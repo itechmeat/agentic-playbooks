@@ -39,19 +39,27 @@ pub(crate) async fn get_stats_handler(
             }
         },
     };
+    let playbook = q.playbook.filter(|p| !p.is_empty());
+    let compare = q.compare.filter(|c| !c.is_empty());
     let filter = apb_engine::run_stats::StatsFilter {
-        playbook: q.playbook.filter(|p| !p.is_empty()),
+        playbook: playbook.clone(),
         since_ms,
-        compare: q.compare.filter(|c| !c.is_empty()),
+        compare: compare.clone(),
     };
     // Like `apb stats --compare` (exit 2): a version is one playbook's.
     if filter.compare.is_some() && filter.playbook.is_none() {
         return (StatusCode::BAD_REQUEST, "compare needs playbook").into_response();
     }
-    // Reading every journal is blocking file IO.
-    match tokio::task::spawn_blocking(move || apb_engine::run_stats::stats(&[root], &filter)).await
+    // Reading every journal is blocking file IO; the answer is redacted
+    // with each contributing run's redactor, like MCP `playbook_stats`.
+    let since = q.since;
+    match tokio::task::spawn_blocking(move || {
+        apb_mcp::tools::stats::playbook_stats(&root, playbook, since.as_deref(), compare)
+    })
+    .await
     {
-        Ok(report) => Json(report).into_response(),
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(e)) => tool_refusal(e),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

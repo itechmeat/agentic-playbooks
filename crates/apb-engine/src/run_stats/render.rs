@@ -1,7 +1,7 @@
 //! `apb stats` as text for a terminal.
 
 use super::digests::DigestStats;
-use super::{PerRun, StatsReport, Waits, findings, quality};
+use super::{PerRun, StatsReport, Waits, findings, interventions, quality};
 
 /// `12 s`, `3.4 min`, `1.2 h`.
 fn dur(ms: u64) -> String {
@@ -126,6 +126,9 @@ pub fn render_text(r: &StatsReport) -> String {
             out.push_str(&format!("  {line}\n"));
         }
         for line in quality::lines(&v.quality) {
+            out.push_str(&format!("  {line}\n"));
+        }
+        for line in v.interventions.iter().flat_map(interventions::lines) {
             out.push_str(&format!("  {line}\n"));
         }
         for n in &v.nodes {

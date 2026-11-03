@@ -12,6 +12,11 @@
 //! as modules of one process means separate per-file locks no longer
 //! prevent races between files).
 
+// Config isolation: before any test thread starts, the real config dir is
+// recorded as forbidden and `XDG_CONFIG_HOME` points at a sandbox that every
+// spawned process inherits (`apb_core::config::test_isolation`).
+apb_core::isolate_test_config!(env!("CARGO_TARGET_TMPDIR"));
+
 // Billed use (`apb_core::billing`): the stand-in agents these tests start
 // have an unknown cost basis, which the default `ask` would hold. Set for
 // the whole process before any test thread starts (and inherited by every
@@ -93,6 +98,8 @@ mod run_answer_test;
 mod run_lists_test;
 #[path = "suite/run_tools_test.rs"]
 mod run_tools_test;
+#[path = "suite/stats_tool_test.rs"]
+mod stats_tool_test;
 #[path = "suite/subplaybook_policy_test.rs"]
 mod subplaybook_policy_test;
 #[path = "suite/supervisor_tools_test.rs"]

@@ -1,6 +1,15 @@
 <script lang="ts">
-  import { fetchRuns } from '../lib/api'
-  import { filterByProject, projectFilter } from '../lib/projectfilter'
+  import { untrack } from 'svelte'
+  import { fetchRunsSearch } from '../lib/api'
+  import {
+    fieldNames,
+    fieldsText,
+    searchErrorText,
+    searchFooter,
+    type SearchTerm,
+  } from '../lib/runsearch'
+  import RunSearchFilter from '../lib/RunSearchFilter.svelte'
+  import { ALL_PROJECTS, filterByProject, projectFilter } from '../lib/projectfilter'
   import { groupRunsByParent, needsLookLabel } from '../lib/runlist'
   import { unknownEventsNote } from '../lib/runusage'
   import { formatAge } from '../lib/runview'
@@ -23,6 +32,19 @@
 
   let items = $state<RunSummary[]>([])
   let loaded = $state(false)
+  // Search fields (U45): the terms applied, the names the unfiltered runs
+  // offer, and what the last answer could not search. The committed terms
+  // change only after a successful answer, so a refused search never leaves
+  // a chip that matches nothing.
+  let terms = $state<SearchTerm[]>([])
+  let names = $state<string[]>([])
+  let counts = $state({ not_indexed: 0, withheld: 0 })
+  // not_indexed and withheld are counted over every workspace the server
+  // listed, while the rows can be narrowed to one project client side, so
+  // the footer only claims them while the listing is not narrowed.
+  const footer = $derived(
+    terms.length && $projectFilter === ALL_PROJECTS ? searchFooter(counts, true) : null,
+  )
   let now = $state(Date.now())
 
   const filtered = $derived(filterByProject(items, $projectFilter))
@@ -37,22 +59,40 @@
     { label: 'aborted', value: count((s) => s === 'aborted'), tone: 'muted' },
   ])
 
-  async function load() {
+  // One sequence number per request: only the latest answer may touch the
+  // page, so a slower older answer never overwrites a newer one.
+  let loadSeq = 0
+  async function load(requested?: SearchTerm[]) {
+    const seq = ++loadSeq
+    const wanted = requested ?? terms
     try {
       // Reverse-chronological order otherwise puts a child run above its
       // parent (review R1-M4) - group so each child sits right after its
       // parent instead.
-      items = groupRunsByParent(await fetchRuns())
+      const answer = await fetchRunsSearch(wanted)
+      if (seq !== loadSeq) return
+      items = groupRunsByParent(answer.runs)
+      counts = { not_indexed: answer.not_indexed, withheld: answer.withheld }
+      // The names come from an unfiltered answer, so a filter never hides
+      // the other fields.
+      if (!wanted.length) names = fieldNames(answer.runs)
       now = Date.now()
+      terms = wanted
     } catch (e) {
-      toast.error('Failed to load runs', { description: String(e) })
+      if (seq !== loadSeq) return
+      // A refused search keeps the committed terms and says why, instead of
+      // showing the request URL.
+      toast.error('Search refused', { description: searchErrorText(e) })
     } finally {
-      loaded = true
+      if (seq === loadSeq) loaded = true
     }
   }
 
   $effect(() => {
-    load()
+    // The terms are read inside load; leaving them untracked here keeps the
+    // effect to the initial load and the websocket, while the filter's
+    // onChange drives the reloads for new terms.
+    untrack(() => void load())
     return subscribeChanges(load)
   })
 
@@ -82,6 +122,14 @@
       {#if loaded}<span class="text-xs text-muted-foreground">{filtered.length} {filtered.length === 1 ? 'run' : 'runs'}</span>{/if}
       <ProjectFilter {items} class="ml-auto" />
     </div>
+    <RunSearchFilter
+      {names}
+      {terms}
+      {footer}
+      onChange={(t) => {
+        load(t)
+      }}
+    />
     {#if !loaded}
       <div class="flex flex-col gap-2">
         {#each Array(4) as _, i (i)}<Skeleton class="h-12 w-full" />{/each}
@@ -90,8 +138,13 @@
       <Empty.Root class="border border-dashed">
         <Empty.Header>
           <Empty.Media variant="icon"><PlayCircle /></Empty.Media>
-          <Empty.Title>No runs yet</Empty.Title>
-          <Empty.Description>Start a playbook to see runs here.</Empty.Description>
+          {#if terms.length}
+            <Empty.Title>No run matches the search</Empty.Title>
+            <Empty.Description>Remove a term to see more runs.</Empty.Description>
+          {:else}
+            <Empty.Title>No runs yet</Empty.Title>
+            <Empty.Description>Start a playbook to see runs here.</Empty.Description>
+          {/if}
         </Empty.Header>
       </Empty.Root>
     {:else}
@@ -136,7 +189,12 @@
                 <span class="relative z-[1] block w-fit max-w-full truncate text-muted-foreground" title={r.continued_from}>continued from {r.continued_from}</span>
               {/if}
             </div>
-            <div class="relative z-[1] w-fit max-w-full min-w-0 truncate text-fg-2" role="cell" title={r.playbook}>{r.playbook}</div>
+            <div class="relative z-[1] w-fit max-w-full min-w-0 truncate text-fg-2" role="cell" title={r.playbook}>
+              {r.playbook}
+              {#if fieldsText(r.search)}
+                <span class="search-fields" data-testid="run-search-fields">{fieldsText(r.search)}</span>
+              {/if}
+            </div>
             <div class="relative z-[1] flex w-fit flex-wrap items-center gap-1" role="cell">
               <span class="tag" style:color={statusColor(r.status)}>
                 {#if r.status === 'running'}<span class="spin"></span>{/if}{r.status}
@@ -203,6 +261,13 @@
 <StatusBar items={statusItems} />
 
 <style>
+  .search-fields {
+    display: block;
+    overflow: hidden;
+    color: var(--muted-foreground);
+    font-size: 0.6875rem;
+    text-overflow: ellipsis;
+  }
   .needs-look {
     color: var(--warning);
   }

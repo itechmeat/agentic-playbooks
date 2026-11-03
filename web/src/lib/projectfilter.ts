@@ -1,4 +1,6 @@
 import { writable, type Writable } from 'svelte/store'
+import { nestByParent, type Nested } from './projectnest'
+import type { Project } from './types'
 
 /** Sentinel value for the "All projects" filter option. */
 export const ALL_PROJECTS = 'all'
@@ -72,6 +74,29 @@ export function projectOptions<T extends { workspace_id: string; project?: strin
   return [...byId.entries()]
     .map(([id, label]) => ({ id, label }))
     .sort((a, b) => a.label.localeCompare(b.label))
+}
+
+/**
+ * The project options ordered like every picker: each main project sorted by
+ * label, followed by its git linked worktrees (depth 1). The parent comes
+ * from the projects registry (`/api/projects`) joined by workspace id; an
+ * option absent there, or whose parent is not among the options, stays at the
+ * top level, so the list loses nothing when the registry read fails.
+ */
+export function nestProjectOptions(
+  options: ProjectOption[],
+  projects: Pick<Project, 'workspace_id' | 'parent_workspace_id'>[],
+): Nested<ProjectOption>[] {
+  const parentOf = new Map<string, string>()
+  for (const p of projects) {
+    if (p.parent_workspace_id) parentOf.set(p.workspace_id, p.parent_workspace_id)
+  }
+  return nestByParent(
+    options,
+    (o) => o.id,
+    (o) => parentOf.get(o.id) ?? null,
+    (o) => o.label,
+  )
 }
 
 /**

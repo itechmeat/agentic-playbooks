@@ -383,3 +383,56 @@ fn stats_splits_the_cost_by_basis() {
             "cost by basis: $0.0200 billed; $0.0300 subscription equivalent, not billed",
         ));
 }
+
+/// Interventions in the text and the JSON: a gate decided through the
+/// review channel is one, an engine retry is none, and a run an older apb
+/// wrote reads its gate decision as not known, never as zero.
+#[test]
+fn stats_reports_interventions_and_where_they_are_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    let cfg = sandbox_config_dir();
+    for (id, apb_version, via) in [
+        ("gate-1", "1.0.0-beta.3", true),
+        // The older writer records no surface, so its decision is not
+        // known: the run-origin key itself is enough, apb creates it.
+        ("gate-2", "1.0.0-beta.1", false),
+    ] {
+        let run = dir.path().join(".apb/runs").join(id);
+        fs::create_dir_all(&run).unwrap();
+        let tail = if via { r#","via":"terminal"}"# } else { "}" };
+        let body = format!(
+            r#"{{"seq":1,"ts":1790000000000,"type":"run_started","playbook":"gate","version":"1.0.0"}}
+{{"seq":2,"ts":1790000000000,"type":"run_provenance","apb":"{apb_version}"}}
+{{"seq":3,"ts":1790000001000,"type":"review_requested","node":"g","options":["approve"]}}
+{{"seq":4,"ts":1790000002000,"type":"review_decided","node":"g","decision":"approve","note":""{tail}
+{{"seq":5,"ts":1790000002000,"type":"supervisor_action","action":"infra_retry","node":"w","detail":""}}
+{{"seq":6,"ts":1790000003000,"type":"run_finished","outcome":"succeeded"}}
+"#,
+        );
+        fs::write(run.join("events.jsonl"), body).unwrap();
+        apb_core::run_origin::stamp_in(cfg, &run, id).unwrap();
+    }
+    apb()
+        .args(["stats", "--playbook", "gate"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "  interventions: 1 (known in 1 of 2 runs) over 2 finished runs",
+        ))
+        .stdout(predicate::str::contains(
+            "  engine actions (not interventions): infra_retry 2",
+        ))
+        .stdout(predicate::str::contains("human").not());
+    let out = apb()
+        .args(["stats", "--playbook", "gate", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let i = &v["versions"][0]["interventions"];
+    assert_eq!(i["total"]["value"], 1);
+    assert_eq!(i["total"]["known_runs"], 1);
+    assert_eq!(i["engine"]["infra_retry"], 2);
+}

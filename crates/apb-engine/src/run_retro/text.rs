@@ -192,6 +192,10 @@ pub fn render(r: &RetroReport) -> String {
     let mut out = header(r);
     out.push_str(&baseline_line(r));
     out.push_str(&goal_lines(r));
+    for line in crate::run_stats::interventions::run_lines(&r.interventions) {
+        out.push_str(&line);
+        out.push('\n');
+    }
     out.push_str("Nodes:\n");
     for n in &r.nodes {
         out.push_str(&node_line(n));

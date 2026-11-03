@@ -67,6 +67,15 @@ async fn stats_reports_the_runs_of_a_playbook_and_an_empty_project() {
         serde_json::json!({"count": 2, "of": 2, "rate": 1.0})
     );
     assert_eq!(v["first_pass"]["count"], 2);
+    // Nothing came in from outside the two runs: no intervention, known
+    // in both (no gate was decided, so no attribution is missing).
+    let i = &v["interventions"];
+    assert_eq!(i["runs"], 2);
+    assert_eq!(
+        i["total"],
+        serde_json::json!({"value": 0, "known_runs": 2, "runs": 2})
+    );
+    assert_eq!(i["without_any"]["value"], 2);
     let (status, _) = get_json(app.clone(), "/api/stats?since=soon").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     // `compare` names a version of one playbook, like the CLI's `--compare`.

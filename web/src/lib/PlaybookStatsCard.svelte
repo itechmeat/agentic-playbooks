@@ -2,6 +2,7 @@
   import type { StatsReport } from './api.gen'
   import { Spinner } from '$lib/components/ui/spinner'
   import ExecutorReport from './ExecutorReport.svelte'
+  import InterventionsCard from './InterventionsCard.svelte'
   import {
     costKnownText,
     executorGroups,
@@ -143,6 +144,9 @@
               </li>
             {/each}
           </ul>
+        {/if}
+        {#if v.interventions}
+          <InterventionsCard stats={v.interventions} />
         {/if}
         {#if v.goal.length}
           <ul class="goal" data-testid="playbook-stats-goal">

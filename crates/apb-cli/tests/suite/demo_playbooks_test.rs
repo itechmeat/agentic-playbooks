@@ -188,6 +188,8 @@ fn the_demo_playbooks_validate() {
         "review-panel",
         "review-panel-list",
         "task-check-first",
+        "design-doc-check",
+        "document-checklist",
     ];
     for id in ids {
         register_playbook(
@@ -444,4 +446,158 @@ fn apb_demo_installs_runs_to_the_review_and_removes() {
     assert!(!project.exists());
     let listed = String::from_utf8_lossy(&ok(&["projects", "list"]).stdout).into_owned();
     assert!(!listed.contains(&ws), "{listed}");
+}
+
+/// The two checklist examples: both validate with no issue in a project
+/// that has the files they protect, and their scenarios pass at quick.
+#[test]
+fn the_checklist_examples_validate_and_their_scenarios_pass_at_quick() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = bare(dir.path());
+    checklist_files(&root);
+    for (id, scenarios) in [
+        (
+            "design-doc-check",
+            ["clean", "must-fail-then-fixed", "open-findings"],
+        ),
+        (
+            "document-checklist",
+            ["clean", "fixed-by-person", "open-findings"],
+        ),
+    ] {
+        register_playbook(
+            &root,
+            id,
+            "1.0.0",
+            &repo_playbook_yaml(&format!("{id}.yaml")),
+        );
+        copy_tree(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../examples/playbooks")
+                .join(id),
+            &root.join(".apb/playbooks").join(id),
+        );
+        let out = apb_ok(&root, &["validate", id]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            stdout.trim(),
+            format!("{id}: OK"),
+            "{id} has issues: {stdout}"
+        );
+        for name in scenarios {
+            let out = playbook(
+                &root,
+                &["eval", id, "--level", "quick", "--scenario", name, "--json"],
+            );
+            let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+                panic!("{id}/{name}: {e}: {}", String::from_utf8_lossy(&out.stderr))
+            });
+            assert_eq!(v["reports"][0]["verdict"], "passed", "{id}/{name}: {v:#}");
+        }
+    }
+}
+
+/// The files the checklist examples read and protect.
+fn checklist_files(root: &Path) {
+    fs::create_dir_all(root.join("docs/checklists")).unwrap();
+    fs::create_dir_all(root.join("docs/design")).unwrap();
+    let checklist = "items:\n  - { id: failure-modes, level: must, text: The design names its failure modes }\n  - { id: rollout, level: should, text: The design has a rollout plan }\n";
+    fs::write(root.join("docs/checklists/design.yaml"), checklist).unwrap();
+    fs::write(root.join("docs/checklists/publication.yaml"), checklist).unwrap();
+    fs::write(
+        root.join("docs/design/cache.md"),
+        "# Cache\n\nNo failure modes yet.\n",
+    )
+    .unwrap();
+}
+
+/// A real run of the code example on a stub agent: `check` fails a MUST
+/// item, `revise` fixes it, `recheck` passes, and every check execution
+/// keeps `check-report.md` in its result snapshot.
+#[cfg(unix)]
+#[test]
+fn a_real_design_doc_check_run_keeps_each_check_report() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = bare(dir.path());
+    checklist_files(&root);
+    let id = "design-doc-check";
+    register_playbook(
+        &root,
+        id,
+        "1.0.0",
+        &repo_playbook_yaml(&format!("{id}.yaml")),
+    );
+    let pdir = root.join(".apb/profiles/main");
+    fs::write(
+        pdir.join("profile.yaml"),
+        "name: main\ndescription: test\nexecutor:\n  agent: claude-code\n  model: haiku\n",
+    )
+    .unwrap();
+    let reply = root.join("reply.json");
+    fs::write(
+        &reply,
+        serde_json::json!({"type": "result", "subtype": "success", "is_error": false, "result": "done"})
+            .to_string(),
+    )
+    .unwrap();
+    let stub = root.join("agent.sh");
+    fs::write(
+        &stub,
+        format!(
+            r#"#!/bin/sh
+case "$APB_NODE_ID" in
+  check) must=1 ;;
+  *) must=0 ;;
+esac
+if [ "$APB_NODE_ID" != revise ]; then
+  printf 'CHECKLIST: 2/2\n%s: must_failed %s\n' "$APB_NODE_ID" "$must" > check-report.md
+  printf '{{"status":"success","outputs":{{"must_failed":%s,"should_failed":0,"unchecked":0,"coverage":"CHECKLIST: 2/2"}}}}' "$must" > "$APB_STATUS_FILE"
+else
+  printf '{{"status":"success"}}' > "$APB_STATUS_FILE"
+fi
+cat '{}'
+"#,
+            reply.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = crate::common::apb_std()
+        .args(["run", id, "--param", "document=docs/design/cache.md"])
+        .current_dir(&root)
+        .env("APB_CONFIG_DIR", root.join("cfg"))
+        .env("HOME", root.join("home"))
+        .env("APB_NO_REGISTRY", "1")
+        .env("APB_AGENT_CMD", &stub)
+        .env_remove("APB_RUN_DIR")
+        .env_remove("APB_NODE_ID")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let run_id = fs::read_dir(root.join(".apb/runs"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .next()
+        .expect("one run");
+    let journal = events(&root, &run_id);
+    assert!(journal.contains("\"outcome\":\"succeeded\""), "{journal}");
+    let out = apb_ok(&root, &["results", &run_id, "--json"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {text}"));
+    // One snapshot per check execution, each holding the report it wrote.
+    let text = v.to_string();
+    assert_eq!(
+        text.matches("\"path\":\"check-report.md\"").count(),
+        2,
+        "{v:#}"
+    );
+    for node in ["check", "recheck"] {
+        assert!(
+            text.contains(&format!("\"node\":\"{node}\"")),
+            "{node}: {v:#}"
+        );
+    }
 }

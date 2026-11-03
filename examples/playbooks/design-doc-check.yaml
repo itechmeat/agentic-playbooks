@@ -1,0 +1,116 @@
+schema: 2
+id: design-doc-check
+name: Check a design document against the checklist
+description: >-
+  Before work starts, an agent checks a design document against the
+  project's engineering checklist and gives every item a verdict with a
+  quote from the document. Failed MUST items go back to an agent that
+  revises the document, then only those items are checked again, for at
+  most three revisions; then a person accepts the open findings or rejects
+  the document. SHOULD
+  findings stay in the report and never block.
+  Coverage of the checklist (every item has a verdict) is what the agent
+  reports in `unchecked`: apb does not parse the checklist itself.
+version: 1.0.0
+defaults:
+  profile: main
+params:
+  - { name: document, type: text, label: "Design document to check (a path)", search: true }
+  - { name: checklist, type: text, label: "Checklist (a path)", default: docs/checklists/design.yaml }
+goal:
+  statement: the design document meets every MUST item of the checklist
+  criteria:
+    - description: the check reported its coverage of the checklist
+      check: { type: marker, marker: "CHECKLIST:" }
+    - description: no MUST item is open, or a person accepted the open ones
+      check: { type: manual }
+quality:
+  criteria:
+    - id: fail-cites-document
+      subject: { node: check }
+      evidence: presence
+      reads: [outputs, transcripts]
+      levels:
+        good: "every item marked fail quotes the passage of the document it fails on"
+        partial: "most failed items quote the document, at least one gives no quote"
+        poor: "failed items give no quote from the document, or quote text it does not contain"
+nodes:
+  - { id: start, type: start }
+  - id: check
+    type: agent_task
+    title: Check the document against every checklist item
+    expected_duration: 10m
+    prompt: >-
+      Read the design document {{params.document}} and the checklist
+      {{params.checklist}}. The checklist is YAML: `items: [{ id, level:
+      must | should, text }]`. Give every item one verdict, `pass`, `fail`
+      or `not_applicable`, and for every verdict quote the sentence of the
+      document it rests on. Write the verdicts to check-report.md, one
+      section per item, and change no other file. Report must_failed (MUST
+      items that fail), should_failed (SHOULD items that fail), unchecked
+      (items you gave no verdict) and coverage, the line
+      `CHECKLIST: <checked>/<total>`.
+    # Static globs: the checklist and the design documents stay as they are
+    # while they are checked (the document path is a param, so the example
+    # keeps design documents under docs/design/).
+    protect: ["docs/checklists/**", "docs/design/**"]
+    outputs:
+      fields: [must_failed, should_failed, unchecked, coverage]
+    results:
+      - path: check-report.md
+  # Did every item get a verdict? A missing `unchecked` reads as not 0.
+  - { id: coverage, type: condition, title: Every item has a verdict }
+  - { id: verdict, type: condition, title: Any MUST item failed }
+  - id: revise
+    type: agent_task
+    title: Revise the document for the failed MUST items
+    expected_duration: 20m
+    prompt: >-
+      check-report.md lists the checklist items {{params.checklist}} the
+      design document {{params.document}} fails. Revise the document so
+      every failed MUST item passes; leave SHOULD findings for the author.
+      Do not edit the checklist.
+    protect: ["docs/checklists/**"]
+  - id: recheck
+    type: agent_task
+    title: Check the failed items again
+    expected_duration: 5m
+    prompt: >-
+      Check again only the items check-report.md marks fail in the design
+      document {{params.document}} against {{params.checklist}}, with a
+      quote for every verdict, and update check-report.md. Report
+      must_failed, should_failed, unchecked and coverage as before.
+    protect: ["docs/checklists/**", "docs/design/**"]
+    outputs:
+      fields: [must_failed, should_failed, unchecked, coverage]
+    results:
+      - path: check-report.md
+  - { id: recheck_verdict, type: condition, title: Any MUST item still failed }
+  - id: decide
+    type: human_review
+    title: Accept the open findings or reject the document
+    expected_duration: 1h
+    prompt: >-
+      check-report.md lists the items still open after the revisions (or
+      the items the check could not give a verdict). Accept them as open
+      findings, or reject the document.
+    options: [accept_open, reject]
+  - { id: done, type: finish, outcome: success }
+  - { id: accepted_with_open_findings, type: finish, outcome: success }
+  - { id: rejected, type: finish, outcome: failure }
+edges:
+  - { from: start, to: check }
+  - { from: check, to: coverage }
+  - { from: coverage, to: verdict, condition: { type: output_field, node: check, field: unchecked, equals: "0" } }
+  # One bounded re-check when items were left without a verdict, then a person.
+  - { from: coverage, to: check, condition: { type: node_status, node: check, equals: success }, max_traversals: 1 }
+  - { from: coverage, to: decide, fallback: true }
+  - { from: verdict, to: done, condition: { type: output_field, node: check, field: must_failed, equals: "0" } }
+  - { from: verdict, to: revise, fallback: true }
+  - { from: revise, to: recheck }
+  - { from: recheck, to: recheck_verdict }
+  - { from: recheck_verdict, to: done, condition: { type: output_field, node: recheck, field: must_failed, equals: "0" } }
+  - { from: recheck_verdict, to: revise, condition: { type: node_status, node: recheck, equals: success }, max_traversals: 2 }
+  - { from: recheck_verdict, to: decide, fallback: true }
+  - { from: decide, to: accepted_with_open_findings, condition: { type: review_status, equals: accept_open } }
+  - { from: decide, to: rejected, condition: { type: review_status, equals: reject } }

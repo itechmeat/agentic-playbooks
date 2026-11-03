@@ -1,6 +1,7 @@
 // Playbooks, runs, profiles and the small read-only lookups (agents, models,
 // skills, projects): one function per endpoint, no UI state.
 
+import { searchQuery, type SearchTerm } from '../runsearch'
 import type {
   OnNoEstimate,
   Project,
@@ -36,6 +37,8 @@ import type {
   Refused,
   Remembered,
   RunGrades,
+  RunListing,
+  RunListEntry,
   RunNotify,
   ResultSummary,
   Transition,
@@ -232,6 +235,13 @@ export const fetchFit = (id: string, workspace = '', scope?: MemoryScope) =>
   getJson<FitReport>(`${pb(id)}/fit${qs({ workspace, scope })}`)
 
 export const fetchRuns = () => getJson<RunSummary[]>('/api/runs')
+// GET /api/runs?search=1&field=name:value: the listing with every run's
+// scope and search fields, kept to the runs whose fields equal the terms.
+// The answer shape is the generated contract; its rows are the listing
+// entries the run list renders (workspace id and project included).
+type RunsSearchAnswer = Omit<RunListing, 'runs'> & { runs: RunListEntry[] }
+export const fetchRunsSearch = (terms: SearchTerm[]) =>
+  requestJson<RunsSearchAnswer>(`/api/runs${searchQuery(terms)}`, { method: 'GET' })
 export const fetchRun = (id: string, workspace = '') =>
   getJson<RunDetail>(`${run(id)}${qs({ workspace })}`)
 export const fetchRunReport = (id: string, workspace = '') =>

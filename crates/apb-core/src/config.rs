@@ -39,10 +39,14 @@ pub struct GlobalConfig {
     /// `APB_NO_REGISTRY=1` and in CI.
     pub registry: Option<bool>,
     /// Days in the `unreachable` state before transitioning to `tombstoned`
-    /// (spec 6.4). `None` -> 14.
+    /// (spec 6.4). `None` -> 14. Setting this or `registry_purge_days` also
+    /// moves the projects registry's hard auto-drop from 30 days to
+    /// max(30, unreachable + purge) days.
     pub registry_unreachable_days: Option<u64>,
     /// Days to keep `tombstoned` before physical cleanup (spec 6.4).
-    /// `None` -> 90.
+    /// `None` -> 90. Setting this or `registry_unreachable_days` also moves
+    /// the projects registry's hard auto-drop from 30 days to
+    /// max(30, unreachable + purge) days.
     pub registry_purge_days: Option<u64>,
     /// Timing knobs for the suggestion-decision store (spec
     /// 2026-07-29-suggestion-decisions-design). Absent keys fall back to the
@@ -442,6 +446,15 @@ fn is_executable(p: &std::path::Path) -> bool {
 /// then `XDG_CONFIG_HOME/apb`, then `~/.config/apb`. None - if
 /// no environment variable is set (config-less path).
 pub fn config_dir() -> Option<PathBuf> {
+    let dir = resolve_config_dir();
+    #[cfg(all(debug_assertions, any(test, feature = "testing")))]
+    if let Some(d) = &dir {
+        test_isolation::refuse_forbidden(d);
+    }
+    dir
+}
+
+fn resolve_config_dir() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("APB_CONFIG_DIR")
         && !d.is_empty()
     {
@@ -456,6 +469,236 @@ pub fn config_dir() -> Option<PathBuf> {
         .ok()
         .filter(|h| !h.is_empty())
         .map(|h| PathBuf::from(h).join(".config/apb"))
+}
+
+/// Keeps every test process off the developer's real config dir. A suite
+/// that ran apb code or spawned `apb` with nothing redirecting the config
+/// dir used to register its temp projects in the real `projects.json`
+/// (thousands of `/tmp/.tmp*` entries) and write launch floors there.
+///
+/// [`isolate_test_config!`](crate::isolate_test_config) installs
+/// [`isolate`](test_isolation::isolate) before `main` in a test binary: it
+/// records the dirs a leak would reach in [`FORBIDDEN_ENV`]
+/// (test_isolation::FORBIDDEN_ENV) and points `XDG_CONFIG_HOME` at a
+/// sandbox, which every process the test spawns inherits. From then on
+/// [`config_dir`] panics when it resolves one of the forbidden dirs, in the
+/// test process and in a spawned test-build `apb` alike, so a leak fails
+/// loudly instead of writing. Test builds only (debug assertions plus
+/// `cfg(test)` or the `testing` feature), so no release binary has it.
+#[cfg(all(debug_assertions, any(test, feature = "testing")))]
+pub mod test_isolation {
+    use std::path::{Path, PathBuf};
+
+    /// The config dirs no test process may resolve, as a path list.
+    pub const FORBIDDEN_ENV: &str = "APB_TEST_FORBIDDEN_CONFIG_DIRS";
+
+    /// The config dirs no test process may resolve, as a path list: what
+    /// [`resolve_config_dir`] reaches right now, the real (password
+    /// database) home's `.config/apb`, and the config dir `HOME` names, even
+    /// when `HOME` differs from the password database entry, since that is
+    /// the home a redirected test would actually read.
+    pub fn forbidden_paths() -> Vec<PathBuf> {
+        let mut real: Vec<PathBuf> = Vec::new();
+        real.extend(super::resolve_config_dir());
+        real.extend(super::real_home().map(|h| h.join(".config/apb")));
+        if let Ok(h) = std::env::var("HOME")
+            && !h.is_empty()
+        {
+            let home_dir = PathBuf::from(h).join(".config/apb");
+            if !real.contains(&home_dir) {
+                real.push(home_dir);
+            }
+        }
+        real
+    }
+
+    /// Records the real config dirs in [`FORBIDDEN_ENV`] and redirects
+    /// `XDG_CONFIG_HOME` to `sandbox`, removing `APB_CONFIG_DIR`.
+    /// `APB_TEST_DEFAULT_CONFIG_DIR` is set to the sandbox too, so
+    /// [`default_config_dir`](super::default_config_dir) resolves inside it
+    /// and never at the developer's real home. A process that inherited the
+    /// list (a test binary or `apb` spawned by a test) keeps it: its own
+    /// config dir is already a sandbox. Runs before `main`, so no other
+    /// thread exists yet.
+    pub fn isolate(sandbox: &Path) {
+        if std::env::var_os(FORBIDDEN_ENV).is_none()
+            && let Ok(list) = std::env::join_paths(forbidden_paths())
+        {
+            // SAFETY: before `main`, single-threaded.
+            unsafe { std::env::set_var(FORBIDDEN_ENV, list) };
+        }
+        // SAFETY: before `main`, single-threaded.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", sandbox);
+            std::env::set_var("APB_TEST_DEFAULT_CONFIG_DIR", sandbox);
+            std::env::remove_var("APB_CONFIG_DIR");
+        }
+    }
+
+    /// Prefix of the per-process sandboxes [`isolate_under`] makes. The name
+    /// is `<prefix><pid>-<random>`, so another process cannot predict it.
+    pub const SANDBOX_PREFIX: &str = "apb-test-config-";
+
+    /// A fresh sandbox directory under `base`, named with this process's pid
+    /// and a random suffix and made with `create_dir`, so a taken name is
+    /// retried with another suffix. The caller created it, so an at-exit
+    /// removal only ever removes what this process made.
+    pub fn sandbox_for(base: &Path) -> PathBuf {
+        use std::hash::{BuildHasher, Hasher};
+        for _ in 0..16 {
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u128(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default(),
+            );
+            let dir = base.join(format!(
+                "{SANDBOX_PREFIX}{}-{:016x}",
+                std::process::id(),
+                h.finish()
+            ));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return dir,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => break,
+            }
+        }
+        base.join(format!("{SANDBOX_PREFIX}{}", std::process::id()))
+    }
+
+    /// The owning pid of a sandbox name, if the name carries one.
+    fn sandbox_owner(name: &std::ffi::OsStr) -> Option<u32> {
+        name.to_str()?
+            .strip_prefix(SANDBOX_PREFIX)?
+            .split('-')
+            .next()?
+            .parse()
+            .ok()
+    }
+
+    /// Whether a process with this pid exists (unix).
+    #[cfg(unix)]
+    fn pid_alive(pid: u32) -> bool {
+        // SAFETY: `kill` with signal 0 only probes the process.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    /// Removes the sandbox directories under `base` whose owning process is
+    /// provably gone (the pid in the name no longer exists), or whose
+    /// mtime is a week old, so a pid reused by an unrelated process cannot
+    /// keep a leftover forever. A live process's sandbox, this process's own
+    /// included, is never swept.
+    pub fn sweep_dead_sandboxes(base: &Path) {
+        let Ok(entries) = std::fs::read_dir(base) else {
+            return;
+        };
+        let week_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 24 * 3600);
+        for entry in entries.flatten() {
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(SANDBOX_PREFIX)
+            {
+                continue;
+            }
+            let Some(owner) = sandbox_owner(&entry.file_name()) else {
+                continue;
+            };
+            #[cfg(unix)]
+            let safe = owner != std::process::id() && !pid_alive(owner);
+            #[cfg(not(unix))]
+            let safe = owner != std::process::id();
+            let ancient = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t < week_ago);
+            if safe || ancient {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+
+    /// The sandbox [`isolate_under`] made in this process, removed at exit.
+    static OWN_SANDBOX: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+    /// At-exit removal of this process's own sandbox (unix).
+    #[cfg(unix)]
+    extern "C" fn remove_own_sandbox() {
+        if let Some(dir) = OWN_SANDBOX.get() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// [`isolate`] with a fresh sandbox under `base`
+    /// ([`sandbox_for`]: pid plus random suffix), which this process removes
+    /// again at exit, so a test run leaves none behind. Sandboxes of other
+    /// processes are swept only when their owner is provably gone
+    /// ([`sweep_dead_sandboxes`]).
+    pub fn isolate_under(base: &Path) {
+        sweep_dead_sandboxes(base);
+        let dir = sandbox_for(base);
+        isolate(&dir);
+        if OWN_SANDBOX.set(dir.clone()).is_ok() {
+            // SAFETY: registers a plain function with no captured state.
+            #[cfg(unix)]
+            unsafe {
+                libc::atexit(remove_own_sandbox);
+            }
+        }
+    }
+
+    /// Whether `dir` is one of the forbidden config dirs or inside one.
+    pub fn is_forbidden(dir: &Path) -> bool {
+        let Some(list) = std::env::var_os(FORBIDDEN_ENV) else {
+            return false;
+        };
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let dir_c = canon(dir);
+        std::env::split_paths(&list)
+            .filter(|f| !f.as_os_str().is_empty())
+            .any(|f| dir.starts_with(&f) || dir_c.starts_with(canon(&f)))
+    }
+
+    /// Panics when `dir` is forbidden: a test reached the real config dir.
+    pub fn refuse_forbidden(dir: &Path) {
+        if is_forbidden(dir) {
+            panic!(
+                "test isolation: this test resolved the real apb config dir `{}`; \
+                 spawn `apb` through the suite's helpers and keep \
+                 `APB_CONFIG_DIR`/`XDG_CONFIG_HOME` on a sandbox",
+                dir.display()
+            );
+        }
+    }
+}
+
+/// Installs [`config::test_isolation::isolate`](crate::config::test_isolation::isolate)
+/// before `main` in the test binary that expands it, with its sandbox
+/// config home under `$dir` (a `Path` expression), see
+/// [`isolate_under`](crate::config::test_isolation::isolate_under).
+/// One per test binary, at its crate root.
+#[cfg(all(debug_assertions, any(test, feature = "testing")))]
+#[macro_export]
+macro_rules! isolate_test_config {
+    ($dir:expr) => {
+        #[used]
+        #[cfg_attr(
+            any(target_os = "linux", target_os = "android", target_os = "freebsd"),
+            unsafe(link_section = ".init_array")
+        )]
+        #[cfg_attr(
+            target_vendor = "apple",
+            unsafe(link_section = "__DATA,__mod_init_func")
+        )]
+        static APB_ISOLATE_TEST_CONFIG: extern "C" fn() = {
+            extern "C" fn isolate() {
+                let base = $dir;
+                $crate::config::test_isolation::isolate_under(::std::convert::AsRef::as_ref(&base));
+            }
+            isolate
+        };
+    };
 }
 
 /// The config dir this user's apb uses when nothing redirects it:
@@ -944,4 +1187,122 @@ pub enum CallbackGap {
     /// The named connector or account is not a routable path segment, so no
     /// hook URL could address it whatever the public base is.
     UnroutableSegment(String),
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    use std::path::PathBuf;
+
+    use super::test_isolation::{
+        FORBIDDEN_ENV, SANDBOX_PREFIX, forbidden_paths, is_forbidden, sandbox_for,
+    };
+
+    /// The unit-test binary is isolated before `main`, and resolving a
+    /// forbidden config dir panics rather than handing it to a writer.
+    #[test]
+    fn a_forbidden_config_dir_panics_and_the_sandbox_does_not() {
+        let _lock = crate::env_test_lock();
+        let list = std::env::var_os(FORBIDDEN_ENV).expect("the isolation hook ran");
+        let sandbox = super::config_dir().expect("a sandbox config dir");
+        assert!(!is_forbidden(&sandbox), "{}", sandbox.display());
+        assert!(
+            std::env::split_paths(&list).all(|f| !sandbox.starts_with(&f)),
+            "the sandbox is inside a real config dir"
+        );
+
+        let real = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("APB_CONFIG_DIR");
+        // SAFETY: env mutation is serialized by the lock.
+        unsafe {
+            std::env::set_var(FORBIDDEN_ENV, real.path());
+            std::env::set_var("APB_CONFIG_DIR", real.path().join("apb"));
+        }
+        let leaked = std::panic::catch_unwind(super::config_dir);
+        unsafe {
+            std::env::set_var(FORBIDDEN_ENV, &list);
+            match prev {
+                Some(v) => std::env::set_var("APB_CONFIG_DIR", v),
+                None => std::env::remove_var("APB_CONFIG_DIR"),
+            }
+        }
+        assert!(leaked.is_err(), "a forbidden config dir was handed out");
+    }
+
+    /// Under isolation the default config dir (what a non-redirected call
+    /// would read) sits in the sandbox, never in the developer's real home.
+    #[test]
+    fn default_config_dir_resolves_inside_the_isolation_sandbox() {
+        let _lock = crate::env_test_lock();
+        let xdg = std::env::var_os("XDG_CONFIG_HOME").expect("the isolation hook ran");
+        let overridden = std::env::var_os("APB_TEST_DEFAULT_CONFIG_DIR")
+            .expect("isolation set the default config dir override");
+        let d = super::default_config_dir().expect("a default config dir under isolation");
+        assert_eq!(d, overridden, "default_config_dir honors the override");
+        assert_eq!(PathBuf::from(&xdg), d, "the override names the sandbox");
+        assert!(
+            !forbidden_paths().iter().any(|f| d.starts_with(f)),
+            "the default config dir {} is a real config dir",
+            d.display()
+        );
+    }
+
+    /// The forbidden set covers the config dir `HOME` names too, so a
+    /// process whose `HOME` differs from the password database is still kept
+    /// out of the home it would actually read.
+    #[test]
+    fn the_forbidden_set_covers_the_home_derived_config_dir() {
+        let _lock = crate::env_test_lock();
+        let home = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("HOME");
+        // SAFETY: env mutation is serialized by the lock.
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let paths = forbidden_paths();
+        // SAFETY: restored before any other test reads it.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        assert!(
+            paths.contains(&home.path().join(".config/apb")),
+            "the HOME-derived config dir is missing from {paths:?}"
+        );
+    }
+
+    /// The sandbox name carries this process's pid and a random suffix, and
+    /// the sweep removes only sandboxes of processes that are provably gone.
+    #[cfg(unix)]
+    #[test]
+    fn the_sandbox_sweep_only_removes_dead_owners_dirs() {
+        use std::process::Command;
+
+        let _lock = crate::env_test_lock();
+        let base = tempfile::tempdir().unwrap();
+
+        // A dead owner: a child that already exited. Its pid is not reused
+        // within the test.
+        let mut child = Command::new("true").spawn().unwrap();
+        let dead = child.id();
+        assert!(child.wait().unwrap().success());
+
+        let gone = base.path().join(format!("{SANDBOX_PREFIX}{dead}-abc123"));
+        std::fs::create_dir(&gone).unwrap();
+        let ours = base
+            .path()
+            .join(format!("{SANDBOX_PREFIX}{}-abc123", std::process::id()));
+        std::fs::create_dir(&ours).unwrap();
+
+        super::test_isolation::sweep_dead_sandboxes(base.path());
+
+        assert!(!gone.exists(), "a dead owner's sandbox was kept");
+        assert!(ours.exists(), "this process's sandbox was swept");
+
+        // A sandbox this process creates is private: pid and a random
+        // suffix, created with create_dir so a collision is retried.
+        let a = sandbox_for(base.path());
+        let b = sandbox_for(base.path());
+        assert_ne!(a, b, "two sandboxes got the same name");
+        assert!(a.starts_with(base.path()));
+    }
 }

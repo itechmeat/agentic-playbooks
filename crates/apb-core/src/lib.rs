@@ -10,6 +10,11 @@ compile_error!(
     "the apb-core `testing` feature is for test builds only and is refused in a build without debug assertions (a release or dist profile)"
 );
 
+// Unit tests run with an isolated global config dir, set before any test
+// thread starts (`apb_core::config::test_isolation`).
+#[cfg(test)]
+crate::isolate_test_config!(std::env::temp_dir());
+
 pub mod agent_actions;
 pub mod agent_catalog;
 pub mod agent_output;
@@ -77,6 +82,7 @@ pub mod run_notes;
 pub mod run_origin;
 pub mod run_outputs;
 pub mod run_params;
+pub mod run_search;
 pub mod save_nudge;
 pub mod scenario;
 pub mod schema;

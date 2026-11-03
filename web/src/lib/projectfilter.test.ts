@@ -7,6 +7,7 @@ import {
   createProjectFilterStore,
   filterByProject,
   filterProfilesByProject,
+  nestProjectOptions,
   projectOptions,
   projectScopeItems,
   type StorageLike,
@@ -131,6 +132,44 @@ describe('projectOptions', () => {
       { id: 'ws-m', label: 'Middle' },
       { id: 'ws-a', label: 'this project' },
       { id: 'ws-z', label: 'Zebra' },
+    ])
+  })
+})
+
+describe('nestProjectOptions', () => {
+  const option = (id: string, label: string) => ({ id, label })
+  const registered = (id: string, parent?: string) => ({
+    workspace_id: id,
+    parent_workspace_id: parent ?? null,
+  })
+
+  it('lists a worktree option nested under its parent project', () => {
+    const rows = nestProjectOptions(
+      [option('ws-w', 'wt-fix'), option('ws-a', 'alpha')],
+      [registered('ws-a'), registered('ws-w', 'ws-a')],
+    )
+    expect(rows.map(({ row, depth }) => [row.id, depth])).toEqual([
+      ['ws-a', 0],
+      ['ws-w', 1],
+    ])
+  })
+
+  it('keeps an option with no registry entry (or an unregistered parent) at the top', () => {
+    const rows = nestProjectOptions(
+      [option('ws-w', 'wt-fix'), option('ws-a', 'alpha')],
+      [registered('ws-a')],
+    )
+    expect(rows.map(({ row, depth }) => [row.id, depth])).toEqual([
+      ['ws-a', 0],
+      ['ws-w', 0],
+    ])
+  })
+
+  it('falls back to the flat sorted options when the registry is empty', () => {
+    const rows = nestProjectOptions([option('ws-b', 'beta'), option('ws-a', 'alpha')], [])
+    expect(rows.map(({ row, depth }) => [row.id, depth])).toEqual([
+      ['ws-a', 0],
+      ['ws-b', 0],
     ])
   })
 })

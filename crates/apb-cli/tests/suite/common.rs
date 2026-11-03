@@ -41,11 +41,18 @@ pub fn sandbox_config_dir() -> &'static Path {
         let parent = Path::new(env!("CARGO_TARGET_TMPDIR"));
         std::fs::create_dir_all(parent).expect("create CARGO_TARGET_TMPDIR");
         prune_stale_sandboxes(parent);
-        tempfile::Builder::new()
+        let dir = tempfile::Builder::new()
             .prefix(SANDBOX_PREFIX)
             .tempdir_in(parent)
             .expect("create sandbox config dir")
-            .keep()
+            .keep();
+        // The run stamp key, in place before any test or spawned `apb`
+        // looks for it: tests that stamp runs used to write it when absent,
+        // and two writers at once (or an `apb` making its own) left runs
+        // stamped with another key than the one read back.
+        std::fs::write(dir.join("run-origin.key"), "k".repeat(64))
+            .expect("write the run stamp key");
+        dir
     })
 }
 

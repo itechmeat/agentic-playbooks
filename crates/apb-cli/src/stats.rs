@@ -37,7 +37,7 @@ pub(crate) fn stats_cmd(
         since_ms,
         compare,
     };
-    let r = run_stats::stats(&roots, &filter);
+    let (r, runs) = run_stats::stats_with_runs(&roots, &filter);
     let skipped = apb_engine::decision::report::unverified_run_dirs(&roots);
     if skipped > 0 {
         eprintln!(
@@ -45,10 +45,23 @@ pub(crate) fn stats_cmd(
             if skipped == 1 { "y" } else { "ies" }
         );
     }
+    // Every contributing run's redactor, so a finding location or a
+    // baseline observation that echoes a secret param value leaves
+    // redacted, like MCP `playbook_stats`.
+    let mut text = run_stats::render_text(&r);
+    let mut value = serde_json::to_value(&r).unwrap_or_default();
+    for (run_id, run_root) in &runs {
+        let red = apb_engine::run_redact::WorkspaceRedaction::new(run_root).run(run_id);
+        if json {
+            red.redact_json(&mut value);
+        } else {
+            text = red.redact_str(&text);
+        }
+    }
     if json {
-        print_json(&serde_json::to_value(&r).unwrap_or_default());
+        print_json(&value);
     } else {
-        print!("{}", run_stats::render_text(&r));
+        print!("{text}");
     }
     ExitCode::SUCCESS
 }

@@ -1,0 +1,22 @@
+schema: 1
+id: fixed-by-person
+title: A MUST item fails, a person edits the document, the re-check passes
+params: { document: reports/q3-summary.md }
+answers:
+  check:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { must_failed: 1, should_failed: 0, unchecked: 0, coverage: "CHECKLIST: 9/9" }
+  fix:
+    - { visit: 1, review: { decision: fixed, note: "Added the data source for the revenue table." } }
+  recheck:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { must_failed: 0, should_failed: 0, unchecked: 0, coverage: "CHECKLIST: 1/1" }
+expect:
+  run: { outcome: [succeeded] }
+  finish: done
+  visits: { check: 1, fix: 1, recheck: 1 }
+  route: { not_visits: [decide] }

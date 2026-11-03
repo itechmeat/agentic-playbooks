@@ -310,6 +310,49 @@ apb_core::read_only_test! {
     }
 }
 
+apb_core::read_only_test! {
+    /// `runs_list` with a search filter is served read-only and writes
+    /// nothing: the fields are computed in memory.
+    fn runs_list_serves_a_search_filter_read_only() {
+        apb_engine::read_only::enter();
+        let cfg = tempfile::tempdir().unwrap();
+        // SAFETY: a read-only child runs this one test, single-threaded.
+        unsafe { std::env::set_var("APB_CONFIG_DIR", cfg.path()) };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let def = "schema: 2\nid: p\nname: P\nversion: 1.0.0\nparams:\n  - { name: who, type: text, search: true }\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n";
+        let run = root.join(".apb/runs/r1");
+        std::fs::create_dir_all(run.join("definitions")).unwrap();
+        let digest = apb_engine::run_definitions::digest(def.as_bytes());
+        std::fs::write(run.join(format!("definitions/{digest}.yaml")), def).unwrap();
+        std::fs::write(run.join("playbook.yaml"), def).unwrap();
+        std::fs::write(run.join("run.yaml"), "params:\n  who: Ada\n").unwrap();
+        std::fs::write(
+            run.join("events.jsonl"),
+            format!("{{\"seq\":1,\"ts\":1,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\",\"definition\":\"{digest}\"}}\n"),
+        )
+        .unwrap();
+        let before = (files(root), files(cfg.path()));
+        let server = WfMcp::for_read_only(root.to_path_buf());
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let listed = rt.block_on(async {
+            text(
+                &server
+                    .runs_list(Parameters(RunsListArgs {
+                        workspace: None,
+                        playbook: Some("p".into()),
+                        scope: None,
+                        fields: vec!["who=ada".into()],
+                    }))
+                    .await,
+            )
+        });
+        assert_eq!(listed["runs"][0]["run_id"], "r1", "{listed}");
+        assert_eq!(listed["not_indexed"], 0);
+        assert_eq!((files(root), files(cfg.path())), before, "something was written");
+    }
+}
+
 /// A project with one playbook, `p`, whose param `who` can be remembered,
 /// written with `std::fs` only (a read-only child writes its fixture so).
 fn project(root: &Path) {

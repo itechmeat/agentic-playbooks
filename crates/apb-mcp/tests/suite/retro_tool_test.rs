@@ -38,6 +38,43 @@ fn run_retro_context_returns_the_actual_model_and_host_wait() {
     assert_eq!(work["attempts"][0]["declared_model"], "sonnet");
     // No earlier run of the version on this machine.
     assert!(out.get("baseline").is_none());
+    // Nothing came in from outside; the run names no writer, so who
+    // decided is not known for it.
+    let i = &out["interventions"];
+    assert_eq!(i["reviews"]["visits"], 0);
+    assert_eq!(i["attribution_known"], false);
+}
+
+/// A gate decided through the review channel and a supervisor's note are
+/// two interventions of the run; an engine retry is none.
+#[test]
+fn run_retro_context_counts_the_interventions() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join(".apb/runs/r2");
+    fs::create_dir_all(&dir).unwrap();
+    let lines = [
+        json!({"seq": 1, "ts": 0, "type": "run_started", "playbook": "p", "version": "1.0.0"}),
+        json!({"seq": 2, "ts": 0, "type": "run_provenance", "apb": "1.0.0-beta.3"}),
+        json!({"seq": 3, "ts": 1, "type": "review_requested", "node": "gate", "options": ["approve"]}),
+        json!({"seq": 4, "ts": 2, "type": "review_decided", "node": "gate", "decision": "approve", "note": "", "via": "terminal"}),
+        json!({"seq": 5, "ts": 3, "type": "supervisor_action", "action": "context_append", "node": null, "detail": "look"}),
+        json!({"seq": 6, "ts": 4, "type": "supervisor_action", "action": "infra_retry", "node": "w", "detail": ""}),
+        json!({"seq": 7, "ts": 5, "type": "run_finished", "outcome": "succeeded"}),
+    ];
+    let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    fs::write(dir.join("events.jsonl"), body).unwrap();
+    let out = run_retro_context(root.path(), "r2", Some(0)).unwrap();
+    let i = &out["interventions"];
+    assert_eq!(i["total"], 2);
+    assert_eq!(i["reviews"]["via"]["terminal"], 1);
+    assert_eq!(i["engine"]["infra_retry"], 1);
+    let text = apb_engine::run_retro::text::render(&apb_engine::run_retro::build(
+        &apb_engine::run_retro::RetroRun::load(&dir).unwrap(),
+        &[],
+        0,
+    ));
+    assert!(text.contains("interventions: 2"), "{text}");
+    assert!(text.contains("through the supervisor channel"), "{text}");
 }
 
 #[test]

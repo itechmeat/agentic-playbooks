@@ -175,10 +175,21 @@ fn observe_control(
         {
             continue;
         }
+        // The acknowledgment names a targeted interrupt's node and leaves a
+        // broadcast one untargeted, so the statistics can tell the two
+        // apart (`run_stats::interventions` counts a broadcast as the run's
+        // correction whatever observed it). Broadcasts keep the historical
+        // shape `interrupt (control seq N)`.
+        let detail = match &entry.cmd {
+            crate::control::Control::Interrupt {
+                node: Some(target), ..
+            } => format!("interrupt node `{target}` (control seq {})", entry.seq),
+            other => control_summary(other, entry.seq),
+        };
         journal.append(EventPayload::SupervisorAction {
             action: "control_received".into(),
             node: Some(node_id.to_string()),
-            detail: control_summary(&entry.cmd, entry.seq),
+            detail,
         })?;
         if let crate::control::Control::Interrupt { reason, .. } = &entry.cmd {
             journal.append(EventPayload::SupervisorAction {

@@ -1,0 +1,22 @@
+schema: 1
+id: must-fail-then-fixed
+title: Two MUST items fail, the revision fixes them, the re-check passes
+params: { document: docs/design/cache.md }
+answers:
+  check:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { must_failed: 2, should_failed: 0, unchecked: 0, coverage: "CHECKLIST: 6/6" }
+  revise:
+    - { visit: 1, attempts: [ { status: succeeded, output: "added the failure modes and the rollback plan" } ] }
+  recheck:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { must_failed: 0, should_failed: 0, unchecked: 0, coverage: "CHECKLIST: 2/2" }
+expect:
+  run: { outcome: [succeeded] }
+  finish: done
+  visits: { check: 1, revise: 1, recheck: 1 }
+  route: { not_visits: [decide] }

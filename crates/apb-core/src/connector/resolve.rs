@@ -1177,21 +1177,26 @@ accounts:
     fn all_referenced_env_names_empty_without_config_dir() {
         let _lock = crate::env_test_lock();
         let root = tempfile::tempdir().unwrap();
-        struct FullGuard(Option<std::ffi::OsString>);
+        // Every variable a config dir resolves from, put back on drop: a
+        // `XDG_CONFIG_HOME` left removed would send every later test in this
+        // process to the real `~/.config/apb`.
+        const KEYS: [&str; 3] = ["APB_CONFIG_DIR", "XDG_CONFIG_HOME", "HOME"];
+        struct FullGuard(Vec<Option<std::ffi::OsString>>);
         impl Drop for FullGuard {
             fn drop(&mut self) {
-                unsafe {
-                    match &self.0 {
-                        Some(v) => std::env::set_var("APB_CONFIG_DIR", v),
-                        None => std::env::remove_var("APB_CONFIG_DIR"),
+                for (k, v) in KEYS.iter().zip(&self.0) {
+                    unsafe {
+                        match v {
+                            Some(v) => std::env::set_var(k, v),
+                            None => std::env::remove_var(k),
+                        }
                     }
                 }
             }
         }
-        let _g = FullGuard(std::env::var_os("APB_CONFIG_DIR"));
-        unsafe {
-            std::env::remove_var("APB_CONFIG_DIR");
-            std::env::remove_var("XDG_CONFIG_HOME");
+        let _g = FullGuard(KEYS.iter().map(std::env::var_os).collect());
+        for k in KEYS {
+            unsafe { std::env::remove_var(k) };
         }
         assert!(all_referenced_env_names(root.path()).is_empty());
     }

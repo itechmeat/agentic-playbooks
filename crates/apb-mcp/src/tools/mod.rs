@@ -21,6 +21,7 @@ pub mod results;
 pub mod retro;
 pub mod run;
 pub mod scenario;
+pub mod stats;
 pub mod supervisor;
 pub mod trial;
 

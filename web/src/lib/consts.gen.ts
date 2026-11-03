@@ -154,5 +154,9 @@ export const FLAGS_WORDING = "Worth a look"
 /** How a package's own completeness statement is shown. */
 export const COLLECTOR_COMPLETE_WORDING = "the collector says the package is complete"
 
+/** The most terms a run search takes, and the longest value it lists or matches, in characters. */
+export const RUN_SEARCH_MAX_TERMS = 8
+export const RUN_SEARCH_MAX_VALUE_CHARS = 200
+
 /** Starter document for a new playbook. */
 export const NEW_PLAYBOOK_TEMPLATE = "schema: 2\nid: new-playbook\nname: New Playbook\nversion: 0.1.0\n\nnodes:\n  - id: start\n    type: start\n    title: Start\n  - id: done\n    type: finish\n    outcome: success\n\nedges:\n  - { from: start, to: done }\n"

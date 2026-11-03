@@ -1,3 +1,8 @@
+// Unit tests run with an isolated global config dir, set before any test
+// thread starts (`apb_core::config::test_isolation`).
+#[cfg(test)]
+apb_core::isolate_test_config!(std::env::temp_dir());
+
 pub mod advisory_tools;
 pub mod ask_server;
 pub mod catalog;

@@ -132,11 +132,8 @@ extern "C" fn isolate_test_config() {
     let dir = created.clone().unwrap_or_else(|| {
         std::env::temp_dir().join(format!("apb-engine-unit-xdg-{}", std::process::id()))
     });
-    // SAFETY: runs before `main`, so no other thread exists yet.
-    unsafe {
-        std::env::set_var("XDG_CONFIG_HOME", &dir);
-        std::env::remove_var("APB_CONFIG_DIR");
-    }
+    // Records the real config dir as forbidden, then redirects to `dir`.
+    apb_core::config::test_isolation::isolate(&dir);
     // Every test process (nextest runs one per test) removes its own
     // directory when it exits, so none is left behind in the temp dir.
     let Some(dir) = created else { return };
@@ -209,12 +206,13 @@ pub use question::{
 pub use review::{ReviewCommand, ReviewEntry, post_review, read_reviews_after};
 pub use run_doctor::{RunCheck, diagnose_run};
 pub use scheduler::{
-    PreparedRun, ResumeDecision, ResumeReason, ResumeRequest, RunMode, RunOptions, RunResult,
-    RunSummary, StartMode, drive_prepared, drive_run_from_dir, list_runs, plan_resume,
-    post_supervisor_command, prepare_supervised_background, record_run_error, resume, resume_by,
-    resume_detached, resume_detached_by, resume_detached_req, resume_detached_with, resume_req,
-    resume_with, run, run_background, run_background_resolved, run_cancel, run_profile_origin,
-    run_resolved, spawn_supervisor_agent, start_detached, start_detached_resolved,
+    PreparedRun, ResumeDecision, ResumeReason, ResumeRequest, RunFilter, RunListing, RunMode,
+    RunOptions, RunResult, RunSummary, StartMode, drive_prepared, drive_run_from_dir, list_runs,
+    list_runs_filtered, plan_resume, post_supervisor_command, prepare_supervised_background,
+    record_run_error, resume, resume_by, resume_detached, resume_detached_by, resume_detached_req,
+    resume_detached_with, resume_req, resume_with, run, run_background, run_background_resolved,
+    run_cancel, run_profile_origin, run_resolved, spawn_supervisor_agent, start_detached,
+    start_detached_resolved,
 };
 pub use signals::{SignalCommand, SignalEntry, post_signal, read_signals_after};
 pub use stop::{StopOutcome, stop_run, stop_run_by};

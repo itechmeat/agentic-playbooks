@@ -115,6 +115,62 @@ pub fn playbook_run_background(
     ))
 }
 
+/// The filter of a run listing from a surface's arguments: `scope` is
+/// `project` or `global`, every `fields` entry `name=value` (or
+/// `name:value`), at most [`apb_core::run_search::MAX_TERMS`]. `None` when
+/// no filter is given and `with_fields` is false: the plain listing.
+pub fn run_filter(
+    playbook: Option<String>,
+    scope: Option<String>,
+    fields: &[String],
+    with_fields: bool,
+) -> Result<Option<apb_engine::RunFilter>, ToolError> {
+    let playbook = playbook.filter(|p| !p.is_empty());
+    let scope = scope.filter(|s| !s.is_empty());
+    if let Some(s) = &scope
+        && s != "project"
+        && s != "global"
+    {
+        return Err(ToolError::Conflict(format!(
+            "scope is `project` or `global`, not `{s}`"
+        )));
+    }
+    let terms = apb_core::run_search::parse_terms(fields)
+        .map_err(|e| ToolError::Conflict(e.to_string()))?;
+    if playbook.is_none() && scope.is_none() && terms.is_empty() && !with_fields {
+        return Ok(None);
+    }
+    Ok(Some(apb_engine::RunFilter {
+        playbook,
+        scope,
+        fields: terms,
+        with_fields,
+    }))
+}
+
+/// [`runs_list`] narrowed by `filter`: `{ runs, not_indexed, withheld }`,
+/// every row with its `scope` and `search` fields, each redacted with its
+/// run's own values. `not_indexed` counts the runs a field term left out
+/// because they have no search fields; zero without field terms.
+pub fn runs_list_filtered(root: &Path, filter: &apb_engine::RunFilter) -> Result<Value, ToolError> {
+    let listing = apb_engine::list_runs_filtered(root, filter)?;
+    let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
+    let runs = listing
+        .runs
+        .into_iter()
+        .map(|run| {
+            let mut v = serde_json::to_value(&run).map_err(|e| ToolError::Engine(e.to_string()))?;
+            redaction.run(&run.run_id).redact_json(&mut v);
+            Ok(v)
+        })
+        .collect::<Result<Vec<Value>, ToolError>>()?;
+    Ok(json!({
+        "runs": runs,
+        "not_indexed": listing.not_indexed,
+        "withheld": listing.withheld,
+    }))
+}
+
 pub fn runs_list(root: &Path) -> Result<Value, ToolError> {
     let runs = list_runs(root)?;
     let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);

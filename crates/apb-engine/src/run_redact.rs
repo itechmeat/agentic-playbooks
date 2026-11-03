@@ -568,6 +568,12 @@ impl RunRedactor {
         run_params::redacted(params, &self.declared)
     }
 
+    /// Whether the run counts the param `name` declared secret (its
+    /// manifest's `secret_params` and its current snapshot's declarations).
+    pub fn declares_secret(&self, name: &str) -> bool {
+        self.declared.contains(name)
+    }
+
     /// Whether `text` holds a secret value of the run or the workspace.
     pub fn holds_value(&self, text: &str) -> bool {
         self.workspace.holds_value(text)

@@ -1159,6 +1159,160 @@ models: { [key in string]: number },
  */
 model_mismatch: number, };
 
+export type KnownCount = { value: number, known_runs: number, runs: number, };
+
+export type CategoryStats = { 
+/**
+ * `review`, `question`, `automatic`, `operator`, `supervisor_node`
+ * or `supervisor_run`.
+ */
+category: string, 
+/**
+ * What `denominator` counts: `gate visits`, `questions asked`,
+ * `decisions asked`, `runs` or `node executions`.
+ */
+unit: string, denominator: number, 
+/**
+ * The category's interventions (for `automatic`, the applied
+ * decisions).
+ */
+count: KnownCount, 
+/**
+ * The count split by kind, option, surface or use.
+ */
+split: { [key in string]: KnownCount }, };
+
+export type InterventionStats = { 
+/**
+ * Finished runs.
+ */
+runs: number, total: KnownCount, 
+/**
+ * Interventions per run over the runs where it is known.
+ */
+per_run_median?: number, per_run_mean?: number, 
+/**
+ * Runs without any intervention, over the runs where it is known.
+ */
+without_any: KnownCount, automatic_total: KnownCount, categories: Array<CategoryStats>, 
+/**
+ * The engine's own actions by kind, outside every total.
+ */
+engine: { [key in string]: number }, 
+/**
+ * Unknown supervisor action names, outside every total.
+ */
+other: { [key in string]: number }, 
+/**
+ * Actions that name no actor, outside every total.
+ */
+actor_unknown: { [key in string]: number }, };
+
+export type ReviewCounts = { 
+/**
+ * Review requests: one per gate visit.
+ */
+visits: number, 
+/**
+ * Decisions through the review channel.
+ */
+channel: number, 
+/**
+ * Decisions the engine took: an enforced recommendation or the gate's
+ * unattended outcome.
+ */
+automatic: number, 
+/**
+ * Requests a directive closed without a decision.
+ */
+withdrawn: number, 
+/**
+ * Requests still open.
+ */
+open: number, 
+/**
+ * Decisions an older binary wrote without saying who decided:
+ * neither `channel` nor `automatic` is known for the run then.
+ */
+unattributed: number, 
+/**
+ * Decisions by option.
+ */
+options: { [key in string]: number }, 
+/**
+ * Channel decisions by the surface they came through; `not_recorded`
+ * when the decision names none.
+ */
+via: { [key in string]: number }, };
+
+export type QuestionCounts = { asked: number, 
+/**
+ * Answers by `answered_by`.
+ */
+answered: { [key in string]: number }, abandoned: number, };
+
+export type UseCounts = { asked: number, applied: number, };
+
+export type RunInterventions = { 
+/**
+ * The oldest apb that wrote the run, when every writer recorded one.
+ */
+writer?: string, 
+/**
+ * The writer records who decided every gate, every expedite and every
+ * unattended answer ([`ATTRIBUTION_SINCE`]).
+ */
+attribution_known: boolean, reviews: ReviewCounts, questions: QuestionCounts, 
+/**
+ * Automatic decisions by use.
+ */
+automatic: { [key in string]: UseCounts }, 
+/**
+ * Operator actions by kind.
+ */
+operator: { [key in string]: number }, 
+/**
+ * Supervisor corrections aimed at one node, by kind.
+ */
+supervisor_node: { [key in string]: number }, 
+/**
+ * Supervisor corrections of the whole run, by kind.
+ */
+supervisor_run: { [key in string]: number }, 
+/**
+ * Node executions begun (race losers left out): the denominator of
+ * the node-targeted corrections.
+ */
+node_executions: number, 
+/**
+ * Pauses, resumes, aborts and expedites that name no actor.
+ */
+actor_unknown: { [key in string]: number }, 
+/**
+ * The engine's own actions, never an intervention.
+ */
+engine: { [key in string]: number }, 
+/**
+ * Supervisor action names this binary does not know (a newer apb's),
+ * never in a total.
+ */
+other: { [key in string]: number }, 
+/**
+ * Distinct list items the counted decisions belong to.
+ */
+items: number, 
+/**
+ * Interventions: channel decisions, human and supervisor answers,
+ * operator actions and supervisor corrections. Unknown when a gate
+ * decision is unattributed or an actor is unknown.
+ */
+total?: number, 
+/**
+ * Automatic decisions, automatic gate decisions and unattended answers;
+ * unknown when a gate decision is unattributed.
+ */
+automatic_total?: number, };
+
 export type VersionStats = { playbook: string, version: string, runs: number, outcomes: Outcomes, 
 /**
  * Succeeded runs over finished runs (succeeded, failed, aborted).
@@ -1190,7 +1344,12 @@ baseline: Array<BaselineStats>,
  * The levels its runs' signed grades gave each criterion, one row per
  * comparable key ([`quality`]); empty when no run was graded.
  */
-quality?: Array<QualityStats>, nodes: Array<NodeStats>, note?: string, 
+quality?: Array<QualityStats>, 
+/**
+ * What came into its finished runs from outside the playbook's flow
+ * ([`interventions`]); absent when the version has no finished run.
+ */
+interventions?: InterventionStats, nodes: Array<NodeStats>, note?: string, 
 /**
  * Runs of this version that were candidate trials (issue #192): the
  * version was a forward patch on trial when they ran.
@@ -1570,6 +1729,16 @@ default_on: boolean,
  */
 problem?: string, };
 
+export type FieldState = "value" | "too_long" | "withheld" | "absent" | "invalid";
+
+export type SearchField = { name: string, state: FieldState, 
+/**
+ * The value as the run has it, only in state `value`.
+ */
+value?: string, };
+
+export type SearchFields = { "state": "indexed", fields: Array<SearchField>, } | { "state": "not_indexed" };
+
 export type RunSummary = { run_id: string, playbook: string, status: string, started_ts: number, 
 /**
  * Active milliseconds from `run_started` to the run's end (`run_finished`
@@ -1621,7 +1790,30 @@ pause?: PauseInfo,
  * Why the run needs a person's look: a baseline regression, or
  * findings or warnings its attempts reported. Absent when none.
  */
-needs_look?: NeedsLook, };
+needs_look?: NeedsLook, 
+/**
+ * Where the run's playbook came from: `project` or `global`
+ * (`run_provenance.origin`; a run without provenance is `project`).
+ * Only in a filtered listing ([`list_runs_filtered`]).
+ */
+scope?: string, 
+/**
+ * The run's search fields; only in a filtered listing.
+ */
+search?: SearchFields, };
+
+export type RunListing = { runs: Array<RunSummary>, 
+/**
+ * Runs a field term dropped because they have no search fields; zero
+ * when the filter has no field terms, because then nothing is left
+ * out of `runs`.
+ */
+not_indexed: number, 
+/**
+ * Runs left out because a term names a field whose value is withheld
+ * or too long (a non-match a query cannot probe).
+ */
+withheld: number, };
 
 export type RunListEntry = { 
 /**
@@ -1678,7 +1870,17 @@ pause?: PauseInfo,
  * Why the run needs a person's look: a baseline regression, or
  * findings or warnings its attempts reported. Absent when none.
  */
-needs_look?: NeedsLook, };
+needs_look?: NeedsLook, 
+/**
+ * Where the run's playbook came from: `project` or `global`
+ * (`run_provenance.origin`; a run without provenance is `project`).
+ * Only in a filtered listing ([`list_runs_filtered`]).
+ */
+scope?: string, 
+/**
+ * The run's search fields; only in a filtered listing.
+ */
+search?: SearchFields, };
 
 export type LaunchPolicy = "allow" | "ask" | "deny";
 

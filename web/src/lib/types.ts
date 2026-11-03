@@ -8,6 +8,8 @@ export interface Project {
   name: string
   path: string
   playbook_count: number
+  // Set for a git linked worktree: the workspace id of its parent project.
+  parent_workspace_id?: string | null
 }
 
 export interface PlaybookSummary {

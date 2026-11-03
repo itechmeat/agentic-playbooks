@@ -1,0 +1,15 @@
+schema: 1
+id: clean
+title: Every item has a verdict and no MUST item fails
+params: { document: reports/q3-summary.md }
+answers:
+  check:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { must_failed: 0, should_failed: 2, unchecked: 0, coverage: "CHECKLIST: 9/9" }
+expect:
+  run: { outcome: [succeeded] }
+  finish: done
+  visits: { check: 1 }
+  route: { not_visits: [fix, recheck, decide] }

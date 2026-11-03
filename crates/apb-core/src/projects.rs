@@ -28,6 +28,13 @@ const SCHEMA_VERSION: u32 = 2;
 const LEGACY_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_UNREACHABLE_DAYS: u64 = 14;
 const DEFAULT_PURGE_DAYS: u64 = 90;
+/// An entry unreachable this long is dropped by the next registry write,
+/// unless the operator configured `registry_unreachable_days` or
+/// `registry_purge_days`, in which case the limit is at least
+/// [`drop_days`]: max(30, unreachable + purge). Every drop re-checks
+/// reachability first, so an entry never disappears while its workspace is
+/// there again.
+const DROP_UNREACHABLE_DAYS: u64 = 30;
 const MS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
 
 /// State of a workspace entry (spec 6.4). Timestamps are `u64` ms: that is
@@ -61,6 +68,10 @@ struct StoredEntry {
     #[serde(default)]
     playbook_count: usize,
     state: State,
+    /// The workspace id of the registered project whose git repository this
+    /// workspace is a linked worktree of, recorded at registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_workspace_id: Option<String>,
     #[serde(flatten)]
     extra: Map<String, Value>,
 }
@@ -79,6 +90,9 @@ pub struct ProjectEntry {
     /// Playbooks on disk right now (0 when the workspace is unreachable).
     pub playbook_count: usize,
     pub state: State,
+    /// Set when this workspace is a git linked worktree of the registered
+    /// project with this workspace id: listings nest it under that project.
+    pub parent_workspace_id: Option<String>,
 }
 
 impl ProjectEntry {
@@ -97,6 +111,7 @@ impl ProjectEntry {
             last_seen_ms: e.last_seen_ms,
             playbook_count,
             state: e.state.clone(),
+            parent_workspace_id: e.parent_workspace_id.clone(),
         }
     }
 }
@@ -156,6 +171,20 @@ pub struct RegistryReadOnly {
 enum RegistryError {
     #[error(transparent)]
     ReadOnly(#[from] RegistryReadOnly),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+/// Why `apb projects prune` failed. A failed read or write is reported to
+/// the caller instead of an empty removed list, which a CLI would show as
+/// "nothing to prune" with a successful exit.
+#[derive(Debug, thiserror::Error)]
+pub enum PruneError {
+    /// The registry is read-only for this build and something would be
+    /// removed.
+    #[error(transparent)]
+    ReadOnly(#[from] RegistryReadOnly),
+    /// Reading or writing the registry failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -340,6 +369,8 @@ fn with_registry<T>(
     let before = file.clone();
     let out = f(&mut file);
     if file != before || before.needs_upgrade() {
+        let cfg = GlobalConfig::load().unwrap_or_default();
+        drop_long_unreachable(&mut file, &cfg, crate::clock::now_ms_u64());
         write_file(&path, &file)?;
     }
     Ok(out)
@@ -401,11 +432,61 @@ fn workspace_name(root: &Path) -> String {
         .unwrap_or_else(|| root.to_string_lossy().into_owned())
 }
 
+/// The day count the long-unreachable auto-drop uses. Plain 30, but when the
+/// operator configured `registry_unreachable_days` or
+/// `registry_purge_days`, at least the sum of the two: a user who asked for a
+/// 365-day purge must not lose entries at 30 days.
+fn drop_days(cfg: &GlobalConfig) -> u64 {
+    if cfg.registry_unreachable_days.is_none() && cfg.registry_purge_days.is_none() {
+        return DROP_UNREACHABLE_DAYS;
+    }
+    let unreach = cfg
+        .registry_unreachable_days
+        .unwrap_or(DEFAULT_UNREACHABLE_DAYS);
+    let purge = cfg.registry_purge_days.unwrap_or(DEFAULT_PURGE_DAYS);
+    DROP_UNREACHABLE_DAYS.max(unreach.saturating_add(purge))
+}
+
+/// Removes the entries unreachable for at least [`drop_days`]. A tombstoned
+/// entry was unreachable for the tombstone threshold before its `since_ms`,
+/// so that lower bound is what counts for it. An entry past its limit is
+/// re-checked against the disk first: a workspace that came back stays, as
+/// active again, and only one that is still gone is dropped.
+fn drop_long_unreachable(file: &mut ProjectsFile, cfg: &GlobalConfig, now: u64) {
+    let limit = drop_days(cfg).saturating_mul(MS_PER_DAY);
+    let unreach = unreachable_ms(cfg);
+    let mut drop_ids = Vec::new();
+    for (id, e) in file.entries.iter_mut() {
+        let over = match &e.state {
+            State::Active => continue,
+            State::Unreachable { since_ms } => now.saturating_sub(*since_ms) >= limit,
+            State::Tombstoned { since_ms } => {
+                now.saturating_sub(*since_ms).saturating_add(unreach) >= limit
+            }
+        };
+        if !over {
+            continue;
+        }
+        if is_reachable(id, Path::new(&e.path)) {
+            // It came back since it was marked unreachable: keep it, active
+            // again.
+            e.state = State::Active;
+        } else {
+            drop_ids.push(id.clone());
+        }
+    }
+    for id in drop_ids {
+        file.entries.remove(&id);
+    }
+}
+
 /// Transitions `unreachable` entries older than the threshold to
 /// `tombstoned`, physically removes `tombstoned` entries older than the
-/// purge threshold. Called inside the lock on every access.
+/// purge threshold, and drops the long unreachable ones
+/// ([`drop_long_unreachable`]). Called inside the lock on every access.
 fn apply_time_transitions(file: &mut ProjectsFile, cfg: &GlobalConfig) {
     let now = crate::clock::now_ms_u64();
+    drop_long_unreachable(file, cfg, now);
     let unreach = unreachable_ms(cfg);
     let purge = purge_ms(cfg);
     let mut to_remove = Vec::new();
@@ -468,6 +549,17 @@ fn register_in(file: &mut ProjectsFile, workspace_id: &str, root: &Path, now: u6
         .get(workspace_id)
         .map(|e| e.extra.clone())
         .unwrap_or_default();
+    let previous_parent = file
+        .entries
+        .get(workspace_id)
+        .and_then(|e| e.parent_workspace_id.clone());
+    let parent_workspace_id = match worktree_parent(file, workspace_id, root) {
+        // git could not be asked: keep what was recorded, never erase it on
+        // a transient failure.
+        ParentLookup::Unknown => previous_parent.filter(|p| *p != workspace_id),
+        ParentLookup::At(id) => Some(id),
+        ParentLookup::None => None,
+    };
     file.entries.insert(
         workspace_id.to_string(),
         StoredEntry {
@@ -479,10 +571,69 @@ fn register_in(file: &mut ProjectsFile, workspace_id: &str, root: &Path, now: u6
             last_seen_ms: now,
             playbook_count: count_playbooks(root),
             state: State::Active,
+            parent_workspace_id,
             extra,
         },
     );
     true
+}
+
+/// What [`worktree_parent`] learned about the parent of a worktree.
+enum ParentLookup {
+    /// git worked and named the registered parent project.
+    At(String),
+    /// git worked and there is no registered parent: a main checkout, a
+    /// directory outside git, or an unregistered parent.
+    None,
+    /// git could not be asked (it would not start or failed): the caller
+    /// keeps the previously recorded parent instead of clearing it.
+    Unknown,
+}
+
+/// The workspace id of the registered project `root` is a git linked
+/// worktree of: git reports a git dir apart from the common dir, the main
+/// worktree is the common dir's parent, and the parent project sits at the
+/// same place inside it as `root` does inside its worktree. Asked through
+/// [`crate::git::Repo`], never a plain `git`. [`ParentLookup::Unknown`] for a
+/// directory whose `.git` points somewhere git cannot open (the recorded
+/// parent then stands), [`ParentLookup::None`] for a main checkout, a
+/// directory outside git, or a parent that is not registered.
+fn worktree_parent(file: &ProjectsFile, workspace_id: &str, root: &Path) -> ParentLookup {
+    // A linked worktree's top holds a `.git` file; a main checkout's is a
+    // directory. Only the former is worth starting git for on every touch.
+    let Some(dot_git) = root
+        .ancestors()
+        .map(|d| d.join(".git"))
+        .find(|g| g.exists())
+    else {
+        return ParentLookup::None;
+    };
+    if !dot_git.is_file() {
+        return ParentLookup::None;
+    }
+    let Ok(repo) = crate::git::Repo::locate(root) else {
+        return ParentLookup::Unknown;
+    };
+    if repo.git_dir == repo.common_dir {
+        return ParentLookup::None;
+    }
+    let Some(main_tree) = repo.common_dir.parent() else {
+        return ParentLookup::Unknown;
+    };
+    let Ok(canon) = std::fs::canonicalize(root) else {
+        return ParentLookup::Unknown;
+    };
+    let Ok(inside) = canon.strip_prefix(&repo.work_tree) else {
+        return ParentLookup::Unknown;
+    };
+    let Ok(parent_root) = std::fs::canonicalize(main_tree.join(inside)) else {
+        return ParentLookup::Unknown;
+    };
+    file.entries
+        .values()
+        .find(|e| e.workspace_id != workspace_id && entry_at(e, &parent_root))
+        .map(|e| ParentLookup::At(e.workspace_id.clone()))
+        .unwrap_or(ParentLookup::None)
 }
 
 /// Whether `entry` names the directory `canon` (already canonical).
@@ -621,6 +772,91 @@ pub fn remove(workspace_id: &str) -> Result<bool, RegistryReadOnly> {
         Err(RegistryError::ReadOnly(e)) => Err(e),
         Err(RegistryError::Io(_)) => Ok(false),
     }
+}
+
+/// `apb projects prune`: removes every entry whose directory is genuinely
+/// gone (`NotFound`), reconciled with [`is_reachable`]. An entry whose path
+/// still exists but is momentarily unreachable (an unmounted disk, a down
+/// sshfs, no permission) is kept and only marked unreachable, so a transient
+/// outage never drops registered projects. Each removal goes the way
+/// [`remove`] removes one, under the registry lock. Returns the removed
+/// entries. `dry_run` reports the same list and writes nothing. Refused when
+/// the registry is read-only for this build and something would be removed;
+/// I/O errors surface instead of an empty list.
+pub fn prune(dry_run: bool) -> Result<Vec<ProjectEntry>, PruneError> {
+    let now = crate::clock::now_ms_u64();
+    let gone = |file: &mut ProjectsFile| -> Vec<ProjectEntry> {
+        let mut removed = Vec::new();
+        let ids: Vec<String> = file.entries.keys().cloned().collect();
+        for id in ids {
+            let Some(entry) = file.entries.get_mut(&id) else {
+                continue;
+            };
+            reconcile(entry, now);
+            let genuinely_gone = std::fs::metadata(&entry.path)
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+            if genuinely_gone
+                && entry.state != State::Active
+                && let Some(e) = file.entries.remove(&id)
+            {
+                removed.push(ProjectEntry::from_stored(&e));
+            }
+        }
+        removed
+    };
+    if dry_run {
+        let Some(path) = projects_path() else {
+            return Ok(Vec::new());
+        };
+        let mut file = match read_file(&path) {
+            Loaded::Writable(file) => file,
+            Loaded::ReadOnly { view, .. } => view,
+        };
+        return Ok(gone(&mut file));
+    }
+    match with_registry(Access::Write, gone) {
+        Ok(removed) => Ok(removed),
+        Err(RegistryError::ReadOnly(e)) => Err(e.into()),
+        Err(RegistryError::Io(e)) => Err(e.into()),
+    }
+}
+
+/// `entries` ordered for display: each main project followed by the
+/// worktrees nested under it (depth 1). Main projects and each group of
+/// worktrees are sorted by byte order of the label (`str` ordering over the
+/// `name` field, then the `path`), never by locale-aware comparison; the web
+/// project picker pairs this rule with JavaScript `localeCompare` for its own
+/// display. A worktree whose parent is not among `entries` is listed as a
+/// main project.
+pub fn nest_worktrees(entries: Vec<ProjectEntry>) -> Vec<(usize, ProjectEntry)> {
+    let ids: HashSet<String> = entries.iter().map(|e| e.workspace_id.clone()).collect();
+    let nested_under = |e: &ProjectEntry| {
+        e.parent_workspace_id
+            .clone()
+            .filter(|p| *p != e.workspace_id && ids.contains(p))
+    };
+    let (mut mains, children): (Vec<_>, Vec<_>) =
+        entries.into_iter().partition(|e| nested_under(e).is_none());
+    let mut by_parent: BTreeMap<String, Vec<ProjectEntry>> = BTreeMap::new();
+    for c in children {
+        by_parent
+            .entry(nested_under(&c).unwrap_or_default())
+            .or_default()
+            .push(c);
+    }
+    let key = |e: &ProjectEntry| (e.name.clone(), e.path.clone());
+    mains.sort_by_key(key);
+    let mut out = Vec::new();
+    for m in mains {
+        let mut kids = by_parent.remove(&m.workspace_id).unwrap_or_default();
+        kids.sort_by_key(key);
+        out.push((0, m));
+        out.extend(kids.into_iter().map(|k| (1, k)));
+    }
+    // A parent that is itself nested (not a shape git makes) keeps its own
+    // worktrees listed, at the top level.
+    out.extend(by_parent.into_values().flatten().map(|k| (0, k)));
+    out
 }
 
 #[cfg(test)]
@@ -1036,6 +1272,8 @@ mod tests {
         let proj = tempfile::tempdir().unwrap();
         init_project(proj.path()).unwrap();
         let ws_id = crate::workspace::ensure_id(proj.path()).unwrap();
+        // Unreachable for a day: recent enough that a write keeps it.
+        let since = crate::clock::now_ms_u64() - MS_PER_DAY;
         let file = serde_json::json!({
             "schema_version": SCHEMA_VERSION,
             "future_file_field": { "nested": [1, 2] },
@@ -1053,7 +1291,7 @@ mod tests {
                     "path": "/nowhere",
                     "name": "nowhere",
                     "last_seen_ms": 1,
-                    "state": { "kind": "unreachable", "since_ms": 1 },
+                    "state": { "kind": "unreachable", "since_ms": since },
                     "future_entry_field": 42
                 }
             }
@@ -1204,6 +1442,205 @@ mod tests {
         assert_eq!(stamp(&file), before, "a listing rewrote the file");
     }
 
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    /// A git linked worktree of a registered repository records the parent
+    /// project's workspace id; the main checkout records none.
+    #[test]
+    fn a_linked_worktree_records_its_parent_project() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        setup(cfg.path());
+        let _g = EnvGuard;
+
+        let base = tempfile::tempdir().unwrap();
+        let main = base.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q"]);
+        std::fs::write(main.join(".gitignore"), ".apb/workspace.local\n").unwrap();
+        git(&main, &["add", ".gitignore"]);
+        git(&main, &["commit", "-q", "-m", "init"]);
+        init_project(&main).unwrap();
+        touch(&main);
+        let main_id = crate::workspace::ensure_id(&main).unwrap();
+
+        let wt = base.path().join("wt");
+        git(&main, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+        init_project(&wt).unwrap();
+        touch(&wt);
+        let wt_id = crate::workspace::ensure_id(&wt).unwrap();
+        assert_ne!(wt_id, main_id);
+
+        let listed = list_active();
+        let of = |id: &str| listed.iter().find(|e| e.workspace_id == id).unwrap();
+        assert_eq!(
+            of(&wt_id).parent_workspace_id.as_deref(),
+            Some(main_id.as_str())
+        );
+        assert_eq!(of(&main_id).parent_workspace_id, None);
+
+        let nested: Vec<(usize, String)> = nest_worktrees(listed)
+            .into_iter()
+            .map(|(d, e)| (d, e.workspace_id))
+            .collect();
+        assert_eq!(nested, vec![(0, main_id), (1, wt_id)]);
+    }
+
+    fn entry(id: &str, name: &str, parent: Option<&str>) -> ProjectEntry {
+        ProjectEntry {
+            workspace_id: id.into(),
+            fingerprint: None,
+            path: format!("/p/{name}"),
+            name: name.into(),
+            last_seen_ms: 0,
+            playbook_count: 0,
+            state: State::Active,
+            parent_workspace_id: parent.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn worktrees_nest_under_their_parent_and_orphans_stay_top_level() {
+        let nested: Vec<(usize, String)> = nest_worktrees(vec![
+            entry("w2", "b-feature", Some("b")),
+            entry("a", "alpha", None),
+            entry("o", "orphan", Some("missing")),
+            entry("b", "beta", None),
+            entry("w1", "a-fix", Some("b")),
+        ])
+        .into_iter()
+        .map(|(d, e)| (d, e.workspace_id))
+        .collect();
+        let expect: Vec<(usize, String)> = [(0, "a"), (0, "b"), (1, "w1"), (1, "w2"), (0, "o")]
+            .into_iter()
+            .map(|(d, id)| (d, id.to_string()))
+            .collect();
+        assert_eq!(nested, expect);
+    }
+
+    /// `prune` removes exactly the entries whose workspace is gone, the
+    /// dry run lists the same ones and leaves the file byte-identical.
+    #[test]
+    fn prune_removes_gone_workspaces_and_the_dry_run_writes_nothing() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        setup(cfg.path());
+        let _g = EnvGuard;
+
+        let live = tempfile::tempdir().unwrap();
+        init_project(live.path()).unwrap();
+        touch(live.path());
+        let live_id = crate::workspace::ensure_id(live.path()).unwrap();
+        let gone = tempfile::tempdir().unwrap();
+        init_project(gone.path()).unwrap();
+        touch(gone.path());
+        let gone_id = crate::workspace::ensure_id(gone.path()).unwrap();
+        drop(gone);
+
+        let file = registry_file(cfg.path());
+        let before = std::fs::read(&file).unwrap();
+        let planned: Vec<String> = prune(true)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.workspace_id)
+            .collect();
+        assert_eq!(planned, vec![gone_id.clone()]);
+        assert_eq!(std::fs::read(&file).unwrap(), before, "a dry run wrote");
+
+        let removed: Vec<String> = prune(false)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.workspace_id)
+            .collect();
+        assert_eq!(removed, vec![gone_id]);
+        let left: Vec<String> = list_active().into_iter().map(|e| e.workspace_id).collect();
+        assert_eq!(left, vec![live_id]);
+        assert!(prune(false).unwrap().is_empty(), "nothing left to prune");
+    }
+
+    /// Any registry write drops an entry unreachable for 30 days, before
+    /// its tombstone would have been purged.
+    #[test]
+    fn a_registry_write_drops_entries_unreachable_for_30_days() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        setup(cfg.path());
+        let _g = EnvGuard;
+
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let gone = tempfile::tempdir().unwrap();
+            init_project(gone.path()).unwrap();
+            touch(gone.path());
+            ids.push(crate::workspace::ensure_id(gone.path()).unwrap());
+        }
+        let now = crate::clock::now_ms_u64();
+        test_set_unreachable_since(&ids[0], now - 31 * MS_PER_DAY);
+        test_set_unreachable_since(&ids[1], now - 2 * MS_PER_DAY);
+
+        let live = tempfile::tempdir().unwrap();
+        init_project(live.path()).unwrap();
+        touch(live.path());
+
+        let raw = std::fs::read_to_string(registry_file(cfg.path())).unwrap();
+        assert!(
+            !raw.contains(&ids[0]),
+            "a 31-day unreachable entry survived"
+        );
+        assert!(
+            raw.contains(&ids[1]),
+            "a 2-day unreachable entry was dropped"
+        );
+    }
+
+    /// The tombstoned arm of the drop: a tombstone ages by the unreachable
+    /// window too, so an entry tombstoned 17 days ago (17 + 14 = 31 days of
+    /// unreachable-equivalent age) goes on any registry write, while one
+    /// tombstoned 15 days ago (29) stays.
+    #[test]
+    fn a_registry_write_drops_tombstoned_entries_past_the_limit() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        setup(cfg.path());
+        let _g = EnvGuard;
+
+        let now = crate::clock::now_ms_u64();
+        let mut ids = Vec::new();
+        for days in [17, 15] {
+            let gone = tempfile::tempdir().unwrap();
+            init_project(gone.path()).unwrap();
+            touch(gone.path());
+            let id = crate::workspace::ensure_id(gone.path()).unwrap();
+            drop(gone);
+            let since = now.saturating_sub(days * MS_PER_DAY);
+            let _ = with_registry(Access::Write, |file| {
+                if let Some(e) = file.entries.get_mut(&id) {
+                    e.state = State::Tombstoned { since_ms: since };
+                }
+            });
+            ids.push(id);
+        }
+
+        let live = tempfile::tempdir().unwrap();
+        init_project(live.path()).unwrap();
+        touch(live.path());
+
+        let raw = std::fs::read_to_string(registry_file(cfg.path())).unwrap();
+        assert!(!raw.contains(&ids[0]), "a 31-day tombstone survived");
+        assert!(raw.contains(&ids[1]), "a 29-day tombstone was dropped");
+    }
+
     #[test]
     fn ci_env_skips_registration() {
         let _lock = crate::env_test_lock();
@@ -1218,5 +1655,201 @@ mod tests {
         init_project(proj.path()).unwrap();
         touch(proj.path());
         assert!(list_active().is_empty(), "CI must skip registration");
+    }
+
+    /// A registry I/O failure must surface as an error from `prune`, never as
+    /// an empty removed list the caller would report as "nothing to prune".
+    /// The fault: a directory sits where the registry lock file goes, so the
+    /// locked write fails no matter who runs.
+    #[test]
+    fn prune_surfaces_a_registry_io_error() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        setup(cfg.path());
+        let _g = EnvGuard;
+
+        let proj = tempfile::tempdir().unwrap();
+        init_project(proj.path()).unwrap();
+        touch(proj.path());
+        // A second project that disappears: removing it is what makes prune
+        // write, so the induced lock failure is on the write path.
+        let gone = tempfile::tempdir().unwrap();
+        init_project(gone.path()).unwrap();
+        touch(gone.path());
+        drop(gone);
+        std::fs::create_dir(cfg.path().join("projects.json.lock")).unwrap();
+
+        let err = prune(false).expect_err("a failed prune must not report success");
+        assert!(matches!(err, PruneError::Io(_)), "{err:?}");
+    }
+
+    /// Prune removes only entries whose directory is genuinely gone
+    /// (NotFound). A path that still exists but fails the identity check is
+    /// kept: an unmounted disk or a down sshfs must not cost the registry its
+    /// entry.
+    #[test]
+    fn prune_keeps_an_entry_whose_path_still_exists() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        setup(cfg.path());
+        let _g = EnvGuard;
+
+        let live = tempfile::tempdir().unwrap();
+        init_project(live.path()).unwrap();
+        touch(live.path());
+        let live_id = crate::workspace::ensure_id(live.path()).unwrap();
+
+        // Exists, but the identity check fails: the workspace file names
+        // another id, like a copied checkout that took the directory over.
+        let alien = tempfile::tempdir().unwrap();
+        init_project(alien.path()).unwrap();
+        touch(alien.path());
+        let alien_id = crate::workspace::ensure_id(alien.path()).unwrap();
+        std::fs::write(
+            alien.path().join(".apb/workspace.local"),
+            "some-other-workspace",
+        )
+        .unwrap();
+
+        let removed: Vec<String> = prune(false)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.workspace_id)
+            .collect();
+        assert_eq!(removed, Vec::<String>::new(), "nothing is genuinely gone");
+        // The alien path is unreachable, so it is not active any more, but
+        // the entry itself must still exist in the registry file.
+        let reachable: Vec<String> = list_reachable()
+            .into_iter()
+            .map(|e| e.workspace_id)
+            .collect();
+        let raw = std::fs::read_to_string(registry_file(cfg.path())).unwrap();
+        assert!(raw.contains(&alien_id), "the unreachable entry was pruned");
+        assert!(raw.contains(&live_id));
+        assert!(
+            !reachable.contains(&alien_id),
+            "the alien path must not count as reachable"
+        );
+    }
+
+    /// The long-unreachable auto-drop re-checks reachability right before it
+    /// drops: an entry whose workspace came back stays, as active again.
+    #[test]
+    fn the_auto_drop_keeps_an_entry_that_became_reachable_again() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        setup(cfg.path());
+        let _g = EnvGuard;
+
+        let proj = tempfile::tempdir().unwrap();
+        init_project(proj.path()).unwrap();
+        touch(proj.path());
+        let id = crate::workspace::ensure_id(proj.path()).unwrap();
+        let now = crate::clock::now_ms_u64();
+        test_set_unreachable_since(&id, now.saturating_sub(40 * MS_PER_DAY));
+
+        let raw = std::fs::read_to_string(registry_file(cfg.path())).unwrap();
+        assert!(
+            raw.contains(&id),
+            "a reachable workspace was dropped at the 30-day mark"
+        );
+        let state = with_registry(Access::View, |file| {
+            file.entries.get(&id).map(|e| e.state.clone())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(state, State::Active, "a reachable workspace stays active");
+    }
+
+    /// With the registry day settings configured, the auto-drop moves to
+    /// max(30, unreachable + purge) days instead of the plain 30.
+    #[test]
+    fn configured_registry_days_raise_the_auto_drop_limit() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        setup(cfg.path());
+        let _g = EnvGuard;
+        std::fs::write(
+            cfg.path().join("config.yaml"),
+            "registry_unreachable_days: 14\nregistry_purge_days: 365\n",
+        )
+        .unwrap();
+
+        let proj = tempfile::tempdir().unwrap();
+        init_project(proj.path()).unwrap();
+        touch(proj.path());
+        let id = crate::workspace::ensure_id(proj.path()).unwrap();
+        // The path is genuinely gone, so only the day limit can keep it.
+        std::fs::remove_dir_all(proj.path().join(".apb")).unwrap();
+        let now = crate::clock::now_ms_u64();
+        test_set_unreachable_since(&id, now.saturating_sub(40 * MS_PER_DAY));
+
+        let raw = std::fs::read_to_string(registry_file(cfg.path())).unwrap();
+        assert!(
+            raw.contains(&id),
+            "40 days is within 14 + 365, so the entry must be kept"
+        );
+
+        test_set_unreachable_since(
+            &id,
+            crate::clock::now_ms_u64().saturating_sub(380 * MS_PER_DAY),
+        );
+        let raw = std::fs::read_to_string(registry_file(cfg.path())).unwrap();
+        assert!(
+            !raw.contains(&id),
+            "380 days is past 14 + 365, so the entry must be dropped"
+        );
+    }
+
+    /// A git that cannot start at a touch must not erase the recorded
+    /// worktree parent: the parent is kept unless git works and reports none.
+    #[test]
+    fn touch_keeps_the_recorded_parent_when_git_fails() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        setup(cfg.path());
+        let _g = EnvGuard;
+
+        let parent = tempfile::tempdir().unwrap();
+        init_project(parent.path()).unwrap();
+        touch(parent.path());
+        let parent_id = crate::workspace::ensure_id(parent.path()).unwrap();
+
+        let child = tempfile::tempdir().unwrap();
+        init_project(child.path()).unwrap();
+        touch(child.path());
+        let child_id = crate::workspace::ensure_id(child.path()).unwrap();
+        let _ = with_registry(Access::Write, |file| {
+            if let Some(e) = file.entries.get_mut(&child_id) {
+                e.parent_workspace_id = Some(parent_id.clone());
+            }
+        });
+
+        // The child moves to a directory whose `.git` file is garbage, so
+        // git cannot report anything about it.
+        let moved = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(moved.path().join(".apb/playbooks")).unwrap();
+        std::fs::write(
+            moved.path().join(".git"),
+            "gitdir: /definitely/not/a/git/dir\n",
+        )
+        .unwrap();
+        std::fs::write(moved.path().join(".apb/workspace.local"), &child_id).unwrap();
+        std::fs::remove_dir_all(child.path().join(".apb")).unwrap();
+        touch(moved.path());
+
+        let entry = with_registry(Access::View, |file| {
+            file.entries
+                .get(&child_id)
+                .map(|e| (e.parent_workspace_id.clone(), e.path.clone()))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            entry.0,
+            Some(parent_id),
+            "the recorded parent was erased on a git failure"
+        );
+        assert_eq!(Path::new(&entry.1), moved.path());
     }
 }
