@@ -17,6 +17,16 @@ import {
   keepCurrentCandidate,
   reopenRunGrading,
   promoteCandidate,
+  promoteRefusalOf,
+  fetchCandidateSummary,
+  fetchScenarios,
+  runScenario,
+  fetchScenarioRun,
+  evaluateJudge,
+  fetchJudgeRunValues,
+  saveJudgeExample,
+  installDemo,
+  DEMO_PLAYBOOK,
   fetchPlaybook,
   postAnswer,
   postReview,
@@ -28,6 +38,7 @@ import {
   saveLayout,
   updatePlaybook,
 } from './api'
+import { DEMO_ID } from './consts.gen'
 
 const fetchMock = vi.fn<typeof fetch>()
 
@@ -307,10 +318,11 @@ describe('run quality', () => {
     await fetchCandidate('p')
     expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/candidate', { headers: H })
     fetchMock.mockResolvedValueOnce(jsonResponse({ verdict: 'promote' }))
-    await promoteCandidate('p', 'w1')
+    await promoteCandidate('p', { expected_version: '1.0.1', expected_digest: 'sha256:ab', acknowledged: 's1' }, 'w1')
     expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/candidate/promote?workspace=w1', {
       method: 'POST',
-      headers: H,
+      headers: JSON_H,
+      body: JSON.stringify({ expected_version: '1.0.1', expected_digest: 'sha256:ab', acknowledged: 's1' }),
     })
     fetchMock.mockResolvedValueOnce(jsonResponse({ verdict: 'keep_current' }))
     await keepCurrentCandidate('p', '  reads better ')
@@ -537,5 +549,66 @@ describe('notify', () => {
 
   it('links the report page of a run', () => {
     expect(runReportHtmlUrl('r 1', 'ws')).toBe('/api/runs/r%201/report.html?workspace=ws')
+  })
+})
+
+describe('checks for people', () => {
+  it('reads a promotion refusal from its JSON body and nothing else as one', async () => {
+    const refusal = { code: 'needs_acknowledgement', summary_id: 's2', items: [] }
+    fetchMock.mockResolvedValueOnce(jsonResponse(refusal, 409))
+    const err = await promoteCandidate('p', { expected_version: '1.0.1', expected_digest: 'sha256:ab' }).catch((e) => e)
+    expect(promoteRefusalOf(err)).toEqual(refusal)
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: 'frozen' }, 409))
+    const other = await promoteCandidate('p', { expected_version: '1.0.1', expected_digest: 'sha256:ab' }).catch((e) => e)
+    expect(promoteRefusalOf(other)).toBeNull()
+  })
+
+  it('reaches the summary, scenario, judge and demo routes with their bodies', async () => {
+    const ok = () => fetchMock.mockResolvedValueOnce(jsonResponse({}))
+    ok()
+    await fetchCandidateSummary('p', 'w1')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/candidate/summary?workspace=w1', { headers: H })
+    ok()
+    await fetchScenarios('p')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/scenarios', { headers: H })
+    ok()
+    await runScenario('p', { scenario: 'green', level: 'quick', version: '1.0.1' }, 'w1')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/scenario-runs?workspace=w1', {
+      method: 'POST',
+      headers: JSON_H,
+      body: JSON.stringify({ scenario: 'green', level: 'quick', version: '1.0.1' }),
+    })
+    ok()
+    await fetchScenarioRun('p', 'r 1')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/scenario-runs/r%201', { headers: H })
+    const inputs = { params: {}, instruction: 'x', outputs: {}, reviews: {}, rejected_outputs: {}, hooks: {}, context: '' }
+    ok()
+    await evaluateJudge('p', 'check', { inputs, answers: { q: { value: 'clear' } }, emulate: false })
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/playbooks/p/judge/check/evaluate', {
+      method: 'POST',
+      headers: JSON_H,
+      body: JSON.stringify({ inputs, answers: { q: { value: 'clear' } }, emulate: false }),
+    })
+    ok()
+    await fetchJudgeRunValues('r1', 'check', 2, 'w1')
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/runs/r1/judge/check/values?workspace=w1&execution=2', { headers: H })
+    ok()
+    await saveJudgeExample('r1', 'check', { execution: 2, expected: { q: 'clear' } })
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/runs/r1/judge/check/examples', {
+      method: 'POST',
+      headers: JSON_H,
+      body: JSON.stringify({ execution: 2, expected: { q: 'clear' } }),
+    })
+    ok()
+    await installDemo()
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/demo', { method: 'POST', headers: H })
+  })
+})
+
+describe('the demo id', () => {
+  it('is the id apb installs the demo as', () => {
+    // The page hints and the scenarios box key on it; a hand-kept literal
+    // drifted once already (the `apb-` prefix is reserved for shipped content).
+    expect(DEMO_PLAYBOOK).toBe(DEMO_ID)
   })
 })

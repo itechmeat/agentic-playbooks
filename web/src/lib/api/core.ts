@@ -41,10 +41,24 @@ import type {
   Transition,
   ResultView,
   RootInfo,
+  DemoProject,
+  DemoStatus,
+  ExampleSaveRequest,
+  JudgeExample,
+  PlaybookCandidateSummary,
+  PlaybookScenarios,
+  PromoteBody,
+  PromoteRefusal,
+  RunValues,
+  SandboxEvaluation,
+  SandboxRequest,
+  ScenarioRunRequest,
+  ScenarioRunView,
 } from '../api.gen'
 import type { RemoveResult, SuggestionRecord } from '../suggestions'
 import { launchFields, type LaunchConfirmation } from '../launch'
-import { getJson, jsonHeaders, pb, qs, requestJson, run } from './http'
+import { DEMO_ID } from '../consts.gen'
+import { ApiError, getJson, jsonHeaders, pb, qs, requestJson, run } from './http'
 
 export const fetchProjects = () => getJson<Project[]>('/api/projects')
 
@@ -241,8 +255,68 @@ export const reopenRunGrading = (id: string, workspace = '') =>
   })
 export const fetchCandidate = (id: string, workspace = '') =>
   getJson<PlaybookCandidate>(`${pb(id)}/candidate${qs({ workspace })}`)
-export const promoteCandidate = (id: string, workspace = '') =>
-  requestJson<QualityRecord>(`${pb(id)}/candidate/promote${qs({ workspace })}`, { method: 'POST' })
+// A person's promotion names exactly the candidate the summary showed and,
+// when the summary had attention items, the summary id the person
+// acknowledged; a refusal comes back as a `PromoteRefusal` body (409 stale
+// or needs_acknowledgement, 422 blocked or expected_required), read with
+// `promoteRefusalOf`.
+export const promoteCandidate = (id: string, body: PromoteBody, workspace = '') =>
+  requestJson<QualityRecord>(`${pb(id)}/candidate/promote${qs({ workspace })}`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(body),
+  })
+// `GET /api/playbooks/{id}/candidate/summary` (`PlaybookCandidateSummary` in
+// `routes/quality.rs`).
+export const fetchCandidateSummary = (id: string, workspace = '') =>
+  getJson<PlaybookCandidateSummary>(`${pb(id)}/candidate/summary${qs({ workspace })}`)
+const REFUSAL_CODES = new Set<string>(['expected_required', 'stale', 'blocked', 'needs_acknowledgement'])
+/** The promotion refusal a failed promote carried, or null for any other failure. */
+export function promoteRefusalOf(e: unknown): PromoteRefusal | null {
+  if (!(e instanceof ApiError) || (e.status !== 409 && e.status !== 422)) return null
+  const code = e.body?.code
+  return typeof code === 'string' && REFUSAL_CODES.has(code) ? (e.body as unknown as PromoteRefusal) : null
+}
+
+// Scenario runs of a playbook (`docs/EVALS.md` "Levels"): the scenarios with
+// their newest result per level, one run at quick or smoke (the server waits
+// for it), and a stored run's report with its graph.
+export const fetchScenarios = (id: string, workspace = '') =>
+  getJson<PlaybookScenarios>(`${pb(id)}/scenarios${qs({ workspace })}`)
+export const runScenario = (id: string, req: ScenarioRunRequest, workspace = '') =>
+  requestJson<ScenarioRunView>(`${pb(id)}/scenario-runs${qs({ workspace })}`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(req),
+  })
+export const fetchScenarioRun = (id: string, runId: string, workspace = '') =>
+  getJson<ScenarioRunView>(`${pb(id)}/scenario-runs/${encodeURIComponent(runId)}${qs({ workspace })}`)
+
+// The judge sandbox: one judge node evaluated outside any run, "fill from a
+// run" with a judge execution's inputs and the run's other values, and
+// saving that execution as a labelled example.
+const judge = (node: string) => `/judge/${encodeURIComponent(node)}`
+export const evaluateJudge = (id: string, node: string, req: SandboxRequest, workspace = '') =>
+  requestJson<SandboxEvaluation>(`${pb(id)}${judge(node)}/evaluate${qs({ workspace })}`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(req),
+  })
+export const fetchJudgeRunValues = (runId: string, node: string, execution?: number, workspace = '') =>
+  getJson<RunValues>(
+    `${run(runId)}${judge(node)}/values${qs({ workspace, execution: execution === undefined ? undefined : String(execution) })}`,
+  )
+export const saveJudgeExample = (runId: string, node: string, req: ExampleSaveRequest, workspace = '') =>
+  requestJson<JudgeExample>(`${run(runId)}${judge(node)}/examples${qs({ workspace })}`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(req),
+  })
+
+// The keyless demo (`routes/demo.rs`).
+export const DEMO_PLAYBOOK = DEMO_ID
+export const fetchDemo = () => getJson<DemoStatus>('/api/demo')
+export const installDemo = () => requestJson<DemoProject>('/api/demo', { method: 'POST' })
 export const keepCurrentCandidate = (id: string, reason: string, workspace = '') =>
   requestJson<QualityRecord>(`${pb(id)}/candidate/keep-current${qs({ workspace })}`, {
     method: 'POST',

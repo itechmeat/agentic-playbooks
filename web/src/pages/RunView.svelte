@@ -56,6 +56,8 @@
   import PublishPanel from '../lib/PublishPanel.svelte'
   import HostTaskPanel from '../lib/HostTaskPanel.svelte'
   import DecisionsPanel from '../lib/DecisionsPanel.svelte'
+  import OutcomeSection from '$lib/components/OutcomeSection.svelte'
+  import { DEMO_PLAYBOOK } from '../lib/api'
   import RunOutcomePanel from '../lib/RunOutcomePanel.svelte'
   import RunVerdictPanel from '../lib/RunVerdictPanel.svelte'
   import RunPauseControls from '../lib/RunPauseControls.svelte'
@@ -783,6 +785,15 @@
         </section>
       {/if}
 
+      {#if detail.playbook === DEMO_PLAYBOOK}
+        <OutcomeSection title="the demo" testid="demo-hint">
+          <ol class="demo-hint">
+            <li><span class="mono">write_report</span> is a script: it writes <span class="mono">report.md</span> in the demo project with this run's id.</li>
+            <li><span class="mono">review</span> is a gate: the run waits until you approve or reject the report.</li>
+            <li>Approve and the run finishes at <span class="mono">done</span> with the report as its output; reject and it ends at <span class="mono">rejected</span>.</li>
+          </ol>
+        </OutcomeSection>
+      {/if}
       <NextActionsPanel
         actions={detail.next_actions}
         runId={detail.run_id}
@@ -796,7 +807,7 @@
       {#key `${workspace}/${id}`}
         <ListProgressPanel lists={detail.lists} />
       {/key}
-      <DecisionsPanel decisions={detail.decisions} events={detail.events} />
+      <DecisionsPanel decisions={detail.decisions} events={detail.events} runId={id} {workspace} />
       <AttemptModelsPanel models={detail.attempt_models} {current} />
       <AttemptIsolationPanel rows={detail.isolation} readOnly={detail.read_only} />
       <RunBudgetPanel budget={detail.budget ?? null} estimate={detail.estimate ?? null} />
@@ -1059,5 +1070,15 @@
   }
   .unattended-tag {
     color: var(--c-violet, var(--muted-foreground));
+  }
+  .demo-hint {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin: 0;
+    padding-left: 1.1rem;
+  }
+  .mono {
+    font-family: var(--font-mono, ui-monospace, monospace);
   }
 </style>

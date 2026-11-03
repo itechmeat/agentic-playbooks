@@ -23,6 +23,7 @@ pub const SCENARIO_SCHEMA: u32 = 1;
 
 /// How far a scenario run reaches outside apb. `deep` is `apb eval` itself
 /// and has no scenario run.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScenarioLevel {

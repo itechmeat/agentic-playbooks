@@ -33,15 +33,14 @@ const quality: CandidateQualityView = {
   recorded: { verdict: 'wait', reason: 'too few graded trials', decided_at: 1, decided_by: 'apb' },
 }
 
-function render(candidate: CandidateQualityView, extra: { frozen?: boolean; busy?: boolean } = {}) {
-  const onPromote = vi.fn()
+function render(candidate: CandidateQualityView, extra: { busy?: boolean } = {}) {
   const onKeepCurrent = vi.fn()
   app = mount(CandidateQualityCard, {
     target: document.body,
-    props: { candidate, onPromote, onKeepCurrent, ...extra },
+    props: { candidate, onKeepCurrent, ...extra },
   })
   flushSync()
-  return { onPromote, onKeepCurrent }
+  return { onKeepCurrent }
 }
 
 const q = (id: string) => document.querySelector(`[data-testid="${id}"]`) as HTMLElement
@@ -85,10 +84,9 @@ describe('CandidateQualityCard', () => {
     expect(row.textContent).not.toContain('0/0/0')
   })
 
-  it('promotes, or keeps current with the reason typed', () => {
-    const { onPromote, onKeepCurrent } = render(quality)
-    ;(q('candidate-promote') as HTMLButtonElement).click()
-    expect(onPromote).toHaveBeenCalledOnce()
+  it('keeps current with the reason typed, and leaves promotion to the summary card', () => {
+    const { onKeepCurrent } = render(quality)
+    expect(q('candidate-promote')).toBeNull()
     const input = q('candidate-reason') as HTMLInputElement
     input.value = 'the old report reads better'
     input.dispatchEvent(new Event('input'))
@@ -97,11 +95,10 @@ describe('CandidateQualityCard', () => {
     expect(onKeepCurrent).toHaveBeenCalledWith('the old report reads better')
   })
 
-  it('says a success policy decides, and a frozen playbook cannot promote', () => {
-    render({ version: '1.0.1', current: '1.0.0', trials: 0 }, { frozen: true })
+  it('says a success policy decides', () => {
+    render({ version: '1.0.1', current: '1.0.0', trials: 0 })
     expect(q('candidate-gate').textContent).toContain('not by quality')
     expect(q('candidate-table')).toBeNull()
-    expect((q('candidate-promote') as HTMLButtonElement).disabled).toBe(true)
     expect((q('candidate-keep-current') as HTMLButtonElement).disabled).toBe(false)
   })
 })

@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest'
-import { render } from 'svelte/server'
+// @vitest-environment happy-dom
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { flushSync, mount, tick, unmount } from 'svelte'
+import { SvelteMap } from 'svelte/reactivity'
 import DecisionsPanel from './DecisionsPanel.svelte'
 import { runEventJournal } from './journal'
-import { decisionRows, decisionsSummary, decisionUseLines } from './rundecisions'
+import { decisionRows, decisionsSummary, decisionUseLines, exampleDraftOf } from './rundecisions'
 import type { RunDecisions } from './api.gen'
 import type { WfEvent } from './types'
 
@@ -103,6 +105,19 @@ describe('the event journal', () => {
   })
 })
 
+// The panel mounted once, as markup.
+function render(
+  component: typeof DecisionsPanel,
+  opts: { props: { decisions?: RunDecisions | null; events: WfEvent[] } },
+) {
+  const app = mount(component, { target: document.body, props: opts.props })
+  flushSync()
+  const body = document.body.innerHTML
+  unmount(app)
+  document.body.innerHTML = ''
+  return { body }
+}
+
 describe('DecisionsPanel', () => {
   it('renders nothing for a run without decisions', () => {
     const { body } = render(DecisionsPanel, { props: { decisions: undefined, events: events.slice(0, 1) } })
@@ -120,5 +135,156 @@ describe('DecisionsPanel', () => {
     expect(body).toContain('2 requests · 1 error · 0 applied · 2 would change')
     expect(body.match(/data-testid="run-decision-row"/g)).toHaveLength(4)
     expect(body).toContain('main/jev-1.13.0 · 190 ms')
+  })
+})
+
+describe('exampleDraftOf', () => {
+  it('drafts an example of a judge execution with its questions, and nothing for other decisions', () => {
+    const journal: WfEvent[] = [
+      // The first execution of gate takes two attempts; the decision is in the second execution.
+      { seq: 0, ts: 1, type: 'node_started', node: 'gate', attempt: 1 },
+      { seq: 1, ts: 2, type: 'node_started', node: 'gate', attempt: 2 },
+      { seq: 2, ts: 3, type: 'node_finished', node: 'gate', status: 'success' },
+      { seq: 3, ts: 4, type: 'node_started', node: 'gate', attempt: 1 },
+      { seq: 4, ts: 5, type: 'decision_made', use_site: 'judge_node', node: 'gate', answers: { verdict: { value: 'pass', p: 0.97 }, risky: { p: 0.2 } } },
+      { seq: 5, ts: 6, type: 'node_finished', node: 'gate', status: 'success' },
+    ]
+    expect(exampleDraftOf(journal, 4)).toEqual({
+      node: 'gate',
+      execution: 2,
+      questions: [
+        { name: 'verdict', yesNo: false, observed: 'pass' },
+        { name: 'risky', yesNo: true, observed: '' },
+      ],
+    })
+    expect(exampleDraftOf(events, 1)).toBeNull()
+    expect(exampleDraftOf(events, 3)).toBeNull()
+  })
+
+  it('leaves a score unfilled: the decision holds its expected level, an example names a level or band', () => {
+    const journal: WfEvent[] = [
+      { seq: 0, ts: 1, type: 'node_started', node: 'gate', attempt: 1 },
+      { seq: 1, ts: 2, type: 'decision_made', use_site: 'judge_node', node: 'gate', answers: { effort: { value: 1.4, confidence: 0.7 } } },
+    ]
+    expect(exampleDraftOf(journal, 1)?.questions).toEqual([{ name: 'effort', yesNo: false, observed: '' }])
+  })
+})
+
+describe('DecisionsPanel saving an example', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    document.body.innerHTML = ''
+  })
+
+  it('saves a judge decision with the expected answers typed, a yes or no as a boolean, and shows what was stored', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+    vi.stubGlobal('fetch', fetchMock)
+    const journal: WfEvent[] = [
+      { seq: 0, ts: 1, type: 'node_started', node: 'gate', attempt: 1 },
+      { seq: 1, ts: 2, type: 'decision_made', use_site: 'judge_node', node: 'gate', answers: { verdict: { value: 'pass', p: 0.97 }, risky: { p: 0.2 } } },
+    ]
+    const app = mount(DecisionsPanel, {
+      target: document.body,
+      props: { decisions: totals, events: journal, runId: 'r1', workspace: 'w1' },
+    })
+    flushSync()
+    ;(document.querySelector('[data-testid="decision-save-example"]') as HTMLButtonElement).click()
+    flushSync()
+    const verdict = document.querySelector('[data-testid="example-expected-verdict"]') as HTMLInputElement
+    expect(verdict.value).toBe('pass')
+    verdict.value = 'fail'
+    verdict.dispatchEvent(new Event('input', { bubbles: true }))
+    const risky = document.querySelector('[data-testid="example-expected-risky"]') as HTMLSelectElement
+    risky.value = 'false'
+    risky.dispatchEvent(new Event('change', { bubbles: true }))
+    flushSync()
+    const stored = { id: 'ex-1', node: 'gate', inputs: { instruction: 'Fix it', params: {}, outputs: {}, reviews: {} } }
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(stored), { status: 200 }))
+    ;(document.querySelector('[data-testid="example-save"]') as HTMLButtonElement).click()
+    for (let i = 0; i < 4; i++) {
+      await Promise.resolve()
+      await tick()
+    }
+    expect(fetchMock.mock.lastCall?.[0]).toBe('/api/runs/r1/judge/gate/examples?workspace=w1')
+    expect(JSON.parse(String(fetchMock.mock.lastCall?.[1]?.body))).toEqual({
+      execution: 1,
+      expected: { verdict: 'fail', risky: false },
+    })
+    expect(document.querySelector('[data-testid="example-saved"]')!.textContent).toContain('instruction: Fix it')
+    unmount(app)
+  })
+
+  it('drops an open draft when the page moves to another run', () => {
+    const journal: WfEvent[] = [
+      { seq: 0, ts: 1, type: 'node_started', node: 'gate', attempt: 1 },
+      { seq: 1, ts: 2, type: 'decision_made', use_site: 'judge_node', node: 'gate', answers: { verdict: { value: 'pass' } } },
+    ]
+    // The run page keeps this panel across runs and hands it the new id.
+    const run = new SvelteMap([['id', 'r1']])
+    const app = mount(DecisionsPanel, {
+      target: document.body,
+      props: {
+        decisions: totals,
+        events: journal,
+        get runId() {
+          return run.get('id')
+        },
+        workspace: 'w1',
+      },
+    })
+    flushSync()
+    ;(document.querySelector('[data-testid="decision-save-example"]') as HTMLButtonElement).click()
+    flushSync()
+    expect(document.querySelector('[data-testid="example-draft"]')).not.toBeNull()
+    run.set('id', 'r2')
+    flushSync()
+    expect(document.querySelector('[data-testid="example-draft"]')).toBeNull()
+    unmount(app)
+  })
+  it('keeps a late answer of a save on another run off this run', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+    vi.stubGlobal('fetch', fetchMock)
+    let answer: (r: Response) => void = () => {}
+    fetchMock.mockReturnValueOnce(new Promise<Response>((resolve) => (answer = resolve)))
+    const journal: WfEvent[] = [
+      { seq: 0, ts: 1, type: 'node_started', node: 'gate', attempt: 1 },
+      { seq: 1, ts: 2, type: 'decision_made', use_site: 'judge_node', node: 'gate', answers: { verdict: { value: 'pass' } } },
+    ]
+    const run = new SvelteMap([['id', 'r1']])
+    const app = mount(DecisionsPanel, {
+      target: document.body,
+      props: {
+        decisions: totals,
+        events: journal,
+        get runId() {
+          return run.get('id')
+        },
+        workspace: 'w1',
+      },
+    })
+    const settle = async () => {
+      for (let i = 0; i < 4; i++) {
+        await Promise.resolve()
+        await tick()
+      }
+    }
+    flushSync()
+    ;(document.querySelector('[data-testid="decision-save-example"]') as HTMLButtonElement).click()
+    flushSync()
+    ;(document.querySelector('[data-testid="example-save"]') as HTMLButtonElement).click()
+    await settle()
+    // The page moves to r2 and opens a draft there before r1's save answers.
+    run.set('id', 'r2')
+    flushSync()
+    ;(document.querySelector('[data-testid="decision-save-example"]') as HTMLButtonElement).click()
+    flushSync()
+    expect(document.querySelector('[data-testid="example-draft"]')).not.toBeNull()
+    const stored = { id: 'ex-1', node: 'gate', inputs: { instruction: 'Fix it', params: {}, outputs: {}, reviews: {} } }
+    answer(new Response(JSON.stringify(stored), { status: 200 }))
+    await settle()
+    expect(document.querySelector('[data-testid="example-saved"]')).toBeNull()
+    expect(document.querySelector('[data-testid="example-draft"]')).not.toBeNull()
+    expect((document.querySelector('[data-testid="example-save"]') as HTMLButtonElement).disabled).toBe(false)
+    unmount(app)
   })
 })

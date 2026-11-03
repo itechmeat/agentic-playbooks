@@ -2862,9 +2862,11 @@ pub struct IsolationViewEntry {
 /// A compact answer in [`EventPayload::DecisionMade`]: `value` is the chosen
 /// option (choice) or the expected level (score), `p` its probability (the
 /// "yes" probability for a noul), `invalid` the reason an item was refused.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(optional_fields))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct DecisionAnswer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
     pub value: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub p: Option<f64>,

@@ -267,7 +267,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "A project playbook's candidate version (a forward patch on trial) and how it compares with current by quality: the trials, the gate and, per criterion, the graded runs of each side and the result, with the verdict (promote, keep_current, wait, needs_person) and the decision recorded last. candidate: null when there is none. Read-only: a person promotes or keeps current with apb candidate or in the dashboard.",
+        description = "A project playbook's candidate version (a forward patch on trial) and how it compares with current by quality: the trials, the gate and, per criterion, the graded runs of each side and the result, with the verdict (promote, keep_current, wait, needs_person) and the decision recorded last; and summary, what a person reads before promoting: three separate axes (fitness on this machine, the definition with validator issues, the diff from current and the scenario results fresh for the candidate's digest, quality), the blocking items, the attention items and the summary_id an acknowledgement names. candidate and summary are null when there is none. Read-only: a person promotes or keeps current with apb candidate or in the dashboard.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn playbook_candidate(
@@ -279,8 +279,10 @@ impl WfMcp {
             Err(e) => return to_call_tool_result(Ok(e)),
         };
         off_runtime(move || {
-            tools::candidate::candidate_view(&root, &id)
-                .and_then(|view| to_value(json!({ "id": id, "candidate": view })))
+            tools::candidate::candidate_summary(&root, &id).and_then(|summary| {
+                let view = summary.as_ref().map(|s| &s.quality.detail.view);
+                to_value(json!({ "id": id, "candidate": view, "summary": summary }))
+            })
         })
         .await
     }

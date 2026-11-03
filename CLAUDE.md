@@ -199,7 +199,14 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   below the playbook, the digest and `staleness`, `validate` V146-V151 and
   `validate_all` behind `apb validate`), the judge node digest
   (`judge::node_digest`, `j1:` over state, questions, thresholds and
-  `on_unavailable`) and `validate::asks_decision_models`, the
+  `on_unavailable`), `judge::expected_names` and `labelled_value` (what a
+  label names in a judge output) and `validate::asks_decision_models`,
+  labelled judge examples on disk (`judge_example.rs`: `evals/judge/<node>/`,
+  safe example ids, `next_id`, reads of plain files only, no link followed),
+  the keyless demo (`demo.rs` and `assets/demo/`: `demo-report` installed
+  into `<config dir>/demo` through `versioning::create_with_scripts`, an
+  ordinary person-channel version neither imported nor approved, and
+  removed again; nothing in the gate knows it), the
   decision-model config (`decisions.rs`: the
   machine's `decisions.yaml`, project narrowing, the doctor line), the
   doctor's free per-provider request (`decision_probe.rs`), the
@@ -333,7 +340,12 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   codex's `exec --json` stdout parsed with tool facts, the other agents'
   streams as plain text; `candidate/`: the gate's choice and
   the trial view in `mod`, `settle` by successes, `quality` by quality with
-  `resettle` after a stored grade and a person's decision; `run_history.rs`
+  `resettle` after a stored grade and `decide_checked`, a person's decision
+  that cannot promote without its check, `summary` the candidate summary
+  (fitness, definition and quality kept apart, blocking and attention
+  items, `summary_id`, `result_ref`) and `decide_by_person`, the one public
+  promotion entry that re-checks `expected` and the acknowledgement under
+  the candidate lock (`PromoteError`, `PromoteRefusal`); `run_history.rs`
   the earlier runs of a playbook the estimate and the comparison share,
   with `counts_as_history` the one filter: only production runs count),
   the redactor every text that
@@ -387,7 +399,13 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the node applies, `node_digest` over `apb_core::judge::node_digest`;
   `inputs` the inputs from a run's state, the one template render every
   prompt and judge state goes through, and `unfilled`, the references that
-  rendered empty), the
+  rendered empty; `sandbox` one judge node evaluated outside any run, given
+  answers at this machine's mode (`Answers::GivenAt`) or a live ask through
+  `DecisionRunner::outside_run` under the fixed cap of 100 requests per
+  project and UTC day counted on `use: judge_sandbox` lines (`SandboxLog`),
+  the profile emulation never started; `example` "fill from a run"
+  (`run_values`), `save_from_run`, `list` and `check` of labelled
+  examples), the
   command runner of scripts, checks and project commands (`proc.rs`,
   `run_capture_in` the program-start guard site), the diagnostics sidecar (`diagnostics/`: `writer` the one
   writer that never fails a run, scrubs before it clips and drops a record
@@ -459,14 +477,17 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `param_needs_value` refusal every launch surface checks after the gate,
   with the start warning about a declared secret value too short to scrub),
   the "will it fit here?" report (`fit/`: compatibility, `setup`, `trust` and
-  consent kept apart, `report` the shapes), and the decision runner
+  consent kept apart, `report` the shapes, `problems` its blocking items and
+  `unavailable` the report that could not be made), and the decision runner
   (`decision/`: the one entry point for decision-model uses, redaction,
   budget, replay, the `decision_made` event, the enforce gate, and one
   module per use: completion check, retry advice, supervisor wake triage,
   review recommendation, tier routing, `bounded` the shared ask over whole
   views the model grader and the recheck use, the judge node and edge answers
   (`scheduler/judge` runs them), `save_nudge` the save check's one yes or
-  no question whether a request is recurring, and `report/`: the labellers, statistics
+  no question whether a request is recurring, `standalone` the decider and
+  `DecisionLog`, the `decisions.jsonl` reader, lock and counter every
+  daily-capped use shares, and `report/`: the labellers, statistics
   and replay behind `apb decisions`; see `docs/DECISIONS.md`).
 - `apb-mcp` - rmcp stdio MCP server (`server/`, with `read_only` the
   allowlist of `apb mcp --read-only` and the tables every tool is classified
@@ -482,7 +503,15 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   block, shared with the HTTP API and the CLI, `grade` for grading a run,
   its grades and the `grades` block of `run_status`, where every stored
   grade re-decides the candidate (`after_stored`), `candidate` for the
-  candidate comparison and a person's decision, `problems` for a
+  candidate comparison, its summary and a person's decision (a refusal
+  typed by its code), `judge` for the judge sandbox and labelled examples
+  (`JudgeCaller`: given answers anywhere, a live ask, a live check and a
+  save never from a run step or a dashboard without keys), `scenario` for
+  scenario runs on every surface (`scenarios`, `run_scenario`,
+  `scenario_run_view`, and `play`, the bounded `apb __scenario-run` child
+  `apb eval --level` uses too; a smoke run needs a cap and an approved
+  version and is refused from a run step and a dashboard without keys),
+  `problems` for a
   playbook's known problems, a person's decision, a recheck and a scan,
   and `discover` for history discovery, its stored results, a save
   through `capture::capture_draft` and a decline, all shared with the HTTP
@@ -536,7 +565,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   is `apb notify` and the notify flags of `apb run` (forwarded to the
   supervised drive like the budget flags), `report.rs` is `apb runs <id>
   --html`, `grade.rs` is `apb grade` and the grade lines of `apb runs
-  <id>`, `candidate.rs` is `apb candidate`, `problems.rs` is `apb
+  <id>`, `candidate.rs` is `apb candidate` (the summary and the exact
+  `--promote --expect <v>@<digest> [--ack <id>]` line), `judge.rs` is `apb
+  judge eval|examples|save-example|values`, `demo.rs` is `apb demo`
+  (`--run` starts the real `apb run demo-report --detach`), `problems.rs` is `apb
   problems`, `discover.rs` is `apb discover`, `actions.rs` prints next
   actions and start actions (`apb runs <id>`, `apb wait`, `--follow-auto`),
   `launch.rs` the `--confirm-launch` flags of `apb run`, `apb resume` and
@@ -545,14 +577,19 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `eval.rs` is `apb eval` and holds `EvalLevel` (`deep`, `quick`, `smoke`);
   `scenario.rs` is `apb eval --level quick|smoke` (the version's validator
   errors refused first, the smoke checks, one bounded `apb __scenario-run`
-  child per scenario) and `apb eval --scenarios`.
+  child per scenario through `apb_mcp::tools::scenario::play`) and `apb
+  eval --scenarios`.
 - `apb-server` - axum web API: a thin router in `lib.rs`, one module per
   resource in `routes/` (`estimate` for the estimate route and the run and
-  resume budgets, `fit` for the fit report, `graph` for the editor's
+  resume budgets, `fit` for the fit report (`?version=` for one version),
+  `graph` for the editor's
   draft validation and the overlay of a run on a version, `memory` for remembered run
   input, `notify` for the machine's notify target and a live run's change,
   `current` for moving a playbook's `current` and its history,
-  `quality` for a run's grades and a playbook's candidate, `problems` for
+  `quality` for a run's grades, a playbook's candidate, its summary and a
+  promotion that names what it saw, `judge` for the judge sandbox and
+  labelled examples, `scenario` for scenario runs, `demo` for the keyless
+  demo, `problems` for
   a playbook's known problems, `discover` for history discovery, loopback
   only; `state.rs` also holds the tool-layer
   answer and refusal mapping they share;
@@ -578,7 +615,11 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   and re-decides the candidate through
   `apb_mcp::tools::grade::after_stored`, which every grading surface calls.
   Grading and deciding a candidate are refused from a run step
-  (`StepCaller`). The model grader (`model/1`) grades the playbook's own
+  (`StepCaller`). A person's promotion names the version and digest the
+  person saw and, while the candidate summary holds attention items, its
+  `summary_id`; both are checked again under the candidate lock
+  (`candidate::summary::decide_by_person`), and a validator error or an
+  edited candidate blocks it. Automatic promotion never reads the summary. The model grader (`model/1`) grades the playbook's own
   criteria only on request, through the standalone decider's daily-capped
   `grade` use; `quality.criteria_grader` says whose grades a comparison
   expects.

@@ -437,6 +437,52 @@ pub fn emulation_profile(
     }
 }
 
+/// What an author may expect as the answer to question `q` (thresholds
+/// `t`), as a labelled example names it: `None` for a `noul` (yes or no,
+/// a boolean); else the names a `choice` takes (its options) or a `score`
+/// (its band names when it has bands, else its levels).
+pub fn expected_names(q: &JudgeQuestion, t: Option<&JudgeThreshold>) -> Option<Vec<String>> {
+    match q {
+        JudgeQuestion::Noul { .. } => None,
+        JudgeQuestion::Choice { criteria, .. } => {
+            Some(criteria.keys().map(str::to_string).collect())
+        }
+        JudgeQuestion::Score { levels, .. } => Some(match t.and_then(|t| t.bands.as_ref()) {
+            Some(bands) => bands.keys().map(str::to_string).collect(),
+            None => levels.clone(),
+        }),
+    }
+}
+
+/// Question `id`'s answer in a judge node's `output`, as an example labels
+/// it ([`expected_names`]): the boolean of a `noul`, the option of a
+/// `choice` (after its threshold), the band of a `score` with bands, else
+/// the level its `<id>_score` rounds to. `None` when the output carries
+/// none.
+pub fn labelled_value(
+    q: &JudgeQuestion,
+    t: Option<&JudgeThreshold>,
+    id: &str,
+    output: &serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    match q {
+        JudgeQuestion::Noul { .. } => output.get(id).filter(|v| v.is_boolean()).cloned(),
+        JudgeQuestion::Choice { .. } => output.get(id).filter(|v| v.is_string()).cloned(),
+        JudgeQuestion::Score { levels, .. } => {
+            if t.is_some_and(|t| t.bands.is_some()) {
+                return output.get(id).filter(|v| v.is_string()).cloned();
+            }
+            let score = output.get(&format!("{id}_score"))?.as_f64()?;
+            let index = score.round();
+            (index >= 0.0)
+                .then(|| levels.get(index as usize))
+                .flatten()
+                .map(|l| Value::String(l.clone()))
+        }
+    }
+}
+
 /// The digest of a judge node's definition: `j1:` and the `sha256:` of
 /// the canonical JSON of everything that decides its answer (the state
 /// templates, the questions with their type, instructions, criteria and
@@ -617,5 +663,50 @@ mod tests {
         ] {
             assert_ne!(digest_of(&JUDGE_NODE.replace(from, to)), base, "{from}");
         }
+    }
+
+    /// An example labels each question by what the node outputs for it:
+    /// the yes or no of a noul, the thresholded option of a choice, the
+    /// band of a score with bands, else the level its score rounds to; the
+    /// names an author may expect follow the same rule.
+    #[test]
+    fn a_label_names_what_the_output_carries_for_its_question() {
+        let h: Holder = yaml_serde::from_str(
+            "questions:\n  risky: { type: noul, instructions: r }\n  verdict: { type: choice, instructions: v, criteria: { clean: a, needs_fix: b } }\n  size: { type: score, instructions: s, levels: [small, medium, large] }\n",
+        )
+        .unwrap();
+        let banded: JudgeThreshold =
+            yaml_serde::from_str("bands: { low: [0, 1.5], high: [1.5, 2] }").unwrap();
+        let q = |id: &str| h.questions.get(id).unwrap();
+        let output: serde_json::Map<String, serde_json::Value> = serde_json::from_value(
+            serde_json::json!({ "risky": false, "verdict": "needs_fix", "size": "high", "size_score": 1.6 }),
+        )
+        .unwrap();
+        let label = |id: &str, t: Option<&JudgeThreshold>| labelled_value(q(id), t, id, &output);
+        assert_eq!(label("risky", None), Some(serde_json::json!(false)));
+        assert_eq!(label("verdict", None), Some(serde_json::json!("needs_fix")));
+        assert_eq!(
+            label("size", Some(&banded)),
+            Some(serde_json::json!("high"))
+        );
+        // Without bands the score's nearest level: 1.6 is `large`.
+        assert_eq!(label("size", None), Some(serde_json::json!("large")));
+        assert_eq!(
+            labelled_value(q("verdict"), None, "verdict", &Default::default()),
+            None
+        );
+        assert_eq!(expected_names(q("risky"), None), None);
+        assert_eq!(
+            expected_names(q("verdict"), None).unwrap(),
+            ["clean", "needs_fix"]
+        );
+        assert_eq!(
+            expected_names(q("size"), None).unwrap(),
+            ["small", "medium", "large"]
+        );
+        assert_eq!(
+            expected_names(q("size"), Some(&banded)).unwrap(),
+            ["low", "high"]
+        );
     }
 }

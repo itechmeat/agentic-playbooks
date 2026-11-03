@@ -38,6 +38,7 @@ macro_rules! boundary_kinds {
     ($($(#[$doc:meta])* $kind:ident => $name:literal,)*) => {
         /// Every point where a run reaches outside the engine. Closed: a site
         /// added to the drive gets a variant here, and every variant has a site.
+        #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
         pub enum BoundaryKind {
@@ -117,6 +118,7 @@ boundary_kinds! {
 }
 
 /// Which crossing of a boundary is meant: the answer book's key.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(optional_fields))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct BoundaryKey {
     /// The node, absent for a run-level boundary (baseline, goal,

@@ -92,6 +92,14 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/playbooks/{id}/fit", get(routes::fit::get_fit_handler))
         .route(
+            "/api/playbooks/{id}/candidate/summary",
+            get(routes::quality::get_candidate_summary_handler),
+        )
+        .route(
+            "/api/demo",
+            get(routes::demo::get_demo_handler).post(routes::demo::post_demo_handler),
+        )
+        .route(
             "/api/playbooks/{id}/candidate",
             get(routes::quality::get_candidate_handler),
         )
@@ -194,6 +202,9 @@ pub fn build_router(state: AppState) -> Router {
         )
         // History discovery, behind its own local-only route layer.
         .merge(routes::discover::router())
+        // The judge sandbox and labelled examples.
+        .merge(routes::judge::router())
+        .merge(routes::scenario::router())
         .route("/api/runs", get(routes::runs::list_runs_handler))
         .route("/api/runs/{id}", get(routes::runs::get_run_handler))
         .route(

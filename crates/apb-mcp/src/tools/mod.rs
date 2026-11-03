@@ -10,6 +10,7 @@ pub mod decision;
 pub mod discover;
 pub mod grade;
 pub mod intent;
+pub mod judge;
 pub mod memory;
 pub mod meta;
 pub mod notify;
@@ -17,6 +18,7 @@ pub mod playbook;
 pub mod problems;
 pub mod retro;
 pub mod run;
+pub mod scenario;
 pub mod supervisor;
 pub mod trial;
 

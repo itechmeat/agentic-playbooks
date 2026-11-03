@@ -38,7 +38,19 @@ fn change_message(event: &Event) -> &'static str {
 /// cause those: broadcasting them made every open list or playbook view
 /// reload, read again and reload again, twice a second, forever. A write that
 /// closes (`Access(Close(Write))`) still counts.
+///
+/// A playbook's pointer lock is no change either: reading the history of
+/// `current` takes it, so its file comes and goes on every such read, and
+/// counting it made an open playbook page reload itself forever.
 fn is_change(event: &Event) -> bool {
+    let only_the_pointer_lock = !event.paths.is_empty()
+        && event.paths.iter().all(|p| {
+            p.file_name()
+                .is_some_and(|n| n == apb_core::candidate_pointer::CANDIDATE_LOCK_FILE)
+        });
+    if only_the_pointer_lock {
+        return false;
+    }
     match event.kind {
         EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
         EventKind::Access(_) => false,
@@ -110,8 +122,8 @@ fn config_message(event: &Event, cfg: &Path) -> Option<&'static str> {
 }
 
 /// The message for an event seen by the global watcher: a config message
-/// for a path under the global config dir `cfg`, a project change message
-/// otherwise. The watch backend may report the resolved path rather than the
+/// for a path under the global config dir `cfg` (unless it lies in a
+/// project kept there), a project change message otherwise. The watch backend may report the resolved path rather than the
 /// spelling that was watched (macOS FSEvents reports `/private/var/...` for a
 /// watch on `/var/...`, and a config dir reached through a symlink resolves
 /// the same way), so both spellings of `cfg` count as the config dir.
@@ -122,11 +134,25 @@ fn global_message(event: &Event, cfg: Option<&Path>) -> Option<&'static str> {
     let canonical = std::fs::canonicalize(cfg).ok();
     let roots = std::iter::once(cfg).chain(canonical.as_deref());
     for root in roots {
+        let under = |p: &&PathBuf| p.starts_with(root);
+        if event.paths.iter().filter(under).any(|p| in_project(p)) {
+            // A project kept inside the config dir (the keyless demo).
+            return Some(change_message(event));
+        }
         if event.paths.iter().any(|p| p.starts_with(root)) {
             return config_message(event, root);
         }
     }
     Some(change_message(event))
+}
+
+/// Whether `p` lies in a project's watched store: a `.apb` component
+/// followed by one of [`WATCHED_SUBDIRS`].
+fn in_project(p: &Path) -> bool {
+    let comps: Vec<_> = p.components().map(|c| c.as_os_str()).collect();
+    comps
+        .windows(2)
+        .any(|w| w[0] == ".apb" && WATCHED_SUBDIRS.iter().any(|d| w[1] == *d))
 }
 
 /// The running global watcher. Dropping it stops the rescan thread (within
@@ -245,5 +271,53 @@ mod tests {
             global_message(&as_watched, Some(&cfg)),
             Some(CONFIG_CHANGED)
         );
+    }
+
+    /// A project inside the config dir (the keyless demo lives in
+    /// `<config dir>/demo`) is a project like any other: its run and
+    /// playbook changes stream to the dashboard.
+    #[test]
+    fn a_project_inside_the_config_dir_streams_its_changes() {
+        let cfg = tempfile::tempdir().unwrap();
+        let cfg = cfg.path();
+        let run = event(cfg.join("demo/.apb/runs/r1/events.jsonl"));
+        assert_eq!(
+            global_message(&run, Some(cfg)),
+            Some(r#"{"type":"runs_changed"}"#)
+        );
+        let playbook = event(cfg.join("demo/.apb/playbooks/demo-report/current"));
+        assert_eq!(
+            global_message(&playbook, Some(cfg)),
+            Some(r#"{"type":"playbooks_changed"}"#)
+        );
+        // The store's own files stay as they were.
+        assert_eq!(
+            global_message(&event(cfg.join("demo/x.tmp")), Some(cfg)),
+            None
+        );
+    }
+
+    /// Reading a playbook's `current` history takes its pointer lock, whose
+    /// file comes and goes on every read. Counting that as a change made an
+    /// open playbook page reload, read the history again and reload again,
+    /// forever.
+    #[test]
+    fn the_pointer_lock_coming_and_going_is_no_change() {
+        let lock =
+            Path::new("/p/.apb/playbooks/x").join(apb_core::candidate_pointer::CANDIDATE_LOCK_FILE);
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Remove(notify::event::RemoveKind::File),
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+        ] {
+            assert!(
+                !is_change(&Event::new(kind).add_path(lock.clone())),
+                "{kind:?}"
+            );
+        }
+        let current = event(PathBuf::from("/p/.apb/playbooks/x/current"));
+        assert!(is_change(&current));
+        let both = current.add_path(lock);
+        assert!(is_change(&both));
     }
 }

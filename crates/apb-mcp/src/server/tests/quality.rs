@@ -153,7 +153,10 @@ async fn a_host_grades_a_run_through_the_tools_and_run_status_shows_the_grades()
             .playbook_candidate(args(json!({ "id": "graded" })))
             .await,
     );
-    assert_eq!(candidate, json!({ "id": "graded", "candidate": null }));
+    assert_eq!(
+        candidate,
+        json!({ "id": "graded", "candidate": null, "summary": null })
+    );
 }
 
 #[tokio::test]

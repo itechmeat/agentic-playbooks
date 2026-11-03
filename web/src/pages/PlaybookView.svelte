@@ -18,7 +18,6 @@
     fetchVersions,
     keepCurrentCandidate,
     makeCurrent,
-    promoteCandidate,
     runPlaybook,
     setFrozen,
     type ProfileSummary,
@@ -77,6 +76,11 @@
   import type { ProblemAction, ProblemDecision } from '../lib/api'
   import FitCard from '../lib/FitCard.svelte'
   import CandidateQualityCard from '../lib/CandidateQualityCard.svelte'
+  import CandidateSummaryCard from '../lib/CandidateSummaryCard.svelte'
+  import ScenarioRunPanel from '../lib/ScenarioRunPanel.svelte'
+  import JudgeSandboxPanel from '../lib/JudgeSandboxPanel.svelte'
+  import { DEMO_PLAYBOOK } from '../lib/api'
+  import FlaskConical from '@lucide/svelte/icons/flask-conical'
   import KnownProblemsCard from '../lib/KnownProblemsCard.svelte'
   import { groupProblems, recheckResult } from '../lib/knownproblems'
   import Bug from '@lucide/svelte/icons/bug'
@@ -378,6 +382,16 @@
   // Known problems: read with the playbook (the toolbar counts the ones a
   // person should look at), shown in a side panel; a person's action on one
   // in flight. A response for another playbook writes nothing.
+  // Scenario runs: the panel reads its own list each time it opens. The
+  // demo's page opens it, so a first look also shows a scenario run.
+  let showScenarios = $state(false)
+  function toggleScenarios() {
+    showScenarios = !showScenarios
+    if (showScenarios) void reveal('[data-testid="scenarios-panel"]')
+  }
+  // The judge sandbox of the selected judge node.
+  let showSandbox = $state(false)
+
   let showProblems = $state(false)
   function toggleProblems() {
     showProblems = !showProblems
@@ -559,6 +573,7 @@
   function select(nodeId: string | null) {
     selectedNodeId = nodeId
     showForm = false
+    showSandbox = false
     nodes = nodes.map((n) => (n.selected === (n.id === nodeId) ? n : { ...n, selected: n.id === nodeId }))
     if (nodeId) void reveal('[data-testid="node-summary"]')
   }
@@ -587,6 +602,10 @@
       showStats = false
     } else if (showFit) {
       showFit = false
+    } else if (showSandbox) {
+      showSandbox = false
+    } else if (showScenarios) {
+      showScenarios = false
     } else if (showProblems) {
       showProblems = false
     }
@@ -634,7 +653,10 @@
     }
     try {
       const c = await fetchCandidate(id, workspace)
-      if (token === loadToken) candidate = c.candidate
+      if (token === loadToken) {
+        candidate = c.candidate
+        candidateRefresh++
+      }
     } catch (e) {
       // `candidate: null` is how "none on trial" reads; a failure says so
       // instead of looking the same.
@@ -667,6 +689,15 @@
     }
     if (!stillHere()) return
     deciding = false
+    toast.success(`Candidate: ${verdictText(rec.verdict)}`)
+    await reload()
+  }
+
+  // The summary card reads its own summary: each reload of the candidate
+  // asks it to read again. A promotion it made reloads the page like any
+  // decision.
+  let candidateRefresh = $state(0)
+  async function candidateDecided(rec: QualityRecord) {
     toast.success(`Candidate: ${verdictText(rec.verdict)}`)
     await reload()
   }
@@ -971,6 +1002,8 @@
     fitToken++
     showFit = false
     showProblems = false
+    showScenarios = id === DEMO_PLAYBOOK
+    showSandbox = false
     problems = null
     problemsError = null
     problemsBusy = new Set()
@@ -1109,6 +1142,17 @@
           >
             <ListChecks data-icon="inline-start" />
             Fit
+          </Button>
+          <Button
+            variant={showScenarios ? 'default' : 'outline'}
+            size="sm"
+            class="h-7"
+            onclick={toggleScenarios}
+            title="Scenario runs: run the playbook against scripted answers, quick (nothing spent) or smoke"
+            data-testid="scenarios-toggle"
+          >
+            <FlaskConical data-icon="inline-start" />
+            Scenarios
           </Button>
           <Button
             variant={showProblems ? 'default' : 'outline'}
@@ -1411,6 +1455,18 @@
         </section>
       {/if}
 
+      {#if showScenarios}
+        <section class="box pv-side" data-testid="scenarios-panel">
+          <span class="box-cap">scenarios</span>
+          <div class="box-close">
+            <Button variant="ghost" size="icon-xs" title="Hide the scenarios" onclick={() => (showScenarios = false)}>
+              <X />
+            </Button>
+          </div>
+          <ScenarioRunPanel {id} {workspace} />
+        </section>
+      {/if}
+
       {#if showProblems}
         <section class="box px-4 pt-3.5 pb-3.5" data-testid="known-problems-panel">
           <span class="box-cap">known problems</span>
@@ -1450,11 +1506,16 @@
           </div>
           {#if candidate}
             <div class="candidate-slot">
+              <CandidateSummaryCard
+                {id}
+                {workspace}
+                {frozen}
+                refresh={candidateRefresh}
+                onDecided={candidateDecided}
+              />
               <CandidateQualityCard
                 {candidate}
-                {frozen}
                 busy={deciding}
-                onPromote={() => decideCandidate(() => promoteCandidate(id, workspace))}
                 onKeepCurrent={(reason) => decideCandidate(() => keepCurrentCandidate(id, reason, workspace))}
               />
             </div>
@@ -1528,6 +1589,26 @@
           onopenform={() => (showForm = true)}
           onclose={() => select(null)}
         />
+        {#if selectedNode.type === 'judge'}
+          <section class="box pv-side" data-testid="judge-sandbox-panel">
+            <span class="box-cap">judge sandbox</span>
+            {#if showSandbox}
+              <div class="box-close">
+                <Button variant="ghost" size="icon-xs" title="Hide the judge sandbox" onclick={() => (showSandbox = false)}>
+                  <X />
+                </Button>
+              </div>
+              <JudgeSandboxPanel {id} {workspace} node={selectedNode} {version} />
+            {:else}
+              <div class="pv-sandbox-open">
+                <span>Try this judge on inputs of your own or of a run, outside any run.</span>
+                <Button variant="outline" size="xs" onclick={() => (showSandbox = true)} data-testid="judge-sandbox-open">
+                  Open the sandbox
+                </Button>
+              </div>
+            {/if}
+          </section>
+        {/if}
       {:else}
         <section class="box px-4 pt-3.5 pb-3.5">
           <span class="box-cap">node</span>
@@ -1709,7 +1790,22 @@
     overflow-wrap: anywhere;
   }
   /* Plain CSS over the app's variables. */
+  .pv-side {
+    padding: 14px 16px;
+  }
+  .pv-sandbox-open {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+  }
   .candidate-slot {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
     margin-bottom: 12px;
   }
   .candidate-chip {

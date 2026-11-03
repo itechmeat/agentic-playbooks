@@ -199,3 +199,123 @@ fn a_supervisor_mcp_serves_only_supervisor_and_read_only_tools() {
         "run_answer by run_id is the operator's path: {answer}"
     );
 }
+
+/// The JSON a `tools/call` answered, from its first content block.
+fn tool_json(line: &str) -> serde_json::Value {
+    let v: serde_json::Value = serde_json::from_str(line).unwrap();
+    let text = v["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no content: {line}"));
+    serde_json::from_str(text).unwrap_or_else(|_| panic!("not JSON: {text}"))
+}
+
+/// What a person checks before a real run, through the shipped binary and
+/// its MCP server: `apb demo` installs the keyless demo; `playbook_scenarios`
+/// lists its scenario, never played; `playbook_scenario_run` plays it at
+/// quick through `apb __scenario-run` (passed, with the run graph, nothing
+/// under `.apb/runs`), and the list shows that result fresh; the judge
+/// sandbox evaluates the "check the task first" example's judge with given
+/// answers and routes each answer, asking no one.
+#[test]
+fn the_demo_scenario_and_the_judge_sandbox_answer_through_apb_mcp() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path();
+    fs::create_dir_all(base.join("home")).unwrap();
+    let cfg = base.join("cfg");
+    let home = base.join("home");
+    let env = [
+        ("APB_CONFIG_DIR", cfg.to_str().unwrap()),
+        ("HOME", home.to_str().unwrap()),
+    ];
+    let mut demo = crate::common::apb_std();
+    demo.args(["demo", "--json"]).current_dir(base);
+    for (k, v) in env {
+        demo.env(k, v);
+    }
+    let out = demo.output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let project = cfg.join("demo");
+    let example = project.join(".apb/playbooks/task-check-first");
+    fs::create_dir_all(example.join("1.0.0")).unwrap();
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/playbooks/task-check-first.yaml"),
+        example.join("1.0.0/playbook.yaml"),
+    )
+    .unwrap();
+    fs::write(example.join("current"), "1.0.0").unwrap();
+
+    let (mut child, mut stdin, rx) = start_mcp(&project, &env);
+    let call = |stdin: &mut ChildStdin, id: u32, tool: &str, args: serde_json::Value| {
+        let body = serde_json::json!({
+            "method": "tools/call",
+            "params": { "name": tool, "arguments": args },
+        })
+        .to_string();
+        tool_json(&request(stdin, &rx, id, &body[1..body.len() - 1]))
+    };
+
+    let listed = call(
+        &mut stdin,
+        2,
+        "playbook_scenarios",
+        serde_json::json!({ "id": "demo-report" }),
+    );
+    assert_eq!(listed["scenarios"][0]["name"], "approve", "{listed}");
+    assert_eq!(listed["scenarios"][0]["latest"], serde_json::json!([]));
+
+    let played = call(
+        &mut stdin,
+        3,
+        "playbook_scenario_run",
+        serde_json::json!({ "id": "demo-report", "scenario": "approve", "level": "quick" }),
+    );
+    assert_eq!(played["report"]["verdict"], "passed", "{played}");
+    let run = played["report"]["run_id"].as_str().unwrap().to_string();
+    assert!(played["graph"]["nodes"].is_array(), "{played}");
+    assert!(project.join(".apb/scenario-runs").join(&run).is_dir());
+    let runs = fs::read_dir(project.join(".apb/runs"))
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(runs, 0, "a scenario run left a run behind");
+
+    let listed = call(
+        &mut stdin,
+        4,
+        "playbook_scenarios",
+        serde_json::json!({ "id": "demo-report" }),
+    );
+    let latest = &listed["scenarios"][0]["latest"][0];
+    assert_eq!(
+        (&latest["verdict"], &latest["fresh"], &latest["run_id"]),
+        (
+            &serde_json::json!("passed"),
+            &serde_json::json!(true),
+            &serde_json::json!(run)
+        ),
+        "{listed}"
+    );
+
+    let judged = call(
+        &mut stdin,
+        5,
+        "judge_evaluate",
+        serde_json::json!({
+            "id": "task-check-first",
+            "node": "check",
+            "inputs": { "instruction": "Fix the parser" },
+            "answers": { "sufficient": { "value": "clear", "p": 0.9, "confidence": 0.9 } },
+        }),
+    );
+    assert_eq!(
+        judged["evaluation"]["at_enforce"]["output"]["sufficient"], "clear",
+        "{judged}"
+    );
+    assert_eq!(
+        judged["route_at_enforce"],
+        serde_json::json!(["e:check>work#1"])
+    );
+    assert_eq!(judged["evaluation"]["requests"], 0);
+    let _ = child.kill();
+    let _ = child.wait();
+}

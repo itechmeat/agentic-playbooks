@@ -52,6 +52,41 @@ fn item(code: &str, subject: Option<&str>, detail: String, severity: FitSeverity
     }
 }
 
+/// The compatibility and setup items that block a run: what makes a
+/// report not `ready`.
+pub fn problems(report: &FitReport) -> impl Iterator<Item = &FitItem> {
+    report
+        .compatibility
+        .iter()
+        .chain(&report.setup)
+        .filter(|i| i.severity == FitSeverity::Blocking)
+}
+
+/// A report that says nothing was assessed for `version` of project
+/// playbook `id`: not ready, not trusted, with the launch policy unread,
+/// for a surface that must show a fitness it could not take.
+pub fn unavailable(id: &str, version: &str) -> FitReport {
+    FitReport {
+        id: id.to_string(),
+        scope: origin_scope_label(&Origin::Project { workspace_id: None }).to_string(),
+        version: version.to_string(),
+        ready: false,
+        trusted: false,
+        needs_consent: false,
+        compatibility: Vec::new(),
+        setup: Vec::new(),
+        trust: Vec::new(),
+        consent: ConsentView::default(),
+        start_actions: Vec::new(),
+        launch: LaunchView {
+            policy: apb_core::launch::LaunchPolicy::Deny,
+            sources: Vec::new(),
+            floor: None,
+            problem: Some("the fit report could not be made".to_string()),
+        },
+    }
+}
+
 /// Assesses playbook `wref` for a run in the project at `root` (the
 /// execution root; a global playbook is read from the global store).
 pub fn assess(root: &Path, wref: &PlaybookRef) -> Result<FitReport, FitError> {

@@ -1,0 +1,38 @@
+schema: 2
+id: demo-report
+name: apb demo
+description: >-
+  A first run with nothing to set up: a script writes report.md in the
+  demo directory, then a person looks at it and approves or rejects it.
+  No agent, no connector, no network, no decision model, no key.
+version: 1.0.0
+goal:
+  statement: A short report exists and a person looked at it.
+  criteria:
+    - description: The script wrote report.md
+      check: { type: marker, marker: REPORT_WRITTEN }
+outputs:
+  report: { from: { node: write_report } }
+nodes:
+  - { id: start, type: start }
+  - id: write_report
+    type: script
+    title: Write the report
+    expected_duration: 5s
+    script: scripts/write-report.sh
+    runner: sh
+  - id: review
+    type: human_review
+    title: Look at the report
+    expected_duration: 1m
+    prompt: >-
+      The script wrote report.md in the demo directory. Open it, then
+      approve to finish the run, or reject to end it as failed.
+    options: [approve, reject]
+  - { id: done, type: finish, outcome: success }
+  - { id: rejected, type: finish, outcome: failure }
+edges:
+  - { from: start, to: write_report }
+  - { from: write_report, to: review }
+  - { from: review, to: done, condition: { type: review_status, equals: approve } }
+  - { from: review, to: rejected, condition: { type: review_status, equals: reject } }

@@ -13,15 +13,19 @@
 //!   (`candidate_promoted`, `candidate_rejected`, `candidate_held`).
 //! - A grade stored after a run ended re-decides a candidate under the
 //!   quality policy ([`resettle`]), and a person may decide at any time
-//!   ([`decide_by_person`]); neither writes to a journal.
+//!   ([`decide_by_person`]); neither writes to a journal. A person's
+//!   promotion is re-checked under the candidate lock against the
+//!   [`candidate_summary`] the person read ([`summary`]).
 //! - The run surfaces read the verdict back with [`trial_of`], the
 //!   playbook surfaces the comparison with [`quality_view`].
 
 mod line;
 mod quality;
 mod settle;
+pub mod summary;
 
-pub use quality::{CandidateQualityView, PersonDecision, decide_by_person, quality_view, resettle};
+pub use quality::{CandidateQualityView, PersonDecision, quality_view, resettle};
+pub use summary::{PromoteError, candidate_summary, decide_by_person};
 
 use std::path::Path;
 

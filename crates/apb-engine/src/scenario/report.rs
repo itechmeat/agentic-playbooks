@@ -30,6 +30,7 @@ pub const REPORT_FILE: &str = "report.json";
 pub const TEMPLATE_EMPTY_KIND: &str = super::session::TEMPLATE_EMPTY_RECORD;
 
 /// What a scenario run showed.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "ScenarioVerdict"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
@@ -49,6 +50,15 @@ pub enum Verdict {
 }
 
 impl Verdict {
+    /// Every verdict, in declaration order.
+    pub const ALL: [Verdict; 5] = [
+        Verdict::Passed,
+        Verdict::Failed,
+        Verdict::Invalid,
+        Verdict::Stale,
+        Verdict::Incomplete,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Verdict::Passed => "passed",
@@ -61,6 +71,7 @@ impl Verdict {
 }
 
 /// One expectation of the scenario, checked.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExpectationResult {
     /// `run.outcome`, `finish`, `route.path`, `route.visits`,
@@ -75,6 +86,7 @@ pub struct ExpectationResult {
 }
 
 /// Where an attempt's scripted answer came from.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnswerSource {
@@ -87,6 +99,7 @@ pub enum AnswerSource {
 }
 
 /// One attempt of an execution (or of one list item in it).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(optional_fields))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TraceAttempt {
     /// 1-based inside the execution and item, counted from the journal's
@@ -103,6 +116,7 @@ pub struct TraceAttempt {
 }
 
 /// One execution of a node, in settlement order.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(optional_fields))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TraceExecution {
     pub node: String,
@@ -112,12 +126,15 @@ pub struct TraceExecution {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
     pub cancelled: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<TraceAttempt>>", optional))]
     pub attempts: Vec<TraceAttempt>,
 }
 
 /// One routing decision, as the `route_evaluated` diagnostics recorded it.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(optional_fields))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RouteTrace {
     pub node: String,
@@ -130,6 +147,7 @@ pub struct RouteTrace {
 }
 
 /// How often one edge (by address) was taken.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EdgeCount {
     pub edge: String,
@@ -137,6 +155,7 @@ pub struct EdgeCount {
 }
 
 /// The inputs a join went on without.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinDead {
     pub join: String,
@@ -144,6 +163,7 @@ pub struct JoinDead {
 }
 
 /// A template reference that rendered as the empty string.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmptyRef {
     pub node: String,
@@ -156,6 +176,7 @@ pub struct EmptyRef {
 }
 
 /// One scripted answer by its boundary and key.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AnswerRef {
     pub kind: BoundaryKind,
@@ -186,6 +207,7 @@ impl AnswerRef {
 /// What the answer book saw: the answers used by number, those a
 /// `visit: default` answered, the boundaries with no answer, and the
 /// answers nothing used.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AnswerUse {
     #[serde(default)]
@@ -199,6 +221,7 @@ pub struct AnswerUse {
 }
 
 /// How often the run reached one boundary, by what the site did.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundaryUse {
     pub kind: BoundaryKind,
@@ -237,6 +260,7 @@ pub struct DriveOutcome {
 }
 
 /// The report of one scenario run.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(optional_fields))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScenarioReport {
     /// Absent when nothing ran (stale, or a drive that failed before it

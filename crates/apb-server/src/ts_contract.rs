@@ -352,6 +352,71 @@ fn render_types() -> String {
         apb_engine::run_outcome::overlay::PlaybookOverlay::decl(&cfg),
         apb_engine::run_stats::route::ReasonCount::decl(&cfg),
         crate::routes::graph::DraftValidation::decl(&cfg),
+        // Scenario runs: the report, its trace and the surfaces' shapes.
+        apb_core::scenario::ScenarioLevel::decl(&cfg),
+        apb_engine::scenario::BoundaryKind::decl(&cfg),
+        apb_engine::scenario::BoundaryKey::decl(&cfg),
+        apb_engine::scenario::report::Verdict::decl(&cfg),
+        apb_engine::scenario::report::ExpectationResult::decl(&cfg),
+        apb_engine::scenario::report::AnswerSource::decl(&cfg),
+        apb_engine::scenario::report::TraceAttempt::decl(&cfg),
+        apb_engine::scenario::report::TraceExecution::decl(&cfg),
+        apb_engine::diagnostics::route::RouteCheck::decl(&cfg),
+        apb_engine::scenario::report::RouteTrace::decl(&cfg),
+        apb_engine::scenario::report::EdgeCount::decl(&cfg),
+        apb_engine::scenario::report::JoinDead::decl(&cfg),
+        apb_engine::scenario::report::EmptyRef::decl(&cfg),
+        apb_engine::scenario::report::AnswerRef::decl(&cfg),
+        apb_engine::scenario::report::AnswerUse::decl(&cfg),
+        apb_engine::scenario::report::BoundaryUse::decl(&cfg),
+        apb_engine::scenario::report::ScenarioReport::decl(&cfg),
+        apb_engine::candidate::summary::ScenarioResultRef::decl(&cfg),
+        apb_mcp::tools::scenario::ScenarioRunRequest::decl(&cfg),
+        apb_mcp::tools::scenario::ScenarioEntry::decl(&cfg),
+        apb_mcp::tools::scenario::PlaybookScenarios::decl(&cfg),
+        apb_mcp::tools::scenario::ScenarioRunView::decl(&cfg),
+        // One judge evaluation, the judge sandbox and labelled examples.
+        apb_core::decisions::DecisionMode::decl(&cfg),
+        apb_engine::event::DecisionAnswer::decl(&cfg),
+        apb_engine::judge_eval::ReviewInput::decl(&cfg),
+        apb_engine::judge_eval::JudgeInputs::decl(&cfg),
+        apb_engine::judge_eval::RenderedField::decl(&cfg),
+        apb_engine::judge_eval::JudgeOutcome::decl(&cfg),
+        apb_engine::judge_eval::JudgeEvaluation::decl(&cfg),
+        apb_engine::judge_eval::sandbox::SandboxRequest::decl(&cfg),
+        apb_engine::judge_eval::sandbox::SandboxEvaluation::decl(&cfg),
+        apb_engine::judge_eval::sandbox::RecordedValue::decl(&cfg),
+        apb_engine::judge_eval::example::ExpectedAnswer::decl(&cfg),
+        apb_engine::judge_eval::example::ExampleSource::decl(&cfg),
+        apb_engine::judge_eval::example::ObservedAnswers::decl(&cfg),
+        apb_engine::judge_eval::sandbox::RunValues::decl(&cfg),
+        apb_engine::judge_eval::example::JudgeExample::decl(&cfg),
+        apb_engine::judge_eval::example::ExampleStatus::decl(&cfg),
+        apb_engine::judge_eval::example::QuestionAgreement::decl(&cfg),
+        apb_engine::judge_eval::example::JudgeExampleResult::decl(&cfg),
+        apb_engine::judge_eval::example::ConfusionCell::decl(&cfg),
+        apb_engine::judge_eval::example::NodeExamplesCheck::decl(&cfg),
+        apb_engine::judge_eval::example::ExamplesCheckRequest::decl(&cfg),
+        apb_engine::judge_eval::example::ExampleSaveRequest::decl(&cfg),
+        apb_mcp::tools::judge::NodeExamples::decl(&cfg),
+        apb_mcp::tools::judge::JudgeExamplesView::decl(&cfg),
+        // The candidate summary and a person's promotion.
+        apb_engine::candidate::summary::VersionDigest::decl(&cfg),
+        apb_engine::candidate::summary::AxisState::decl(&cfg),
+        apb_engine::candidate::summary::AxisName::decl(&cfg),
+        apb_engine::candidate::summary::SummaryCode::decl(&cfg),
+        apb_engine::candidate::summary::SummaryItem::decl(&cfg),
+        apb_engine::candidate::summary::Axis::<()>::decl(&cfg),
+        apb_engine::candidate::summary::FitnessAxis::decl(&cfg),
+        apb_engine::candidate::summary::DefinitionAxis::decl(&cfg),
+        apb_engine::candidate::summary::QualityAxis::decl(&cfg),
+        apb_engine::candidate::summary::CandidateSummary::decl(&cfg),
+        apb_engine::candidate::summary::PromoteRefusal::decl(&cfg),
+        crate::routes::quality::PromoteBody::decl(&cfg),
+        crate::routes::quality::PlaybookCandidateSummary::decl(&cfg),
+        // The keyless demo.
+        apb_core::demo::DemoProject::decl(&cfg),
+        crate::routes::demo::DemoStatus::decl(&cfg),
     ];
     let mut out = format!(
         "{HEADER}\nimport type {{ PlaybookEdge, PlaybookNode, WfEvent, WfLayout }} from './types'\n"
@@ -487,11 +552,56 @@ fn render_consts() -> String {
     render_isolation_consts(&mut out);
     render_publish_consts(&mut out);
     render_route_consts(&mut out);
+    render_check_consts(&mut out);
     out.push_str(&format!(
         "\n/** Starter document for a new playbook. */\nexport const NEW_PLAYBOOK_TEMPLATE = {}\n",
         serde_json::to_string(&schema::new_playbook_template()).expect("a string serializes")
     ));
     out
+}
+
+/// The checks before an expensive run: the boundaries a scenario answers,
+/// its verdicts, the candidate summary's item codes and the sandbox cap.
+fn render_check_consts(out: &mut String) {
+    use apb_engine::candidate::summary::{EXPECTED_REQUIRED, SummaryCode};
+    use apb_engine::scenario::BoundaryKind;
+    use apb_engine::scenario::report::Verdict;
+    let kinds: Vec<&str> = BoundaryKind::ALL.iter().map(|k| k.as_str()).collect();
+    let verdicts: Vec<&str> = Verdict::ALL.iter().map(|v| v.as_str()).collect();
+    let codes: Vec<&str> = SummaryCode::ALL.iter().map(|c| c.as_str()).collect();
+    let blocking: Vec<&str> = SummaryCode::ALL
+        .iter()
+        .filter(|c| c.blocks())
+        .map(|c| c.as_str())
+        .collect();
+    out.push_str(&format!(
+        "\n/** Every boundary a scenario run answers. */\nexport const BOUNDARY_KINDS = {}\n",
+        ts_string_array(&kinds)
+    ));
+    out.push_str(&format!(
+        "\n/** Every verdict of a scenario run. */\nexport const SCENARIO_VERDICTS = {}\n",
+        ts_string_array(&verdicts)
+    ));
+    out.push_str(&format!(
+        "\n/** Every item code of a candidate summary, and those that refuse a promotion. */\nexport const SUMMARY_CODES = {}\nexport const BLOCKING_SUMMARY_CODES = {}\n",
+        ts_string_array(&codes),
+        ts_string_array(&blocking)
+    ));
+    out.push_str(&format!(
+        "\n/** The refusal of a promotion that names no expected version and digest. */\nexport const EXPECTED_REQUIRED = '{EXPECTED_REQUIRED}'\n"
+    ));
+    out.push_str(&format!(
+        "\n/** Judge sandbox requests per project and UTC day. */\nexport const SANDBOX_DAILY_CAP = {}\n",
+        apb_engine::judge_eval::sandbox::SANDBOX_DAILY_CAP
+    ));
+    out.push_str(&format!(
+        "\n/** The most decision requests a smoke scenario run may be capped at. */\nexport const SCENARIO_MAX_DECISION_REQUESTS = {}\n",
+        apb_mcp::tools::scenario::MAX_DECISION_REQUESTS
+    ));
+    out.push_str(&format!(
+        "\n/** The keyless demo's playbook id. */\nexport const DEMO_ID = '{}'\n",
+        apb_core::demo::DEMO_ID
+    ));
 }
 
 /// The classes and codes a "why it did not run" statement carries, so the

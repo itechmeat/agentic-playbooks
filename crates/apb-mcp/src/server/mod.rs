@@ -24,12 +24,14 @@ pub use args::*;
 
 mod decision;
 mod discover;
+mod judge;
 mod playbook;
 mod problems;
 mod profile;
 mod quality;
 pub mod read_only;
 mod run;
+mod scenario;
 mod supervisor;
 
 /// A supervisor session: which run it observes and which capabilities were
@@ -649,6 +651,8 @@ impl WfMcp {
             + Self::quality_router()
             + Self::problems_router()
             + Self::discover_router()
+            + Self::judge_router()
+            + Self::scenario_router()
     }
 }
 

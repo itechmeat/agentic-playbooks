@@ -1,0 +1,15 @@
+schema: 1
+id: clear-task
+title: A clear task goes straight to the work
+instruction: Rename the config key timeout to timeout_seconds in src/config.rs and update its two readers.
+answers:
+  check:
+    - { visit: 1, judge: { sufficient: { value: clear, p: 0.92 } } }
+  work:
+    - { visit: 1, attempts: [ { status: succeeded, output: "renamed in three places" } ] }
+expect:
+  run: { outcome: [succeeded] }
+  finish: done
+  route: { path: [start, check, work, done] }
+  # The clarification note renders empty when nobody was asked.
+  templates_empty: report

@@ -1,0 +1,61 @@
+schema: 2
+id: task-check-first
+name: Check the task first
+description: >-
+  A judge node reads the task before any work starts. A clear task goes
+  straight to the work; an unclear one goes to a person, who says what is
+  missing, and the task is checked again. After two rounds the run ends
+  failed instead of working on a task nobody could make clear. The check
+  runs after the run started: its directory, consent, lock and baseline
+  come first.
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - id: check
+    type: judge
+    title: Is the task clear enough to start
+    expected_duration: 10s
+    state:
+      task: "{{run.instruction}}"
+      clarification: "{{nodes.clarify.review_note}}"
+    questions:
+      sufficient:
+        type: choice
+        instructions: >-
+          Is `task`, together with `clarification` when there is one, clear
+          enough to start the work without guessing what is wanted?
+        criteria:
+          clear: "It names what to change and what done looks like."
+          unclear: "It leaves the goal, the place or the expected result to a guess."
+    thresholds:
+      sufficient: { min_confidence: 0.7, below: unclear }
+    on_unavailable: { route: clarify }
+  - id: clarify
+    type: human_review
+    title: Say what is missing from the task
+    expected_duration: 10m
+    prompt: >-
+      The task did not read as clear enough to start. Write what is missing
+      in the note and choose clarified, or cancel the run.
+    options: [clarified, cancel]
+  - id: work
+    type: agent_task
+    title: Do the task
+    expected_duration: 15m
+    prompt: >-
+      Do this task: {{run.instruction}}
+      What a person added: {{nodes.clarify.review_note}}
+  - { id: done, type: finish, outcome: success }
+  - { id: gave_up, type: finish, outcome: failure }
+  - { id: cancelled, type: finish, outcome: failure }
+edges:
+  - { from: start, to: check }
+  - { from: check, to: work, condition: { type: output_field, node: check, field: sufficient, equals: clear } }
+  - { from: check, to: clarify, condition: { type: output_field, node: check, field: sufficient, equals: unclear }, max_traversals: 2 }
+  - { from: check, to: clarify, condition: { type: output_field, node: check, field: decided_by, equals: unavailable }, max_traversals: 2 }
+  - { from: check, to: gave_up, fallback: true }
+  - { from: clarify, to: check, condition: { type: review_status, equals: clarified } }
+  - { from: clarify, to: cancelled, condition: { type: review_status, equals: cancel } }
+  - { from: work, to: done }

@@ -1,0 +1,13 @@
+schema: 1
+id: approve
+title: The script writes the report and a person approves it
+answers:
+  write_report:
+    - { visit: 1, script: { exit: 0, stdout: "REPORT_WRITTEN report.md for run demo" } }
+  review:
+    - { visit: 1, review: { decision: approve } }
+expect:
+  run: { outcome: [succeeded] }
+  finish: done
+  route: { path: [start, write_report, review, done] }
+  run_outputs: { report: { state: value } }

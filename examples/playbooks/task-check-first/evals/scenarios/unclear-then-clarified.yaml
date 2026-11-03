@@ -1,0 +1,18 @@
+schema: 1
+id: unclear-then-clarified
+title: An unclear task goes to a person once, then to the work
+instruction: Fix it.
+answers:
+  check:
+    - { visit: 1, judge: { sufficient: { value: unclear, p: 0.88 } } }
+    - { visit: 2, judge: { sufficient: { value: clear, p: 0.9 } } }
+  clarify:
+    - { visit: 1, review: { decision: clarified, note: "The login test in tests/auth.rs fails since the last merge; make it pass." } }
+  work:
+    - { visit: 1, attempts: [ { status: succeeded, output: "the login test passes" } ] }
+expect:
+  run: { outcome: [succeeded] }
+  finish: done
+  visits: { check: 2, clarify: 1, work: 1 }
+  # The clarification note renders empty on the first check.
+  templates_empty: report

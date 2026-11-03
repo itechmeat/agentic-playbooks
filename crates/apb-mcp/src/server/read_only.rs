@@ -97,6 +97,16 @@ pub const REMOVED_IN_READ_ONLY: &[&str] = &[
     "run_grade_submit",
     "known_problem_recheck",
     "known_problem_decide",
+    // The judge sandbox and labelled examples: a live ask spends, a save
+    // writes, and the reads serve the sandbox alone.
+    "judge_evaluate",
+    "judge_examples",
+    "judge_example_save",
+    "judge_run_values",
+    // Scenario runs: a run writes its scenario run directory and starts
+    // `apb __scenario-run`, and a smoke run spends; the list serves them.
+    "playbook_scenarios",
+    "playbook_scenario_run",
     // Authoring and trust.
     "playbook_create",
     "playbook_update",
