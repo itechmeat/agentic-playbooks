@@ -379,12 +379,18 @@ fn gate_visit_decision<'a>(
             EventPayload::ReviewWithdrawn { node: n, .. } if n == node && open => {
                 return Err("the gate visit was withdrawn");
             }
-            // An unattended run's declared decision is no person's label.
+            // A decision no person made is no person's label.
             EventPayload::ReviewDecided {
                 node: n,
-                decided_by: Some(_),
+                decided_by: Some(by),
                 ..
-            } if n == node && open => return Err("the gate visit was decided unattended"),
+            } if n == node && open => {
+                return Err(match by {
+                    crate::event::DecidedBy::Unattended => "the gate visit was decided unattended",
+                    crate::event::DecidedBy::Model => "the model decided the gate itself",
+                    crate::event::DecidedBy::Unknown => "the gate visit was decided by no person",
+                });
+            }
             EventPayload::ReviewDecided {
                 node: n,
                 decision,
@@ -962,6 +968,17 @@ mod tests {
         }
         let unattended = vec![requested(1, "g"), unattended];
         assert!(matches!(l.label(&first, &unattended), Label::Unlabelled(_)));
+        // Nor is a model's enforced decision, by its decider alone (no
+        // `auto:` note to fall back on).
+        let mut by_model = decided(2, "g", "needs_changes", "");
+        if let EventPayload::ReviewDecided { decided_by, .. } = &mut by_model.payload {
+            *decided_by = Some(crate::event::DecidedBy::Model);
+        }
+        let by_model = vec![requested(1, "g"), by_model];
+        assert_eq!(
+            l.label(&first, &by_model),
+            Label::Unlabelled("the model decided the gate itself")
+        );
         // Shown to the reviewer outside shadow; acting never picks approve.
         assert!(!l.shown_to_labeller(&first));
         assert!(l.shown_to_labeller(&answered(

@@ -621,7 +621,7 @@ pub enum EventPayload {
         plan_digest: Option<String>,
         /// Who decided when it was not a person through a review channel:
         /// `unattended` for the gate's declared `unattended: { decide }`
-        /// outcome. `None` for a person's decision and old logs; a value
+        /// outcome, `model` for an enforced recommendation. `None` for a person's decision and old logs; a value
         /// this binary does not know reads as `unknown`, never as a
         /// person ([`lenient_decided_by`]).
         #[serde(
@@ -2006,6 +2006,9 @@ pub enum DecidedBy {
     /// The gate's declared `unattended: { decide }` outcome in an
     /// unattended run. Never a person's consent.
     Unattended,
+    /// A decision model's enforced review recommendation (`auto_decide`),
+    /// posted by the engine. Never a person's consent.
+    Model,
     /// A decider this binary does not know ([`lenient_decided_by`] reads
     /// any value it cannot decode as this). Never a person's consent.
     Unknown,

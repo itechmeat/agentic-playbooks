@@ -31,13 +31,12 @@
     personTakes,
     shownElsewhere,
     suppliedArg,
-    unattendedLine,
-    unattendedStops,
   } from './nextactions'
   import { actionTarget, postDecision, postIntentDecision, postReply } from './runposts'
   import * as AlertDialog from '$lib/components/ui/alert-dialog'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
+  import UnattendedNote from './UnattendedNote.svelte'
 
   let {
     actions = null,
@@ -274,14 +273,7 @@
             <p class="muted" data-testid="next-action-auto">{autoLine(a.auto)}</p>
           {/if}
           {#if a.unattended}
-            <p
-              class="unattended"
-              class:stops={unattendedStops(a.unattended)}
-              title="What an unattended run (apb run --unattended) does at this wait"
-              data-testid="next-action-unattended"
-            >
-              {unattendedLine(a.unattended)}
-            </p>
+            <UnattendedNote outcome={a.unattended} testid="next-action-unattended" />
           {/if}
           {#if !a.ready && a.not_ready}
             <p class="bad" data-testid="next-action-not-ready">Not ready: {a.not_ready.detail}</p>
@@ -481,13 +473,6 @@
   }
   .muted {
     color: var(--muted-foreground);
-  }
-  .unattended {
-    color: var(--muted-foreground);
-    font-size: 11px;
-  }
-  .unattended.stops {
-    color: var(--warning);
   }
   .bad {
     color: var(--destructive);

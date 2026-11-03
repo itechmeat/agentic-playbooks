@@ -64,6 +64,14 @@ describe('PublishPanel', () => {
     expect(document.querySelector('[data-testid="publish-guidance"] i')).toBeNull()
   })
 
+  // The next-actions panel leaves the gate's `decide_publish` to this card,
+  // so what an unattended run does there must show here, as on the CLI.
+  it('shows what an unattended run does at an open plan, marked where it stops', () => {
+    render({ gates: [{ node: 'ship', plan, unattended: { kind: 'fails_run', code: 'hitl_required' } }] })
+    expect(text('publish-unattended')).toBe('unattended: fails the run (hitl_required)')
+    expect(byTestId('publish-unattended')?.classList.contains('stops')).toBe(true)
+  })
+
   it('posts the plan nonce with the decision', () => {
     const onDecide = vi.fn()
     render({ gates: [{ node: 'ship', plan }], onDecide })

@@ -1,6 +1,6 @@
 import { pendingSupervisorFromPayload, type SupervisorEntry } from './supervisors'
 import type { PublishGate } from './publish'
-import type { ActionCode, NextAction, PendingHostTask, ReviewRecommendation } from './api.gen'
+import type { ActionCode, NextAction, PendingHostTask, ReviewRecommendation, UnattendedOutcome } from './api.gen'
 import type { RunDetail } from './types'
 
 // The identity of the request a gate entry posts to: the run it belongs to
@@ -10,6 +10,10 @@ export interface GateRequest {
   runId: string
   /** Absent on a payload from an older server without next actions. */
   request?: number
+  /** What an unattended run does at this gate, from the gate's own next
+   * action; the next-actions panel leaves that action to the gate's card.
+   * Absent where it does not apply. */
+  unattended?: UnattendedOutcome
 }
 
 // A pending human-review gate as the review panel renders it: one button per
@@ -126,13 +130,22 @@ export function runGates(detail: RunDetail): RunGates {
   }
 }
 
+// The next action of the page's own run with this code at `node`.
+function ownAction(detail: RunDetail, code: ActionCode, node: string): NextAction | undefined {
+  const actions: NextAction[] = detail.next_actions?.actions ?? []
+  return actions.find((x) => x.code === code && x.target.node === node && x.run_id === detail.run_id)
+}
+
 // The request of the page's own run that a gate of `node` answers: the run
 // id, and the seq of the matching next action (same code, node and run).
 export function gateRequest(detail: RunDetail, code: ActionCode, node: string): GateRequest {
-  const actions: NextAction[] = detail.next_actions?.actions ?? []
-  const a = actions.find((x) => x.code === code && x.target.node === node && x.run_id === detail.run_id)
+  const a = ownAction(detail, code, node)
   const seq = a?.target.request?.seq
-  return seq === undefined ? { runId: detail.run_id } : { runId: detail.run_id, request: seq }
+  return {
+    runId: detail.run_id,
+    ...(seq === undefined ? {} : { request: seq }),
+    ...(a?.unattended ? { unattended: a.unattended } : {}),
+  }
 }
 
 // The review card's recommendation line: `Advisory recommendation: approve

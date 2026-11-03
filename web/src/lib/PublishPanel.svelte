@@ -11,6 +11,7 @@
   import { authState } from './auth.svelte'
   import * as Card from '$lib/components/ui/card'
   import { Button } from '$lib/components/ui/button'
+  import UnattendedNote from './UnattendedNote.svelte'
   import {
     approveCommand,
     commitCount,
@@ -67,6 +68,9 @@
             {/if}
             {#if c.awaiting_consent && c.prompt}
               <pre class="guidance" data-testid="publish-guidance">{c.prompt}</pre>
+            {/if}
+            {#if c.awaiting_consent && c.unattended}
+              <UnattendedNote outcome={c.unattended} testid="publish-unattended" />
             {/if}
             {#if c.plan}
               {@const plan = c.plan}
