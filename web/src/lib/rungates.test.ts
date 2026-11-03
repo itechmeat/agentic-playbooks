@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { deadlineNote, runGates } from './rungates'
+import { deadlineNote, liveRefusals, refusalKey, refusalSentence, runGates } from './rungates'
+import { ApiError } from './api/http'
 import type { ProgressSummary, RunDetail, WfEvent } from './types'
 import type { NextAction, PendingHostTask, PendingQuestion, RunActions } from './api.gen'
 
@@ -272,5 +273,29 @@ describe('publish gates', () => {
   it('names no request when the run lists no matching action', () => {
     const d = detail([], progress({ pending_reviews: [review] }), 'running', [])
     expect(runGates(d).reviews[0]).toEqual({ node: 'gate', options: ['approve', 'reject'], runId: 'r' })
+  })
+})
+
+// A refused decision shows the server's own sentence on the gate: the 403 of
+// a person-only gate names the terminal command and the run page, and a
+// toast of the URL and status alone would not.
+describe('refusalSentence', () => {
+  it('prefers the structured message, else the plain body without the URL', () => {
+    const msg = 'gate `review` of run `r1` is person_only, so only a person decides it.'
+    expect(refusalSentence(new ApiError('/api/runs/r1/review: channel_refused', 403, 'channel_refused', undefined, { error: 'channel_refused', message: msg }))).toBe(msg)
+    expect(refusalSentence(new ApiError(`http://127.0.0.1:7777/api/runs/r1/review?workspace=w: ${msg}`, 403))).toBe(msg)
+    expect(refusalSentence(new ApiError('/api/runs/r1/review: HTTP 500', 500))).toBe('/api/runs/r1/review: HTTP 500')
+    expect(refusalSentence(new Error('offline'))).toBe('Error: offline')
+  })
+})
+
+describe('refusalKey and liveRefusals', () => {
+  it('keeps a refusal per run, gate and request, and only while that request is open', () => {
+    const open = [{ runId: 'r1', node: 'review', request: 41, options: [] }]
+    expect(refusalKey(open[0])).toBe('r1:review:41')
+    expect(refusalKey({ runId: 'r1', node: 'review' })).toBe('r1:review:')
+    expect(
+      liveRefusals({ 'r1:review:41': 'kept', 'r2:review:41': 'other run', 'r1:review:40': 'replaced' }, open),
+    ).toEqual({ 'r1:review:41': 'kept' })
   })
 })

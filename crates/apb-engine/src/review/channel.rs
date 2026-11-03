@@ -1,0 +1,176 @@
+//! Who may post a decision: a person-only gate takes one only from a
+//! person's channel ([`crate::decision_channel::DecisionChannel`]), and a
+//! step of a run's own tree never decides or answers for it.
+
+use std::path::Path;
+
+use crate::decision_channel::{CallerRefusal, DecisionChannel};
+use crate::error::EngineError;
+
+/// Whether a decision through `channel` decides a person-only gate of the
+/// run at `run_dir`: a person's channel, or a scenario run's scripted
+/// decision in a scenario run (its person is the script). An entry without
+/// a channel never does.
+pub fn decides_person_only(run_dir: &Path, channel: Option<DecisionChannel>) -> bool {
+    match channel {
+        Some(c) if c.is_person_channel() => true,
+        Some(DecisionChannel::Scenario) => crate::scenario::session::is_scenario(run_dir),
+        _ => false,
+    }
+}
+
+/// The refusal of a decision through `channel` on the person-only gate
+/// `node` of the run at `run_dir`; `Ok` when the channel decides it. The
+/// message names both ways a person decides.
+pub fn refuse_for_person_only(
+    run_dir: &Path,
+    node: &str,
+    channel: Option<DecisionChannel>,
+) -> Result<(), EngineError> {
+    if decides_person_only(run_dir, channel) {
+        return Ok(());
+    }
+    let refusal = channel
+        .and_then(DecisionChannel::person_only_refusal)
+        .unwrap_or(CallerRefusal::NotThisCaller);
+    let run = run_id_of(run_dir);
+    let through = channel.map_or("an unstated channel", DecisionChannel::as_str);
+    Err(EngineError::ChannelRefused {
+        refusal,
+        message: format!(
+            "gate `{node}` of run `{run}` is person_only, so only a person decides it; {through} is not a person's channel ({}). Decide at an interactive terminal outside a run step with `apb review {run} {node} --decision <option>{}`, or on the run page of a dashboard where you are signed in.",
+            refusal.as_str(),
+            bound_args(run_dir, node)
+        ),
+    })
+}
+
+/// The open request of gate `gate`: the seq of its latest
+/// `review_requested` and the binding it carries, while that request has
+/// neither a decision nor a withdrawal. `None` when nothing is open.
+pub fn open_request<'e>(
+    events: &'e [crate::event::Event],
+    gate: &str,
+) -> Option<(u64, Option<&'e crate::approval::ReviewBinding>)> {
+    if crate::event::review_open_count(events, gate) == 0 {
+        return None;
+    }
+    events.iter().rev().find_map(|e| match &e.payload {
+        crate::event::EventPayload::ReviewRequested { node, binding, .. } if node == gate => {
+            Some((e.seq, binding.as_ref()))
+        }
+        _ => None,
+    })
+}
+
+/// The ` --nonce <binding> --request review:<seq>` an approving decision
+/// on the open request of gate `node` carries when that request binds
+/// snapshots, so the command in a refusal is one that is accepted; empty
+/// otherwise, or when the journal does not read.
+fn bound_args(run_dir: &Path, node: &str) -> String {
+    let events = crate::event::read_all_lossy_tail(run_dir).unwrap_or_default();
+    match open_request(&events, node) {
+        Some((seq, Some(b))) => format!(" --nonce {} --request review:{seq}", b.nonce),
+        _ => String::new(),
+    }
+}
+
+/// The refusal of a decision or an answer `caller` posts to the run at
+/// `run_dir` from inside a step of a run of the same tree: the run, its
+/// ancestors, and every descendant of its topmost ancestor, siblings
+/// included (followed through `parent_run` up and `child_run_started`
+/// down, at most [`MAX_TREE_DEPTH`] levels up and twice that down): a step
+/// deciding a gate whose outcome steers its own run defeats the gate. A
+/// step of an unrelated run, and a process that is no step, pass. A tree
+/// that cannot be read whole (a config or a journal that does not read, a
+/// link beyond the depth) refuses a step: the guard fails closed.
+pub fn refuse_own_run(
+    run_dir: &Path,
+    caller: &apb_core::step_env::StepCaller,
+) -> Result<(), EngineError> {
+    let Some(step_run) = caller.run_id.as_deref() else {
+        return Ok(());
+    };
+    let message = match run_tree(run_dir) {
+        Ok(tree) if !tree.iter().any(|r| r == step_run) => return Ok(()),
+        Ok(_) => format!(
+            "this process runs inside run `{step_run}` (APB_RUN_ID is set), which is in the run tree of run `{}` (the run, an ancestor, a descendant or a sibling); a run step never decides a gate or answers a question of its own run tree. Ask the person to decide outside the run.",
+            run_id_of(run_dir)
+        ),
+        Err(why) => format!(
+            "this process runs inside run `{step_run}` (APB_RUN_ID is set), and the run tree of run `{}` cannot be read whole ({why}), so it may be its own; a run step's decision or answer is refused. Ask the person to decide outside the run.",
+            run_id_of(run_dir)
+        ),
+    };
+    Err(EngineError::ChannelRefused {
+        refusal: CallerRefusal::RunStepOwnRun,
+        message,
+    })
+}
+
+/// How many levels of ancestors and descendants [`refuse_own_run`]
+/// follows: the depth run redaction follows.
+pub const MAX_TREE_DEPTH: usize = 8;
+
+fn run_id_of(run_dir: &Path) -> String {
+    run_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// The run tree of the run at `run_dir`: the run, its ancestors, and the
+/// descendants of every one of them (siblings included). An error names
+/// what could not be read, so the caller fails closed.
+fn run_tree(run_dir: &Path) -> Result<Vec<String>, String> {
+    let Some(runs) = run_dir.parent() else {
+        return Ok(vec![run_id_of(run_dir)]);
+    };
+    let mut tree = vec![run_id_of(run_dir)];
+    let mut dir = run_dir.to_path_buf();
+    let mut depth = 0;
+    loop {
+        let parent = crate::run_config::read_run_config(&dir)
+            .map_err(|e| format!("the config of run `{}`: {e}", tree[tree.len() - 1]))?
+            .parent_run;
+        let Some(parent) = parent else { break };
+        if !apb_core::registry::is_safe_segment(&parent) || tree.contains(&parent) {
+            return Err(format!(
+                "run `{}` names parent `{parent}`",
+                tree[tree.len() - 1]
+            ));
+        }
+        if depth == MAX_TREE_DEPTH {
+            return Err(format!("ancestors beyond {MAX_TREE_DEPTH} levels"));
+        }
+        depth += 1;
+        dir = runs.join(&parent);
+        if !dir.is_dir() {
+            return Err(format!("parent run `{parent}` is not here"));
+        }
+        tree.push(parent);
+    }
+    let mut level = tree.clone();
+    for _ in 0..2 * MAX_TREE_DEPTH {
+        let mut next = Vec::new();
+        for id in &level {
+            let events = crate::event::read_all_lossy_tail(&runs.join(id))
+                .map_err(|e| format!("the journal of run `{id}`: {e}"))?;
+            for e in events {
+                if let crate::event::EventPayload::ChildRunStarted { run_id, .. } = e.payload
+                    && apb_core::registry::is_safe_segment(&run_id)
+                    && !tree.contains(&run_id)
+                {
+                    tree.push(run_id.clone());
+                    next.push(run_id);
+                }
+            }
+        }
+        if next.is_empty() {
+            return Ok(tree);
+        }
+        level = next;
+    }
+    Err(format!("descendants beyond {} levels", 2 * MAX_TREE_DEPTH))
+}

@@ -149,6 +149,33 @@ describe('RunResultsPanel', () => {
     expect(document.body.textContent).toContain('redacted on read')
   })
 
+  it('keeps the text it loaded when "Show more" fails, with the error next to it', async () => {
+    const part = (text: string, range: [number, number]) =>
+      new Response(
+        JSON.stringify({
+          run_id: 'r1',
+          ref: `r:${snap}/output`,
+          content: { text, digest: 'sha256:' + '1'.repeat(64), size: 120, range, redacted_at_capture: false, redacted_on_read: false },
+        }),
+        { status: 200 },
+      )
+    fetchMock.mockResolvedValueOnce(part('first part', [0, 60]))
+    app = mount(RunResultsPanel, { target: document.body, props: { runId: 'r1', view } })
+    flushSync()
+    document.querySelector<HTMLButtonElement>('[data-testid="run-results-view"]')?.click()
+    await vi.waitFor(() => expect(document.querySelector('[data-testid="run-results-text"]')).not.toBeNull())
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'corrupt: the object does not hash to its name' }), {
+        status: 409,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+    const more = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Show more')
+    more?.click()
+    await vi.waitFor(() => expect(document.body.textContent).toContain('corrupt: the object does not hash to its name'))
+    expect(document.querySelector('[data-testid="run-results-text"]')?.textContent).toBe('first part')
+  })
+
   it('shows a failed read and a failed comparison by the server sentence, without the request address', async () => {
     const refusal = (error: string) =>
       new Response(JSON.stringify({ error }), { status: 409, headers: { 'content-type': 'application/json' } })

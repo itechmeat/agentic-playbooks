@@ -39,6 +39,33 @@ mod common;
 )]
 static ISOLATE_CONFIG: extern "C" fn() = isolate_config;
 
+/// A directory under `parent` this process created itself: the pid and a
+/// random suffix, made with `create_dir`, a name taken already tried again
+/// with another suffix. `None` when none could be made.
+fn own_dir(parent: &std::path::Path, prefix: &str) -> Option<std::path::PathBuf> {
+    use std::hash::{BuildHasher, Hasher};
+    for _ in 0..16 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_nanos(),
+        );
+        let dir = parent.join(format!(
+            "{prefix}-{}-{:016x}",
+            std::process::id(),
+            h.finish()
+        ));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Some(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
 extern "C" fn isolate_config() {
     // The sandbox helper below runs this binary inside the sandbox; the
     // order of `.init_array` entries is not guaranteed, so the helper's
@@ -53,9 +80,24 @@ extern "C" fn isolate_config() {
     }) {
         return;
     }
-    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("apb-engine-test-xdg-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let parent = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let _ = std::fs::create_dir_all(parent);
+    let created = own_dir(parent, "apb-engine-test-xdg");
+    let dir = created.clone().unwrap_or_else(|| {
+        let d = parent.join(format!("apb-engine-test-xdg-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        d
+    });
+    // Every test process (nextest runs one per test) removes its own
+    // directory when it exits, so none is left behind; only one it made.
+    if let Some(own) = created {
+        let _ = CONFIG_DIR.set(own);
+        // SAFETY: registers a plain function with no captured state.
+        #[cfg(unix)]
+        unsafe {
+            libc::atexit(remove_config);
+        }
+    }
     // SAFETY: runs before `main`, so no other thread exists yet.
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", &dir);
@@ -80,6 +122,15 @@ extern "C" fn isolate_config() {
         ] {
             std::env::remove_var(login);
         }
+    }
+}
+
+static CONFIG_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+#[cfg(unix)]
+extern "C" fn remove_config() {
+    if let Some(dir) = CONFIG_DIR.get() {
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
@@ -156,6 +207,8 @@ mod agent_probe_test;
 mod agent_report_test;
 #[path = "suite/agent_timeout_test.rs"]
 mod agent_timeout_test;
+#[path = "suite/approval_test.rs"]
+mod approval_test;
 #[cfg(unix)]
 #[path = "suite/attempt_briefing_test.rs"]
 mod attempt_briefing_test;
@@ -238,6 +291,8 @@ mod context_test;
 mod control_liveness_test;
 #[path = "suite/control_test.rs"]
 mod control_test;
+#[path = "suite/decision_channel_test.rs"]
+mod decision_channel_test;
 #[path = "suite/decision_test.rs"]
 mod decision_test;
 #[cfg(unix)]
@@ -428,6 +483,8 @@ mod review_test;
 mod run_estimate_test;
 #[path = "suite/run_file_modes_test.rs"]
 mod run_file_modes_test;
+#[path = "suite/run_guard_test.rs"]
+mod run_guard_test;
 #[path = "suite/run_outcome_list_test.rs"]
 mod run_outcome_list_test;
 #[path = "suite/run_outcome_test.rs"]

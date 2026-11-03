@@ -177,15 +177,11 @@ edges:
     })
     .unwrap();
     let seq = log
-        .append(apb_engine::event::EventPayload::ReviewRequested {
-            node: "gate".into(),
-            options: vec!["approved".into(), "rejected".into()],
-            title: None,
-            instruction: String::new(),
-            prompt: None,
-            recommendation: None,
-            plan_digest: None,
-        })
+        .append(apb_engine::event::EventPayload::review_requested(
+            "gate",
+            vec!["approved".into(), "rejected".into()],
+            String::new(),
+        ))
         .unwrap()
         .seq;
     let uri = format!("/api/runs/{run_id}/review");

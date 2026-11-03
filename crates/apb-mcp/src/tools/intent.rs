@@ -47,8 +47,10 @@ impl<'a> IntentCaller<'a> {
 
 /// Records a person's decision on send intent `intent` of `run_id`: it went
 /// out (`sent`) or it did not. Refused (a conflict) for an intent whose
-/// outcome is known or that is still in flight, and for a caller inside a
-/// run (see [`refusal_inside_run`]); an unknown run or intent is not found.
+/// outcome is known or that is still in flight, for a caller inside a run
+/// (see [`refusal_inside_run`]), and for a step of the run's own tree
+/// whatever the surface (`run_step_own_run`); an unknown run or intent is
+/// not found.
 /// A later repeat of the send then answers `already_sent`, or sends it
 /// again.
 pub fn run_intent_resolve(
@@ -63,6 +65,9 @@ pub fn run_intent_resolve(
         return Err(ToolError::Conflict(refusal));
     }
     let dir = resolve_run_dir(root, run_id)?;
+    // A surface that cannot see its caller (MCP, HTTP) still never lets a
+    // step of the run's own tree speak for the person about its sends.
+    apb_engine::review::channel::refuse_own_run(&dir, &apb_core::step_env::StepCaller::from_env())?;
     let note = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
     apb_engine::connector::intent::resolve_by_person(&dir, intent, sent, note, caller.by).map_err(
         |e| match e {

@@ -7,14 +7,19 @@
 //!    confirm it; an earlier push that was not sent spends its consent;
 //! 2. an open request waits for a decision carrying the plan's nonce;
 //!    `skip` finishes `skipped`, `publish` re-plans at once;
-//! 3. the read-only plan refuses with a code, finishes when there is
-//!    nothing to push, or is journaled and asked about;
+//! 3. a node that requires an approval is checked first
+//!    ([`super::approval::check_before`]); the read-only plan then refuses
+//!    with a code (`approval_mismatch` when `HEAD` is not the commit the
+//!    approved source result was taken at), finishes when there is nothing
+//!    to push, or is journaled (its digest naming the approval) and asked
+//!    about;
 //! 4. a plan identical to the one a person just consented to (also after a
 //!    crash between the decision and the push) is recorded in the ledger,
 //!    pushed, and settled from what git reported.
 //!
 //! No recommendation is asked for and no decision is ever posted
-//! automatically: the consent is a person's.
+//! automatically: the consent is a person's, and on a `person_only` node
+//! only one through a person's channel is consumed.
 
 use super::review_gate::{Consume, GateDrive, GateRequest, GateStep, await_decision};
 use super::*;
@@ -24,7 +29,7 @@ use apb_core::publish::{self as core_publish, OPTION_PUBLISH, OPTION_SKIP, outpu
 
 use crate::connector::intent::{Admission, IntentState, ledger};
 use crate::publish::intent as push_intent;
-use crate::publish::plan::{Plan, PlanInput, Planned};
+use crate::publish::plan::{Plan, PlanApproval, PlanInput, Planned};
 use crate::publish::push::{Remote, RemoteHead};
 
 /// What one look at a publish node found.
@@ -59,6 +64,7 @@ struct Spec<'a> {
     timeout: u64,
     prompt: Option<&'a str>,
     title: Option<&'a str>,
+    person_only: bool,
 }
 
 fn spec<'a>(playbook: &'a Playbook, node: &str) -> Result<Spec<'a>, EngineError> {
@@ -79,6 +85,7 @@ fn spec<'a>(playbook: &'a Playbook, node: &str) -> Result<Spec<'a>, EngineError>
             timeout: timeout_seconds.unwrap_or(core_publish::DEFAULT_TIMEOUT_SECONDS),
             prompt: prompt.as_deref(),
             title: n.title.as_deref(),
+            person_only: n.person_only,
         }),
         _ => Err(EngineError::Invalid(format!(
             "node `{node}` is not a publish node"
@@ -174,6 +181,7 @@ pub(crate) fn step(r: &PublishRun<'_>, d: &mut GateDrive<'_>) -> Result<PublishS
         let consume = Consume::Nonce {
             nonce,
             consumed: decided_for(&events, &node, plan_digest),
+            person_only: s.person_only,
         };
         // The request is open, so it is never declared again here.
         let step = await_decision(d, consume, |_, _| {
@@ -184,7 +192,11 @@ pub(crate) fn step(r: &PublishRun<'_>, d: &mut GateDrive<'_>) -> Result<PublishS
         return decided(d, &node, plan_digest, step);
     }
 
-    // 3. Plan, read-only.
+    // 3. The approval the node requires, then the plan, read-only.
+    let approval = match approval_of(d, &node, &events, s.from) {
+        Ok(a) => a,
+        Err(failure) => return finished(d, &node, NodeStatus::Failed, failure.to_string()),
+    };
     let tree = source_tree(r, d, &s)?;
     let branch = match s.branch {
         Some(t) => Some(render_node_prompt(
@@ -210,6 +222,10 @@ pub(crate) fn step(r: &PublishRun<'_>, d: &mut GateDrive<'_>) -> Result<PublishS
         writable: &writable,
         scrub: r.scrub,
         abort: Some(r.abort),
+        approval: approval.as_ref().map(|(nonce, head)| PlanApproval {
+            nonce,
+            head: head.as_ref().map(Option::as_deref),
+        }),
     };
     let plan = match crate::publish::plan::plan(&input) {
         Planned::Refused { why, detail } => {
@@ -237,12 +253,46 @@ pub(crate) fn step(r: &PublishRun<'_>, d: &mut GateDrive<'_>) -> Result<PublishS
     let consume = Consume::Nonce {
         nonce: &plan.nonce,
         consumed: decided_for(&events, &node, &plan.digest),
+        person_only: s.person_only,
     };
     let step = await_decision(d, consume, |log, _| {
         log.append(plan.event(&node, s.from))?;
         Ok(request(&node, &s, &plan))
     })?;
     decided(d, &node, &plan.digest, step)
+}
+
+/// The commit an approved `from` result was taken at, as
+/// [`super::approval::approved_head`] answers it.
+type ApprovedHead = Option<Option<String>>;
+
+/// The approval a node with `requires_approval` acts on, checked before
+/// it plans (the drive's admission leaves a publish node to this arm, so a
+/// plan after a resume or a consent is checked too): the binding nonce the
+/// plan digest names, and the commit the approved `from` result was taken
+/// at (see [`super::approval::approved_head`]). `Ok(None)` for a node
+/// without the declaration.
+fn approval_of(
+    d: &GateDrive<'_>,
+    node: &str,
+    events: &[Event],
+    from: &str,
+) -> Result<Option<(String, ApprovedHead)>, crate::approval::ApprovalFailure> {
+    let Some(n) = d.playbook.node(node) else {
+        return Ok(None);
+    };
+    if n.requires_approval.is_none() {
+        return Ok(None);
+    }
+    super::approval::check_before(d.run_dir, d.playbook, n, events)?;
+    let binding = super::approval::approved_binding(n, events).ok_or_else(|| {
+        crate::approval::ApprovalFailure {
+            refusal: crate::approval::ApprovalRefusal::ApprovalMissing,
+            detail: format!("node `{node}` acts on no bound decision"),
+        }
+    })?;
+    let head = super::approval::approved_head(d.run_dir, d.playbook, n, binding, from);
+    Ok(Some((binding.nonce.clone(), head)))
 }
 
 /// The source node's tree, resolved exactly as provenance resolves it.
@@ -321,6 +371,7 @@ fn request(node: &str, s: &Spec<'_>, plan: &Plan) -> GateRequest {
         plan.outside_push_suspected,
         s.prompt,
         &plan.nonce,
+        s.person_only,
     );
     GateRequest {
         event: EventPayload::ReviewRequested {
@@ -331,6 +382,10 @@ fn request(node: &str, s: &Spec<'_>, plan: &Plan) -> GateRequest {
             prompt: s.prompt.map(str::to_string),
             recommendation: None,
             plan_digest: Some(plan.digest.clone()),
+            // A publish request binds its plan through the plan digest; an
+            // approval it acts on is a line of that digest.
+            binding: None,
+            person_only: s.person_only,
         },
         auto: None,
     }
@@ -353,12 +408,16 @@ fn decided(
             if entry.cmd.decision == OPTION_SKIP {
                 start_visit(d.run_dir, d.log, node)?;
             }
-            d.log.append(EventPayload::review_decided(
+            let mut decided = EventPayload::review_decided(
                 node,
                 entry.cmd.decision.clone(),
                 entry.cmd.note.clone(),
                 Some(digest.to_string()),
-            ))?;
+            );
+            if let EventPayload::ReviewDecided { via, .. } = &mut decided {
+                *via = entry.channel.filter(|c| c.is_surface());
+            }
+            d.log.append(decided)?;
             if entry.cmd.decision == OPTION_SKIP {
                 Ok(PublishStep::Finished(
                     NodeStatus::Succeeded,

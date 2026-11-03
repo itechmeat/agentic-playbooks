@@ -9,8 +9,11 @@
 //! checks everything again, so an action shown as available can still be
 //! refused.
 
+use apb_engine::decision_channel::DecisionChannel;
 use apb_engine::next_action::start::{StartAction, StartOf};
-use apb_engine::next_action::{ActionArg, ActionCode, ArgValue, NextAction, Principal, RunActions};
+use apb_engine::next_action::{
+    ActionArg, ActionCode, ArgValue, CallerRefusal, NextAction, Principal, RunActions,
+};
 use serde_json::{Map, Value, json};
 
 /// Who reads the actions.
@@ -41,9 +44,9 @@ fn mutates(code: ActionCode) -> bool {
 impl ActionCaller {
     /// Whether this caller may take `code`, which the run accepts from
     /// `principals`, and if not, why.
-    fn refusal(self, code: ActionCode, principals: &[Principal]) -> Option<&'static str> {
+    fn refusal(self, code: ActionCode, principals: &[Principal]) -> Option<CallerRefusal> {
         if self == ActionCaller::ReadOnly {
-            return mutates(code).then_some(READ_ONLY_REFUSAL);
+            return mutates(code).then_some(CallerRefusal::ReadOnlyServer);
         }
         let has = |p: Principal| principals.contains(&p);
         let ok = match self {
@@ -58,14 +61,33 @@ impl ActionCaller {
             return None;
         }
         Some(match self {
-            ActionCaller::Supervisor => {
-                "the run does not take this from its supervisor; relay it to the person"
-            }
-            ActionCaller::Host if has(Principal::Supervisor) => {
-                "only the run's supervisor session takes this"
-            }
-            _ => "the run does not take this from this caller",
+            ActionCaller::Supervisor => CallerRefusal::RelayToPerson,
+            ActionCaller::Host if has(Principal::Supervisor) => CallerRefusal::SupervisorOnly,
+            _ => CallerRefusal::NotThisCaller,
         })
+    }
+
+    /// The channel this caller's decisions come through: this MCP server's
+    /// ([`mcp_channel`]) for a session, the CLI's for a person
+    /// at `apb runs <id> --json` (a run step's inside one, the terminal at
+    /// one, else the CLI without a terminal).
+    pub fn channel(self) -> DecisionChannel {
+        use std::io::IsTerminal as _;
+        match self {
+            ActionCaller::Person => {
+                if apb_core::step_env::StepCaller::from_env()
+                    .describe()
+                    .is_some()
+                {
+                    DecisionChannel::RunStep
+                } else if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+                    DecisionChannel::Terminal
+                } else {
+                    DecisionChannel::CliUnattended
+                }
+            }
+            _ => mcp_channel(),
+        }
     }
 
     /// Whether this caller passes the action on to its person rather than
@@ -239,7 +261,9 @@ pub fn render(a: &NextAction, caller: ActionCaller) -> Value {
             json!({ "name": "token", "required": true, "hint": "your supervisor session token" }),
         );
     }
-    let refusal = caller.refusal(a.code, &a.principals);
+    // Whom the run accepts it from first, then this caller's channel (a
+    // person-only gate, a step's own run) as the surface marked it.
+    let refusal = caller.refusal(a.code, &a.principals).or(a.caller_refusal);
     let mut out = json!({
         "code": a.code,
         "run_id": a.run_id,
@@ -252,7 +276,7 @@ pub fn render(a: &NextAction, caller: ActionCaller) -> Value {
         "reason": a.reason,
     });
     if let Some(why) = refusal {
-        out["caller_refusal"] = json!(why);
+        out["caller_refusal"] = json!(why.as_str());
     }
     if refusal.is_none() && caller.relays(&a.principals) {
         out["relay_to_person"] = json!(true);
@@ -268,6 +292,32 @@ pub fn render(a: &NextAction, caller: ActionCaller) -> Value {
         out["unattended"] = json!(u);
     }
     out
+}
+
+/// The channel of a decision through this MCP server: a run step's when
+/// the server runs inside one (`APB_RUN_ID` or `APB_HOST_TASK` in its
+/// environment), else the agent channel. Neither decides a person-only
+/// gate.
+pub fn mcp_channel() -> DecisionChannel {
+    if apb_core::step_env::StepCaller::from_env()
+        .describe()
+        .is_some()
+    {
+        DecisionChannel::RunStep
+    } else {
+        DecisionChannel::Mcp
+    }
+}
+
+/// Marks the actions of the runs under `runs_dir` with what `caller`'s
+/// channel may not take ([`apb_engine::next_action::mark_for_caller`]).
+pub fn mark(actions: &mut RunActions, runs_dir: &std::path::Path, caller: ActionCaller) {
+    apb_engine::next_action::mark_for_caller(
+        actions,
+        runs_dir,
+        caller.channel(),
+        &apb_core::step_env::StepCaller::from_env(),
+    );
 }
 
 /// Adds `next_actions` (each action as a tool call), `primary` (its index)
@@ -353,6 +403,8 @@ mod tests {
             auto: None,
             command: None,
             unattended: None,
+            person_only: false,
+            caller_refusal: None,
             reason: "node `ask` asks a question".into(),
         }
     }
@@ -473,7 +525,7 @@ mod tests {
         );
         let v = render(&human, ActionCaller::Supervisor);
         assert_eq!(v["available_to_caller"], false);
-        assert!(v["caller_refusal"].as_str().unwrap().contains("relay"));
+        assert_eq!(v["caller_refusal"], "relay_to_person");
         assert_eq!(v["fill"][0]["name"], "token");
         assert!(v["arguments"].get("run_id").is_none());
 
@@ -484,6 +536,7 @@ mod tests {
         );
         let v = render(&retry, ActionCaller::Host);
         assert_eq!(v["available_to_caller"], false);
+        assert_eq!(v["caller_refusal"], "supervisor_only");
         assert_eq!(v["tool"], "supervisor_node_retry");
         assert_eq!(
             render(&retry, ActionCaller::Supervisor)["available_to_caller"],
@@ -492,6 +545,10 @@ mod tests {
         assert_eq!(
             render(&retry, ActionCaller::Person)["available_to_caller"],
             false
+        );
+        assert_eq!(
+            render(&retry, ActionCaller::Person)["caller_refusal"],
+            "not_this_caller"
         );
     }
 

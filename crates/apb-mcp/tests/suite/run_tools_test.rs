@@ -1125,15 +1125,11 @@ fn run_wait_answer_is_built_from_the_observation_the_wait_decided_on() {
         definition: None,
     })
     .unwrap();
-    log.append(EventPayload::ReviewRequested {
-        node: "gate".into(),
-        options: vec!["approved".into(), "rejected".into()],
-        title: None,
-        instruction: String::new(),
-        prompt: None,
-        recommendation: None,
-        plan_digest: None,
-    })
+    log.append(EventPayload::review_requested(
+        "gate",
+        vec!["approved".into(), "rejected".into()],
+        String::new(),
+    ))
     .unwrap();
 
     let res = wait_run_with(
@@ -1147,13 +1143,12 @@ fn run_wait_answer_is_built_from_the_observation_the_wait_decided_on() {
     assert_eq!(res.reason, WaitReason::NeedsInput);
 
     // The gate is decided after the wait returned.
-    log.append(EventPayload::ReviewDecided {
-        node: "gate".into(),
-        decision: "approved".into(),
-        note: String::new(),
-        plan_digest: None,
-        decided_by: None,
-    })
+    log.append(EventPayload::review_decided(
+        "gate",
+        "approved",
+        String::new(),
+        None,
+    ))
     .unwrap();
 
     let out = apb_mcp::tools::run_wait_result(dir.path(), "r1", &res).unwrap();
@@ -1641,4 +1636,74 @@ fn run_status_says_a_resend_went_out_and_the_first_send_is_unknown() {
         .unwrap()
         .to_string();
     assert!(report.contains(&resent_text("gap")), "{report}");
+}
+
+/// `run_resume` with a `from_node` behind a person-only gate no person
+/// decided: an agent never goes past it, so the tool refuses with the way a
+/// person does it and journals nothing.
+#[test]
+fn run_resume_from_a_node_past_an_undecided_person_only_gate_is_refused() {
+    use apb_engine::event::{EventLog, EventPayload};
+    const GATED: &str = "schema: 2\nid: gated\nname: gated\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: g, type: human_review, options: [approve, reject], person_only: true }\n  - { id: d, type: script, script: scripts/d.sh, runner: sh }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: g }\n  - { from: g, to: d }\n  - { from: d, to: done }\n";
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    apb_core::registry::init_project(root).unwrap();
+    let run_dir = root.join(".apb/runs/gated-1");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("playbook.yaml"), GATED).unwrap();
+    let mut log = EventLog::open(&run_dir).unwrap();
+    for p in [
+        EventPayload::RunStarted {
+            playbook: "gated".into(),
+            version: "1.0.0".into(),
+            definition: None,
+        },
+        EventPayload::node_finished("start", "succeeded", 1, String::new()),
+        EventPayload::ReviewRequested {
+            node: "g".into(),
+            options: vec!["approve".into(), "reject".into()],
+            title: None,
+            instruction: String::new(),
+            prompt: None,
+            recommendation: None,
+            plan_digest: None,
+            binding: None,
+            person_only: true,
+        },
+        EventPayload::RunPaused {
+            reason: "away".into(),
+            by: Some(apb_engine::pause::PauseBy::Operator),
+            mode: None,
+            until: None,
+            keep_lock: false,
+        },
+    ] {
+        log.append(p).unwrap();
+    }
+    let err =
+        apb_mcp::tools::run_resume(root, "gated-1", Some("d"), false, None, None).unwrap_err();
+    match &err {
+        apb_mcp::tools::ToolError::Refused { refusal, message } => {
+            assert_eq!(
+                *refusal,
+                apb_engine::decision_channel::CallerRefusal::AgentChannel
+            );
+            assert!(
+                message.starts_with("approval_weakened: `d` skips gate `g`"),
+                "{message}"
+            );
+            assert!(
+                message.contains("apb resume gated-1 --from-node d"),
+                "{message}"
+            );
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(
+        !apb_engine::event::read_all(&run_dir)
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunResumed { .. })),
+        "a refused resume journals nothing"
+    );
 }

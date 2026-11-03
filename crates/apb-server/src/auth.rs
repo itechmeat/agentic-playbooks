@@ -681,6 +681,39 @@ pub fn client_ctx(auth: &AuthState, headers: &HeaderMap, peer: Option<IpAddr>) -
     }
 }
 
+/// The credential a request reached a handler with, as a decision channel
+/// sees it. The middleware inserts it beside [`ClientCtx`]; a handler that
+/// posts a decision maps it to its channel ([`RequestChannel::channel`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestChannel {
+    /// No keys exist: anything on the machine reaches the dashboard.
+    Keyless,
+    /// A bearer key (the CLI, scripts, CI, a process holding a key).
+    Bearer,
+    /// A signed-in browser session (cookie; a write also carries the CSRF
+    /// marker).
+    Session,
+}
+
+impl RequestChannel {
+    /// The decision channel of a request with this credential.
+    pub fn channel(self) -> apb_engine::decision_channel::DecisionChannel {
+        use apb_engine::decision_channel::DecisionChannel;
+        match self {
+            RequestChannel::Keyless => DecisionChannel::DashboardKeyless,
+            RequestChannel::Bearer => DecisionChannel::HttpBearer,
+            RequestChannel::Session => DecisionChannel::DashboardSession,
+        }
+    }
+
+    /// The decision channel of a request whose handler found no credential
+    /// marked (a route the middleware lets through without one): never a
+    /// person's.
+    pub fn of(found: Option<RequestChannel>) -> apb_engine::decision_channel::DecisionChannel {
+        found.unwrap_or(RequestChannel::Keyless).channel()
+    }
+}
+
 /// How a request proved its identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Credential {
@@ -957,6 +990,7 @@ pub async fn auth_middleware(
         if !keyless_write_allowed(req.method(), req.uri().path(), req.headers()) {
             return deny_framing(forbidden_csrf());
         }
+        req.extensions_mut().insert(RequestChannel::Keyless);
         return deny_framing(next.run(req).await);
     }
 
@@ -999,7 +1033,14 @@ pub async fn auth_middleware(
         Credential::Cookie if !is_safe_method(&method) && !has_csrf_marker(req.headers()) => {
             forbidden_csrf()
         }
-        _ => next.run(req).await,
+        Credential::Cookie => {
+            req.extensions_mut().insert(RequestChannel::Session);
+            next.run(req).await
+        }
+        Credential::Bearer => {
+            req.extensions_mut().insert(RequestChannel::Bearer);
+            next.run(req).await
+        }
     };
     deny_framing(res)
 }

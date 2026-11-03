@@ -10,6 +10,7 @@ pub mod adapter;
 pub mod agent_env;
 mod agent_home;
 pub mod agent_probe;
+pub mod approval;
 pub mod baseline;
 pub mod budget;
 // candidate trials (issue #192)
@@ -22,6 +23,7 @@ pub mod consent;
 pub mod context;
 pub mod control;
 pub mod decision;
+pub mod decision_channel;
 pub mod diagnostics;
 pub mod driver;
 mod env_duration;
@@ -125,12 +127,62 @@ static ISOLATE_TEST_CONFIG: extern "C" fn() = isolate_test_config;
 
 #[cfg(test)]
 extern "C" fn isolate_test_config() {
-    let dir = std::env::temp_dir().join(format!("apb-engine-unit-xdg-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let created = own_test_dir(&std::env::temp_dir(), "apb-engine-unit-xdg");
+    let dir = created.clone().unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("apb-engine-unit-xdg-{}", std::process::id()))
+    });
     // SAFETY: runs before `main`, so no other thread exists yet.
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", &dir);
         std::env::remove_var("APB_CONFIG_DIR");
+    }
+    // Every test process (nextest runs one per test) removes its own
+    // directory when it exits, so none is left behind in the temp dir.
+    let Some(dir) = created else { return };
+    let _ = TEST_CONFIG_DIR.set(dir);
+    // SAFETY: registers a plain function with no captured state.
+    #[cfg(unix)]
+    unsafe {
+        libc::atexit(remove_test_config);
+    }
+}
+
+/// A directory under `parent` this process created itself: named by the
+/// pid and a random suffix and made with `create_dir`, a name taken already
+/// tried again with another suffix, so the at-exit removal only ever
+/// removes what this process made. `None` when none could be made.
+#[cfg(test)]
+fn own_test_dir(parent: &std::path::Path, prefix: &str) -> Option<std::path::PathBuf> {
+    use std::hash::{BuildHasher, Hasher};
+    for _ in 0..16 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_nanos(),
+        );
+        let dir = parent.join(format!(
+            "{prefix}-{}-{:016x}",
+            std::process::id(),
+            h.finish()
+        ));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Some(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+static TEST_CONFIG_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+#[cfg(all(test, unix))]
+extern "C" fn remove_test_config() {
+    if let Some(dir) = TEST_CONFIG_DIR.get() {
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

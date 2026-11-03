@@ -66,6 +66,20 @@ export const DISPLAY_CAP = RESULT_DISPLAY_CAP
 // The paths a capture's scrub changed are stored as numbered placeholders.
 const REDACTED_PATH_PREFIX = '<redacted path '
 
+/** The element id of a snapshot's row in the results panel, the target the
+ * review panel's links into it scroll to. */
+export function snapshotAnchorId(snapshotId: string): string {
+  return `run-results-snapshot-${snapshotId}`
+}
+
+/** Scrolls the results panel to a snapshot's row; false when the panel
+ * does not show it (no results read yet, or a row the view left out). */
+export function scrollToSnapshot(snapshotId: string): boolean {
+  const el = document.getElementById(snapshotAnchorId(snapshotId))
+  el?.scrollIntoView({ block: 'center' })
+  return el !== null
+}
+
 export function isRedactedPath(path: string | undefined): boolean {
   return path !== undefined && path.startsWith(REDACTED_PATH_PREFIX)
 }

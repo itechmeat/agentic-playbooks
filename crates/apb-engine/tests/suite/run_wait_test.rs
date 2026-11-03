@@ -245,15 +245,11 @@ fn supervisor_wait_returns_wakes_reviews_and_the_end_in_seq_order() {
         })
         .unwrap();
     let review = log
-        .append(EventPayload::ReviewRequested {
-            node: "gate".into(),
-            options: vec!["approved".into()],
-            title: None,
-            instruction: "decide".into(),
-            prompt: None,
-            recommendation: None,
-            plan_digest: None,
-        })
+        .append(EventPayload::review_requested(
+            "gate",
+            vec!["approved".into()],
+            "decide",
+        ))
         .unwrap();
     log.append(EventPayload::RunFinished {
         outcome: "failed".into(),

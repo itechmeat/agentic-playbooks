@@ -980,3 +980,204 @@ fn a_retry_now_that_cannot_start_beside_a_parked_review_says_why() {
     let shown = String::from_utf8_lossy(&shown.stdout);
     assert!(shown.contains("work\tretry_waiting\t"), "{shown}");
 }
+
+/// A person-only gate's action, printed by `apb runs` without a terminal,
+/// says the CLI here cannot take it and why.
+#[test]
+fn a_person_only_gate_is_printed_as_not_takeable_without_a_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), &[]);
+    let run = dir.path().join(".apb/runs/r");
+    fs::write(
+        run.join("playbook.yaml"),
+        GATED.replace(
+            "type: human_review,",
+            "type: human_review, person_only: true,",
+        ),
+    )
+    .unwrap();
+    let events = fs::read_to_string(run.join("events.jsonl"))
+        .unwrap()
+        .replace(
+            "\"type\":\"review_requested\"",
+            "\"type\":\"review_requested\",\"person_only\":true",
+        );
+    fs::write(run.join("events.jsonl"), events).unwrap();
+    let out = crate::common::apb_std()
+        .args(["runs", "r"])
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("no_terminal"), "{stdout}");
+}
+
+/// `apb review` at a pseudo-terminal: the typed confirmation a person-only
+/// gate needs, refused without a terminal and inside a run step.
+mod review_terminal {
+    use std::fs;
+    use std::path::Path;
+
+    const PERSON_ONLY: &str = "schema: 2\nid: po\nname: po\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: gate, type: human_review, person_only: true }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: gate }\n  - { from: gate, to: f }\n";
+
+    const ORDINARY: &str = "schema: 2\nid: or\nname: or\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: gate, type: human_review }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: gate }\n  - { from: gate, to: f }\n";
+
+    /// A project with run `id` of `playbook`, its gate's request open.
+    fn seed(root: &Path, id: &str, playbook: &str, person_only: bool) {
+        fs::create_dir_all(root.join(".apb/playbooks")).unwrap();
+        let dir = root.join(".apb/runs").join(id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("playbook.yaml"), playbook).unwrap();
+        let mut req = serde_json::json!({"seq": 1, "ts": 2, "type": "review_requested", "node": "gate", "options": ["approve", "reject"]});
+        if person_only {
+            req["person_only"] = serde_json::json!(true);
+        }
+        let lines = [
+            serde_json::json!({"seq": 0, "ts": 1, "type": "run_started", "playbook": "p", "version": "1.0.0"}),
+            req,
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        fs::write(dir.join("events.jsonl"), text).unwrap();
+    }
+
+    /// The channel entries queued for run `id`.
+    fn queued(root: &Path, id: &str) -> Vec<serde_json::Value> {
+        fs::read_to_string(root.join(".apb/runs").join(id).join("reviews.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    fn review(root: &Path, id: &str, env: &[(&str, &str)]) -> std::process::Output {
+        let mut cmd = crate::common::apb_std();
+        cmd.args(["review", id, "gate", "--decision", "approve"])
+            .current_dir(root)
+            .stdin(std::process::Stdio::null());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.output().unwrap()
+    }
+
+    /// Without a terminal the CLI is not a person's channel.
+    #[test]
+    fn without_a_terminal_a_person_only_gate_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed(tmp.path(), "r1", PERSON_ONLY, true);
+        let out = review(tmp.path(), "r1", &[]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains("no_terminal"), "{stderr}");
+        assert!(queued(tmp.path(), "r1").is_empty());
+    }
+
+    /// A step never decides a gate of its own run, person-only or not.
+    #[test]
+    fn a_run_step_never_decides_its_own_runs_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed(tmp.path(), "r1", ORDINARY, false);
+        let out = review(tmp.path(), "r1", &[("APB_RUN_ID", "r1")]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains("run_step_own_run"), "{stderr}");
+        assert!(queued(tmp.path(), "r1").is_empty());
+    }
+
+    /// At a terminal, typing the option decides the gate through the terminal
+    /// channel; typing anything else decides nothing; a run step at a terminal
+    /// is still refused.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn at_a_terminal_the_typed_option_decides_a_person_only_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = crate::common::sandbox_config_dir();
+        seed(tmp.path(), "r1", PERSON_ONLY, true);
+        let args = ["review", "r1", "gate", "--decision", "approve"];
+
+        let Some((code, shown)) =
+            crate::common::on_a_terminal(tmp.path(), cfg, &args, &[], b"reject\n")
+        else {
+            // Card B2 rests on this test: where it must run (CI, or the corpus
+            // gate's `APB_CORPUS_REQUIRED=1`), a missing `script` fails it.
+            let required = std::env::var_os("CI").is_some()
+                || std::env::var("APB_CORPUS_REQUIRED").is_ok_and(|v| v == "1");
+            assert!(
+                !required,
+                "no `script` to make a terminal, and this test must run here"
+            );
+            eprintln!("skipped: no `script` to make a terminal");
+            return;
+        };
+        assert_ne!(code, 0, "{shown}");
+        assert!(shown.contains("Type the option to confirm"), "{shown}");
+        assert!(queued(tmp.path(), "r1").is_empty(), "{shown}");
+
+        let (code, shown) = crate::common::on_a_terminal(
+            tmp.path(),
+            cfg,
+            &args,
+            &[("APB_RUN_ID", "other")],
+            b"approve\n",
+        )
+        .unwrap();
+        assert_ne!(code, 0, "{shown}");
+        assert!(shown.contains("run_step"), "{shown}");
+        assert!(queued(tmp.path(), "r1").is_empty(), "{shown}");
+
+        let (code, shown) =
+            crate::common::on_a_terminal(tmp.path(), cfg, &args, &[], b"approve\n").unwrap();
+        assert_eq!(code, 0, "{shown}");
+        let entries = queued(tmp.path(), "r1");
+        assert_eq!(entries.len(), 1, "{shown}");
+        assert_eq!(entries[0]["channel"], "terminal");
+        assert_eq!(entries[0]["request"], 1);
+    }
+
+    /// `apb resume --from-node` past a person-only gate no person decided:
+    /// refused (3) without a terminal and inside a run step, and at a
+    /// terminal only the typed node goes past it.
+    #[test]
+    fn a_resume_past_an_undecided_person_only_gate_needs_a_person() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed(tmp.path(), "r1", PERSON_ONLY, true);
+        let resume = |env: &[(&str, &str)]| {
+            let mut cmd = crate::common::apb_std();
+            cmd.args(["resume", "r1", "--from-node", "f"])
+                .current_dir(tmp.path())
+                .stdin(std::process::Stdio::null());
+            for (k, v) in env {
+                cmd.env(k, v);
+            }
+            cmd.output().unwrap()
+        };
+        for (env, refusal) in [
+            (&[][..], "no_terminal"),
+            (&[("APB_RUN_ID", "other")][..], "run_step"),
+        ] {
+            let out = resume(env);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(3), "{stderr}");
+            assert!(
+                stderr.contains("resume refused: approval_weakened: `f` skips gate `gate`"),
+                "{stderr}"
+            );
+            assert!(stderr.contains(refusal), "{stderr}");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let cfg = crate::common::sandbox_config_dir();
+            let args = ["resume", "r1", "--from-node", "f"];
+            if let Some((code, shown)) =
+                crate::common::on_a_terminal(tmp.path(), cfg, &args, &[], b"gate\n")
+            {
+                assert_eq!(code, 3, "{shown}");
+                assert!(shown.contains("Type the node to confirm"), "{shown}");
+                assert!(shown.contains("not confirmed"), "{shown}");
+            }
+        }
+        let journal = fs::read_to_string(tmp.path().join(".apb/runs/r1/events.jsonl")).unwrap();
+        assert!(!journal.contains("run_resumed"), "{journal}");
+    }
+}

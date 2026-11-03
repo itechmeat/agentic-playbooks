@@ -444,15 +444,11 @@ fn a_request_left_open_by_a_crash_is_decided_on_resume() {
     // What the crashed drive left: the request, and nothing in the channel.
     apb_engine::event::EventLog::open(&dir)
         .unwrap()
-        .append(EventPayload::ReviewRequested {
-            node: "gate".into(),
-            options: vec!["approve".into(), "reject".into()],
-            title: None,
-            instruction: String::new(),
-            prompt: None,
-            recommendation: None,
-            plan_digest: None,
-        })
+        .append(EventPayload::review_requested(
+            "gate",
+            vec!["approve".into(), "reject".into()],
+            String::new(),
+        ))
         .unwrap();
     assert!(!dir.join("reviews.jsonl").exists());
     let root = p.root();

@@ -385,6 +385,53 @@ awaiting_consent: boolean, push?: PushView,
  */
 result?: string, };
 
+export type BindingMissingReason = "not_run" | "no_snapshot";
+
+export type BindingMissing = { node: string, reason: BindingMissingReason, };
+
+export type BoundSnapshot = { node: string, 
+/**
+ * The node's execution number (1-based) the snapshot was taken for.
+ */
+execution: number, 
+/**
+ * The list item, for an item snapshot.
+ */
+item?: string, 
+/**
+ * The seq of the settlement event that stamped the snapshot.
+ */
+settlement_seq: number, snapshot_id: string, 
+/**
+ * Entries left out of the snapshot.
+ */
+omitted?: number, 
+/**
+ * The snapshot stopped short of what was declared.
+ */
+incomplete?: boolean, 
+/**
+ * Some entry is stored redacted: it is approved as its redacted bytes
+ * and cannot be compared with the live file.
+ */
+redacted?: boolean, };
+
+export type ReviewBinding = { 
+/**
+ * The binding nonce of this request ([`binding_nonce`]): an approving
+ * decision carries it.
+ */
+nonce: string, snapshots: Array<BoundSnapshot>, 
+/**
+ * Named nodes with no snapshot to bind; approving such a request does
+ * not approve them.
+ */
+missing?: Array<BindingMissing>, };
+
+export type ApprovalRefusal = "approval_missing" | "approval_stale" | "approval_snapshot_unreadable" | "approval_incomplete" | "approval_unverifiable" | "approval_mismatch";
+
+export type DecisionChannel = "terminal" | "cli_unattended" | "dashboard_session" | "dashboard_keyless" | "http_bearer" | "mcp" | "run_step" | "scenario" | "engine" | "unattended" | "unknown";
+
 export type PendingReview = { node: string, 
 /**
  * The gate node's title from the playbook, when it has one.
@@ -422,7 +469,17 @@ recommendation?: ReviewRecommendation,
  * For a publish gate: the exact plan the person consents to, with the
  * nonce a consent must carry. `None` for a `human_review` gate.
  */
-publish?: PlanView, };
+publish?: PlanView, 
+/**
+ * For a gate with `approves:`: the snapshots the open request is bound
+ * to, with the nonce an approving decision must carry.
+ */
+binding?: ReviewBinding, 
+/**
+ * Only a person's channel decides this gate: the CLI at a terminal or
+ * the dashboard with a signed-in session.
+ */
+person_only?: boolean, };
 
 export type PendingSupervisor = { node: string, 
 /**
@@ -2051,6 +2108,8 @@ export type ActionCode = "answer_question" | "decide_review" | "decide_publish" 
 
 export type Principal = "person" | "operator" | "host" | "supervisor";
 
+export type CallerRefusal = "read_only_server" | "supervisor_only" | "relay_to_person" | "not_this_caller" | "agent_channel" | "run_step" | "no_terminal" | "keyless_dashboard" | "bearer_key" | "run_step_own_run";
+
 export type RequestKind = "question" | "review" | "publish";
 
 export type RequestRef = { kind: RequestKind, seq: number, nonce?: string, };
@@ -2098,7 +2157,19 @@ command?: string,
  * attended or not, so a CI author sees what the mode would do. Absent
  * where it does not apply.
  */
-unattended?: UnattendedOutcome, };
+unattended?: UnattendedOutcome, 
+/**
+ * Only a person's channel takes it: the CLI at an interactive terminal
+ * outside a run step, or the dashboard with a signed-in session (a
+ * gate marked `person_only`).
+ */
+person_only?: boolean, 
+/**
+ * Why the surface that shows it does not take it from its caller
+ * ([`super::mark_for_caller`]); absent when the caller may take it, or
+ * on a surface that does not say.
+ */
+caller_refusal?: CallerRefusal, };
 
 export type StopVerdict = "finished" | "progresses_by_itself" | "stopped" | "needs_input";
 

@@ -902,13 +902,7 @@ mod tests {
     fn decided(seq: u64, node: &str, decision: &str, note: &str) -> Event {
         ev(
             seq,
-            EventPayload::ReviewDecided {
-                node: node.into(),
-                decision: decision.into(),
-                note: note.into(),
-                plan_digest: None,
-                decided_by: None,
-            },
+            EventPayload::review_decided(node, decision, note, None),
         )
     }
 

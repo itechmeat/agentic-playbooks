@@ -1833,6 +1833,113 @@ unattended run decides (or fails at) on its own terms. A
 `publish` node never has an unattended outcome: an unattended run fails
 there with `hitl_required`.
 
+### Approving exact results (approves, requires_approval)
+
+A review can approve exactly what earlier nodes produced, and a later node
+can refuse to act on anything else:
+
+```yaml
+nodes:
+  - id: implement
+    type: agent_task
+    profile: coder
+    prompt: "Write the change and docs/report.md"
+    results: [{ path: CHANGELOG.md }, { path: docs/report.md }]
+  - id: review
+    type: human_review
+    options: [approve, rework]
+    approves: { results: [implement] }        # options: [approve] by default
+  - id: ship
+    type: script
+    script: scripts/ship.sh
+    runner: sh
+    requires_approval: { gate: review }       # of: [implement], live: check
+edges:
+  - { from: implement, to: review, max_traversals: 3 }
+  - { from: review, to: ship, condition: { type: review_status, equals: approve } }
+  - { from: review, to: implement, condition: { type: review_status, equals: rework } }
+  - { from: ship, to: implement, condition: { type: node_status, node: ship, equals: failure } }
+```
+
+1. `approves: { results: [<node>...], options?: [<option>...] }` on a
+   `human_review` binds each request of the gate to the latest stored
+   result snapshot of every named node (for a list node, its latest visit's
+   node and item snapshots). A named node is snapshotted even without its
+   own `results:` (the output and fields then). `options` lists the options
+   that mean approval; the default is `approve` when the gate offers it,
+   else its first option. The review panel, `apb runs` and MCP
+   `pending_review.binding` show the bound snapshots with their ids and the
+   binding nonce; a named node with nothing to bind is listed as missing,
+   and approving does not approve it.
+2. An approving decision must carry the binding nonce: the dashboard
+   buttons send it, `apb review <run> review --decision approve --nonce
+   <nonce>` at the CLI, `nonce` on MCP `review_decide`. A nonce belongs to
+   one request, so a decision queued for an earlier visit never answers a
+   later one.
+3. `requires_approval: { gate, of?, live? }` on a node that does work (an
+   `agent_task`, a `script`, a sub-playbook, a `publish`, a node calling a
+   connector or declaring an effect) checks the approval when the node is
+   admitted, before it starts, and again as each execution of it begins (a
+   resume after a pause, a deferred retry, a list item): the gate's latest
+   decision is an approving
+   one covering every node in `of` (default: all of the gate's
+   `approves.results`), none of them ran again since, the bound snapshots
+   still verify and are complete, and with `live: check` (the default)
+   every approved file still hashes to its approved digest in the tree.
+   `live: ignore` keeps the first checks and lets the node act on files
+   that changed after the approval. A failed check finishes the node
+   failed with `approval_missing`, `approval_stale`,
+   `approval_snapshot_unreadable`, `approval_incomplete` or
+   `approval_unverifiable` (a file stored redacted cannot be compared) and
+   no attempt, so a failure edge can loop back for a fresh approval, as
+   `ship -> implement` does above. A publish node adds `approval_mismatch`
+   (docs/PUBLISH.md "Acting on an approval, and a person-only consent").
+4. An approval is a fact about the stored bytes, never a consent: it does
+   not let a publish push or an irreversible run start. An unattended run's
+   declared `decide` and an enforced review recommendation approve a bound
+   gate too, labelled `decided_by` in the journal; make the gate
+   `person_only` when only a person may approve it. A supervisor's patch
+   never weakens these fields nor re-points the gate's options, and no
+   patch, `node_retry`, `continue_from` or agent's `run_resume
+   from_node` moves the run past the gate without a passing decision of the
+   current visit (`approval_weakened`; docs/GUARDRAILS.md "Moving a run past
+   a gate").
+5. The re-check as each execution begins reads the tree as it is then. A
+   node whose attempt edited a bound file and was then paused is refused
+   `approval_stale` when it resumes, and so is the next item of a
+   sequential list node whose items edit a bound file. Use `live: ignore`
+   for a node that edits what it was approved on. A refused list item
+   settles as a rejection (it counts against `batch.retries`, then the item
+   needs a look); the visit goes on.
+
+### Gates only a person decides (person_only)
+
+`person_only: true` on a `human_review` or a `publish` node makes apb take
+the decision only from a person's channel: `apb review` (or `apb publish
+approve`) at an interactive terminal outside a run step, after typing the
+option to confirm, or the dashboard with keys and a signed-in session. MCP,
+the CLI without a terminal, the HTTP API with a bearer key, a dashboard
+without keys (which shows the command instead of buttons) and anything
+inside a run step are refused before anything is queued. It does not
+prove a person decided: a process that controls a terminal or holds a
+session cookie is not stopped (docs/GUARDRAILS.md "Approvals and
+person-only gates"). Separately, a run step never decides a gate or answers
+a person's question of its own run, its ancestors or its descendants, on
+any gate.
+
+| Code | Severity | What it means |
+|------|----------|---------------|
+| V155 | error | `person_only` on a node other than a `human_review` or a `publish` |
+| V156 | error | `person_only` with `auto_decide` or with `unattended: { decide }`, which would decide without a person (`unattended: fail` is fine) |
+| V157 | error | `approves` on a node other than a `human_review`; an empty `results`; a named node that is unknown, settles no result of its own (anything but an `agent_task`, a `script` or a `finish` with a prompt) or does not lead to the gate; `options` that is empty or names an option the gate does not offer |
+| V158 | error | `requires_approval` on a node that does no work; a gate that is unknown, declares no `approves` or does not lead to the node; an `of` that is empty or names a node the gate does not approve |
+
+A run using any of these fields journals a run guard, so an older apb
+refuses to continue it. An older apb that starts such a playbook ignores
+the fields and runs plain gates, and one that stops such a run can then
+resume it past its gates, so every apb that runs it must be this release
+or newer.
+
 ## Publishing (the publish node)
 
 To push what a node committed, end the work with a `publish` node instead of

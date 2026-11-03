@@ -60,6 +60,8 @@ policy to the host agent and its administrators (see "Host agent settings" below
 | `read_only: true` on `agent_task` and `script` | 3 Tool and environment | Enforced (sandbox), else detected (post-hoc) | The node must not change its tree. In the sandbox (`isolation: full`, or `best_effort` where it works) the tree and its git directory are mounted read-only, so a write fails as it happens (`enforced`). Without a sandbox apb compares the tree (initialized submodules included), each repository's `HEAD`, refs, staged index and the files that change what git does (config, hooks, `info/`), every `.gitignore` (so a new one that hides itself shows) and the `.apb` definitions at the root before and after each attempt (`detected`, or `detected_partial` above 20000 entries, 512 MiB, 8 nested repositories or 2000 git control entries): a change journals `read_only_violated` and fails the node with `read_only_dirty`, with no retry, no fallback, no reprompt and no restore; ignored files, the run's own `.apb` files, `.apb` and `.git` directories below the root and changes outside the tree are not checked. A detected-tier node never runs in a concurrent batch. Evidence names the changed paths, never their content. See ISOLATION.md "Read-only nodes". |
 | `agent_launch`, launch floor, `launch:` in `policy.yaml` | 4 Gates | Enforced (run gate) | Whether an agent may launch a playbook: `allow` (the default), `ask` (only with the nonce of the refusal, after the host asked the person) or `deny` (only a person, from the dashboard or an interactive terminal). The run's policy is the strictest over its tree of the playbook's declaration held up by its launch floor, the machine settings and the project settings. Every start, trial, plan execution, eval and resume of a run never authorized goes through the one run gate; a run authorized once stays authorized for its lifetime. See "Launch policy for agents" below. |
 | `human_review` | 4 Gates | Enforced | The run waits for a person's decision; nothing is preselected. |
+| `approves` on `human_review`, `requires_approval` on a working node | 4 Gates | Enforced (engine, at admission) | A gate's request is bound to the latest stored result snapshots of the nodes it `approves`; an approving decision must carry that binding's nonce, and the drive re-verifies every bound snapshot before it consumes the decision (a snapshot that no longer verifies ends the run `approval_snapshot_unreadable`). A node with `requires_approval` starts only when the gate's latest decision approved a binding that covers its `of` nodes, none of them ran again, the snapshots verify and are complete and, with `live: check` (the default), every bound file still hashes to its approved digest; otherwise it finishes failed with the refusal code and no attempt runs. An approval is a fact about stored bytes, never a consent: a publish still needs its own. See "Approvals and person-only gates" below. |
+| `person_only` on `human_review` and `publish` | 4 Gates | Enforced (channel) | Only a person's channel decides the gate: `apb review` (or `apb publish approve`) at an interactive terminal outside a run step after a typed confirmation, and the dashboard with a signed-in session. MCP, a run step, the CLI without a terminal, a bearer key and a dashboard without keys are refused before anything is queued; no automatic decision may be declared (V156). It does not prove that a person decided. See "Approvals and person-only gates" below. |
 | Unattended mode (`apb run --unattended`), `human_review.unattended` | 4 Gates | Enforced | A run nobody attends fails at once (`hitl_required`) at every review, publish gate and question that declares no unattended outcome, without taking a failure route, and fails `budget_exhausted` where an attended run would pause for its budget. A review may declare `unattended: { decide: <option> }`, journaled with `decided_by: unattended` and never counted as a person's consent (nor is a `decided_by` this apb does not know); the validator refuses an option that reaches an irreversible or secret step before the next gate, over edges and failure handlers (V142), and the run checks it again. An unattended review never waits: a decision lost to a crash is made on resume, one that cannot be recorded fails the run. A publish gate has no unattended outcome. Host execution and supervised modes are refused at start, and so is an unattended start from a run step of an attended run (a person, CI, an agent session or a step of an unattended run may choose the mode; a run step is recognized by its environment, as for every run-step refusal, so this keeps a cooperating step from choosing it by mistake). The mode grants no consent: irreversible starts and the launch policy are unchanged. See CI.md "Unattended runs". |
 | `judge` nodes and edges | 4 Gates | Model-decided | A decision model answers typed questions and routes; thresholds are declared, failures take `on_unavailable`. |
 | Trust digests (playbook, profile bundle, connector, account) | 4 Gates | Enforced | A changed playbook, profile, skill or connector drops its approval; MCP starts are refused until a person approves or acknowledges. |
@@ -71,6 +73,176 @@ policy to the host agent and its administrators (see "Host agent settings" below
 | Journal (`events.jsonl`), run manifest | 6 Provenance | Recorded | Every attempt, gate decision, retry, supervisor action and decision is journaled; the manifest snapshots what the run was started with. |
 | `APB_RUN_ID`, `{{run.id}}`, `Apb-Run:` trailer, `artifacts_committed` | 6 Provenance | Recorded | Links commits to runs in both directions (see HOWTO-authoring.md "Linking runs, commits and tracker records"). |
 | `apb stats`, `apb decisions report` | 6 Measurement | Read-only | Cross-run metrics from journals only, and the accuracy of each decision-model use against labels the journals hold. |
+
+## Approvals and person-only gates
+
+Both declarations live on nodes (docs/HOWTO-authoring.md "Approving exact
+results"); the design is
+`docs/superpowers/specs/2026-11-03-approvals-design.md`.
+
+### Which channel decides a person-only gate
+
+Every surface states the channel a decision arrives through. The channel
+entry (`reviews.jsonl`) carries it with the request it answers, and a
+decision through a surface journals it as `review_decided.via`.
+
+| Channel | Surface | Decides a person-only gate | Refusal code |
+|---|---|---|---|
+| `terminal` | `apb review` or `apb publish approve` at an interactive terminal outside a run step, after typing the option to confirm | yes | none |
+| `dashboard_session` | the run page of a dashboard with keys, signed in (cookie with the CSRF marker) | yes | none |
+| `cli_unattended` | the CLI without a terminal (a script, CI) | no | `no_terminal` |
+| `dashboard_keyless` | a dashboard without keys: anything on the machine reaches it | no (HTTP 403; the page shows the CLI line instead of buttons) | `keyless_dashboard` |
+| `http_bearer` | the HTTP API with a bearer key | no (HTTP 403) | `bearer_key` |
+| `mcp` | MCP `review_decide`, whoever the host says is deciding | no (tool error) | `agent_channel` |
+| `run_step` | any surface called from inside a run step (`APB_RUN_ID` or `APB_HOST_TASK` set) | no | `run_step` |
+| `scenario` | a scenario run's scripted decision | only inside a scenario run | `not_this_caller` |
+| `engine`, `unattended` | an enforced review recommendation, an unattended run's declared `decide` | never: V156 refuses both on a person-only gate | `not_this_caller` |
+
+The refusal names both ways a person decides, with the exact `apb review`
+command. The drive consumes a person-only gate's decision only from an
+entry stamped with a person's channel and the open request; a line
+appended by hand, by an older apb or through another channel stays in the
+file, is never consumed, and `apb doctor --run` lists it in its `reviews`
+row.
+
+**What this does not prove.** A process that controls a terminal, holds a
+signed-in browser session cookie, or writes apb's channel files is not
+stopped. Over MCP the server cannot tell a host agent from a person
+relaying, and over HTTP it cannot see a caller's environment, so neither
+ever counts as a person's channel.
+
+**A server key is a person's credential.** Whoever holds a key from `apb
+server key issue` can sign in to the dashboard with it (`POST
+/api/auth/login`) and decide a person-only gate through the signed-in
+session. The `bearer_key` refusal therefore guards against mistakes (a
+script posting with its key by habit), not against a key holder. Do not
+hand a key to an agent, a script or CI that must not decide person-only
+gates; `apb server key issue` and `apb doctor` (its `server keys` line)
+say so.
+
+**Host-mode tasks.** A host agent's own MCP server runs no step, so it has
+no `APB_RUN_ID`: the own-run refusal below does not reach a host task's
+subagents through that server, and MCP is never a person's channel in any
+case.
+
+**Supervisor patches.** A supervisor's patch, for the current run or for
+the next runs, never weakens these constraints: it is refused
+(`approval_weakened`) when it drops `person_only`, drops or narrows
+`approves` (fewer results, more approving options), drops or loosens
+`requires_approval` (another gate, fewer results, `live: ignore`), removes
+a node that declares one of them, or opens a way to a node that a
+person-only or approving gate stood before on every path. An in-run patch
+is refused as well when it changes where any option of such a gate routes
+(the gate's option-to-target map is frozen while the run is under way, so
+a person's `reject` never comes to lead where `approve` led).
+
+**Moving a run past a gate.** Every way of moving a run to a named node
+shares one check (`apb_engine::approval::skips_gate`): an in-run patch's
+`continue_from`, `supervisor_run_continue_from` and `supervisor_node_retry`
+(at a parked gate or at a failed node), and a resume's `from_node`. A
+person-only or approving gate that stands before the target on every path
+counts as passed only by its latest decision, and only when that decision
+answers the gate's latest request; is an approving option on that
+request's binding for a gate that `approves` results, and any option but
+`reject` for a gate that is only `person_only`; takes an edge that leads to
+the target without passing the gate again; and belongs to the current
+visit (no node started since it that leads back into the gate and not on to
+the target, as a loop back toward the gate does). A rejection, or an
+approval from an earlier loop, never lets a move past the gate. A refused
+directive is journaled as a `supervisor_action` with action
+`directive_refused` and the `approval_weakened` reason, and the run stays
+where it was: an open request stays open. A resume from such a node is
+refused (`approval_weakened`, with the channel's refusal code) through MCP
+`run_resume`, inside a run step, at the CLI without a terminal and on a
+dashboard without keys; only a person goes past the gate: `apb resume <run>
+--from-node <node>` at an interactive terminal outside a run step, after
+typing the node to confirm, or the run page of a dashboard where the person
+is signed in.
+
+**Re-checks see the node's own edits.** `requires_approval` with `live:
+check` is checked again as each execution of the node begins, against the
+tree as it is then. A node whose attempt edited a bound file and was then
+paused (an operator pause, a quota or budget pause) is refused
+`approval_stale` when it resumes, and a sequential list node whose items
+edit a bound file refuses the next item because of the previous item's
+write. Both fail closed; declare `live: ignore` for a node that edits what
+it was approved on, or bind the files it does not touch. A refusal settles
+an admitted visit failed; for a list item it settles that item as a
+rejection, which counts against `batch.retries` and then marks the item
+`needs_look`, while the visit goes on.
+
+**What these checks do not cover.** A supervisor's in-run patch may still
+rewrite the definition of a node behind a person-only gate (its script or
+its prompt), or add new nodes before the gate that do the protected work:
+these are the supervisor's general powers over the run's definition, not a
+weakening of the gate's fields, and a playbook that must not allow them
+runs without a supervisor or with `supervisor.capabilities` that leave out
+`patch_playbook`. The own-run refusal below reads the whole run tree: a
+parent whose journal names a child run that was deleted or pruned cannot
+be read whole, so every run-step decision on that tree is refused, unrelated
+steps included (fail closed).
+
+### A run step never decides for its own run
+
+Independently of `person_only`, a decision or an answer posted from inside
+a run step (`APB_RUN_ID` set) to a run of its own tree is refused with
+`run_step_own_run`. The tree is the run, its ancestors (followed through
+`parent_run`, up to 8 levels) and every descendant of each of them through
+the child runs, so a sibling run (a child of the same parent, whose outcome
+steers that parent) is in it. A tree that cannot be read whole (a config
+or a journal that does not read, or links beyond the depth) refuses the
+step: the check fails closed. It covers MCP `review_decide`,
+`run_answer` for a question answered by a person and `run_intent_resolve`,
+and the CLI `apb review`, `apb answer`, `apb publish approve` and `apb
+intent resolve`. A step deciding another run's ordinary gate is allowed (an
+orchestrating playbook may drive other runs).
+
+### Caller refusal codes
+
+Every next action a surface shows carries `caller_refusal` when this
+caller may not take it. The list is closed and the same on MCP, the HTTP
+API and the CLI (`CALLER_REFUSALS` in the generated constants):
+
+| Code | Meaning |
+|---|---|
+| `read_only_server` | a read-only MCP server takes no action that writes |
+| `supervisor_only` | only the run's supervisor session takes this |
+| `relay_to_person` | the run does not take this from its supervisor; relay it to the person |
+| `not_this_caller` | the run does not take this from this caller |
+| `agent_channel` | a person-only gate refuses MCP |
+| `run_step` | a person-only gate refuses a run step |
+| `no_terminal` | a person-only gate refuses the CLI without a terminal |
+| `keyless_dashboard` | a person-only gate refuses a dashboard without keys |
+| `bearer_key` | a person-only gate refuses the HTTP API with a bearer key |
+| `run_step_own_run` | a run step never decides a gate or answers a question of its own run tree |
+
+### Approval refusals
+
+A node whose approval check fails finishes failed with the output
+`<code>: <detail>`; a failure route handles it like any failed node (an
+author loops back to the producer and the gate for a fresh approval).
+
+| Code | When |
+|---|---|
+| `approval_missing` | the gate has no approving decision whose binding covers every node in `of` |
+| `approval_stale` | a required node ran again after the approval, or with `live: check` an approved file changed (checked when the visit is admitted and again as each execution of the node begins: a resume, a deferred retry, a list item) |
+| `approval_snapshot_unreadable` | a bound snapshot no longer verifies (also ends the run when found while consuming the decision) |
+| `approval_incomplete` | a bound snapshot is incomplete: what was not stored was not approved |
+| `approval_unverifiable` | with `live: check`, an approved file was stored redacted, so the live file cannot be compared |
+| `approval_mismatch` | publish only: the commit to push is not the commit the approved result was taken at, or the approved result recorded no commit to compare with |
+
+### Older apb binaries
+
+A run whose definition uses `approves`, `requires_approval` or
+`person_only` journals a `run_guard` record after every checkpoint, so an
+older apb refuses to resume it, answer through its engine or pause it
+("written by a newer apb"); its stop still works. Two cases are not
+covered: an older apb that *starts* such a playbook drops the three fields
+and runs plain gates, and an older apb that *stops* such a run leaves its
+own stop as the last checkpoint with no guard after it, after which that
+older apb can resume the run past its gates. Every apb on a machine that
+runs these playbooks must be this release or newer; `apb doctor` warns
+about other `apb` binaries on `PATH`.
 
 ## Launch policy for agents
 

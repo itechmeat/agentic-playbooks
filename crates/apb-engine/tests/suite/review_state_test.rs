@@ -22,25 +22,15 @@ fn fold_records_review_decision() {
         ),
         ev(
             1,
-            EventPayload::ReviewRequested {
-                node: "gate".into(),
-                options: vec!["approved".into(), "rejected".into()],
-                title: None,
-                instruction: String::new(),
-                prompt: None,
-                recommendation: None,
-                plan_digest: None,
-            },
+            EventPayload::review_requested(
+                "gate",
+                vec!["approved".into(), "rejected".into()],
+                String::new(),
+            ),
         ),
         ev(
             2,
-            EventPayload::ReviewDecided {
-                node: "gate".into(),
-                decision: "approved".into(),
-                note: "ok".into(),
-                plan_digest: None,
-                decided_by: None,
-            },
+            EventPayload::review_decided("gate", "approved", "ok", None),
         ),
         ev(
             3,

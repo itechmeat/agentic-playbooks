@@ -202,6 +202,13 @@ pub fn post_answer_to(
     answered_by: &str,
     request: Option<u64>,
 ) -> Result<u64, EngineError> {
+    // A run step never answers as the person for its own run tree.
+    if answered_by == "human" {
+        crate::review::channel::refuse_own_run(
+            run_dir,
+            &apb_core::step_env::StepCaller::from_env(),
+        )?;
+    }
     let target = resolve_pending_node(run_dir, node)?;
     if answered_by == "supervisor" && answer_by_for(run_dir, &target) == AnswerBy::Human {
         return Err(EngineError::Invalid(format!(

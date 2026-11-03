@@ -53,6 +53,16 @@ pub(crate) struct Request<'a> {
     pub cache_hit: bool,
     /// For an item snapshot: the item and its declared output fields.
     pub item: Option<ItemSubject<'a>>,
+    /// The node is snapshotted ([`snapshotted`]).
+    pub snapshotted: bool,
+}
+
+/// Whether node `node_id` takes snapshots: it declares `results:`, or a
+/// gate's `approves` or a node's `requires_approval.of` names it, so its
+/// output and fields are there to bind
+/// ([`apb_core::validate::snapshotted_nodes`]).
+pub(crate) fn snapshotted(playbook: &apb_core::schema::Playbook, node_id: &str) -> bool {
+    apb_core::validate::snapshotted_nodes(playbook).contains(node_id)
 }
 
 /// The list item an item snapshot is of.
@@ -78,9 +88,10 @@ impl std::fmt::Debug for Taken {
     }
 }
 
-/// Whether a settlement of `node` with `status` takes a snapshot.
-pub(crate) fn wanted(node: &Node, status: NodeStatus) -> bool {
-    node.results.is_some()
+/// Whether a settlement with `status` of a node that is `snapshotted`
+/// takes a snapshot.
+pub(crate) fn wanted(snapshotted: bool, status: NodeStatus) -> bool {
+    snapshotted
         && matches!(
             status,
             NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::TimedOut
@@ -106,13 +117,14 @@ pub(crate) fn of_node(
         output,
         cache_hit,
         item: None,
+        snapshotted: snapshotted(playbook, node_id),
     })
 }
 
 /// Captures one settlement; `None` when none is taken or the capture
 /// failed (the failure is a diagnostic, never an error of the node).
 pub(crate) fn capture(req: Request<'_>) -> Option<Taken> {
-    if !wanted(req.node, req.status) {
+    if !wanted(req.snapshotted, req.status) {
         return None;
     }
     let events = crate::event::read_all_lossy_tail(req.run_dir).unwrap_or_default();

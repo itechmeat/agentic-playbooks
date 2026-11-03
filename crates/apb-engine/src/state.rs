@@ -781,6 +781,7 @@ impl RunState {
                     }
                 }
                 EventPayload::DeferredRetryGuard { .. }
+                | EventPayload::RunGuard { .. }
                 | EventPayload::DriveReleased { .. }
                 | EventPayload::RetryExpedited { .. } => {}
                 // Every hop the drive loop journaled, whatever kind of edge it

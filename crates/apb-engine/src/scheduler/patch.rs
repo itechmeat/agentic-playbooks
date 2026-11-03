@@ -110,6 +110,14 @@ pub(crate) fn apply_patch(
     {
         return append_patch_rejected(log, reason);
     }
+    // A person-only gate and an approval are a person's constraints: a
+    // supervisor's patch never weakens them, nor continues past a gate no
+    // decision answered.
+    if let Some(reason) =
+        super::approval::patch_refusal(playbook, &loaded.playbook, &events, &continue_from)
+    {
+        return append_patch_rejected(log, reason);
+    }
 
     let from_version = playbook.version.clone();
     let base = playbook.clone();
@@ -131,6 +139,18 @@ pub(crate) fn apply_patch(
             ),
         );
     }
+    // The run guard follows the definition in force. A patched definition
+    // that uses a guarded feature is guarded before its snapshot replaces
+    // the running one (a resume executes `playbook.yaml` whatever the
+    // journal says, so the guard must already stand when it does). A
+    // supervisor's patch never drops such a feature (`approval::
+    // patch_refusal` above); a guarded run whose patched definition names
+    // none all the same ends its guard only once the patch is journaled.
+    let guard = super::prepare::run_guard(&loaded.playbook);
+    let was_guarded = latest_guard(&events).is_some_and(|r| !r.is_empty());
+    if let Some(guard) = guard.clone() {
+        log.append(guard)?;
+    }
     // Store the definition, replace the snapshot, journal: in this order,
     // so a journaled digest names stored bytes whenever the store worked.
     // The digest is for surfaces only; a resume executes `playbook.yaml`
@@ -143,6 +163,9 @@ pub(crate) fn apply_patch(
         continue_from: continue_from.clone(),
         definition: Some(definition),
     })?;
+    if guard.is_none() && was_guarded {
+        log.append(EventPayload::RunGuard { requires: vec![] })?;
+    }
     log.append(EventPayload::RunMigrated {
         from_version,
         to_version: version.clone(),
@@ -157,6 +180,15 @@ pub(crate) fn apply_patch(
         continue_from,
         base,
     })))
+}
+
+/// The `requires` of the latest `run_guard` of `events`, `None` when the
+/// run never journaled one.
+fn latest_guard(events: &[Event]) -> Option<&[String]> {
+    events.iter().rev().find_map(|e| match &e.payload {
+        EventPayload::RunGuard { requires } => Some(requires.as_slice()),
+        _ => None,
+    })
 }
 
 /// The rejection reason when `patched` declares consent sources that the
@@ -402,6 +434,12 @@ mod tests {
             patched()
         );
         assert_eq!(playbook.version, "1.0.1");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.payload, EventPayload::RunGuard { .. })),
+            "a definition without a guarded feature needs no guard"
+        );
     }
 
     #[test]
@@ -413,5 +451,342 @@ mod tests {
         .unwrap();
         let (result, _) = patch(root.path(), &run_dir, &mut log, "start");
         assert!(matches!(result, PatchResult::Applied(_)));
+    }
+
+    const GATED: &str = "schema: 2\nid: g\nname: g\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: gate, type: human_review, options: [approve, reject] }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: gate }\n  - { from: gate, to: done }\n";
+
+    fn person_only() -> String {
+        GATED.replace(
+            "options: [approve, reject] }",
+            "options: [approve, reject], person_only: true }",
+        )
+    }
+
+    /// Patches a run of `running` (its journal guarded by `guard`, if any)
+    /// to `patched`, continuing from `continue_from`, appends the next
+    /// checkpoint when the patch applied, and returns whether it applied
+    /// with the event types journaled from the patch on.
+    fn patch_run(
+        running: &str,
+        patched: &str,
+        guard: Option<&[&str]>,
+        continue_from: &str,
+    ) -> (bool, Vec<String>) {
+        let root = tempfile::tempdir().unwrap();
+        apb_core::registry::init_project(root.path()).unwrap();
+        let next = patched.replace("version: 1.0.0", "version: 1.0.1");
+        for (version, yaml) in [("1.0.0", running), ("1.0.1", next.as_str())] {
+            let dir = root.path().join(format!(".apb/playbooks/g/{version}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("playbook.yaml"), yaml).unwrap();
+        }
+        std::fs::write(root.path().join(".apb/playbooks/g/current"), "1.0.0").unwrap();
+        let run_dir = root.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("playbook.yaml"), running).unwrap();
+        let mut log = EventLog::create(&run_dir).unwrap();
+        log.append(EventPayload::RunStarted {
+            playbook: "g".into(),
+            version: "1.0.0".into(),
+            definition: None,
+        })
+        .unwrap();
+        if let Some(requires) = guard {
+            log.append(EventPayload::RunGuard {
+                requires: requires.iter().map(|s| s.to_string()).collect(),
+            })
+            .unwrap();
+        }
+        log.append(EventPayload::node_finished("start", "succeeded", 1, ""))
+            .unwrap();
+        let before = read_all(&run_dir).unwrap().len();
+        let mut playbook = Playbook::from_yaml(running).unwrap();
+        let mut current = "gate".to_string();
+        let result = apply_patch(
+            root.path(),
+            &run_dir,
+            &mut log,
+            &RunConfig::default(),
+            &mut playbook,
+            &mut current,
+            PatchCommand {
+                version: "1.0.1".into(),
+                classification: "improvement".into(),
+                continue_from: continue_from.into(),
+            },
+        )
+        .unwrap();
+        let applied = matches!(result, PatchResult::Applied(_));
+        if applied {
+            // The next checkpoint, as the drive appends it after the patch.
+            log.append(EventPayload::node_finished("gate", "succeeded", 1, ""))
+                .unwrap();
+        } else {
+            assert_eq!(
+                std::fs::read_to_string(run_dir.join("playbook.yaml")).unwrap(),
+                running,
+                "a refused patch leaves the running definition"
+            );
+        }
+        let events = read_all(&run_dir).unwrap()[before..]
+            .iter()
+            .map(|e| match &e.payload {
+                EventPayload::RunGuard { requires } => format!("run_guard{requires:?}"),
+                EventPayload::PatchRejected { reason } => format!("patch_rejected {reason}"),
+                p => serde_json::to_value(p).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            })
+            .collect();
+        (applied, events)
+    }
+
+    fn patch_gate(running: &str, patched: &str, guard: Option<&[&str]>) -> Vec<String> {
+        let (applied, events) = patch_run(running, patched, guard, "gate");
+        assert!(applied, "{events:?}");
+        events
+    }
+
+    /// The one line a refused patch journals.
+    fn refused(running: &str, patched: &str, continue_from: &str) -> String {
+        let (applied, events) = patch_run(running, patched, Some(&["person_only"]), continue_from);
+        assert!(!applied, "{events:?}");
+        assert_eq!(events.len(), 1, "{events:?}");
+        events[0].clone()
+    }
+
+    /// A patch that brings a guarded feature guards the run before the
+    /// patched definition replaces the running one, and the next
+    /// checkpoint carries the guard.
+    #[test]
+    fn a_patch_that_adds_a_guarded_feature_guards_the_run_before_its_snapshot() {
+        assert_eq!(
+            patch_gate(GATED, &person_only(), None),
+            [
+                r#"run_guard["person_only"]"#,
+                "patch_applied",
+                "run_migrated",
+                "node_finished",
+                r#"run_guard["person_only"]"#,
+            ]
+        );
+    }
+
+    /// A supervisor's patch never drops `person_only`: the run keeps its
+    /// definition and its guard.
+    #[test]
+    fn a_patch_that_drops_person_only_is_refused() {
+        let line = refused(&person_only(), GATED, "gate");
+        assert!(
+            line.starts_with("patch_rejected approval_weakened: node `gate` drops `person_only`"),
+            "{line}"
+        );
+    }
+
+    /// Nor does it continue past a person-only gate no decision answered,
+    /// nor open a way around one.
+    #[test]
+    fn a_patch_that_skips_or_bypasses_an_undecided_person_only_gate_is_refused() {
+        let line = refused(&person_only(), &person_only(), "done");
+        assert!(
+            line.starts_with("patch_rejected approval_weakened: `done` skips gate `gate`"),
+            "{line}"
+        );
+        let bypass = person_only().replace(
+            "  - { from: gate, to: done }\n",
+            "  - { from: gate, to: done }\n  - { from: start, to: done, condition: { type: node_status, node: start, equals: success } }\n",
+        );
+        let line = refused(&person_only(), &bypass, "gate");
+        assert!(
+            line.starts_with(
+                "patch_rejected approval_weakened: node `done` becomes reachable without passing gate `gate`"
+            ),
+            "{line}"
+        );
+    }
+
+    /// Every way an approval weakens, judged on the definitions alone (an
+    /// in-run and a forward patch share it).
+    #[test]
+    fn every_weakening_of_an_approval_is_named() {
+        let base = "schema: 2\nid: g\nname: g\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: script, script: s, runner: sh, results: [{ path: a.md }] }\n  - { id: b, type: script, script: s, runner: sh, results: [{ path: b.md }] }\n  - { id: gate, type: human_review, options: [approve, ok, reject], approves: { results: [a, b] } }\n  - { id: ship, type: script, script: s, runner: sh, requires_approval: { gate: gate, of: [a] } }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: b, to: gate }\n  - { from: gate, to: ship }\n  - { from: ship, to: done }\n";
+        let running = Playbook::from_yaml(base).unwrap();
+        for (from, to, want) in [
+            (
+                "approves: { results: [a, b] }",
+                "approves: { results: [a] }",
+                "node `gate` binds fewer results in `approves`",
+            ),
+            (
+                "approves: { results: [a, b] }",
+                "approves: { results: [a, b], options: [approve, ok] }",
+                "node `gate` counts more options as approval",
+            ),
+            (
+                ", approves: { results: [a, b] }",
+                "",
+                "node `gate` drops `approves`",
+            ),
+            (
+                ", requires_approval: { gate: gate, of: [a] }",
+                "",
+                "node `ship` drops `requires_approval`",
+            ),
+            (
+                "requires_approval: { gate: gate, of: [a] }",
+                "requires_approval: { gate: gate, of: [a], live: ignore }",
+                "node `ship` stops checking the live files (`live: ignore`)",
+            ),
+            (
+                "requires_approval: { gate: gate, of: [a] }",
+                "requires_approval: { gate: gate, of: [b] }",
+                "node `ship` requires the approval of fewer results",
+            ),
+        ] {
+            assert!(base.contains(from), "{from}");
+            let patched = Playbook::from_yaml(&base.replace(from, to)).unwrap();
+            assert_eq!(
+                super::super::approval::patch_weakening(&running, &patched).as_deref(),
+                Some(want)
+            );
+        }
+        // Stricter or equal is not weaker: all results required, the
+        // default approving option named.
+        for (from, to) in [
+            (
+                "requires_approval: { gate: gate, of: [a] }",
+                "requires_approval: { gate: gate }",
+            ),
+            (
+                "approves: { results: [a, b] }",
+                "approves: { results: [a, b, a], options: [approve] }",
+            ),
+        ] {
+            let patched = Playbook::from_yaml(&base.replace(from, to)).unwrap();
+            assert_eq!(
+                super::super::approval::patch_weakening(&running, &patched),
+                None,
+                "{to}"
+            );
+        }
+    }
+
+    /// A gate whose options route somewhere else after the patch: a
+    /// person's `reject` would lead to what `approve` led to.
+    #[test]
+    fn a_patch_that_reroutes_a_person_only_gate_is_refused() {
+        let running = person_only()
+            .replace(
+                "  - { id: done, type: finish, outcome: success }\n",
+                "  - { id: done, type: finish, outcome: success }\n  - { id: stop, type: finish, outcome: failure }\n",
+            )
+            .replace(
+                "  - { from: gate, to: done }\n",
+                "  - { from: gate, to: done, condition: { type: review_status, equals: approve } }\n  - { from: gate, to: stop, condition: { type: review_status, equals: reject } }\n",
+            );
+        let swapped = running
+            .replace("equals: approve } }", "equals: tmp } }")
+            .replace("equals: reject } }", "equals: approve } }")
+            .replace("equals: tmp } }", "equals: reject } }");
+        assert_ne!(running, swapped);
+        let line = refused(&running, &swapped, "gate");
+        assert!(
+            line.starts_with(
+                "patch_rejected approval_weakened: node `gate` changes where its options route"
+            ),
+            "{line}"
+        );
+        // An added route on `reject` toward the protected node too.
+        let added = running.replace(
+            "  - { from: start, to: gate }\n",
+            "  - { from: start, to: gate }\n  - { from: gate, to: done, condition: { type: review_status, equals: reject } }\n",
+        );
+        assert!(refused(&running, &added, "gate").contains("changes where its options route"));
+    }
+
+    /// `start -> w -> g (person-only) -> ship -> check -> done`, `reject`
+    /// routes to `fix`, which leads back into `g`, and so does `check`.
+    const LOOPED: &str = "schema: 2\nid: g\nname: g\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: w, type: script, script: s, runner: sh }\n  - { id: g, type: human_review, options: [approve, reject], person_only: true }\n  - { id: fix, type: script, script: s, runner: sh }\n  - { id: ship, type: script, script: s, runner: sh }\n  - { id: check, type: script, script: s, runner: sh }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: w }\n  - { from: w, to: g }\n  - { from: g, to: ship, condition: { type: review_status, equals: approve } }\n  - { from: g, to: fix, condition: { type: review_status, equals: reject } }\n  - { from: fix, to: g, max_traversals: 3 }\n  - { from: ship, to: check }\n  - { from: check, to: fix, max_traversals: 3 }\n  - { from: check, to: done }\n";
+
+    /// A journal from `lines`, one `"type":...` body per event, numbered
+    /// from 1.
+    fn journal(lines: &[&str]) -> Vec<crate::event::Event> {
+        lines
+            .iter()
+            .enumerate()
+            .map(|(i, body)| {
+                serde_json::from_str(&format!("{{\"seq\":{},\"ts\":0,{body}}}", i + 1)).unwrap()
+            })
+            .collect()
+    }
+
+    const REQ: &str = r#""type":"review_requested","node":"g","options":["approve","reject"]"#;
+
+    fn decided(option: &str) -> String {
+        format!(r#""type":"review_decided","node":"g","decision":"{option}","note":"""#)
+    }
+
+    fn started(node: &str) -> String {
+        format!(r#""type":"node_started","node":"{node}","attempt":1"#)
+    }
+
+    /// The one check every move shares: a gate counts as passed toward the
+    /// target only by a passing decision of its current visit.
+    #[test]
+    fn only_a_passing_decision_of_this_visit_lets_a_move_past_a_gate() {
+        use super::super::approval::skips_gate;
+        let pb = Playbook::from_yaml(LOOPED).unwrap();
+        let (approve, reject) = (decided("approve"), decided("reject"));
+        let (ship, check, fix) = (started("ship"), started("check"), started("fix"));
+        // Undecided, and rejected: the run is at `fix`.
+        assert!(skips_gate(&pb, &journal(&[REQ]), "ship").is_some());
+        let rejected = journal(&[REQ, &reject, &fix]);
+        let why = skips_gate(&pb, &rejected, "ship").unwrap();
+        assert!(why.starts_with("`ship` skips gate `g`"), "{why}");
+        // Approved in this visit: on to `ship` and past it.
+        let approved = journal(&[REQ, &approve, &ship]);
+        assert_eq!(skips_gate(&pb, &approved, "ship"), None);
+        assert_eq!(skips_gate(&pb, &approved, "check"), None);
+        // Approved in the earlier loop: the run left for `fix`, back toward
+        // the gate, before it asked again.
+        let earlier = journal(&[REQ, &approve, &ship, &check, &fix]);
+        assert!(skips_gate(&pb, &earlier, "ship").is_some());
+        assert!(skips_gate(&pb, &earlier, "check").is_some());
+        // A request since the decision is a new visit, open or withdrawn.
+        assert!(skips_gate(&pb, &journal(&[REQ, &approve, &ship, REQ]), "ship").is_some());
+        // Nodes before the gate, and the gate itself, are never skipped.
+        assert_eq!(skips_gate(&pb, &rejected, "w"), None);
+        assert_eq!(skips_gate(&pb, &rejected, "g"), None);
+    }
+
+    /// For a gate that approves results the decision must be an approving
+    /// option on the binding of its current request.
+    #[test]
+    fn an_approving_gate_passes_only_on_its_current_binding() {
+        use super::super::approval::skips_gate;
+        let pb =
+            Playbook::from_yaml(&LOOPED.replace("person_only: true", "approves: { results: [w] }"))
+                .unwrap();
+        let req = |nonce: &str| {
+            format!(
+                r#""type":"review_requested","node":"g","options":["approve","reject"],"binding":{{"nonce":"{nonce}","snapshots":[]}}"#
+            )
+        };
+        let bound = |option: &str, nonce: &str| {
+            format!(
+                r#""type":"review_decided","node":"g","decision":"{option}","note":"","binding":"{nonce}""#
+            )
+        };
+        let ship = started("ship");
+        let ok = journal(&[&req("n1"), &bound("approve", "n1"), &ship]);
+        assert_eq!(skips_gate(&pb, &ok, "ship"), None);
+        for events in [
+            journal(&[&req("n1"), &bound("approve", "n0"), &ship]),
+            journal(&[&req("n1"), &decided("approve"), &ship]),
+            journal(&[&req("n1"), &bound("reject", "n1"), &ship]),
+        ] {
+            assert!(skips_gate(&pb, &events, "ship").is_some());
+        }
     }
 }

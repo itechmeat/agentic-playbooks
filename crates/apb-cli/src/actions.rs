@@ -34,6 +34,13 @@ pub(crate) fn lines(actions: &RunActions) -> Vec<String> {
             Some(cmd) => out.push(format!("  $ {}", sanitize_command(&cmd.line()))),
             None => out.push("  (the run's supervisor takes this)".into()),
         }
+        if let Some(r) = a.caller_refusal {
+            out.push(format!(
+                "  not from here ({}): {}",
+                r.as_str(),
+                refusal_words(r)
+            ));
+        }
         if let Some(n) = &a.not_ready {
             out.push(format!("  not ready: {}", text(&n.detail)));
         }
@@ -48,6 +55,24 @@ pub(crate) fn lines(actions: &RunActions) -> Vec<String> {
         out.push("note: a sub-playbook run sat too deep to be observed".into());
     }
     out
+}
+
+/// Why this CLI may not take an action, in words: where it is taken
+/// instead.
+fn refusal_words(r: apb_engine::next_action::CallerRefusal) -> &'static str {
+    use apb_engine::next_action::CallerRefusal;
+    match r {
+        CallerRefusal::NoTerminal => {
+            "only a person decides it: run the command at an interactive terminal, or decide on the dashboard run page where you are signed in"
+        }
+        CallerRefusal::RunStep => {
+            "only a person decides it, and this process runs inside a run step; ask the person"
+        }
+        CallerRefusal::RunStepOwnRun => {
+            "this process runs inside the run's own tree, which never decides for it; ask the person"
+        }
+        _ => "this caller does not take it; ask the person",
+    }
 }
 
 /// The lines a terminal shows for a refused start's actions: what each
@@ -241,6 +266,8 @@ mod tests {
             auto: None,
             command: None,
             unattended: None,
+            person_only: false,
+            caller_refusal: None,
             reason: String::new(),
         }
     }
@@ -250,6 +277,40 @@ mod tests {
             kind,
             seq,
             nonce: None,
+        }
+    }
+
+    /// Every caller refusal reaches every facade under its own wire name:
+    /// MCP's rendered action, the HTTP API's serialized action and the
+    /// CLI's lines, which also put it in words.
+    #[test]
+    fn every_caller_refusal_reads_alike_on_mcp_http_and_cli() {
+        use apb_engine::next_action::CallerRefusal;
+        use apb_mcp::tools::actions::{ActionCaller, render};
+        for r in CallerRefusal::ALL {
+            let mut a = action(ActionCode::DecideReview, "r1", Some("review"), vec![]);
+            a.caller_refusal = Some(r);
+            let mcp = render(&a, ActionCaller::Person);
+            assert_eq!(mcp["caller_refusal"], r.as_str(), "MCP for {r:?}");
+            let http = serde_json::to_value(&a).unwrap();
+            assert_eq!(http["caller_refusal"], r.as_str(), "HTTP for {r:?}");
+            let actions = RunActions {
+                observed_at_ms: 0,
+                status: apb_engine::state::RunStatus::Running,
+                stop: apb_engine::next_action::StopVerdict::NeedsInput,
+                actions: vec![a],
+                primary: None,
+                children_truncated: false,
+            };
+            let cli = lines(&actions).join("\n");
+            let line = format!("not from here ({}): ", r.as_str());
+            let at = cli
+                .find(&line)
+                .unwrap_or_else(|| panic!("CLI for {r:?}: {cli}"));
+            assert!(
+                cli[at + line.len()..].trim_start().len() > 1,
+                "CLI words for {r:?}"
+            );
         }
     }
 

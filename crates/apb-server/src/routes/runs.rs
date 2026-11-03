@@ -313,6 +313,7 @@ pub(crate) async fn get_run_handler(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
     Query(q): Query<WorkspaceQuery>,
+    channel: Option<axum::Extension<crate::auth::RequestChannel>>,
 ) -> impl IntoResponse {
     if !is_safe_id(&id) {
         return (StatusCode::NOT_FOUND, "not found").into_response();
@@ -338,9 +339,17 @@ pub(crate) async fn get_run_handler(
     // Each action redacted with the values of the run it acts on (a child's
     // with its own), before the whole detail is redacted with this run's.
     let redaction = apb_engine::run_redact::WorkspaceRedaction::new(&root);
-    let next_actions = apb_engine::next_action::for_surface(
+    let mut next_actions = apb_engine::next_action::for_surface(
         &redaction,
         &apb_engine::next_action::Observation::from_view(&run_dir, &id, view.clone()),
+    );
+    // What this request's credential may not take: the server cannot see a
+    // caller's run step, so only the channel counts here.
+    apb_engine::next_action::mark_for_caller(
+        &mut next_actions,
+        &root.join(".apb/runs"),
+        crate::auth::RequestChannel::of(channel.map(|c| c.0)),
+        &apb_core::step_env::StepCaller::default(),
     );
 
     // The run's playbook snapshot (may be missing for very old runs). Kept in
@@ -515,8 +524,9 @@ pub(crate) struct ReviewBody {
 
 /// The answer to a gate's engine refusal: 404 for a node or request that
 /// is not there, 409 when the request changed or was already answered,
-/// 400 for a decision the gate does not take; anything else is a server
-/// fault.
+/// 400 for a decision the gate does not take, 403 for a channel that may
+/// not decide it (a person-only gate without a signed-in session);
+/// anything else is a server fault.
 fn gate_refusal(e: apb_engine::EngineError) -> axum::response::Response {
     use apb_engine::EngineError;
     match e {
@@ -526,6 +536,9 @@ fn gate_refusal(e: apb_engine::EngineError) -> axum::response::Response {
             (StatusCode::CONFLICT, e.to_string()).into_response()
         }
         EngineError::Invalid(what) => (StatusCode::BAD_REQUEST, what).into_response(),
+        EngineError::ChannelRefused { message, .. } => {
+            (StatusCode::FORBIDDEN, message).into_response()
+        }
         e => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -553,6 +566,7 @@ pub(crate) async fn post_review_handler(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
     Query(q): Query<WorkspaceQuery>,
+    channel: Option<axum::Extension<crate::auth::RequestChannel>>,
     Json(body): Json<ReviewBody>,
 ) -> impl IntoResponse {
     if !is_safe_id(&id) {
@@ -582,7 +596,11 @@ pub(crate) async fn post_review_handler(
     // decision is pending on it or the nonce answers an older plan (the
     // message names the current one), `Invalid` means a decision the gate
     // does not offer or a `publish` without the plan's nonce.
-    match apb_engine::review::post_decision_to(&run_dir, cmd, body.nonce, body.request) {
+    // The channel is the request's credential: only a signed-in browser
+    // session decides a person-only gate (a keyless dashboard and a bearer
+    // key are 403).
+    let channel = crate::auth::RequestChannel::of(channel.map(|c| c.0));
+    match apb_engine::review::post_decision_via(&run_dir, cmd, body.nonce, body.request, channel) {
         Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
         Err(e) => gate_refusal(e),
     }
@@ -872,6 +890,7 @@ pub(crate) async fn post_resume_handler(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
     Query(q): Query<WorkspaceQuery>,
+    channel: Option<axum::Extension<crate::auth::RequestChannel>>,
     body: Option<Json<ResumeBody>>,
 ) -> impl IntoResponse {
     if !is_safe_id(&id) {
@@ -950,6 +969,17 @@ pub(crate) async fn post_resume_handler(
         Err(refusal) => return refusal.into_response(),
     };
     let from_node = body.from_node.as_deref();
+    // A resume from a node past a person-only or approving gate no decision
+    // passed: only a signed-in session goes past it.
+    if let Some(n) = from_node
+        && let Err(e) = apb_engine::approval::refuse_resume_skip(
+            &root.join(".apb/runs").join(&id),
+            n,
+            crate::auth::RequestChannel::of(channel.map(|c| c.0)),
+        )
+    {
+        return gate_refusal(e);
+    }
     // Computed before the drive so the answer says where the run resumes, and
     // so a finished run is refused here (the argument-free plan would).
     let decision = match apb_engine::plan_resume(&root, &id, from_node) {

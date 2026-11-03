@@ -126,6 +126,7 @@ impl ListRun<'_, '_, '_> {
                     id: s.id,
                     fields: &self.spec.item_outputs,
                 }),
+                snapshotted: result::snapshotted(self.ctx.playbook, &self.node.id),
             })
         });
         result::journal(taken, |stamp| self.settle_stamped(s, stamp))

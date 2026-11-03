@@ -231,7 +231,10 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
         out["branch_failures"] = json!(branch_failures);
     }
     let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
-    let actions = super::actions::of_view(&redaction, &dir, run_id, view);
+    let mut actions = super::actions::of_view(&redaction, &dir, run_id, view);
+    if let Some(runs) = dir.parent() {
+        super::actions::mark(&mut actions, runs, caller);
+    }
     super::actions::add_to(&mut out, &actions, caller);
     Ok(super::redacted_with(&redaction, &dir, out))
 }
@@ -595,7 +598,10 @@ pub fn run_wait_result_as(
     };
     let dir = resolve_run_dir(root, run_id)?;
     let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
-    let actions = super::actions::of_view(&redaction, &dir, run_id, res.view.clone());
+    let mut actions = super::actions::of_view(&redaction, &dir, run_id, res.view.clone());
+    if let Some(runs) = dir.parent() {
+        super::actions::mark(&mut actions, runs, caller);
+    }
     // `next` is the primary action's reason (the same line every surface
     // leads with); the wait's own instruction for this caller stays beside
     // it when it says more.
@@ -753,7 +759,10 @@ pub fn run_report_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
             view.graph(&dir).present(&redaction.run_dir(&dir)),
         );
     }
-    let actions = super::actions::of_view(&redaction, &dir, run_id, view.clone());
+    let mut actions = super::actions::of_view(&redaction, &dir, run_id, view.clone());
+    if let Some(runs) = dir.parent() {
+        super::actions::mark(&mut actions, runs, caller);
+    }
     super::actions::add_to(&mut base, &actions, caller);
 
     Ok(super::redacted_with(&redaction, &dir, base))
@@ -904,6 +913,17 @@ pub fn run_resume_with(
     // Compute the resume decision up front so the ack reports where and why the
     // run resumes. This must run BEFORE the drive: once the run reaches a
     // terminal state, an argument-free `plan_resume` would refuse it.
+    // A resume from a node past a person-only or approving gate no decision
+    // passed is a person's: an agent never goes past it.
+    if let Some(n) = from_node
+        && apb_core::registry::is_safe_segment(run_id)
+    {
+        apb_engine::approval::refuse_resume_skip(
+            &root.join(".apb/runs").join(run_id),
+            n,
+            crate::tools::actions::mcp_channel(),
+        )?;
+    }
     let decision = plan_resume(root, run_id, from_node)?;
     // The drive itself happens in a separate OS process: this session may be a
     // chat host that dies at any moment, and a resumed run must not die with
@@ -1086,7 +1106,9 @@ pub fn run_answer(
 /// For a `publish` node, `nonce` is the nonce of the plan the person saw
 /// (`pending_review.publish.nonce`); the engine refuses a stale or missing
 /// one for `publish`, and stamps a `skip` without one with the open plan's.
-/// A regular run tool (not supervised): takes run_id directly.
+/// A regular run tool (not supervised): takes run_id directly. Posted
+/// through the MCP channel ([`super::actions::mcp_channel`]): a person-only gate refuses
+/// it, and a run step never decides for its own run tree.
 pub fn review_decide(
     root: &Path,
     run_id: &str,
@@ -1096,8 +1118,34 @@ pub fn review_decide(
     nonce: Option<&str>,
     request: Option<u64>,
 ) -> Result<Value, ToolError> {
+    review_decide_via(
+        root,
+        run_id,
+        node,
+        decision,
+        note,
+        nonce,
+        request,
+        super::actions::mcp_channel(),
+    )
+}
+
+/// [`review_decide`] through the channel the surface states (`apb review`
+/// passes the terminal after its typed confirmation, else the CLI without
+/// a terminal or a run step).
+#[allow(clippy::too_many_arguments)]
+pub fn review_decide_via(
+    root: &Path,
+    run_id: &str,
+    node: &str,
+    decision: &str,
+    note: &str,
+    nonce: Option<&str>,
+    request: Option<u64>,
+    channel: apb_engine::decision_channel::DecisionChannel,
+) -> Result<Value, ToolError> {
     let run_dir = resolve_run_dir(root, run_id)?;
-    let seq = apb_engine::review::post_decision_to(
+    let seq = apb_engine::review::post_decision_via(
         &run_dir,
         apb_engine::ReviewCommand {
             node: node.to_string(),
@@ -1106,6 +1154,7 @@ pub fn review_decide(
         },
         nonce.map(str::to_string),
         request,
+        channel,
     )?;
     Ok(json!({ "posted_seq": seq }))
 }

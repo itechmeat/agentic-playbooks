@@ -27,6 +27,7 @@
     omissionLines,
     rowBadges,
     shortDigest,
+    snapshotAnchorId,
     type EntryContent,
     type EntryView,
     type ResultRow,
@@ -124,7 +125,7 @@
             {#each g.executions as x (x.ordinal)}
               {#each x.rows as row (row.settlement_seq)}
                 {@const ok = row.verified === 'ok'}
-                <div class="row" data-testid="run-results-row">
+                <div class="row" id={snapshotAnchorId(row.snapshot_id)} data-testid="run-results-row">
                   <div class="head">
                     <span class="code">{rowHead(row, x.ordinal)}</span>
                     <span class="muted">{row.status}</span>
@@ -240,9 +241,9 @@
           {#if v.content?.redacted_on_read}· redacted on read{/if}
         </Dialog.Description>
       </Dialog.Header>
-      {#if v.error}
-        <p class="error">{v.error}</p>
-      {:else if v.content}
+      <!-- A failed "Show more" keeps the text already loaded; its error
+           shows next to it. -->
+      {#if v.content}
         {@const note = contentNote(v.content)}
         <pre class="text" data-testid="run-results-text">{v.content.text}</pre>
         {#if note}
@@ -251,7 +252,10 @@
             <Button variant="outline" size="xs" disabled={v.loading} onclick={() => loadMore(v)}>Show more</Button>
           {/if}
         {/if}
-      {:else}
+      {/if}
+      {#if v.error}
+        <p class="error">{v.error}</p>
+      {:else if !v.content}
         <p class="muted">Loading</p>
       {/if}
     {/if}

@@ -7,6 +7,7 @@
 //! new rule lands next to the rules it is related to instead of at the end of
 //! one long file.
 
+mod approval;
 mod baseline;
 mod budget;
 mod connectors;
@@ -14,6 +15,7 @@ mod decisions;
 mod edges;
 mod forks;
 mod graph;
+pub mod guarded;
 mod isolation;
 mod judge;
 mod known_problems;
@@ -51,6 +53,7 @@ use graph::{
     check_conditions, check_cycles, check_edges, check_edges_exist, check_failure_policy,
     check_joins, check_reachability, check_start_finish, check_unique_ids,
 };
+pub use guarded::{GuardedFeature, guarded_features};
 use judge::{check_judge_edges, check_judge_nodes};
 use node_io::{
     check_cache_key, check_declared_fields, check_session_handoff, check_workdir, check_worktree,
@@ -385,6 +388,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     outputs::check_outputs(playbook, ctx, &mut r); // V131-V135
     read_only::check_read_only(playbook, &mut r); // V137-V139
     results::check_results(playbook, &mut r); // V152-V154
+    approval::check_approvals(playbook, &mut r); // V155-V158
     unattended::check_unattended(playbook, ctx, &mut r); // V141-V143
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08

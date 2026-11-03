@@ -12,8 +12,8 @@
 //! - `max_patches`: the run's `max_patches_per_run` (in-run patches handled
 //!   plus forward patches created) is spent;
 //! - `goal_changed`, `effects_changed`, `irreversible_added`,
-//!   `trust_fields_changed`, `quality_changed`: the definition guard
-//!   ([`definition_guard`]);
+//!   `trust_fields_changed`, `quality_changed`, `approval_weakened`: the
+//!   definition guard ([`definition_guard`]);
 //! - the validator and the frozen flag, as for every patch version.
 //!
 //! Nothing is written to the run's journal (the drive loop is its only
@@ -300,7 +300,8 @@ fn protected_fields() -> [(&'static str, &'static str, Unchanged); 8] {
 /// promotion and trial policies), the decision opt-ins in `defaults`
 /// (`host_decisions`, `retry_advice`), the run's `worktree`, the launch
 /// policy (`agent_launch`), each node's connector grants and each
-/// sub-playbook a node runs.
+/// sub-playbook a node runs. Nor may it weaken a person-only gate or an
+/// approval ([`crate::scheduler::approval::patch_weakening`]).
 ///
 /// A node may still bind another profile: profile trust is not inherited
 /// from the base version, the run gate checks every profile bundle of the
@@ -317,7 +318,14 @@ pub fn definition_guard(
         return Err(refused(code, why));
     }
     check_effects(root, base, patched)?;
-    check_nodes(base, patched)
+    check_nodes(base, patched)?;
+    match crate::scheduler::approval::patch_weakening(base, patched) {
+        Some(why) => Err(refused(
+            crate::scheduler::approval::APPROVAL_WEAKENED,
+            format!("{why}; only a person may weaken a person-only gate or an approval"),
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Effects may be dropped, never added: neither the effective effects, nor
@@ -418,6 +426,27 @@ mod tests {
         }
         let same = Playbook::from_yaml(&yaml("agent_launch: deny\n")).unwrap();
         assert!(definition_guard(root.path(), &base, &same).is_ok());
+    }
+
+    /// A forward patch for the next runs never weakens a person-only gate
+    /// or an approval, so no candidate without them can be promoted.
+    #[test]
+    fn a_forward_patch_never_weakens_a_person_only_gate() {
+        let yaml = |decl: &str| {
+            format!(
+                "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - {{ id: start, type: start }}\n  - {{ id: gate, type: human_review{decl} }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: gate }}\n  - {{ from: gate, to: done }}\n"
+            )
+        };
+        let root = tempfile::tempdir().unwrap();
+        let base = Playbook::from_yaml(&yaml(", person_only: true")).unwrap();
+        let patched = Playbook::from_yaml(&yaml("")).unwrap();
+        let err = definition_guard(root.path(), &base, &patched).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("(approval_weakened): node `gate` drops `person_only`"),
+            "{err}"
+        );
+        assert!(definition_guard(root.path(), &patched, &base).is_ok());
     }
 
     #[test]

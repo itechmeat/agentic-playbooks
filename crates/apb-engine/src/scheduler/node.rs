@@ -749,6 +749,22 @@ fn execute_node_kind(
         return Err(drive_handled_refusal(node_id, &node.kind));
     }
     let mut events: Vec<EventPayload> = Vec::new();
+    // The approval a node with `requires_approval` needs is checked again
+    // as each execution begins, not only when its visit was admitted: a
+    // resume of an open visit, a deferred retry and a list item all start
+    // here, and the approved files may have changed while the run waited.
+    // A refusal settles the visit failed with the admission's code and
+    // starts no attempt. Immediate retries inside one execution are not
+    // checked again: the tree then holds the node's own work.
+    if node.requires_approval.is_some()
+        && let Err(f) = super::approval::check_before(run_dir, playbook, node, &read_all(run_dir)?)
+    {
+        return Ok(AttemptOutcome::Finished {
+            status: NodeStatus::Failed,
+            output: f.to_string(),
+            events,
+        });
+    }
     // A read-only node is never run unchecked: on a list (V138) its items
     // would share one tree concurrently, so the engine refuses them.
     if node.read_only && item.is_some() {

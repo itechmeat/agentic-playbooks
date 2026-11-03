@@ -1793,10 +1793,13 @@ fn run_detail_text(
         say!("  {}", unknown_events_note(view.unknown.len()));
     }
     print_waiting_on_question(view.progress.as_ref());
-    print_next_actions(&apb_engine::next_action::for_surface(
-        redaction,
-        &apb_engine::next_action::Observation::from_view(&run_dir, run_id, view),
-    ));
+    print_next_actions(
+        &apb_engine::next_action::for_surface(
+            redaction,
+            &apb_engine::next_action::Observation::from_view(&run_dir, run_id, view),
+        ),
+        run_dir.parent().unwrap_or(&run_dir),
+    );
     ExitCode::SUCCESS
 }
 
@@ -1989,6 +1992,12 @@ pub(crate) fn resume_cmd(
             return ExitCode::from(2);
         }
     };
+    if let Some(n) = from_node
+        && let Err(msg) = refuse_gate_skip(root, run_id, n)
+    {
+        eprintln!("resume refused: {msg}");
+        return ExitCode::from(3);
+    }
     if let Some(arg) = retry_now {
         match retry_now_live(root, run_id, arg) {
             Ok(Some(exit)) => {
@@ -2212,7 +2221,7 @@ pub(crate) fn wait_cmd(
     );
     crate::util::with_run_redaction(redaction.run_dir(&run_dir), || {
         let exit = wait_report(root, run_id, &res, &actions);
-        print_next_actions(&actions);
+        print_next_actions(&actions, &root.join(".apb/runs"));
         exit
     })
 }
@@ -2247,14 +2256,23 @@ fn follow_auto_cmd(root: &Path, run_id: &str, timeout: Duration) -> ExitCode {
             WaitExit::Timeout => say!("run {run_id} still {status} after the timeout"),
             WaitExit::Error => {}
         }
-        print_next_actions(&actions);
+        print_next_actions(&actions, &root.join(".apb/runs"));
         ExitCode::from(res.exit.code())
     })
 }
 
-/// The next actions of a run, one block, inside its redaction.
-fn print_next_actions(actions: &apb_engine::next_action::RunActions) {
-    for line in crate::actions::lines(actions) {
+/// The next actions of a run, one block, inside its redaction, each
+/// marked with what this CLI may not take (a person-only gate without a
+/// terminal, a gate of the run step's own run); `runs` holds the runs.
+fn print_next_actions(actions: &apb_engine::next_action::RunActions, runs: &Path) {
+    let mut actions = actions.clone();
+    apb_engine::next_action::mark_for_caller(
+        &mut actions,
+        runs,
+        apb_mcp::tools::actions::ActionCaller::Person.channel(),
+        &crate::util::StepCaller::from_env(),
+    );
+    for line in crate::actions::lines(&actions) {
         say!("  {line}");
     }
 }
@@ -2488,7 +2506,16 @@ pub(crate) fn review_cmd(
         eprintln!("review failed: {refusal}");
         return ExitCode::from(2);
     }
-    match apb_mcp::tools::review_decide(root, run_id, node_id, decision, note, nonce, request) {
+    let channel = match decision_channel(&run_dir, run_id, node_id, decision) {
+        Ok(c) => c,
+        Err(why) => {
+            eprintln!("review failed: {why}");
+            return ExitCode::from(2);
+        }
+    };
+    match apb_mcp::tools::review_decide_via(
+        root, run_id, node_id, decision, note, nonce, request, channel,
+    ) {
         Ok(v) => {
             println!(
                 "review posted for {run_id}/{node_id}: {decision} (seq {})",
@@ -2503,6 +2530,91 @@ pub(crate) fn review_cmd(
             );
             ExitCode::from(2)
         }
+    }
+}
+
+/// Refuses `apb resume --from-node` past a person-only or approving gate
+/// no decision passed ([`apb_engine::approval::resume_skips_gate`]) unless
+/// a person at a terminal, outside a run step, typed the node to confirm.
+/// `Ok` when nothing is skipped or the person confirmed.
+fn refuse_gate_skip(root: &Path, run_id: &str, from_node: &str) -> Result<(), String> {
+    use apb_engine::decision_channel::DecisionChannel;
+    let run_dir = root.join(".apb/runs").join(run_id);
+    // A run that does not exist fails later with the engine's own error.
+    if !is_safe_segment(run_id) || !run_dir.is_dir() {
+        return Ok(());
+    }
+    let Some(line) =
+        apb_engine::approval::resume_skips_gate(&run_dir, from_node).map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
+    let channel = if crate::util::StepCaller::from_env().describe().is_some() {
+        DecisionChannel::RunStep
+    } else {
+        let question = format!(
+            "Resume run `{}` from `{}` past that gate? Type the node to confirm:",
+            sanitize_for_terminal(run_id, QUESTION_TEXT_MAX),
+            sanitize_for_terminal(from_node, QUESTION_TEXT_MAX)
+        );
+        match crate::consent::ask_typed(
+            &[sanitize_for_terminal(&line, 4 * QUESTION_TEXT_MAX)],
+            &question,
+        ) {
+            None => DecisionChannel::CliUnattended,
+            Some(typed) if typed == from_node => DecisionChannel::Terminal,
+            Some(_) => {
+                return Err(format!(
+                    "not confirmed: the node typed is not `{}`; nothing was resumed",
+                    sanitize_for_terminal(from_node, QUESTION_TEXT_MAX)
+                ));
+            }
+        }
+    };
+    apb_engine::approval::refuse_resume_skip(&run_dir, from_node, channel)
+        .map_err(|e| e.to_string())
+}
+
+/// The channel `apb review` decides through: a run step's inside one (a
+/// terminal never helps there); for a gate only a person decides, the
+/// terminal once the person typed the option to the question asked on it;
+/// otherwise the CLI without a terminal, which the engine refuses for such
+/// a gate with the way a person decides. `Err` when the person at the
+/// terminal typed something else: nothing is decided.
+fn decision_channel(
+    run_dir: &Path,
+    run_id: &str,
+    node: &str,
+    decision: &str,
+) -> Result<apb_engine::decision_channel::DecisionChannel, String> {
+    use apb_engine::decision_channel::DecisionChannel;
+    if crate::util::StepCaller::from_env().describe().is_some() {
+        return Ok(DecisionChannel::RunStep);
+    }
+    let person_only = is_safe_segment(run_id)
+        && apb_engine::progress::load_run_playbook(run_dir)
+            .and_then(|p| p.node(node).map(|n| n.person_only))
+            .unwrap_or(false);
+    if !person_only {
+        return Ok(DecisionChannel::CliUnattended);
+    }
+    let question = format!(
+        "Decide `{}` for gate `{}` of run `{}`? Type the option to confirm:",
+        sanitize_for_terminal(decision, QUESTION_TEXT_MAX),
+        sanitize_for_terminal(node, QUESTION_TEXT_MAX),
+        sanitize_for_terminal(run_id, QUESTION_TEXT_MAX)
+    );
+    let lines = [format!(
+        "gate `{}` is person_only: only a person decides it.",
+        sanitize_for_terminal(node, QUESTION_TEXT_MAX)
+    )];
+    match crate::consent::ask_typed(&lines, &question) {
+        None => Ok(DecisionChannel::CliUnattended),
+        Some(typed) if typed == decision => Ok(DecisionChannel::Terminal),
+        Some(_) => Err(format!(
+            "not confirmed: the option typed is not `{}`; nothing was decided",
+            sanitize_for_terminal(decision, QUESTION_TEXT_MAX)
+        )),
     }
 }
 

@@ -134,15 +134,11 @@ fn seed_gate_run_yaml(
 }
 
 fn review_requested(node: &str) -> apb_engine::event::EventPayload {
-    apb_engine::event::EventPayload::ReviewRequested {
-        node: node.into(),
-        options: vec!["approved".into(), "rejected".into()],
-        title: None,
-        instruction: String::new(),
-        prompt: None,
-        recommendation: None,
-        plan_digest: None,
-    }
+    apb_engine::event::EventPayload::review_requested(
+        node,
+        vec!["approved".into(), "rejected".into()],
+        String::new(),
+    )
 }
 
 async fn get_json(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
@@ -207,6 +203,8 @@ async fn get_run_detail_exposes_pending_review_prompt() {
         prompt: Some("Check the changelog first.".into()),
         recommendation: None,
         plan_digest: None,
+        binding: None,
+        person_only: false,
     };
     seed_gate_run_yaml(dir.path(), "gate-2", GATE_PROMPT, &[prompt]);
     let app = build_router(AppState::new(dir.path().to_path_buf()));
@@ -345,6 +343,8 @@ fn publish_gate() -> (Vec<apb_engine::event::EventPayload>, String) {
             prompt: None,
             recommendation: None,
             plan_digest: Some(digest),
+            binding: None,
+            person_only: false,
         },
     ];
     (payloads, nonce)
@@ -2407,4 +2407,56 @@ mod results_routes {
         .await;
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
+}
+
+/// A dashboard without keys never resumes a run from a node past a
+/// person-only gate no person decided: 403 with the way a person does it,
+/// and nothing journaled. A node before the gate is not refused by it.
+#[tokio::test]
+async fn a_keyless_resume_past_an_undecided_person_only_gate_is_refused() {
+    let _cfg = common::config_sandbox().await;
+    apb_core::run_origin::ensure_key().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    seed_stamped_run(
+        dir.path(),
+        "po-1",
+        &GATE.replace(
+            "options: [approved, rejected] }",
+            "options: [approved, rejected], person_only: true }",
+        ),
+        &[
+            apb_engine::event::EventPayload::node_finished("start", "succeeded", 1, String::new()),
+            review_requested("gate"),
+            paused_event("away"),
+        ],
+    );
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let res = app
+        .oneshot(
+            Request::post("/api/runs/po-1/resume")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"from_node":"ok"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.starts_with("approval_weakened: `ok` skips gate `gate`"),
+        "{text}"
+    );
+    assert!(text.contains("dashboard_keyless"), "{text}");
+    let events = apb_engine::event::read_all(&dir.path().join(".apb/runs/po-1")).unwrap();
+    assert!(
+        !events.iter().any(|e| matches!(
+            e.payload,
+            apb_engine::event::EventPayload::RunResumed { .. }
+        )),
+        "a refused resume journals nothing"
+    );
 }

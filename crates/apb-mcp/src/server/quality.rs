@@ -123,6 +123,7 @@ pub(super) fn detail_of(e: tools::ToolError) -> String {
         tools::ToolError::Engine(d)
         | tools::ToolError::NotFound(d)
         | tools::ToolError::Conflict(d) => d,
+        e @ tools::ToolError::Refused { .. } => e.to_string(),
     }
 }
 

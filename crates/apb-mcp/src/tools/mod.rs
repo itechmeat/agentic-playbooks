@@ -51,6 +51,15 @@ pub enum ToolError {
     /// surfaces can map it to 409 without a fragile substring search in the text.
     #[error("conflict: {0}")]
     Conflict(String),
+    /// The caller's channel may not take this ([`apb_engine::EngineError::
+    /// ChannelRefused`]): a person-only gate refuses every channel that is
+    /// not a person's, and a run step never decides for its own run tree.
+    /// The message names how a person decides instead. HTTP answers 403.
+    #[error("refused ({}): {message}", refusal.as_str())]
+    Refused {
+        refusal: apb_engine::decision_channel::CallerRefusal,
+        message: String,
+    },
 }
 
 /// Refuses `what` when `step` is a run step (see
@@ -88,6 +97,9 @@ impl From<EngineError> for ToolError {
             // conflict, not a hard failure (#102.5): the caller can try again
             // shortly instead of treating this like any other engine error.
             EngineError::WorkdirBusy(m) => ToolError::Conflict(m),
+            EngineError::ChannelRefused { refusal, message } => {
+                ToolError::Refused { refusal, message }
+            }
             other => ToolError::Engine(other.to_string()),
         }
     }

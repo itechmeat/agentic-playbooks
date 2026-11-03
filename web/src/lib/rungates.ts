@@ -1,6 +1,14 @@
 import { pendingSupervisorFromPayload, type SupervisorEntry } from './supervisors'
-import type { PublishGate } from './publish'
-import type { ActionCode, NextAction, PendingHostTask, ReviewRecommendation, UnattendedOutcome } from './api.gen'
+import { shellWord, type PublishGate } from './publish'
+import { ApiError } from './api/http'
+import type {
+  ActionCode,
+  NextAction,
+  PendingHostTask,
+  ReviewBinding,
+  ReviewRecommendation,
+  UnattendedOutcome,
+} from './api.gen'
 import type { RunDetail } from './types'
 
 // The identity of the request a gate entry posts to: the run it belongs to
@@ -27,6 +35,13 @@ export interface ReviewEntry extends GateRequest {
    * Part 11); absent unless the machine runs `review_triage` in advise or
    * enforce. Never preselects an option. */
   recommendation?: string
+  /** For a gate with `approves:`: the snapshots the open request is bound
+   * to. An approving decision carries `nonce`, the binding's. */
+  binding?: ReviewBinding
+  nonce?: string
+  /** Only a person's channel decides this gate: the CLI at a terminal or a
+   * dashboard with a signed-in session. */
+  personOnly?: boolean
 }
 
 // A pending question as the question panel renders it. The panel always
@@ -106,10 +121,15 @@ export function runGates(detail: RunDetail): RunGates {
   return {
     reviews: p.pending_reviews
       .filter((r) => !r.publish)
-      .map(({ node, options, prompt, recommendation }) => {
+      .map(({ node, options, prompt, recommendation, binding, person_only }) => {
         const entry: ReviewEntry = { node, options, ...(prompt ? { prompt } : {}), ...req('decide_review', node) }
         const note = recommendationNote(recommendation)
         if (note) entry.recommendation = note
+        if (binding) {
+          entry.binding = binding
+          entry.nonce = binding.nonce
+        }
+        if (person_only) entry.personOnly = true
         return entry
       }),
     publishes: p.pending_reviews.flatMap(({ node, publish, prompt }) =>
@@ -156,4 +176,43 @@ export function recommendationNote(r: ReviewRecommendation | null | undefined): 
   const who = [r.provider, r.model].filter(Boolean).join('/')
   const flags = [r.calibrated ? null : 'uncalibrated', r.applied ? 'applied by the engine' : null].filter(Boolean)
   return `${r.applied ? 'Decided' : 'Advisory recommendation'}: ${r.option} (p=${r.p.toFixed(2)})${who ? `, ${who}` : ''}${flags.length ? ` [${flags.join(', ')}]` : ''}`
+}
+
+// The terminal command that decides `option` at a review gate, every value
+// quoted for the shell: what a dashboard without keys offers for a
+// person-only gate instead of its buttons. A bound gate's command carries
+// the binding nonce, and the request the page showed when it knows it.
+export function reviewCommand(r: ReviewEntry, option: string): string {
+  const words = ['apb', 'review', r.runId, r.node, '--decision', option]
+  if (r.nonce) words.push('--nonce', r.nonce)
+  if (r.request !== undefined) words.push('--request', `review:${r.request}`)
+  return words.map(shellWord).join(' ')
+}
+
+// The key a refused decision is kept under: the gate's run, its node and
+// the request it answered, so a refusal shows only on that gate of that run
+// while that request is open.
+export function refusalKey(g: { runId: string; node: string; request?: number }): string {
+  return `${g.runId}:${g.node}:${g.request ?? ''}`
+}
+
+// The refusals still about a gate on screen: one whose request was
+// decided, replaced or withdrawn is dropped.
+export function liveRefusals(refusals: Record<string, string>, open: ReviewEntry[]): Record<string, string> {
+  const live = new Set(open.map(refusalKey))
+  return Object.fromEntries(Object.entries(refusals).filter(([k]) => live.has(k)))
+}
+
+// The server's own sentence for a refused decision, as the gate shows it:
+// the `message` of a structured refusal, else the plain body without the
+// URL the fetch layer puts in front of it.
+export function refusalSentence(e: unknown): string {
+  if (e instanceof ApiError) {
+    const msg = e.body?.message
+    if (typeof msg === 'string' && msg) return msg
+    const plain = /^(?:https?:\/\/\S+|\/api\/\S+): ([\s\S]+)$/.exec(e.message)
+    if (plain && !/^HTTP \d+$/.test(plain[1])) return plain[1]
+    return e.message
+  }
+  return String(e)
 }

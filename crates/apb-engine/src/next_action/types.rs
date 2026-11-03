@@ -5,6 +5,10 @@ use serde::Serialize;
 
 use crate::state::RunStatus;
 
+/// Why a surface does not offer an action to its caller; every facade's
+/// `caller_refusal` is one of these.
+pub use crate::decision_channel::CallerRefusal;
+
 /// The one verdict over every open wait of a run and its live children.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -269,6 +273,18 @@ pub struct NextAction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub unattended: Option<UnattendedOutcome>,
+    /// Only a person's channel takes it: the CLI at an interactive terminal
+    /// outside a run step, or the dashboard with a signed-in session (a
+    /// gate marked `person_only`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub person_only: bool,
+    /// Why the surface that shows it does not take it from its caller
+    /// ([`super::mark_for_caller`]); absent when the caller may take it, or
+    /// on a surface that does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub caller_refusal: Option<CallerRefusal>,
 }
 
 /// What an unattended run does at a wait ([`NextAction::unattended`]).
