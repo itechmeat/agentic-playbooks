@@ -14,6 +14,7 @@ mod candidate;
 mod connector;
 mod consent;
 mod dashboard_check;
+mod demo;
 // --- issue #193 host-task decisions ---
 mod decide;
 // --- end issue #193 ---
@@ -28,6 +29,7 @@ mod hook;
 mod import_preview;
 mod intent;
 mod interrupt;
+mod judge;
 mod launch;
 mod make_global;
 mod manage;
@@ -529,6 +531,12 @@ enum Command {
     /// current by quality, or decide it: --promote makes it current,
     /// --keep-current drops it and changes nothing
     Candidate(crate::candidate::CandidateArgs),
+    /// Install, run or remove the keyless demo
+    Demo(crate::demo::DemoArgs),
+    /// Try a judge node outside any run (eval), list and check its
+    /// labelled examples (examples), save a run's judge execution as one
+    /// (save-example), or show what a run's judge execution read (values)
+    Judge(crate::judge::JudgeArgs),
     /// A playbook's versions and its current one: list them, make one
     /// current (use, with --expect and --reason), or show the moves of
     /// current (history)
@@ -1177,6 +1185,8 @@ fn main() -> ExitCode {
         Some(Command::Decisions { action }) => decisions_cmd(&root, action),
         Some(Command::Grade(args)) => grade::grade_cmd(&root, args),
         Some(Command::Candidate(args)) => candidate::candidate_cmd(&root, args),
+        Some(Command::Demo(args)) => demo::demo_cmd(args),
+        Some(Command::Judge(args)) => judge::judge_cmd(&root, args),
         Some(Command::Version(args)) => version::version_cmd(&root, args),
         Some(Command::Problems(args)) => problems::problems_cmd(&root, args),
         Some(Command::Discover(args)) => discover::discover_cmd(&root, args),

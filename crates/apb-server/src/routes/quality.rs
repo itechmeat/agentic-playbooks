@@ -11,7 +11,13 @@
 //!   run once more (409 without a host grade);
 //! - `GET /api/playbooks/{id}/candidate`: the candidate and how it compares
 //!   with `current` (`candidate: null` without one);
-//! - `POST /api/playbooks/{id}/candidate/promote` and
+//! - `GET /api/playbooks/{id}/candidate/summary`: what a person reads before
+//!   promoting (`summary: null` without a candidate);
+//! - `POST /api/playbooks/{id}/candidate/promote` (`{ expected_version,
+//!   expected_digest, acknowledged? }`: the candidate as the person saw it;
+//!   a call without that body is refused `expected_required`; a refusal of
+//!   the re-check answers its `PromoteRefusal` as JSON: 409 `stale` or
+//!   `needs_acknowledgement` with the summary id, 422 `blocked`) and
 //!   `POST /api/playbooks/{id}/candidate/keep-current` (`{ reason? }`): a
 //!   person's decision, recorded as made in the dashboard (404 without a
 //!   candidate).
@@ -21,11 +27,15 @@
 
 use apb_core::quality::grade::Grade;
 use apb_core::step_env::StepCaller;
+use apb_engine::candidate::summary::{CandidateSummary, PromoteRefusal, VersionDigest};
 use apb_engine::candidate::{CandidateQualityView, PersonDecision};
-use apb_mcp::tools::candidate::{candidate_decide, candidate_view};
+use apb_mcp::tools::candidate::{
+    DecideError, candidate_decide, candidate_decide_typed, candidate_summary, candidate_view,
+};
 use apb_mcp::tools::grade::{grade_by, grade_reopen, grader_of, run_grades};
 use axum::extract::{Path as AxPath, Query, State};
-use axum::response::{Json, Response};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Json, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::state::*;
@@ -48,6 +58,28 @@ pub struct RunGrades {
 pub struct PlaybookCandidate {
     pub id: String,
     pub candidate: Option<CandidateQualityView>,
+}
+
+/// `GET /api/playbooks/{id}/candidate/summary`.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct PlaybookCandidateSummary {
+    pub id: String,
+    pub summary: Option<CandidateSummary>,
+}
+
+/// Body of `POST /api/playbooks/{id}/candidate/promote`: the candidate's
+/// version and digest as the person saw them, and the summary id the
+/// person acknowledged when it had attention items.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct PromoteBody {
+    pub expected_version: String,
+    pub expected_digest: String,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional))]
+    pub acknowledged: Option<String>,
 }
 
 /// Body of `POST /api/playbooks/{id}/candidate/keep-current`.
@@ -116,22 +148,68 @@ pub(crate) async fn get_candidate_handler(
     .await
 }
 
-pub(crate) async fn post_promote_handler(
+/// The candidate summary of playbook `id`: what a person reads before
+/// promoting it.
+pub(crate) async fn get_candidate_summary_handler(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
     Query(q): Query<WorkspaceQuery>,
 ) -> Response {
     let pid = id.clone();
     answer(&state, &id, q.workspace.as_deref(), move |root| {
-        candidate_decide(
-            &root,
-            &pid,
-            PersonDecision::Promote,
-            DECIDED_BY,
-            &StepCaller::from_env(),
-        )
+        candidate_summary(&root, &pid).map(|summary| PlaybookCandidateSummary { id: pid, summary })
     })
     .await
+}
+
+/// A promotion's refusal as data: 409 when the person should look again
+/// (`stale`, `needs_acknowledgement` with the summary id to name), 422 when
+/// it is refused as asked (`blocked`, `expected_required`).
+fn refusal_response(r: PromoteRefusal) -> Response {
+    let status = match r {
+        PromoteRefusal::Stale { .. } | PromoteRefusal::NeedsAcknowledgement { .. } => {
+            StatusCode::CONFLICT
+        }
+        PromoteRefusal::Blocked { .. } | PromoteRefusal::ExpectedRequired => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
+    };
+    (status, Json(r)).into_response()
+}
+
+pub(crate) async fn post_promote_handler(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+    Query(q): Query<WorkspaceQuery>,
+    body: Option<Json<PromoteBody>>,
+) -> Response {
+    // An older dashboard promotes without saying what it showed: that is
+    // refused before anything is looked up.
+    let Some(Json(body)) = body else {
+        return refusal_response(PromoteRefusal::ExpectedRequired);
+    };
+    if !is_safe_id(&id) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let root = match resolve_root(&state, q.workspace.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let decision = PersonDecision::Promote {
+        expected: VersionDigest {
+            version: body.expected_version,
+            digest: body.expected_digest,
+        },
+        acknowledged: body.acknowledged,
+    };
+    let work =
+        move || candidate_decide_typed(&root, &id, decision, DECIDED_BY, &StepCaller::from_env());
+    match tokio::task::spawn_blocking(work).await {
+        Ok(Ok(rec)) => Json(rec).into_response(),
+        Ok(Err(DecideError::Refused(r))) => refusal_response(r),
+        Ok(Err(DecideError::Tool(e))) => tool_refusal(e),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 pub(crate) async fn post_keep_current_handler(

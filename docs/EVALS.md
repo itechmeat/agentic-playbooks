@@ -89,6 +89,7 @@ is not what the playbook needs.
     scripts/                case check scripts
     fixtures/               fixture directories
     scenarios/              scenario files (see Scenario runs below)
+    judge/<node>/           labelled judge examples (docs/DECISIONS.md, "Judge sandbox and labelled examples")
 ```
 
 The registry only lists `major.minor.patch` directories as versions, so
@@ -101,7 +102,8 @@ directly. A directory holding only `scenarios/` is no suite: `apb validate`
 checks no case for it and raises no V81, so a playbook an eval cannot run
 (a publish node, a connector, a sub-playbook) may still carry scenarios.
 The suite digest covers the whole `evals/` tree, `scenarios/` included, so
-editing a scenario asks for a new suite approval before the next `apb eval`.
+editing a scenario, or saving a labelled judge example, asks for a new
+suite approval before the next `apb eval`.
 
 ## A case
 
@@ -466,6 +468,40 @@ expectation did not hold), `invalid` (a boundary had no answer under
 every scenario passed, 1 when one failed, 2 for a refusal before any run,
 and 3 when one was invalid, stale or incomplete (3 wins over 1). `--json`
 prints every report.
+
+### On MCP and the dashboard
+
+The same scenario runs are offered to an agent and on the playbook page:
+
+| Surface | List | Play one | Read one |
+|---|---|---|---|
+| MCP | `playbook_scenarios { id, version? }` | `playbook_scenario_run { id, scenario, level, version?, max_decision_requests? }` | |
+| HTTP | `GET /api/playbooks/{id}/scenarios` | `POST /api/playbooks/{id}/scenario-runs` | `GET /api/playbooks/{id}/scenario-runs/{run}` |
+
+They play a scenario exactly as the command does, through the same `apb
+__scenario-run` child with the same timeouts, and answer `{ report, graph
+}`: the report and the run graph of the scenario run directory. The list
+gives each scenario's newest result per level with `fresh` (same version
+digest and scenario file) and whether the scenario is stale now. What
+differs from the command: one scenario per call; a stale scenario answers
+a `stale` report and never plays (there is no `--allow-stale`); a smoke run
+needs `max_decision_requests` named (1 to 200; there is no default and no
+terminal question, naming the cap is the go-ahead), an approved version,
+and is refused from a run step and from a dashboard without keys. A quick
+run needs nothing: it sends nothing. A read-only MCP server routes neither
+tool.
+
+On the dashboard, the Scenarios button of a playbook page opens a box with
+the scenarios of the shown version, each with its newest result per level
+(a link opens the stored report) and the reason a scenario does not fit
+the version, plus the files that did not load. It opens by itself on the
+demo's page. Quick is always offered. Smoke is offered only on a dashboard
+with keys: it asks for the request cap (1 to 200, 3 by default) and a
+confirmation naming it before anything is sent; a dashboard without keys
+says to run `apb eval --level smoke` in a terminal instead. The report
+shows the failed checks first, then the trace: executions, edges taken,
+answers nobody used or that were missing, and templates that rendered
+empty. The run graph of a scenario run is not drawn on the canvas.
 
 ### The report
 

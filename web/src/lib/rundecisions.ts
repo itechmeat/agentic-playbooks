@@ -117,3 +117,42 @@ export function decisionNote(e: WfEvent): string {
   const [row] = decisionRows([e])
   return [row.use, row.answer, row.source, row.latency, row.outcome].filter(Boolean).join(' · ')
 }
+
+/**
+ * What saving a judge node's decision as a labelled example starts from:
+ * the node, its execution (1-based, counted as the engine counts them:
+ * one more than the node's finished executions before the decision; absent
+ * when the journal shows no start, which the server reads as the latest), and one expected answer per question the
+ * decision answered, a `noul` (answered with `p` only) as yes or no, any
+ * other prefilled with the observed value. Null for anything but a
+ * `judge_node` decision with answers.
+ */
+export interface ExampleDraft {
+  node: string
+  execution?: number
+  questions: { name: string; yesNo: boolean; observed: string }[]
+}
+
+export function exampleDraftOf(events: WfEvent[], seq: number): ExampleDraft | null {
+  const e = events.find((x) => x.seq === seq && x.type === 'decision_made')
+  if (!e || !e.node) return null
+  const r = e as unknown as Record<string, unknown>
+  if (r.use_site !== 'judge_node' || str(r.error)) return null
+  const answers = r.answers && typeof r.answers === 'object' ? (r.answers as Record<string, unknown>) : {}
+  const questions = Object.entries(answers)
+    .filter(([, a]) => a && typeof a === 'object')
+    .map(([name, raw]) => {
+      const a = raw as Record<string, unknown>
+      const has = a.value !== undefined && a.value !== null
+      // A score's value is its expected level, a number; the example names
+      // a level or a band, which the person types.
+      const observed = typeof a.value === 'string' ? a.value : ''
+      return { name, yesNo: !has && num(a.p) !== undefined, observed }
+    })
+  if (!questions.length) return null
+  // Executions as `apb_engine::identity::index` numbers them: the one a
+  // decision sits in follows every finished one of its node.
+  const started = events.some((x) => x.type === 'node_started' && x.node === e.node && x.seq < seq)
+  const finished = events.filter((x) => x.type === 'node_finished' && x.node === e.node && x.seq < seq).length
+  return { node: e.node, ...(started ? { execution: finished + 1 } : {}), questions }
+}

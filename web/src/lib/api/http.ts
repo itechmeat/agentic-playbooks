@@ -100,6 +100,11 @@ export async function errorMessage(
     }
     if (body.error === 'frozen') return { message: `${url}: playbook is frozen`, ...meta }
     if (body.error) return { message: `${url}: ${body.error}`, ...meta }
+    // A refusal typed by its `code` (a candidate promotion's
+    // `PromoteRefusal`) keeps its body for the caller to read.
+    if (typeof body.code === 'string') {
+      return { message: `${url}: ${body.code}`, code: body.code, detail: body.detail, body }
+    }
   } catch {
     // body is not JSON: a plain-text body (e.g. the answer endpoint's
     // answer_by relay diagnostic) is still worth surfacing verbatim rather

@@ -169,6 +169,14 @@ fn terminate_process_group(child: &mut std::process::Child, grace: Duration) {
     let _ = child.wait();
 }
 
+/// Whether `child` has exited, without reaping it on unix (see
+/// [`leader_exited`]): a caller that kills the child's group once it ended
+/// checks this, kills the group, then reaps, so the group id cannot be
+/// reused in between.
+pub fn exited_unreaped(child: &mut std::process::Child) -> bool {
+    leader_exited(child)
+}
+
 /// Whether `child` has exited, without reaping it (unix: `waitid` with
 /// `WNOWAIT`), so its pid stays reserved for the caller's group kill. Also
 /// true when the state cannot be read, which ends the wait early. Only an

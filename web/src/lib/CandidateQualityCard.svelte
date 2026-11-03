@@ -15,19 +15,16 @@
   // A playbook's candidate version (a forward patch on trial) against
   // current: under a quality policy the comparison per criterion and the
   // verdict as it stands, the decision recorded last, and a person's
-  // decision: Promote makes the candidate current, Keep current drops it
-  // and changes nothing.
+  // Keep current, which drops the candidate and changes nothing. Promoting
+  // is the summary card's (`CandidateSummaryCard`), which names exactly
+  // what the person saw.
   let {
     candidate,
-    frozen = false,
     busy = false,
-    onPromote,
     onKeepCurrent,
   }: {
     candidate: CandidateQualityView
-    frozen?: boolean
     busy?: boolean
-    onPromote: () => void
     onKeepCurrent: (reason: string) => void
   } = $props()
 
@@ -106,17 +103,6 @@
         title="Keep the current version and drop the candidate: nothing changes"
       >
         Keep current
-      </Button>
-      <Button
-        size="sm"
-        disabled={busy || frozen}
-        onclick={onPromote}
-        data-testid="candidate-promote"
-        title={frozen
-          ? 'Frozen playbook: unfreeze it to change the current version'
-          : 'Make the candidate the current version'}
-      >
-        Promote
       </Button>
     </div>
   </div>

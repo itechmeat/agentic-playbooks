@@ -28,19 +28,26 @@ use crate::decision::{
 use crate::error::EngineError;
 use crate::event::DecisionAnswer;
 
+pub mod example;
 pub(crate) mod inputs;
+pub mod sandbox;
 
 pub use inputs::{JudgeInputs, RenderedField, ReviewInput};
 
 /// What the node does with the answers on this machine, at its mode.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JudgeOutcome {
     /// The answers apply: the node outputs this.
-    Output { output: Map<String, Value> },
+    Output {
+        #[cfg_attr(feature = "ts", ts(type = "Record<string, unknown>"))]
+        output: Map<String, Value>,
+    },
     /// The declared `on_unavailable` fallback applies.
     Fallback {
         reason: String,
+        #[cfg_attr(feature = "ts", ts(type = "Record<string, unknown>"))]
         output: Map<String, Value>,
     },
     /// The node fails.
@@ -51,6 +58,7 @@ pub enum JudgeOutcome {
 }
 
 /// One judge evaluation.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JudgeEvaluation {
     /// `apb_core::judge::node_digest` of the node's definition.
@@ -102,6 +110,15 @@ pub(crate) enum Answers<'a> {
     Given {
         answers: &'a BTreeMap<String, DecisionAnswer>,
         by: &'a str,
+    },
+    /// Answers already given, applied as this machine's `judge_node` use
+    /// applies an answer it asked for: at enforce they apply, below it the
+    /// declared fallback does (reason `mode` or `off`, `not_configured`
+    /// when `mode` is absent). No request, no journal.
+    GivenAt {
+        answers: &'a BTreeMap<String, DecisionAnswer>,
+        by: &'a str,
+        mode: Option<DecisionMode>,
     },
 }
 
@@ -206,6 +223,22 @@ pub(crate) fn evaluate(req: &JudgeRequest, answers: Answers) -> Result<Evaluated
             },
             crate::decision::state_digest(None, &parts),
             None,
+            0,
+            None,
+        ),
+        Answers::GivenAt { answers, by, mode } => (
+            Asked {
+                verdict: match mode {
+                    None => Verdict::Unavailable("not_configured".into()),
+                    Some(DecisionMode::Off) => Verdict::Unavailable("off".into()),
+                    Some(DecisionMode::Enforce) => Verdict::Answered,
+                    Some(_) => Verdict::Unavailable("mode".into()),
+                },
+                raw: answers.clone(),
+                by: Some(by.to_string()),
+            },
+            crate::decision::state_digest(None, &parts),
+            mode,
             0,
             None,
         ),

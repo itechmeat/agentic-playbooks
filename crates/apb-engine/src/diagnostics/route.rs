@@ -23,6 +23,7 @@ pub const KIND: &str = "route_evaluated";
 pub const OBSERVED_MAX: usize = 64;
 
 /// One edge of a routing decision.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(optional_fields))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RouteCheck {
     /// The edge's rendered address.
@@ -38,6 +39,7 @@ pub struct RouteCheck {
     /// edge's `p` and `applied`. Absent for an edge that was not checked
     /// and for `output_match`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
     pub observed: Option<Value>,
 }
 

@@ -10,9 +10,11 @@
 //! One failed trial alone decides nothing: the failure is in its grade.
 //! The decision is re-taken at a trial's end (journaled), whenever a grade
 //! is stored later ([`resettle`], not journaled), and a person may decide
-//! instead ([`decide_by_person`]).
+//! instead ([`super::summary::decide_by_person`], over [`decide_checked`]).
 
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use apb_core::candidate::{PromotePolicy, lineage_reaches, promote_policy};
 use apb_core::fsutil::DirLock;
@@ -23,7 +25,7 @@ use apb_core::quality::compare::{
 use apb_core::quality::criteria::criteria_of;
 use apb_core::quality::grade::Grade;
 use apb_core::schema::Playbook;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::line::{Line, Trial};
 use crate::error::EngineError;
@@ -179,13 +181,14 @@ impl Taken {
     }
 }
 
-fn record(decision: &QualityDecision, by: &str) -> QualityRecord {
+fn record(decision: &QualityDecision, by: &str, summary_id: Option<String>) -> QualityRecord {
     QualityRecord {
         verdict: decision.verdict,
         reason: decision.reason.clone(),
         compared: decision.per_criterion.clone(),
         decided_at: apb_core::clock::now_ms_u64(),
         decided_by: by.to_string(),
+        summary_id,
     }
 }
 
@@ -196,9 +199,10 @@ fn apply(
     decision: &QualityDecision,
     run_id: Option<&str>,
     by: &str,
+    summary_id: Option<String>,
     held: &DirLock,
 ) -> Result<(QualityRecord, u32), EngineError> {
-    let rec = record(decision, by);
+    let rec = record(decision, by, summary_id);
     let basis = if by == DECIDED_BY_APB {
         BASIS_QUALITY
     } else {
@@ -254,7 +258,14 @@ pub(super) fn settle_trial(
             t.successes = t.successes.saturating_add(1);
         })?;
     }
-    let (rec, successes) = apply(line, &decision, Some(&trial.run_id), DECIDED_BY_APB, held)?;
+    let (rec, successes) = apply(
+        line,
+        &decision,
+        Some(&trial.run_id),
+        DECIDED_BY_APB,
+        None,
+        held,
+    )?;
     let (version, run_id) = (line.candidate.clone(), trial.run_id.clone());
     log.append(match rec.verdict {
         Verdict::Promote => EventPayload::CandidatePromoted {
@@ -323,60 +334,131 @@ pub fn resettle(root: &Path, id: &str) -> Result<Option<QualityRecord>, EngineEr
     }
     let (decision, _) = taken.confirmed(&line, &current, &gate, None);
     Ok(Some(
-        apply(&line, &decision, None, DECIDED_BY_APB, &held)?.0,
+        apply(&line, &decision, None, DECIDED_BY_APB, None, &held)?.0,
     ))
+}
+
+/// A version and its trust digest: what a person saw and promotes.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VersionDigest {
+    pub version: String,
+    /// The version's trust digest (`sha256:...`).
+    pub digest: String,
+}
+
+/// A [`VersionDigest`] written `<version>@<digest>` (`apb candidate
+/// --promote --expect`) is not one of these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadVersionDigest(pub String);
+
+impl fmt::Display for BadVersionDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "`{}` is not <version>@<digest> (the candidate's version and digest as `apb candidate` shows them)",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for BadVersionDigest {}
+
+impl FromStr for VersionDigest {
+    type Err = BadVersionDigest;
+
+    /// `1.3.0@sha256:...`: the version up to the first `@`, the digest after
+    /// it; both must be present and the digest names its algorithm.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bad = || BadVersionDigest(s.to_string());
+        let (version, digest) = s.split_once('@').ok_or_else(bad)?;
+        let named = digest
+            .split_once(':')
+            .is_some_and(|(alg, hex)| !alg.is_empty() && !hex.is_empty());
+        if version.is_empty() || !named || s.chars().any(char::is_whitespace) {
+            return Err(bad());
+        }
+        Ok(VersionDigest {
+            version: version.to_string(),
+            digest: digest.to_string(),
+        })
+    }
+}
+
+impl fmt::Display for VersionDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}@{}", self.version, self.digest)
+    }
 }
 
 /// A person's decision on a candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PersonDecision {
-    Promote,
-    /// Change nothing: drop the candidate.
-    KeepCurrent {
-        reason: Option<String>,
+    /// Make the candidate `current`: `expected` is the version and digest
+    /// the person saw, `acknowledged` the [`super::summary::CandidateSummary`]
+    /// id the person acknowledged, when the summary had attention items.
+    Promote {
+        expected: VersionDigest,
+        acknowledged: Option<String>,
     },
+    /// Change nothing: drop the candidate.
+    KeepCurrent { reason: Option<String> },
 }
 
 /// A person decides the candidate of playbook `id`: promote it, or keep
-/// `current` and drop it. `by` names the surface (`cli`, `dashboard`,
-/// `mcp:<client>`). Refused without a candidate.
-pub fn decide_by_person(
+/// `current` and drop it. `by` names the surface. Refused without a
+/// candidate. Under the candidate lock, a promotion first goes through
+/// `check` (the candidate and `current` versions as the lock holds them,
+/// and the quality comparison confirmed under it), which refuses it or
+/// returns the summary id the record keeps; keeping `current` does not.
+/// The public entry is [`super::summary::decide_by_person`], which supplies
+/// the check: nothing promotes without one.
+pub(super) fn decide_checked<E: From<EngineError>>(
     root: &Path,
     id: &str,
     decision: PersonDecision,
     by: &str,
-) -> Result<QualityRecord, EngineError> {
+    check: impl FnOnce(&str, &str, Option<&QualityDecision>) -> Result<Option<String>, E>,
+) -> Result<QualityRecord, E> {
     let missing = || EngineError::NotFound(format!("playbook `{id}` has no candidate on trial"));
     let Some((line, current)) = open_line(root, id)? else {
-        return Err(missing());
+        return Err(missing().into());
     };
     let gate = quality_gate(&current);
     let taken = gate.as_ref().map(|g| Taken::of(&line, &current, g, None));
-    let held = apb_core::candidate::lock(&apb_core::candidate::playbook_dir(root, id))?;
+    let held = apb_core::candidate::lock(&apb_core::candidate::playbook_dir(root, id))
+        .map_err(EngineError::from)?;
     if !line.unchanged() {
         return Err(EngineError::Conflict(format!(
             "the candidate of playbook `{id}` changed while deciding: look again and decide"
-        )));
+        ))
+        .into());
     }
-    let compared = match (taken, gate) {
-        (Some(t), Some(g)) => t.confirmed(&line, &current, &g, None).0.per_criterion,
-        _ => Vec::new(),
+    let confirmed = match (taken, gate) {
+        (Some(t), Some(g)) => Some(t.confirmed(&line, &current, &g, None).0),
+        _ => None,
     };
-    let (verdict, reason) = match &decision {
-        PersonDecision::Promote => (Verdict::Promote, "promoted by a person".to_string()),
+    let (verdict, reason, summary_id) = match &decision {
+        PersonDecision::Promote { .. } => (
+            Verdict::Promote,
+            "promoted by a person".to_string(),
+            check(&line.candidate, &line.current, confirmed.as_ref())?,
+        ),
         PersonDecision::KeepCurrent { reason } => (
             Verdict::KeepCurrent,
             reason
                 .clone()
                 .unwrap_or_else(|| "a person kept current".to_string()),
+            None,
         ),
     };
     let decided = QualityDecision {
         verdict,
-        per_criterion: compared,
+        per_criterion: confirmed.map(|d| d.per_criterion).unwrap_or_default(),
         reason,
     };
-    Ok(apply(&line, &decided, None, by, &held)?.0)
+    Ok(apply(&line, &decided, None, by, summary_id, &held)?.0)
 }
 
 /// A candidate and how it compares, for the playbook surfaces.

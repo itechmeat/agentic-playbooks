@@ -25,6 +25,10 @@ use crate::redact;
 /// The log file under `<root>/.apb/`.
 pub const DECISIONS_LOG: &str = "decisions.jsonl";
 
+/// The `use` of a judge sandbox line (`judge_eval::sandbox`): no cap here
+/// counts such a line.
+pub(crate) const JUDGE_SANDBOX_USE: &str = "judge_sandbox";
+
 /// Why a read-only process skipped a decision.
 pub const READ_ONLY_SKIP: &str = "read_only";
 
@@ -216,8 +220,8 @@ impl StandaloneDecider {
         }
     }
 
-    fn log_path(&self) -> PathBuf {
-        self.log_root.join(".apb").join(DECISIONS_LOG)
+    fn log(&self) -> DecisionLog {
+        DecisionLog::of(&self.log_root)
     }
 
     fn daily_cap(&self, site: UseSite) -> u32 {
@@ -229,99 +233,19 @@ impl StandaloneDecider {
             .unwrap_or(0)
     }
 
-    /// Opens the log without following a link, and only as a regular file:
-    /// the log sits in the project tree, which a repository can fill with a
-    /// symlink, a FIFO or a directory. `Ok(None)`: no log yet. `Err`: a log
-    /// that is not a plain file.
-    fn open_log(&self, append: bool) -> Result<Option<std::fs::File>, ()> {
-        let path = self.log_path();
-        match std::fs::symlink_metadata(&path) {
-            Ok(m) if !m.file_type().is_file() => return Err(()),
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && append => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(()),
-        }
-        let mut options = std::fs::OpenOptions::new();
-        if append {
-            options.create(true).append(true);
-        } else {
-            options.read(true);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        }
-        let file = options.open(&path).map_err(|_| ())?;
-        match file.metadata() {
-            Ok(m) if m.is_file() => Ok(Some(file)),
-            _ => Err(()),
-        }
-    }
-
-    /// Requests sent today (UTC) for `site`, per the log. A log that is not
-    /// a plain file counts as a spent cap (fail closed for spend); only the
-    /// last [`MAX_LOG_SCAN_BYTES`] are read.
+    /// Requests sent today (UTC) for `site`, per the log. A judge sandbox
+    /// line never counts here, whatever its `use_site`: the sandbox has its
+    /// own cap.
     fn requests_today(&self, site: UseSite, now_ms: u64) -> u32 {
-        use std::io::{Read, Seek, SeekFrom};
-        let mut file = match self.open_log(false) {
-            Ok(Some(f)) => f,
-            Ok(None) => return 0,
-            Err(()) => return u32::MAX,
-        };
-        let len = file.metadata().map_or(0, |m| m.len());
-        let skip_partial = len > MAX_LOG_SCAN_BYTES;
-        if skip_partial
-            && file
-                .seek(SeekFrom::Start(len - MAX_LOG_SCAN_BYTES))
-                .is_err()
-        {
-            return u32::MAX;
-        }
-        let today = now_ms / DAY_MS;
-        std::io::BufReader::new(file.take(MAX_LOG_SCAN_BYTES))
-            .lines()
-            .skip(usize::from(skip_partial))
-            .map_while(Result::ok)
-            .filter_map(|l| serde_json::from_str::<Value>(&l).ok())
-            .filter(|v| {
-                v["use_site"] == site.as_str()
-                    && v["ts_ms"].as_u64().is_some_and(|t| t / DAY_MS == today)
-                    && !v["provider"].is_null()
-                    && v["cached"] != true
-            })
-            .count() as u32
+        self.log().count_today(now_ms, |v| {
+            v["use_site"] == site.as_str() && v["use"] != JUDGE_SANDBOX_USE
+        })
     }
 
     /// How long the log lock may be held before another caller treats it as
-    /// abandoned: every provider in the chain taking its whole
-    /// `timeout_ms`, plus a margin for the count and the log write.
+    /// abandoned ([`lock_lifetime`] of one request).
     fn lock_lifetime(&self) -> std::time::Duration {
-        let providers = self.settings.providers.len().max(1) as u64;
-        std::time::Duration::from_millis(
-            self.settings
-                .timeout_ms
-                .saturating_mul(providers)
-                .saturating_add(LOCK_MARGIN_MS),
-        )
-    }
-
-    /// Best effort: a log that cannot be written never changes the answer.
-    fn log(&self, line: &Value) {
-        if crate::read_only::active() {
-            return;
-        }
-        if !self.log_path().parent().is_some_and(Path::is_dir) {
-            return;
-        }
-        if let (Ok(Some(mut f)), Ok(mut text)) = (self.open_log(true), serde_json::to_string(line))
-        {
-            text.push('\n');
-            let _ = f.write_all(text.as_bytes());
-        }
+        lock_lifetime(&self.settings, 1)
     }
 
     /// Asks one decision over `state` (material class [`apb_core::decisions::send_class`]
@@ -400,24 +324,15 @@ impl StandaloneDecider {
         // counts as stale only past that bound ([`Self::lock_lifetime`]); a
         // stale one (a holder that died) is broken and the break is logged.
         let lifetime = self.lock_lifetime();
-        let Some((_lock, broke_stale)) = self
-            .log_path()
-            .parent()
-            .and_then(|dir| apb_core::fsutil::lock_dir_with_lifetime(dir, LOG_LOCK, lifetime).ok())
-        else {
+        let Some((_lock, broke_stale)) = self.log().lock(lifetime) else {
             return StandaloneOutcome::Skipped { reason: "busy" };
         };
         if broke_stale {
-            self.log(&json!({
-                "ts_ms": now_ms,
-                "note": "stale_lock_broken",
-                "lock": LOG_LOCK,
-                "stale_after_ms": lifetime.as_millis() as u64,
-            }));
+            self.log().note_stale_lock(now_ms, lifetime);
         }
         if self.requests_today(site, now_ms) >= self.daily_cap(site) {
             line["error"] = json!("budget");
-            self.log(&line);
+            self.log().append(&line);
             return StandaloneOutcome::Skipped { reason: "budget" };
         }
         let request = DecisionRequest {
@@ -450,7 +365,7 @@ impl StandaloneDecider {
                 line["input_tokens"] = json!(resp.usage.input_tokens);
                 line["cost_usd"] = json!(cost);
                 line["cost_estimated"] = json!(estimated);
-                self.log(&line);
+                self.log().append(&line);
                 StandaloneOutcome::Answered(StandaloneAnswer {
                     provider: resp.provider,
                     model: resp.model,
@@ -464,11 +379,157 @@ impl StandaloneDecider {
                 line["provider"] = json!(self.chain().0.ids().last());
                 line["latency_ms"] = json!(started.elapsed().as_millis() as u64);
                 line["error"] = json!(e.kind());
-                self.log(&line);
+                self.log().append(&line);
                 StandaloneOutcome::Failed {
                     error_kind: e.kind().to_string(),
                 }
             }
+        }
+    }
+}
+
+/// How long the log lock may be held for `requests` requests before another
+/// caller treats it as abandoned: every provider in the chain taking its
+/// whole `timeout_ms` for each, plus a margin for the count and the log
+/// write.
+pub(crate) fn lock_lifetime(settings: &EffectiveDecisions, requests: u64) -> std::time::Duration {
+    let providers = settings.providers.len().max(1) as u64;
+    std::time::Duration::from_millis(
+        settings
+            .timeout_ms
+            .saturating_mul(providers)
+            .saturating_mul(requests.max(1))
+            .saturating_add(LOCK_MARGIN_MS),
+    )
+}
+
+/// The project's log of decisions outside a run, `<root>/.apb/decisions.jsonl`:
+/// one JSON line per decision, counted per UTC day under its lock. Shared by
+/// the standalone decider and the judge sandbox.
+pub(crate) struct DecisionLog {
+    path: PathBuf,
+}
+
+impl DecisionLog {
+    pub(crate) fn of(root: &Path) -> Self {
+        DecisionLog {
+            path: root.join(".apb").join(DECISIONS_LOG),
+        }
+    }
+
+    /// Opens the log without following a link, and only as a regular file:
+    /// the log sits in the project tree, which a repository can fill with a
+    /// symlink, a FIFO or a directory. `Ok(None)`: no log yet. `Err`: a log
+    /// that is not a plain file.
+    pub(crate) fn open(&self, append: bool) -> Result<Option<std::fs::File>, ()> {
+        let path = &self.path;
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if !m.file_type().is_file() => return Err(()),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && append => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(()),
+        }
+        let mut options = std::fs::OpenOptions::new();
+        if append {
+            options.create(true).append(true);
+        } else {
+            options.read(true);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options.open(path).map_err(|_| ())?;
+        match file.metadata() {
+            Ok(m) if m.is_file() => Ok(Some(file)),
+            _ => Err(()),
+        }
+    }
+
+    /// Requests sent today (UTC) on the lines `keep` selects: a provider was
+    /// asked and the answer was not cached. A log that is not a plain file
+    /// counts as a spent cap (fail closed for spend); only the last
+    /// [`MAX_LOG_SCAN_BYTES`] are read.
+    pub(crate) fn count_today(&self, now_ms: u64, keep: impl Fn(&Value) -> bool) -> u32 {
+        self.weigh_today(now_ms, |v| {
+            u32::from(keep(v) && !v["provider"].is_null() && v["cached"] != true)
+        })
+    }
+
+    /// The sum of `weigh` over today's (UTC) lines, saturating. A log that
+    /// is not a plain file weighs a spent cap; only the last
+    /// [`MAX_LOG_SCAN_BYTES`] are read.
+    pub(crate) fn weigh_today(&self, now_ms: u64, weigh: impl Fn(&Value) -> u32) -> u32 {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = match self.open(false) {
+            Ok(Some(f)) => f,
+            Ok(None) => return 0,
+            Err(()) => return u32::MAX,
+        };
+        let len = file.metadata().map_or(0, |m| m.len());
+        let skip_partial = len > MAX_LOG_SCAN_BYTES;
+        if skip_partial
+            && file
+                .seek(SeekFrom::Start(len - MAX_LOG_SCAN_BYTES))
+                .is_err()
+        {
+            return u32::MAX;
+        }
+        let today = now_ms / DAY_MS;
+        std::io::BufReader::new(file.take(MAX_LOG_SCAN_BYTES))
+            .lines()
+            .skip(usize::from(skip_partial))
+            .map_while(Result::ok)
+            .filter_map(|l| serde_json::from_str::<Value>(&l).ok())
+            .filter(|v| v["ts_ms"].as_u64().is_some_and(|t| t / DAY_MS == today))
+            .fold(0u32, |sum, v| sum.saturating_add(weigh(&v)))
+    }
+
+    /// The log's lock, held `lifetime` at most before another caller breaks
+    /// it, and whether a stale one was broken. `None`: held elsewhere.
+    pub(crate) fn lock(
+        &self,
+        lifetime: std::time::Duration,
+    ) -> Option<(apb_core::fsutil::DirLock, bool)> {
+        self.path
+            .parent()
+            .and_then(|dir| apb_core::fsutil::lock_dir_with_lifetime(dir, LOG_LOCK, lifetime).ok())
+    }
+
+    /// Logs that a stale lock was broken.
+    pub(crate) fn note_stale_lock(&self, now_ms: u64, lifetime: std::time::Duration) {
+        self.append(&json!({
+            "ts_ms": now_ms,
+            "note": "stale_lock_broken",
+            "lock": LOG_LOCK,
+            "stale_after_ms": lifetime.as_millis() as u64,
+        }));
+    }
+
+    /// Appends one line, best effort: a log that cannot be written never
+    /// changes an answer. Nothing in a read-only process, nor without the
+    /// project's `.apb` directory.
+    pub(crate) fn append(&self, line: &Value) {
+        let _ = self.try_append(line);
+    }
+
+    /// [`DecisionLog::append`], saying whether the line was written.
+    pub(crate) fn try_append(&self, line: &Value) -> Result<(), ()> {
+        if crate::read_only::active() {
+            return Err(());
+        }
+        if !self.path.parent().is_some_and(Path::is_dir) {
+            return Err(());
+        }
+        let mut text = serde_json::to_string(line).map_err(|_| ())?;
+        text.push('\n');
+        match self.open(true)? {
+            Some(mut f) => f.write_all(text.as_bytes()).map_err(|_| ()),
+            None => Err(()),
         }
     }
 }
@@ -668,6 +729,37 @@ mod tests {
             !root.path().join(".apb").join(LOG_LOCK).exists(),
             "the broken lock was released"
         );
+    }
+
+    /// A day of judge sandbox lines leaves every other use's daily cap
+    /// whole: the sandbox counts its own lines, nothing else does.
+    #[test]
+    fn judge_sandbox_lines_never_count_against_another_cap() {
+        let root = project();
+        let now = apb_core::clock::now_ms_u64();
+        let log = DecisionLog::of(root.path());
+        // A whole day of the sandbox (its cap is 100).
+        for _ in 0..100 {
+            log.append(&json!({
+                "ts_ms": now,
+                "use_site": "judge_node",
+                "use": JUDGE_SANDBOX_USE,
+                "provider": "fake",
+                "cached": false,
+            }));
+        }
+        let slow = Arc::new(Slow::default());
+        let d = decider(root.path(), 1, &slow);
+        assert_eq!(d.requests_today(UseSite::CatalogRank, now), 0);
+        assert!(matches!(
+            d.decide(
+                UseSite::CatalogRank,
+                json!({"task": "x"}),
+                vec!["task".into()],
+                questions("s"),
+            ),
+            StandaloneOutcome::Answered(_)
+        ));
     }
 
     #[test]

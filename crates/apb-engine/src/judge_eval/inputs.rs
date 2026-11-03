@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 /// Everything a judge node's state renders from, field by field: what the
 /// template context reads in a run.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JudgeInputs {
@@ -46,6 +47,7 @@ pub struct JudgeInputs {
 }
 
 /// A review's decision and note, as a template reads them.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewInput {
@@ -55,6 +57,7 @@ pub struct ReviewInput {
 }
 
 /// One rendered state field: what was sent for it. Never journaled.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenderedField {
     pub name: String,
@@ -66,6 +69,7 @@ pub struct RenderedField {
     pub clipped: bool,
     /// Template references that rendered as nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<String>>", optional))]
     pub unfilled: Vec<String>,
 }
 

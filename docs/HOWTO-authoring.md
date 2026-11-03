@@ -1582,6 +1582,12 @@ provider model; only answers at enforce are stored, never a fallback.
 - Collect 20-30 labelled examples of the decision before trusting a
   threshold, and run the use in shadow first; switch `judge_node` to enforce
   only once the journaled answers agree with what you would have decided.
+  `apb judge save-example <run> <node> --expect q=v` keeps a run's judge
+  execution as an example and `apb judge examples <id> --check` shows how
+  the current thresholds agree with each label; `apb judge eval` tries one
+  input without a run (docs/DECISIONS.md, "Judge sandbox and labelled
+  examples"). Examples are committed with the project, so read what a save
+  stored.
 - References: https://docs.typesafe.ai/patterns and
   https://docs.typesafe.ai/model-jaggedness/jev-1.13.
 
@@ -1605,6 +1611,60 @@ template.
 Validator codes: V50 questions shape (including two questions writing one output field), V51 question content, V52 thresholds,
 V53 `on_unavailable`, V54 state, V59 judge edges (errors); V55, V56, V57, V58,
 V60, V61 (warnings).
+
+## Check the task first
+
+A judge node can read the task before any work starts and send an unclear
+one to a person instead of letting an agent guess. The example
+`examples/playbooks/task-check-first.yaml` does this:
+
+```yaml
+- id: check
+  type: judge
+  state:
+    task: "{{run.instruction}}"
+    clarification: "{{nodes.clarify.review_note}}"
+  questions:
+    sufficient:
+      type: choice
+      instructions: >-
+        Is `task`, together with `clarification` when there is one, clear
+        enough to start the work without guessing what is wanted?
+      criteria:
+        clear: "It names what to change and what done looks like."
+        unclear: "It leaves the goal, the place or the expected result to a guess."
+  thresholds:
+    sufficient: { min_confidence: 0.7, below: unclear }
+  on_unavailable: { route: clarify }
+```
+
+`clear` goes to the work; `unclear` goes to a `human_review` whose note is
+read back into the state, and `clarified` checks the task again. After two
+rounds a fallback ends the run failed rather than working on a task nobody
+could make clear. What to know before using it:
+
+- The check runs after the run has started: its run directory, consent,
+  busy lock and baseline come first. It is a step of the run, not a
+  refusal before it.
+- Below enforce the node takes its `on_unavailable`. `route: clarify`
+  sends every run to a person until the `judge_node` use is at enforce;
+  `default: { sufficient: clear }` makes the check advisory instead.
+- With `privacy.send` lacking `prompts` the instruction is not sent and
+  `task` reaches the model empty.
+- Put the cap on the edges out of the judge, the same `max_traversals` on
+  every edge into the review (V122 otherwise); a cap on the edge out of the
+  review ends the run failed when it is used up.
+- A playbook whose only decision is the judge works: the run snapshots the
+  machine's decision settings for it like for any judge.
+- In an unattended run the review has no one to ask: without an
+  `unattended` outcome on it, an unclear task fails the run
+  `hitl_required` before any work.
+
+The example ships three quick scenarios (`clear-task`,
+`unclear-then-clarified`, `unclear-unattended`); `apb eval
+task-check-first --level quick` plays them in seconds without asking a
+model or starting an agent (docs/EVALS.md, "Scenario runs"). A scenario is
+the cheap way to see such a loop route before the first real run.
 
 ## Human review and conditional edges
 

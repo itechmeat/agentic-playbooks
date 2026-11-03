@@ -1,7 +1,8 @@
 //! "Will it fit here?" on the HTTP API: `GET
-//! /api/playbooks/{id}/fit?workspace&scope`, the four-section report of
-//! [`apb_engine::fit`] for a run of the playbook (definition `scope`:
-//! `project`, the default, or `global`) in the workspace's project. Read
+//! /api/playbooks/{id}/fit?workspace&scope&version`, the four-section
+//! report of [`apb_engine::fit`] for a run of the playbook (definition
+//! `scope`: `project`, the default, or `global`) in the workspace's
+//! project, of `version` (a candidate's own fitness), else `current`. Read
 //! only; the report reads the playbook tree and the machine, off the async
 //! runtime.
 
@@ -22,15 +23,18 @@ pub(crate) struct FitQuery {
     /// `project` (default) or `global`.
     #[serde(default)]
     scope: Option<String>,
+    /// A version of the playbook; `current` when absent.
+    #[serde(default)]
+    version: Option<String>,
 }
 
-/// GET: the `FitReport` of the playbook's current version.
+/// GET: the `FitReport` of the playbook's `version`, else its current one.
 pub(crate) async fn get_fit_handler(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
     Query(q): Query<FitQuery>,
 ) -> Response {
-    if !is_safe_id(&id) {
+    if !is_safe_id(&id) || q.version.as_deref().is_some_and(|v| !is_safe_id(v)) {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
     let origin = match Scope::parse(q.scope.as_deref().unwrap_or("project")) {
@@ -47,7 +51,7 @@ pub(crate) async fn get_fit_handler(
     let wref = PlaybookRef {
         origin,
         id,
-        version: None,
+        version: q.version,
     };
     match tokio::task::spawn_blocking(move || assess(&root, &wref)).await {
         Ok(Ok(report)) => Json(report).into_response(),

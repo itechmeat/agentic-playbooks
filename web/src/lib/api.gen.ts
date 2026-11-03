@@ -2153,7 +2153,13 @@ decided_at: number,
 /**
  * `apb` for a decision the rule made, else the surface a person used.
  */
-decided_by: string, };
+decided_by: string, 
+/**
+ * The candidate summary a person acknowledged when promoting
+ * (`apb_engine::candidate::summary`). Display only: an older apb that
+ * rewrites the record drops it.
+ */
+summary_id?: string, };
 
 export type CriterionSource = "builtin" | "playbook";
 
@@ -3020,3 +3026,526 @@ export type DraftValidation = {
  * issues (the editor keeps the last valid ones).
  */
 parse_error: string | null, issues: Array<IssueView>, };
+
+export type ScenarioLevel = "quick" | "smoke";
+
+export type BoundaryKind = "agent_attempt" | "question" | "success_check" | "completion_check" | "script" | "judge_native" | "judge_emulation" | "judge_edges" | "list_judge_check" | "engine_aid" | "list_source" | "review" | "publish" | "wait" | "child_playbook" | "baseline" | "goal_script" | "protect" | "worktree" | "provenance" | "notify" | "node_cache" | "retry_delay" | "infra_backoff" | "read_only_check" | "finish_hooks";
+
+export type BoundaryKey = { 
+/**
+ * The node, absent for a run-level boundary (baseline, goal,
+ * worktree, notify, finish hooks).
+ */
+node?: string, 
+/**
+ * The node execution ordinal, 1-based (`identity::index`); 0 for a
+ * run-level boundary.
+ */
+visit: number, 
+/**
+ * The k-th attempt inside the execution (or the item), 1-based,
+ * counted by the answer book, never the journal's display ordinal.
+ */
+attempt?: number, 
+/**
+ * A list item id.
+ */
+item?: string, 
+/**
+ * The part of a boundary that has several: `before` or `after` of the
+ * baseline, a goal criterion's index.
+ */
+part?: string, };
+
+export type ScenarioVerdict = "passed" | "failed" | "invalid" | "stale" | "incomplete";
+
+export type ExpectationResult = { 
+/**
+ * `run.outcome`, `finish`, `route.path`, `route.visits`,
+ * `route.not_visits`, `visits[<node>]`, `edges.taken[<address>]`,
+ * `edges.not_taken[<address>]`, `joins.dead[<join>]`,
+ * `outputs[<node>]`, `outputs[<node>.<field>]`, `run_outputs[<name>]`,
+ * `templates_empty`, `unused_answers`.
+ */
+check: string, passed: boolean, expected: string, observed: string, };
+
+export type AnswerSource = "used" | "default" | "missing";
+
+export type TraceAttempt = { 
+/**
+ * 1-based inside the execution and item, counted from the journal's
+ * `attempt_started` events (never the display ordinal).
+ */
+n: number, item?: string, status?: string, failure_kind?: string, answer?: AnswerSource, };
+
+export type TraceExecution = { node: string, 
+/**
+ * The execution ordinal (`identity::index`), 1-based.
+ */
+visit: number, 
+/**
+ * The status its `node_finished` recorded; absent while open.
+ */
+status?: string, cancelled?: boolean, attempts?: Array<TraceAttempt>, };
+
+export type RouteCheck = { 
+/**
+ * The edge's rendered address.
+ */
+edge: string, rank: number, 
+/**
+ * `unconditional`, `fallback`, or the condition's type.
+ */
+kind: string, 
+/**
+ * `matched`, `not_matched`, `exhausted`, `not_reached`,
+ * `judge_unavailable` or `shadowed`.
+ */
+result: string, 
+/**
+ * The smallest fact that explains the result: a status, a review
+ * decision, an output field value (scrubbed, then clipped), a judge
+ * edge's `p` and `applied`. Absent for an edge that was not checked
+ * and for `output_match`.
+ */
+observed?: unknown, };
+
+export type RouteTrace = { node: string, visit: number, item?: string, mode: string, checks: Array<RouteCheck>, chosen: Array<string>, };
+
+export type EdgeCount = { edge: string, count: number, };
+
+export type JoinDead = { join: string, inputs: Array<string>, };
+
+export type EmptyRef = { node: string, visit: number, 
+/**
+ * The reference as written (`nodes.qa.output`).
+ */
+reference: string, 
+/**
+ * `never ran`, `field absent` or `not JSON`.
+ */
+why: string, };
+
+export type AnswerRef = { kind: BoundaryKind, 
+/**
+ * The node, absent for a run-level boundary (baseline, goal,
+ * worktree, notify, finish hooks).
+ */
+node?: string, 
+/**
+ * The node execution ordinal, 1-based (`identity::index`); 0 for a
+ * run-level boundary.
+ */
+visit: number, 
+/**
+ * The k-th attempt inside the execution (or the item), 1-based,
+ * counted by the answer book, never the journal's display ordinal.
+ */
+attempt?: number, 
+/**
+ * A list item id.
+ */
+item?: string, 
+/**
+ * The part of a boundary that has several: `before` or `after` of the
+ * baseline, a goal criterion's index.
+ */
+part?: string, };
+
+export type AnswerUse = { used: Array<AnswerRef>, defaults: Array<AnswerRef>, missing: Array<AnswerRef>, extra: Array<AnswerRef>, };
+
+export type BoundaryUse = { kind: BoundaryKind, 
+/**
+ * Answered from the scenario.
+ */
+answered: number, 
+/**
+ * Not crossed (no snapshot, no lock, no send, no sleep).
+ */
+skipped: number, 
+/**
+ * No answer: `on_missing` applied.
+ */
+missing: number, 
+/**
+ * Acted for real. A quick run must show none.
+ */
+real: number, };
+
+export type ScenarioReport = { 
+/**
+ * Absent when nothing ran (stale, or a drive that failed before it
+ * allocated a run).
+ */
+run_id?: string, level: ScenarioLevel, scenario: string, scenario_digest: string, playbook: string, version: string, playbook_digest: string, verdict: ScenarioVerdict, 
+/**
+ * Why the verdict is `invalid`, `stale` or `incomplete`.
+ */
+reason?: string, outcome?: string, finish?: string, checks: Array<ExpectationResult>, executions: Array<TraceExecution>, routes: Array<RouteTrace>, edges_taken: Array<EdgeCount>, joins_dead: Array<JoinDead>, templates_empty: Array<EmptyRef>, answers: AnswerUse, boundaries: Array<BoundaryUse>, decision_requests: number, cost_usd?: number, };
+
+export type ScenarioResultRef = { scenario: string, level: ScenarioLevel, verdict: ScenarioVerdict, version: string, playbook_digest: string, scenario_digest: string, at_ms: number, 
+/**
+ * The result's playbook digest is the version's digest and its
+ * scenario digest the scenario file's now.
+ */
+fresh: boolean, run_id: string, };
+
+export type ScenarioRunRequest = { 
+/**
+ * The scenario's name (its file stem).
+ */
+scenario: string, level: ScenarioLevel, 
+/**
+ * The playbook version; `current` when absent.
+ */
+version?: string, 
+/**
+ * The decision request cap of a smoke run (required there, refused at
+ * quick).
+ */
+max_decision_requests?: number, };
+
+export type ScenarioEntry = { name: string, title?: string, 
+/**
+ * The scenario file's digest now.
+ */
+digest: string, 
+/**
+ * Why the scenario does not fit the version now (its `versions` or its
+ * digest pin); absent when it fits.
+ */
+stale?: string, 
+/**
+ * The newest result at each level that has one, quick first.
+ */
+latest: Array<ScenarioResultRef>, };
+
+export type PlaybookScenarios = { id: string, version: string, 
+/**
+ * The version's trust digest: a result is fresh only for this one.
+ */
+playbook_digest: string, scenarios: Array<ScenarioEntry>, 
+/**
+ * One issue per scenario file that did not load (V146).
+ */
+issues: Array<IssueView>, };
+
+export type ScenarioRunView = { report: ScenarioReport, 
+/**
+ * Absent when the run directory holds no journal to draw.
+ */
+graph?: RunGraph, };
+
+export type DecisionMode = "off" | "shadow" | "advise" | "enforce";
+
+export type DecisionAnswer = { value?: unknown, p?: number, confidence?: number, invalid?: string, };
+
+export type ReviewInput = { decision: string, note: string | null, };
+
+export type JudgeInputs = { params: { [key in string]: string }, instruction: string | null, 
+/**
+ * Node outputs by node id.
+ */
+outputs: { [key in string]: string }, 
+/**
+ * Review decisions by review node id.
+ */
+reviews: { [key in string]: ReviewInput }, 
+/**
+ * The output a rejection sent back, by node id.
+ */
+rejected_outputs: { [key in string]: string }, hooks: { [key in string]: string }, 
+/**
+ * `run.context` as it would render.
+ */
+context: string, };
+
+export type RenderedField = { name: string, 
+/**
+ * The field's material class: `prompt`, or `output` when it carries
+ * what a node produced.
+ */
+class: string, 
+/**
+ * Bytes sent after redaction and the clip.
+ */
+bytes: number, clipped: boolean, 
+/**
+ * Template references that rendered as nothing.
+ */
+unfilled?: Array<string>, };
+
+export type JudgeOutcome = { "kind": "output", output: Record<string, unknown>, } | { "kind": "fallback", reason: string, output: Record<string, unknown>, } | { "kind": "fail", reason: string, } | { "kind": "emulate", reason: string, };
+
+export type JudgeEvaluation = { 
+/**
+ * `apb_core::judge::node_digest` of the node's definition.
+ */
+node_digest: string, state_digest: string, questions_digest: string, fields: Array<RenderedField>, 
+/**
+ * The answer per question as asked, an invalid one kept with its
+ * reason.
+ */
+raw: { [key in string]: DecisionAnswer }, 
+/**
+ * The `judge_node` use's mode; absent without decision settings.
+ */
+mode: DecisionMode | null, 
+/**
+ * What the node outputs if the answers applied (`output`), or why
+ * they cannot (`fail`).
+ */
+at_enforce: JudgeOutcome, 
+/**
+ * What the node does on this machine at its mode.
+ */
+as_configured: JudgeOutcome, 
+/**
+ * Whether applying the answers would change the output, when the mode
+ * keeps them from applying.
+ */
+would_change: boolean | null, requests: number, cost_usd: number | null, };
+
+export type SandboxRequest = { 
+/**
+ * The playbook version; `current` when absent.
+ */
+version?: string, inputs: JudgeInputs, 
+/**
+ * Answers given per question (typed by a person, or an example's
+ * observed answers): evaluated without a request.
+ */
+answers?: { [key in string]: DecisionAnswer }, 
+/**
+ * When the node would hand over to its emulation, ask the configured
+ * `llm_emulation` providers as a run would (priced, inside the daily
+ * cap). The node's profile emulation is never started.
+ */
+emulate: boolean, };
+
+export type SandboxEvaluation = { playbook: string, version: string, node: string, evaluation: JudgeEvaluation, 
+/**
+ * Edge addresses the enforce output would take; empty when the
+ * answers cannot apply.
+ */
+route_at_enforce: Array<string>, 
+/**
+ * Edge addresses the output on this machine would take.
+ */
+route_as_configured: Array<string>, 
+/**
+ * [`ROUTE_PREVIEW_NOTE`].
+ */
+route_note: string, 
+/**
+ * Sandbox requests of this project today, this one included.
+ */
+requests_today: number, daily_cap: number, };
+
+export type RecordedValue = { 
+/**
+ * Where it came from: `outputs.<node>`, `reviews.<node>.note`,
+ * `params.<name>`, `baseline.<check>.before`, `baseline.<check>.after`.
+ */
+label: string, 
+/**
+ * Redacted with the run tree's redactor.
+ */
+text: string, };
+
+export type ExpectedAnswer = boolean | string;
+
+export type ExampleSource = { 
+/**
+ * The run, for an example saved from one.
+ */
+run?: string, 
+/**
+ * The judge node's execution in that run, 1-based.
+ */
+execution?: number, 
+/**
+ * The journal seq of that execution's `decision_made`.
+ */
+decision_seq?: number, 
+/**
+ * Typed by hand (in the sandbox), not saved from a run.
+ */
+hand?: boolean, };
+
+export type ObservedAnswers = { provider: string, model: string, answers: { [key in string]: DecisionAnswer }, };
+
+export type RunValues = { run_id: string, node: string, 
+/**
+ * The judge node's execution, 1-based.
+ */
+execution: number, 
+/**
+ * Redacted with the run tree's redactor; a secret param reads
+ * [`SECRET_PLACEHOLDER`].
+ */
+inputs: JudgeInputs, recorded: Array<RecordedValue>, 
+/**
+ * The answers of that execution's `decision_made`, when it asked.
+ */
+observed?: ObservedAnswers, };
+
+export type JudgeExample = { 
+/**
+ * [`EXAMPLE_SCHEMA`].
+ */
+schema: number, 
+/**
+ * The file stem, `[a-z0-9][a-z0-9-]*`.
+ */
+id: string, playbook: string, node: string, 
+/**
+ * `apb_core::judge::node_digest` at labelling time: another one now
+ * means the example is stale (relabel it).
+ */
+node_digest: string, questions_digest: string, 
+/**
+ * The state the inputs rendered to at labelling time: another one now,
+ * under an equal node digest, means the render changed.
+ */
+state_digest: string, 
+/**
+ * Scrubbed before writing.
+ */
+inputs: JudgeInputs, 
+/**
+ * Per question; an omitted question is unlabelled.
+ */
+expected: { [key in string]: ExpectedAnswer }, source: ExampleSource, labelled_by: string, 
+/**
+ * `YYYY-MM-DD`.
+ */
+labelled_at: string, observed?: ObservedAnswers, note: string, };
+
+export type ExampleStatus = "checked" | "stale" | "state_changed";
+
+export type QuestionAgreement = { question: string, expected: ExpectedAnswer, 
+/**
+ * What the node's output carries for the question now.
+ */
+observed?: unknown, agrees: boolean, };
+
+export type JudgeExampleResult = { id: string, status: ExampleStatus, 
+/**
+ * Absent unless `checked`.
+ */
+evaluation?: JudgeEvaluation, questions: Array<QuestionAgreement>, };
+
+export type ConfusionCell = { question: string, expected: string, 
+/**
+ * The observed answer as text; `none` when the output carries none.
+ */
+observed: string, count: number, };
+
+export type NodeExamplesCheck = { node: string, 
+/**
+ * The node's digest now.
+ */
+node_digest: string, examples: Array<JudgeExampleResult>, 
+/**
+ * Labelled questions of checked examples that agree.
+ */
+agree: number, disagree: number, confusion: Array<ConfusionCell>, 
+/**
+ * Requests the check sent (`live` only).
+ */
+requests: number, cost_usd?: number, };
+
+export type ExamplesCheckRequest = { 
+/**
+ * One node; every judge node with examples when absent.
+ */
+node?: string, 
+/**
+ * Ask the sandbox again (inside its daily cap) instead of evaluating
+ * the observed answers.
+ */
+live: boolean, };
+
+export type ExampleSaveRequest = { 
+/**
+ * The judge node's execution, 1-based; the latest when absent.
+ */
+execution?: number, expected: { [key in string]: ExpectedAnswer }, note?: string, };
+
+export type NodeExamples = { node: string, examples: Array<JudgeExample>, };
+
+export type JudgeExamplesView = { playbook: string, nodes: Array<NodeExamples>, 
+/**
+ * Present when a check was asked for.
+ */
+checks?: Array<NodeExamplesCheck>, };
+
+export type VersionDigest = { version: string, 
+/**
+ * The version's trust digest (`sha256:...`).
+ */
+digest: string, };
+
+export type AxisState = "ok" | "attention" | "blocking" | "unknown";
+
+export type AxisName = "fitness" | "definition" | "quality";
+
+export type SummaryCode = "validator_error" | "candidate_edited" | "scenario_failed" | "scenario_invalid" | "scenario_incomplete" | "scenario_stale" | "scenario_not_run" | "quality_not_promote" | "fitness_problem";
+
+export type SummaryItem = { axis: AxisName, code: SummaryCode, 
+/**
+ * One line for people.
+ */
+detail: string, };
+
+export type Axis<T> = { state: AxisState, detail: T, };
+
+export type FitnessAxis = { report: FitReport, start_actions: Array<StartAction>, };
+
+export type DefinitionAxis = { issues: Array<IssueView>, 
+/**
+ * Absent when either definition could not be read.
+ */
+diff?: VersionDiff, scenarios: Array<ScenarioResultRef>, 
+/**
+ * Scenario names with no fresh result at any level.
+ */
+not_run: Array<string>, };
+
+export type QualityAxis = { view: CandidateQualityView, };
+
+export type CandidateSummary = { 
+/**
+ * sha256 over the basis (the two version digests, the scenario
+ * results' digests) and the item codes, never over times: the id an
+ * acknowledgement names.
+ */
+summary_id: string, playbook: string, candidate: VersionDigest, current: VersionDigest, computed_at_ms: number, 
+/**
+ * On this machine.
+ */
+fitness: Axis<FitnessAxis>, definition: Axis<DefinitionAxis>, quality: Axis<QualityAxis>, blocking: Array<SummaryItem>, attention: Array<SummaryItem>, };
+
+export type PromoteRefusal = { "code": "expected_required" } | { "code": "stale", expected: VersionDigest, found?: VersionDigest, } | { "code": "blocked", items: Array<SummaryItem>, } | { "code": "needs_acknowledgement", summary_id: string, items: Array<SummaryItem>, };
+
+export type PromoteBody = { expected_version: string, expected_digest: string, acknowledged?: string, };
+
+export type PlaybookCandidateSummary = { id: string, summary: CandidateSummary | null, };
+
+export type DemoProject = { 
+/**
+ * The demo project's directory.
+ */
+dir: string, playbook: string, version: string, 
+/**
+ * The project's id in the projects registry; absent when registration
+ * is off on this machine.
+ */
+workspace_id?: string, };
+
+export type DemoStatus = { installed: boolean, 
+/**
+ * Installed, but its files differ from the shipped ones.
+ */
+modified: boolean, project?: DemoProject, };

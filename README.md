@@ -95,6 +95,12 @@ coding agent installing apb for you follows
 
 ## Quick start
 
+To see a run end to end before writing anything, `apb demo --run` installs a
+small demo project under the config dir and starts it: a script writes
+`report.md`, then the run waits for you at a review (`apb review <run>
+review --decision approve`). It needs no agent and no key. `apb demo
+--remove` deletes it.
+
 A playbook that plans a task with an agent, runs a lint script, and lets the
 agent fix the result until the lint passes (at most three times).
 
@@ -215,9 +221,11 @@ apb suggestions     list / allow / reset save-as-playbook suggestion declines
 apb discover        find step sequences your past agent sessions repeat; list / show / save / dismiss
 apb stats           cross-run metrics per playbook version and node (read-only)
 apb grade <run>     grade an ended run by rules (--model: by the decision model); --backfill <id> grades earlier runs
-apb candidate <id>  a candidate version compared with current by quality; --promote, --keep-current
+apb candidate <id>  a candidate version compared with current by quality, with the summary to read first; --promote --expect <v>@<digest> [--ack <id>], --keep-current
 apb problems <id>   a playbook's known problems; confirm / dismiss / reopen / close --quote / recheck / scan
-apb eval <id>       run a playbook's eval cases in scratch repositories (opt-in, paid)
+apb eval <id>       run a playbook's eval cases in scratch repositories (opt-in, paid); --level quick plays its scenarios in seconds, free
+apb judge           evaluate one judge node outside any run; keep and check labelled examples
+apb demo            install (--run: start) the keyless demo project; --remove deletes it
 apb cache           status / inspect / prune / clear the node result cache
 apb decide          ask the configured decision models a bounded question
 apb decisions       decision-model report, stored thresholds, replay

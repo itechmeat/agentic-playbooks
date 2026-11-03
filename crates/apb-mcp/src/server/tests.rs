@@ -180,6 +180,12 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "supervisor_report",
         "supervisor_rebind_profile",
         "supervisor_patch_playbook",
+        "judge_evaluate",
+        "judge_examples",
+        "judge_example_save",
+        "judge_run_values",
+        "playbook_scenarios",
+        "playbook_scenario_run",
     ];
     for name in expected {
         assert!(
@@ -388,6 +394,13 @@ fn tools_carry_safety_annotations() {
     // A grading session writes its reading state and the grade into the
     // run, never anything the run made: not read-only, not destructive.
     for n in ["run_grade_start", "run_grade_read", "run_grade_submit"] {
+        assert_eq!(read_only(n), None, "tool `{n}`");
+        assert_eq!(destructive(n), Some(false), "tool `{n}`");
+    }
+    // A judge ask may spend this machine's decision requests (the
+    // examples check with `live: true` too): never hinted read-only, so a
+    // host that runs read-only tools unasked asks first.
+    for n in ["judge_evaluate", "judge_examples"] {
         assert_eq!(read_only(n), None, "tool `{n}`");
         assert_eq!(destructive(n), Some(false), "tool `{n}`");
     }

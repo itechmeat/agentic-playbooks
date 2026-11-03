@@ -4,7 +4,8 @@
 //! runs and held (`candidate_held`), promoted or kept out, one failed
 //! trial alone rejects nothing, spent trials go to a person, a host grade
 //! stored later re-settles the candidate, and a copied run folder or an
-//! unsigned grade file counts for nothing.
+//! unsigned grade file counts for nothing. A person's promotion is checked
+//! against the candidate summary under the candidate lock.
 
 use std::fs;
 use std::path::Path;
@@ -12,12 +13,21 @@ use std::path::Path;
 use apb_core::quality::compare::Verdict;
 use apb_core::quality::grade::{Cite, Level};
 use apb_core::registry::init_project;
+use apb_core::scenario::ScenarioLevel;
 use apb_core::versioning::read_provenance;
-use apb_engine::candidate::{PersonDecision, decide_by_person, quality_view, resettle, trial_of};
+use apb_engine::candidate::summary::{
+    AxisState, PromoteRefusal, SummaryCode, SummaryItem, VersionDigest,
+};
+use apb_engine::candidate::{
+    PersonDecision, PromoteError, candidate_summary, decide_by_person, quality_view, resettle,
+    trial_of,
+};
 use apb_engine::event::{EventPayload, read_all};
 use apb_engine::grade::evidence::Proposal;
 use apb_engine::grade::reader::ReadRequest;
 use apb_engine::grade::{SubmitOutcome, grades_of, read, start_session, submit};
+use apb_engine::scenario::report::Verdict as ScenarioVerdict;
+use apb_engine::scenario::store::IndexLine;
 use apb_engine::state::RunStatus;
 
 use crate::candidate_trial_test::{
@@ -173,7 +183,7 @@ fn trials_are_held_one_failure_rejects_nothing_and_spent_trials_go_to_a_person()
         Some(version.as_str())
     );
 
-    let rec = decide_by_person(root, ID, PersonDecision::Promote, "cli").unwrap();
+    let rec = decide_by_person(root, ID, promote(root, &version), "cli").unwrap();
     assert_eq!(
         (rec.verdict, rec.decided_by.as_str()),
         (Verdict::Promote, "cli")
@@ -405,7 +415,7 @@ fn a_person_keeps_current_and_the_candidate_is_dropped() {
         .trial
         .unwrap();
     assert_eq!(trial.outcome.as_deref(), Some("rejected"));
-    assert!(decide_by_person(root, ID, PersonDecision::Promote, "cli").is_err());
+    assert!(decide_by_person(root, ID, promote(root, &version), "cli").is_err());
 }
 
 #[test]
@@ -494,4 +504,400 @@ fn a_backfill_counts_only_the_runs_it_grades() {
     assert_eq!(graded, [runs[1].as_str()]);
     assert_eq!(report[0].skipped.as_deref(), Some("graded"));
     assert!(grades_of(&run_dir(root, &runs[0])).is_empty());
+}
+
+/// A person's promotion of the candidate `version` as `apb candidate`
+/// shows it: its version and trust digest, acknowledging the summary's
+/// attention items under the id they stand under now.
+fn promote(root: &Path, version: &str) -> PersonDecision {
+    match candidate_summary(root, ID).unwrap() {
+        Some(s) => promote_as(version, &s.candidate.digest, Some(&s.summary_id)),
+        None => promote_as(version, &digest(root, version), None),
+    }
+}
+
+/// Writes `yaml` (the template's text) as the definition of `version`, in
+/// place.
+fn rewrite(root: &Path, version: &str, yaml: &str) {
+    let file = root
+        .join(".apb/playbooks")
+        .join(ID)
+        .join(version)
+        .join("playbook.yaml");
+    let yaml = yaml.replace("version: 1.0.0", &format!("version: {version}"));
+    assert_ne!(fs::read_to_string(&file).unwrap(), yaml);
+    fs::write(&file, yaml).unwrap();
+}
+
+/// The trust digest `version` reads as now.
+fn digest(root: &Path, version: &str) -> String {
+    apb_core::registry::Registry::open(root)
+        .unwrap()
+        .load(ID, Some(version))
+        .unwrap()
+        .trust_digest()
+        .unwrap()
+}
+
+fn promote_as(version: &str, digest: &str, ack: Option<&str>) -> PersonDecision {
+    PersonDecision::Promote {
+        expected: VersionDigest {
+            version: version.to_string(),
+            digest: digest.to_string(),
+        },
+        acknowledged: ack.map(str::to_string),
+    }
+}
+
+fn refusal(r: Result<apb_core::quality::QualityRecord, PromoteError>) -> PromoteRefusal {
+    match r {
+        Err(PromoteError::Refused(r)) => r,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+fn codes(items: &[SummaryItem]) -> Vec<SummaryCode> {
+    items.iter().map(|i| i.code).collect()
+}
+
+/// A scenario `green` of the playbook, answering `p1` once.
+fn scenario(root: &Path, text: &str) -> String {
+    let dir = root.join(".apb/playbooks").join(ID);
+    let file = apb_core::scenario::scenarios_dir(&dir).join("green.yaml");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, text).unwrap();
+    apb_core::scenario::load(&dir, "green").unwrap().digest
+}
+
+const GREEN: &str =
+    "schema: 1\nid: green\nanswers:\n  p1:\n    - { visit: 1, script: { exit: 0, stdout: ok } }\n";
+
+/// A result of `green` at quick in the results index, as a scenario run
+/// leaves it.
+fn result(
+    root: &Path,
+    version: &str,
+    pd: &str,
+    sd: &str,
+    verdict: ScenarioVerdict,
+    run: &str,
+    at: u64,
+) {
+    apb_engine::scenario::store::append(
+        root,
+        ID,
+        &IndexLine {
+            scenario: "green".into(),
+            scenario_digest: sd.into(),
+            level: ScenarioLevel::Quick,
+            version: version.into(),
+            playbook_digest: pd.into(),
+            verdict,
+            run_id: run.into(),
+            at_ms: at,
+            decision_requests: 0,
+            cost_usd: None,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_promotion_moves_exactly_what_the_person_saw_and_acknowledged() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, "quality: {}");
+    let base = start(root).0;
+    let version = forward(root, &base, &playbook("quality: {}", "maybe.sh"));
+    let sd = scenario(root, GREEN);
+    let pd = digest(root, &version);
+
+    // Three axes apart: fit here, a scenario that never ran, a comparison
+    // with too few grades.
+    let s = candidate_summary(root, ID).unwrap().unwrap();
+    assert_eq!(
+        s.candidate,
+        VersionDigest {
+            version: version.clone(),
+            digest: pd.clone()
+        }
+    );
+    assert_eq!(s.current.version, "1.0.0");
+    assert_eq!(
+        s.fitness.state,
+        AxisState::Ok,
+        "{:?}",
+        s.fitness.detail.report
+    );
+    assert_eq!(s.definition.state, AxisState::Attention);
+    assert_eq!(s.quality.state, AxisState::Attention);
+    assert!(s.blocking.is_empty());
+    assert_eq!(
+        codes(&s.attention),
+        [SummaryCode::ScenarioNotRun, SummaryCode::QualityNotPromote]
+    );
+    assert_eq!(s.definition.detail.not_run, ["green"]);
+
+    // Another version or digest than the one shown is stale.
+    let wrong = refusal(decide_by_person(
+        root,
+        ID,
+        promote_as(&version, "sha256:00", None),
+        "cli",
+    ));
+    assert!(
+        matches!(&wrong, PromoteRefusal::Stale { found: Some(f), .. } if f.digest == pd),
+        "{wrong:?}"
+    );
+    let other = refusal(decide_by_person(
+        root,
+        ID,
+        promote_as("1.0.0", &pd, None),
+        "cli",
+    ));
+    assert!(matches!(other, PromoteRefusal::Stale { .. }), "{other:?}");
+    // Attention items unacknowledged: refused with the id to name.
+    let unacked = refusal(decide_by_person(
+        root,
+        ID,
+        promote_as(&version, &pd, None),
+        "cli",
+    ));
+    assert_eq!(
+        unacked,
+        PromoteRefusal::NeedsAcknowledgement {
+            summary_id: s.summary_id.clone(),
+            items: s.attention.clone()
+        }
+    );
+
+    // A scenario result arrives between the view and the click: the id
+    // the person acknowledged no longer covers what stands.
+    result(root, &version, &pd, &sd, ScenarioVerdict::Passed, "s-1", 1);
+    let after = candidate_summary(root, ID).unwrap().unwrap();
+    assert_ne!(after.summary_id, s.summary_id);
+    assert_eq!(codes(&after.attention), [SummaryCode::QualityNotPromote]);
+    let late = refusal(decide_by_person(
+        root,
+        ID,
+        promote_as(&version, &pd, Some(&s.summary_id)),
+        "cli",
+    ));
+    assert!(
+        matches!(&late, PromoteRefusal::NeedsAcknowledgement { summary_id, .. } if *summary_id == after.summary_id),
+        "{late:?}"
+    );
+    assert_eq!(pointer(root, "current").as_deref(), Some("1.0.0"));
+
+    let rec = decide_by_person(
+        root,
+        ID,
+        promote_as(&version, &pd, Some(&after.summary_id)),
+        "cli",
+    )
+    .unwrap();
+    assert_eq!(rec.summary_id.as_deref(), Some(after.summary_id.as_str()));
+    assert_eq!(pointer(root, "current").as_deref(), Some(version.as_str()));
+    let kept = read_provenance(root, ID, &version)
+        .unwrap()
+        .unwrap()
+        .trial
+        .unwrap();
+    assert_eq!(kept.outcome.as_deref(), Some("promoted"));
+    assert_eq!(kept.quality.unwrap().summary_id, rec.summary_id);
+    let history =
+        apb_core::versioning::current::history(&root.join(".apb/playbooks").join(ID), 5).unwrap();
+    assert_eq!(history.entries[0].to.as_deref(), Some(version.as_str()));
+}
+
+#[test]
+fn a_scenario_result_counts_only_for_the_candidate_and_the_file_as_they_are() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, "quality: {}");
+    let base = start(root).0;
+    let version = forward(root, &base, &playbook("quality: {}", "maybe.sh"));
+    let sd = scenario(root, GREEN);
+    let pd = digest(root, &version);
+    let scenario_codes = |root: &Path| {
+        let s = candidate_summary(root, ID).unwrap().unwrap();
+        let only: Vec<SummaryCode> = codes(&s.attention)
+            .into_iter()
+            .filter(|c| *c != SummaryCode::QualityNotPromote)
+            .collect();
+        (
+            only,
+            s.definition.detail.not_run,
+            s.definition.detail.scenarios,
+        )
+    };
+
+    // A failed result of this very candidate needs acknowledging.
+    result(root, &version, &pd, &sd, ScenarioVerdict::Failed, "s-1", 1);
+    let (c, not_run, refs) = scenario_codes(root);
+    assert_eq!(c, [SummaryCode::ScenarioFailed]);
+    assert!(not_run.is_empty());
+    assert!(refs[0].fresh);
+
+    // A newer result for another digest of the playbook is stale.
+    result(
+        root,
+        &version,
+        "sha256:other",
+        &sd,
+        ScenarioVerdict::Passed,
+        "s-2",
+        2,
+    );
+    let (c, not_run, refs) = scenario_codes(root);
+    assert_eq!(c, [SummaryCode::ScenarioStale]);
+    assert_eq!(not_run, ["green"]);
+    assert!(!refs[0].fresh);
+
+    // A fresh pass, then the scenario file is edited: stale again.
+    result(root, &version, &pd, &sd, ScenarioVerdict::Passed, "s-3", 3);
+    assert_eq!(scenario_codes(root).0, Vec::<SummaryCode>::new());
+    scenario(root, &format!("{GREEN}title: edited\n"));
+    assert_eq!(scenario_codes(root).0, [SummaryCode::ScenarioStale]);
+}
+
+#[test]
+fn a_validator_error_blocks_and_a_missing_profile_is_attention_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, "quality: {}");
+    let base = start(root).0;
+    let version = forward(root, &base, &playbook("quality: {}", "maybe.sh"));
+    // A node bound to a profile this machine does not have: fitness, not
+    // correctness.
+    let agent = playbook("quality: {}", "maybe.sh")
+        .replace(
+            "  - { id: done, type: finish, outcome: success }",
+            "  - { id: done, type: finish, outcome: success }\n  - { id: ask, type: agent_task, profile: ghost, prompt: hi }",
+        )
+        .replace(
+            "  - { from: p1, to: done }",
+            "  - { from: p1, to: ask }\n  - { from: ask, to: done }",
+        );
+    rewrite(root, &version, &agent);
+    let s = candidate_summary(root, ID).unwrap().unwrap();
+    assert_eq!(
+        s.fitness.state,
+        AxisState::Attention,
+        "{:?}",
+        s.fitness.detail.report
+    );
+    assert!(s.blocking.is_empty(), "{:?}", s.blocking);
+    assert!(codes(&s.attention).contains(&SummaryCode::FitnessProblem));
+    let acked = decide_by_person(
+        root,
+        ID,
+        promote_as(&version, &s.candidate.digest, Some(&s.summary_id)),
+        "cli",
+    );
+    assert!(acked.is_ok(), "{acked:?}");
+
+    // A validator error on a candidate blocks, acknowledged or not.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, "quality: {}");
+    let base = start(root).0;
+    let version = forward(root, &base, &playbook("quality: {}", "maybe.sh"));
+    let broken = playbook("quality: {}", "maybe.sh")
+        .replace("{ from: p1, to: done }", "{ from: p1, to: nowhere }");
+    rewrite(root, &version, &broken);
+    let s = candidate_summary(root, ID).unwrap().unwrap();
+    assert_eq!(s.definition.state, AxisState::Blocking);
+    assert!(
+        codes(&s.blocking).contains(&SummaryCode::ValidatorError),
+        "{:?}",
+        s.blocking
+    );
+    let r = refusal(decide_by_person(
+        root,
+        ID,
+        promote_as(&version, &s.candidate.digest, Some(&s.summary_id)),
+        "cli",
+    ));
+    assert!(matches!(r, PromoteRefusal::Blocked { .. }), "{r:?}");
+    assert_ne!(pointer(root, "current").as_deref(), Some(version.as_str()));
+}
+
+#[test]
+fn a_candidate_edited_after_a_run_of_it_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, "quality: {}");
+    let base = start(root).0;
+    let version = forward(root, &base, &playbook("quality: {}", "maybe.sh"));
+    let (_, _, chosen) = start(root);
+    assert_eq!(chosen.as_deref(), Some(version.as_str()));
+    let file = root
+        .join(".apb/playbooks")
+        .join(ID)
+        .join(&version)
+        .join("playbook.yaml");
+    let mut yaml = fs::read_to_string(&file).unwrap();
+    yaml.push_str("# edited in place\n");
+    fs::write(&file, yaml).unwrap();
+    let s = candidate_summary(root, ID).unwrap().unwrap();
+    assert_eq!(codes(&s.blocking), [SummaryCode::CandidateEdited]);
+    let r = refusal(decide_by_person(
+        root,
+        ID,
+        promote_as(&version, &s.candidate.digest, Some(&s.summary_id)),
+        "cli",
+    ));
+    assert!(matches!(r, PromoteRefusal::Blocked { .. }), "{r:?}");
+}
+
+/// The quality counts a person saw are part of what they acknowledge: a
+/// host grade stored after the view changes the counts while the verdict
+/// and its reason stay, and the old acknowledgement no longer promotes.
+#[test]
+fn an_acknowledgement_does_not_cover_quality_counts_that_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, OWN);
+    let mut base = String::new();
+    for _ in 0..3 {
+        base = start(root).0;
+        host_grade(root, &base);
+    }
+    let version = forward(root, &base, &playbook(OWN, "maybe.sh"));
+    let mut trials = Vec::new();
+    for _ in 0..4 {
+        trials.push(start(root).0);
+    }
+    host_grade(root, &trials[0]);
+    let s = candidate_summary(root, ID).unwrap().unwrap();
+    let before = s.quality.detail.view.decision.clone().unwrap();
+    assert_eq!(before.verdict, Verdict::NeedsPerson, "{}", before.reason);
+    host_grade(root, &trials[1]);
+    let after = quality_view(root, ID).unwrap().unwrap().decision.unwrap();
+    assert_eq!(
+        (after.verdict, after.reason.as_str()),
+        (before.verdict, before.reason.as_str())
+    );
+    assert_ne!(after.per_criterion, before.per_criterion);
+    let late = refusal(decide_by_person(
+        root,
+        ID,
+        promote_as(&version, &s.candidate.digest, Some(&s.summary_id)),
+        "cli",
+    ));
+    assert!(
+        matches!(&late, PromoteRefusal::NeedsAcknowledgement { summary_id, .. } if *summary_id != s.summary_id),
+        "{late:?}"
+    );
+    assert_eq!(pointer(root, "current").as_deref(), Some("1.0.0"));
+    let now = candidate_summary(root, ID).unwrap().unwrap();
+    decide_by_person(
+        root,
+        ID,
+        promote_as(&version, &now.candidate.digest, Some(&now.summary_id)),
+        "cli",
+    )
+    .unwrap();
+    assert_eq!(pointer(root, "current").as_deref(), Some(version.as_str()));
 }

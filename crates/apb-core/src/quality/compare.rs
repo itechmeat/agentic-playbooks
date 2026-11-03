@@ -249,6 +249,12 @@ pub struct QualityRecord {
     pub decided_at: u64,
     /// `apb` for a decision the rule made, else the surface a person used.
     pub decided_by: String,
+    /// The candidate summary a person acknowledged when promoting
+    /// (`apb_engine::candidate::summary`). Display only: an older apb that
+    /// rewrites the record drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub summary_id: Option<String>,
 }
 
 /// The latest grade of each grader per run: the newest `created_at`, and
@@ -486,5 +492,28 @@ fn verdict_of(per: &[CriterionComparison], gate: &QualityGate, trials: u32) -> (
             Verdict::Promote,
             format!("better than current on {}", better.join(", ")),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A trial record written before `summary_id` existed reads as none and
+    /// writes back byte for byte, so the provenance of every older
+    /// candidate keeps its shape; an acknowledged summary round trips.
+    #[test]
+    fn a_quality_record_keeps_the_shape_older_apb_wrote() {
+        let old = r#"{"verdict":"promote","reason":"promoted by a person","decided_at":7,"decided_by":"cli"}"#;
+        let rec: QualityRecord = serde_json::from_str(old).expect("an older record reads");
+        assert_eq!(rec.summary_id, None);
+        assert_eq!(serde_json::to_string(&rec).unwrap(), old);
+        let acked = QualityRecord {
+            summary_id: Some("sha256:abc".into()),
+            ..rec
+        };
+        let text = serde_json::to_string(&acked).unwrap();
+        assert!(text.ends_with(r#","summary_id":"sha256:abc"}"#), "{text}");
+        assert_eq!(serde_json::from_str::<QualityRecord>(&text).unwrap(), acked);
     }
 }

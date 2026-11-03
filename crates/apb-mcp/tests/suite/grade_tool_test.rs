@@ -201,7 +201,7 @@ fn a_persons_reason_is_kept_as_one_clean_line() {
     let _cfg = config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    line_with_trials(root, 1);
+    let (version, _) = line_with_trials(root, 1);
     let rec = candidate_decide(
         root,
         ID,
@@ -218,7 +218,7 @@ fn a_persons_reason_is_kept_as_one_clean_line() {
         ("the old report reads better", "dashboard")
     );
     assert_eq!(pointer(root, "candidate"), None);
-    let again = candidate_decide(root, ID, PersonDecision::Promote, "cli", &person()).unwrap_err();
+    let again = candidate_decide(root, ID, promote(root, &version), "cli", &person()).unwrap_err();
     assert!(matches!(again, ToolError::NotFound(_)), "{again:?}");
 }
 
@@ -227,7 +227,7 @@ fn a_run_step_is_refused_every_grading_and_deciding_call() {
     let _cfg = config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let (_, trials) = line_with_trials(root, 1);
+    let (version, trials) = line_with_trials(root, 1);
     let run = &trials[0];
     for step in [
         StepCaller {
@@ -252,7 +252,7 @@ fn a_run_step_is_refused_every_grading_and_deciding_call() {
         refused(grade_reopen(root, run, "cli", &step).map(drop));
         refused(backfill(root, ID, None, 5, GraderChoice::Rules, &step).map(drop));
         refused(backfill(root, ID, None, 5, GraderChoice::Model, &step).map(drop));
-        refused(candidate_decide(root, ID, PersonDecision::Promote, "cli", &step).map(drop));
+        refused(candidate_decide(root, ID, promote(root, &version), "cli", &step).map(drop));
     }
     // Nothing was decided: the candidate is still on trial.
     assert!(pointer(root, "candidate").is_some());
@@ -299,4 +299,104 @@ fn a_grade_without_a_candidate_leaves_the_playbook_untouched() {
     .unwrap();
     assert!(report.runs.is_empty());
     assert_eq!(report.after, Default::default());
+}
+
+/// A person's promotion of the candidate `version` as `apb candidate`
+/// shows it: its version and trust digest.
+fn promote(root: &Path, version: &str) -> PersonDecision {
+    let digest = apb_core::registry::Registry::open(root)
+        .unwrap()
+        .load(ID, Some(version))
+        .unwrap()
+        .trust_digest()
+        .unwrap();
+    PersonDecision::Promote {
+        expected: apb_engine::candidate::summary::VersionDigest {
+            version: version.to_string(),
+            digest,
+        },
+        acknowledged: None,
+    }
+}
+
+// --- the judge sandbox and labelled examples --------------------------------
+
+const JUDGE: &str = "schema: 2\nid: doc\nname: Doc\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - id: triage\n    type: judge\n    state: { task: \"{{run.instruction}}\" }\n    questions:\n      verdict: { type: choice, instructions: \"Which?\", criteria: { clean: a, needs_fix: b } }\n    on_unavailable: { default: { verdict: needs_fix } }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: triage }\n  - { from: triage, to: done }\n";
+
+/// A project with `doc` current and run `r1` of it, one judge execution.
+fn seed_judge(root: &Path) {
+    init_project(root).unwrap();
+    let v = root.join(".apb/playbooks/doc/1.0.0");
+    fs::create_dir_all(&v).unwrap();
+    fs::write(v.join("playbook.yaml"), JUDGE).unwrap();
+    fs::write(root.join(".apb/playbooks/doc/current"), "1.0.0").unwrap();
+    let run = root.join(".apb/runs/r1");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(run.join("playbook.yaml"), JUDGE).unwrap();
+    fs::write(run.join("run.yaml"), "instruction: Triage it\n").unwrap();
+    fs::write(
+        run.join("events.jsonl"),
+        "{\"seq\":0,\"ts\":1,\"type\":\"run_started\",\"playbook\":\"doc\",\"version\":\"1.0.0\"}\n\
+         {\"seq\":1,\"ts\":1,\"type\":\"node_started\",\"node\":\"triage\",\"attempt\":1}\n\
+         {\"seq\":2,\"ts\":2,\"type\":\"node_finished\",\"node\":\"triage\",\"status\":\"succeeded\",\"attempt\":1,\"output\":\"{}\",\"artifacts\":[]}\n",
+    )
+    .unwrap();
+}
+
+/// A run step may evaluate answers it gives (free, nothing sent) and read
+/// examples, but never asks a provider from the sandbox, never checks live
+/// and never saves an example; a dashboard without keys is held the same.
+#[test]
+fn a_run_step_evaluates_given_answers_but_never_spends_or_saves() {
+    use apb_engine::judge_eval::example::{ExampleSaveRequest, ExpectedAnswer};
+    use apb_engine::judge_eval::sandbox::SandboxRequest;
+    use apb_mcp::tools::judge::{JudgeCaller, judge_evaluate, judge_example_save, judge_examples};
+    let _cfg = config_sandbox();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_judge(root);
+    let step = StepCaller {
+        run_id: Some("other-run".into()),
+        host_task: None,
+    };
+    let person = StepCaller::default();
+    let given: SandboxRequest = serde_json::from_value(serde_json::json!({
+        "answers": { "verdict": { "value": "clean", "p": 0.9, "confidence": 0.9 } }
+    }))
+    .unwrap();
+    let live = SandboxRequest::default();
+    let save = ExampleSaveRequest {
+        expected: [("verdict".to_string(), ExpectedAnswer::Value("clean".into()))].into(),
+        ..Default::default()
+    };
+    let keyless = JudgeCaller {
+        step: &person,
+        keyless_dashboard: true,
+    };
+    for caller in [JudgeCaller::of(&step), keyless] {
+        let ok = judge_evaluate(root, "doc", "triage", &given, caller).unwrap();
+        assert_eq!(ok.evaluation.requests, 0);
+        assert!(matches!(
+            judge_evaluate(root, "doc", "triage", &live, caller),
+            Err(ToolError::Conflict(_))
+        ));
+        assert!(matches!(
+            judge_example_save(root, "r1", "triage", &save, "mcp", caller),
+            Err(ToolError::Conflict(_))
+        ));
+        assert!(matches!(
+            judge_examples(root, "doc", None, true, true, caller),
+            Err(ToolError::Conflict(_))
+        ));
+        assert!(judge_examples(root, "doc", None, true, false, caller).is_ok());
+    }
+    assert!(!root.join(".apb/playbooks/doc/evals").exists());
+    // A person outside a run saves, and a path segment is refused.
+    let saved =
+        judge_example_save(root, "r1", "triage", &save, "mcp", JudgeCaller::of(&person)).unwrap();
+    assert_eq!(saved.id, "ex-0001");
+    assert!(matches!(
+        judge_evaluate(root, "../doc", "triage", &given, JudgeCaller::of(&person)),
+        Err(ToolError::NotFound(_))
+    ));
 }

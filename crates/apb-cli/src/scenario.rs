@@ -22,30 +22,20 @@
 //! Exit codes: 0 every scenario passed, 1 one failed, 2 refused before any
 //! run, 3 one was invalid, stale or incomplete (3 wins over 1).
 
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::process::{Command, ExitCode};
 
-use apb_core::registry::Registry;
 use apb_core::scenario::{LoadedScenario, ScenarioLevel};
-use apb_core::validate::Severity;
 use apb_engine::scenario::report::{ScenarioReport, Subject, Verdict};
 use apb_engine::scenario::store::{self, DriveRequest};
+pub(crate) use apb_mcp::tools::scenario::ScenarioChild as ChildArgs;
+use apb_mcp::tools::scenario::{
+    DEFAULT_MAX_DECISION_REQUESTS, MAX_DECISION_REQUESTS, ScenarioVersion as Version, load_version,
+    play, scenario_errors as errors, shown, smoke_trust, timeout,
+};
 use serde_json::json;
 
 use crate::util::print_json;
-
-/// The smoke cap when none is given.
-pub(crate) const DEFAULT_MAX_DECISION_REQUESTS: u32 = 20;
-/// The highest smoke cap.
-pub(crate) const MAX_DECISION_REQUESTS: u32 = 200;
-const QUICK_TIMEOUT: Duration = Duration::from_secs(60);
-const SMOKE_TIMEOUT: Duration = Duration::from_secs(300);
-/// How often the wait looks at the child.
-const POLL: Duration = Duration::from_millis(50);
-/// The tail of a child's error output kept in an `incomplete` reason.
-const STDERR_TAIL: usize = 2000;
 
 /// What `apb eval --level quick|smoke` was asked.
 pub(crate) struct ScenarioArgs {
@@ -60,19 +50,6 @@ pub(crate) struct ScenarioArgs {
     pub json: bool,
 }
 
-/// What the `apb __scenario-run` child is asked to play.
-pub(crate) struct ChildArgs {
-    pub root: PathBuf,
-    pub playbook: String,
-    pub version: String,
-    pub scenario: String,
-    pub level: ScenarioLevel,
-    pub max_decision_requests: Option<u32>,
-    /// The digests the parent checked: anything else is not played.
-    pub scenario_digest: String,
-    pub playbook_digest: String,
-}
-
 fn refuse(json_out: bool, code: &str, message: String) -> ExitCode {
     if json_out {
         print_json(&json!({ "error": code, "message": message }));
@@ -80,45 +57,6 @@ fn refuse(json_out: bool, code: &str, message: String) -> ExitCode {
         eprintln!("eval: {message}");
     }
     ExitCode::from(2)
-}
-
-/// One version of a playbook, as both sides of a scenario run read it.
-struct Version {
-    playbook: apb_core::schema::Playbook,
-    version: String,
-    digest: String,
-    dir: PathBuf,
-    /// The validator's errors for the version: a run of it is refused, so
-    /// a scenario of it is refused before any run too.
-    invalid: Vec<String>,
-}
-
-fn load_version(root: &Path, id: &str, version: Option<&str>) -> Result<Version, (String, String)> {
-    let reg =
-        Registry::open(root).map_err(|e| ("no_project".into(), format!("no project here: {e}")))?;
-    let loaded = reg
-        .load(id, version)
-        .map_err(|e| ("not_found".into(), e.to_string()))?;
-    let digest = loaded
-        .trust_digest()
-        .map_err(|e| ("no_digest".into(), e.to_string()))?;
-    let ctx = apb_core::validate::ValidationContext::for_registry(
-        &reg,
-        apb_core::profile_store::PlaybookOrigin::Project,
-    );
-    let invalid = apb_core::validate::validate(&loaded.playbook, &ctx)
-        .issues
-        .into_iter()
-        .filter(|i| i.severity == Severity::Error)
-        .map(|i| format!("{} {}", i.code, i.message))
-        .collect();
-    Ok(Version {
-        playbook: loaded.playbook,
-        version: loaded.version,
-        digest,
-        dir: root.join(".apb/playbooks").join(id),
-        invalid,
-    })
 }
 
 /// The scenarios asked for (every one when none is named). A name outside
@@ -150,15 +88,6 @@ fn select(dir: &Path, names: &[String]) -> Result<Vec<LoadedScenario>, (String, 
         .collect()
 }
 
-/// The errors of a scenario against the version, one line each.
-fn errors(s: &LoadedScenario, playbook: &apb_core::schema::Playbook) -> Vec<String> {
-    apb_core::scenario::validate_scenario(&s.name, &s.scenario, playbook)
-        .into_iter()
-        .filter(|i| i.severity == Severity::Error)
-        .map(|i| format!("{} {}: {}", s.name, i.code, i.message))
-        .collect()
-}
-
 /// The checks only smoke needs: a person, a cap, a trusted version.
 fn smoke_checks(args: &ScenarioArgs, v: &Version, count: usize) -> Result<u32, (String, String)> {
     if let Some(why) = apb_core::step_env::StepCaller::from_env().refusal("a smoke scenario run") {
@@ -173,23 +102,7 @@ fn smoke_checks(args: &ScenarioArgs, v: &Version, count: usize) -> Result<u32, (
             format!("--max-decision-requests must be 1 to {MAX_DECISION_REQUESTS}"),
         ));
     }
-    if !apb_core::trust::TrustStore::load().is_approved(&v.digest) {
-        return Err((
-            "untrusted".into(),
-            format!(
-                "`{}` {} is not approved (digest {}): a smoke run sends its text to decision providers, so approve the version first (`apb trust approve`)",
-                args.id, v.version, v.digest
-            ),
-        ));
-    }
-    if let Err(refusal) =
-        apb_engine::gate::check_import_approval(&v.dir, &args.id, &v.version, &v.digest)
-    {
-        return Err((
-            "imported_scripts_require_approval".into(),
-            refusal["detail"].as_str().unwrap_or_default().to_string(),
-        ));
-    }
+    smoke_trust(&args.id, v)?;
     let question = format!(
         "A smoke run sends up to {cap} decision requests per scenario ({count} scenario(s)) to this machine's decision providers, at their cost. Continue?"
     );
@@ -309,161 +222,24 @@ pub(crate) fn scenario_cmd(root: &Path, args: ScenarioArgs) -> ExitCode {
             );
         }
     };
-    let timeout = match args.level {
-        ScenarioLevel::Quick => QUICK_TIMEOUT,
-        ScenarioLevel::Smoke => SMOKE_TIMEOUT,
-    };
     for s in &to_run {
         let subject = Subject::of(args.level, s, &args.id, &v.version, &v.digest);
-        let child = ChildArgs {
-            root: root.to_path_buf(),
-            playbook: args.id.clone(),
-            version: v.version.clone(),
-            scenario: s.name.clone(),
-            level: args.level,
-            max_decision_requests: cap,
-            scenario_digest: s.digest.clone(),
-            playbook_digest: v.digest.clone(),
-        };
+        let child = ChildArgs::of(root, &args.id, &v, s, args.level, cap);
         let mut cmd = Command::new(&exe);
-        cmd.args(child_argv(&child));
-        reports.push(play(&mut cmd, timeout, &subject));
+        cmd.args(child.argv());
+        reports.push(play(
+            &mut cmd,
+            timeout(args.level),
+            &subject,
+            &crate::interrupt::interrupted,
+        ));
         if crate::interrupt::interrupted() {
             break;
         }
     }
+    let reports: Vec<ScenarioReport> = reports.into_iter().map(|r| shown(root, r)).collect();
     print_reports(&args, &v.version, &reports);
     ExitCode::from(exit_code(&reports))
-}
-
-/// The arguments of `apb __scenario-run` for `c`.
-fn child_argv(c: &ChildArgs) -> Vec<String> {
-    let mut argv = vec![
-        "__scenario-run".to_string(),
-        "--root".into(),
-        c.root.display().to_string(),
-        "--playbook".into(),
-        c.playbook.clone(),
-        "--version".into(),
-        c.version.clone(),
-        "--scenario".into(),
-        c.scenario.clone(),
-        "--level".into(),
-        c.level.as_str().into(),
-        "--scenario-digest".into(),
-        c.scenario_digest.clone(),
-        "--playbook-digest".into(),
-        c.playbook_digest.clone(),
-    ];
-    if let Some(n) = c.max_decision_requests {
-        argv.extend(["--max-decision-requests".into(), n.to_string()]);
-    }
-    argv
-}
-
-/// How a child ended.
-enum Ended {
-    Exited {
-        ok: bool,
-        stdout: String,
-        stderr: String,
-    },
-    TimedOut,
-    Interrupted,
-    NotStarted(String),
-}
-
-/// Runs `cmd` in its own process group and waits up to `timeout`; on the
-/// timeout or an interruption the whole group is killed, and so is whatever
-/// the child left behind once it ended, so a program holding its pipes can
-/// never keep the parent waiting.
-fn run_bounded(cmd: &mut Command, timeout: Duration) -> Ended {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    let mut child = match apb_core::fsutil::spawn_when_not_busy(cmd) {
-        Ok(c) => c,
-        Err(e) => return Ended::NotStarted(e.to_string()),
-    };
-    let drain = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut out = String::new();
-            if let Some(mut p) = pipe {
-                let _ = p.read_to_string(&mut out);
-            }
-            out
-        })
-    };
-    let out = drain(
-        child
-            .stdout
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let err = drain(
-        child
-            .stderr
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let started = Instant::now();
-    let stop = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                // The pipes close once every process of the group is gone.
-                #[cfg(unix)]
-                crate::eval::kill_group(child.id());
-                return Ended::Exited {
-                    ok: status.success(),
-                    stdout: out.join().unwrap_or_default(),
-                    stderr: err.join().unwrap_or_default(),
-                };
-            }
-            Ok(None) if crate::interrupt::interrupted() => break Ended::Interrupted,
-            Ok(None) if started.elapsed() >= timeout => break Ended::TimedOut,
-            Ok(None) => std::thread::sleep(POLL),
-            Err(e) => break Ended::NotStarted(e.to_string()),
-        }
-    };
-    #[cfg(unix)]
-    crate::eval::kill_group(child.id());
-    let _ = child.kill();
-    let _ = child.wait();
-    // The pipes close once every process of the group is gone.
-    let _ = (out.join(), err.join());
-    stop
-}
-
-fn tail(text: &str) -> String {
-    let text = text.trim();
-    let n = text.chars().count();
-    text.chars().skip(n.saturating_sub(STDERR_TAIL)).collect()
-}
-
-/// Plays one scenario through the child `cmd` and reads its report.
-fn play(cmd: &mut Command, timeout: Duration, subject: &Subject) -> ScenarioReport {
-    let incomplete = |why: String| ScenarioReport::not_run(subject, Verdict::Incomplete, why);
-    match run_bounded(cmd, timeout) {
-        Ended::Exited { stdout, stderr, ok } => match serde_json::from_str(stdout.trim()) {
-            Ok(report) => report,
-            Err(_) => incomplete(format!(
-                "the scenario run ended {} without a report: {}",
-                if ok { "cleanly" } else { "with an error" },
-                tail(&stderr)
-            )),
-        },
-        Ended::TimedOut => incomplete(format!(
-            "the scenario run did not end within {} s and was stopped",
-            timeout.as_secs()
-        )),
-        Ended::Interrupted => incomplete("interrupted".into()),
-        Ended::NotStarted(e) => incomplete(format!("the scenario run could not start: {e}")),
-    }
 }
 
 /// 3 when one was invalid, stale or incomplete, else 1 when one failed,
@@ -645,20 +421,8 @@ pub(crate) fn child_cmd(a: ChildArgs) -> ExitCode {
 /// scenario: a digest that moved since the parent checked them, or a
 /// scenario that no longer fits, is `invalid` and nothing runs.
 fn child_request(root: &Path, a: &ChildArgs) -> Result<DriveRequest, Box<ScenarioReport>> {
-    let unread = |why: String| {
-        Box::new(ScenarioReport::not_run(
-            &Subject {
-                level: a.level,
-                scenario: a.scenario.clone(),
-                scenario_digest: a.scenario_digest.clone(),
-                playbook: a.playbook.clone(),
-                version: a.version.clone(),
-                playbook_digest: a.playbook_digest.clone(),
-            },
-            Verdict::Invalid,
-            why,
-        ))
-    };
+    let unread =
+        |why: String| Box::new(ScenarioReport::not_run(&a.subject(), Verdict::Invalid, why));
     let v = load_version(root, &a.playbook, Some(&a.version)).map_err(|(_, m)| unread(m))?;
     let s = apb_core::scenario::load(&v.dir, &a.scenario).map_err(unread)?;
     if s.digest != a.scenario_digest || v.digest != a.playbook_digest {
@@ -685,6 +449,7 @@ fn child_request(root: &Path, a: &ChildArgs) -> Result<DriveRequest, Box<Scenari
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     const PLAYBOOK: &str = "schema: 2\nid: pb\nname: pb\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: agent_task, prompt: work }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n";
 
@@ -750,6 +515,7 @@ mod tests {
             &mut sh(&format!("sleep 30 & echo $! > {}; wait", pidfile.display())),
             Duration::from_millis(500),
             &subject(),
+            &|| false,
         );
         assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(r.verdict, Verdict::Incomplete);
@@ -782,6 +548,7 @@ mod tests {
             &mut sh(&format!("echo '{text}'")),
             Duration::from_secs(10),
             &subject(),
+            &|| false,
         );
         assert_eq!(r, report);
 
@@ -792,6 +559,7 @@ mod tests {
             &mut sh(&format!("sleep 20 & echo '{text}'")),
             Duration::from_secs(60),
             &subject(),
+            &|| false,
         );
         assert_eq!(r, report);
         assert!(
@@ -803,6 +571,7 @@ mod tests {
             &mut sh("echo boom >&2; exit 2"),
             Duration::from_secs(10),
             &subject(),
+            &|| false,
         );
         assert_eq!(r.verdict, Verdict::Incomplete);
         assert!(r.reason.unwrap().contains("boom"));

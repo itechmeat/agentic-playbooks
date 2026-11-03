@@ -726,6 +726,109 @@ the rendered state and the first native provider and its pinned model; the
 working tree is not part of the key. Fallback and emulated outputs are never
 stored. A hit makes no request.
 
+## Judge sandbox and labelled examples
+
+The sandbox evaluates one judge node of a project playbook outside any run:
+`apb judge eval <id> <node>`, MCP `judge_evaluate`, `POST
+/api/playbooks/{id}/judge/{node}/evaluate`, and the dashboard's judge panel.
+It renders the node's state from typed inputs (`params`, `instruction`,
+`outputs`, `reviews`, `context`) through the same evaluation a run uses,
+and always shows three answers together: the raw answers per question,
+`as_configured` (what the node outputs on this machine now, at the
+`judge_node` use's mode) and `at_enforce` (what it would output at
+enforce), each with the route it would take. The answer is never applied
+anywhere: no run directory, journal, cache, trust, quality or threshold
+record is written.
+
+- **Given answers ask no one.** With `answers` the sandbox evaluates them at
+  this machine's mode: `not_configured` without a `decisions.yaml`, `off`
+  when the file turns the use off, the fallback with reason `mode`
+  below enforce, and applied at enforce. Anyone may do this, a run step
+  included.
+- **A live ask spends.** Without `answers` it asks the providers of this
+  machine's `decisions.yaml` (a caller can never name a provider, a URL, a
+  key or a model) with a run's privacy classes, redaction and clipping: a
+  state over `privacy.max_state_bytes` is clipped as in a run, never
+  skipped, so the sandbox and a run send the same state. A param that is
+  declared secret, named like a secret or shaped like a credential is sent
+  as `<secret>`.
+- **Cap.** At most 100 sandbox HTTP requests per project and UTC day,
+  fixed (no `decisions.yaml` key). The count is taken under the lock of
+  `.apb/decisions.jsonl` from its lines with `use: judge_sandbox`. Before
+  an ask goes out it takes its worst case from what is left: every
+  provider on its route with the decision client's retries (3 requests a
+  provider). It gives them back only when nothing went out (a cache hit, a
+  refused ask), and its line records what it kept as `requests`, so
+  retries and fallbacks never pass the cap; an ask whose worst case does
+  not fit is logged `budget` and never sent. A log that is not a plain
+  file counts as a spent day. Each answer carries `requests` (decisions),
+  `cost_usd`, `requests_today` and `daily_cap`.
+- **Log line.** One line per request in `.apb/decisions.jsonl`: `use:
+  judge_sandbox`, `use_site: judge_node`, the playbook, version and node,
+  and the `decision_made` fields, never the state. No other use's daily
+  counter counts these lines.
+- **Emulation.** `emulate` asks the configured `llm_emulation` providers
+  only where a run would (the native question gave no usable answer),
+  inside the same cap. The profile emulation is never started: the answer
+  then says that the node would start its profile there.
+- **Who may spend.** A live ask is refused from a run step (`APB_RUN_ID`,
+  `APB_HOST_TASK`) and from a dashboard without keys; a read-only MCP
+  server does not route the judge tools at all.
+- The sandbox refuses to run while anything sits at `.apb/judge-sandbox`,
+  the scratch place its clip notes would name.
+
+**Labelled examples.** `apb judge save-example <run> <node> --expect
+q=v...` (MCP `judge_example_save`, `POST /api/runs/{run}/judge/{node}/examples`)
+keeps one judge execution of a run as an example under
+`.apb/playbooks/<id>/evals/judge/<node>/ex-NNNN.yaml`: the inputs that
+execution had when it started (redacted with the run tree's redactor, then
+scrubbed with the run tree's scrubber; a secret param as `<secret>`), the
+expected answer per labelled question, the answers the model gave then and
+an optional note (both scrubbed the same way), and the node, questions and
+state digests. A save is refused, rather than rewriting the value, when the
+inputs, the answers or the note still hold anything the storage rule refuses (a
+credential shape, a configured or run secret value, a keyed value such as
+`password: ...`), when the run's secret values could not all be read, and
+when the run's judge node differs from the one in `current` (a check reads
+that one). Saves at once each get their own id under the node's lock. The
+files live next to the versions and are committed with the project: review
+them like code. At most 200 examples per node.
+
+`apb judge examples <id> --check` (MCP `judge_examples`, `POST
+.../examples/check`) reports each example against `current`: `stale` when
+the node's definition changed since labelling (its questions, thresholds,
+state templates or `on_unavailable`; a title does not count), `state_changed`
+when the stored inputs render another state, and otherwise whether each
+label agrees with what the current thresholds make of the observed answers
+(or, with `--live`, of a new sandbox ask inside the cap), with counts and a
+confusion table per node. Nothing is tuned from the examples, and they are
+not labels of `apb decisions report` or stored thresholds: they help an
+author choose thresholds by hand. "Fill from a run" (`apb judge values`,
+MCP `judge_run_values`) shows the inputs of one judge execution and every
+other value the run recorded (node outputs, review notes, params and the
+baseline observations) to place into an input.
+
+**On the dashboard.** Selecting a judge node on a playbook page offers
+"Open the sandbox". It has one input per place the node's state reads
+(`instruction`, `context`, `params.<name>`, `outputs.<node>`,
+`reviews.<node>.note` or `.decision`, `rejected_outputs.<node>`,
+`run.hooks.<key>`), each labelled with the references that read it; an
+empty input is marked "renders as nothing". Answers are given (a `choice`
+by its option, a `score` by its level, which the request sends as the
+level's number from 0, and a `noul` by its `p`, each with an optional
+confidence) or asked of this machine's decision models, which a dashboard
+without keys refuses. "Fill from the run" takes a run id and an optional
+execution, fills the inputs, lists the run's other values with a "Use"
+target each, and turns the execution's observed answers into given ones
+(an observed `score` keeps its expected level, which may lie between two
+levels). The result shows the raw answers, "On this machine" and "At
+enforce" with their routes, the references that rendered empty and the
+day's requests against the cap. On a run page, each judge decision row
+has "Save as example": it drafts the execution and one expected answer per
+question (a `score` is left for the person to name as a level or band)
+and shows the stored inputs once saved; a dashboard without keys refuses
+the save.
+
 ## LLM emulation (uncalibrated)
 
 A chat model can imitate the decision interface through structured output,

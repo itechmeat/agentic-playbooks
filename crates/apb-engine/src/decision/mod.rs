@@ -298,6 +298,57 @@ pub(crate) struct DecisionRunner {
     /// A quick scenario run's runner: its snapshot is the whole truth (no
     /// live cap from this machine's file, which a quick run never reads).
     scripted: bool,
+    /// An outer cap counted in HTTP requests (the judge sandbox's day):
+    /// every ask takes its worst case from it before anything leaves.
+    request_cap: Option<std::sync::Arc<RequestCap>>,
+}
+
+/// A cap counted in HTTP requests, shared by every ask of one runner. An
+/// ask takes the most requests it can send ([`DecisionRunner::worst_requests`])
+/// before it goes out and gives them back only when nothing went out; what
+/// it kept is its charge until its journal line takes it
+/// ([`RequestCap::take_charge`]).
+#[derive(Debug, Default)]
+pub(crate) struct RequestCap {
+    left: std::sync::atomic::AtomicU32,
+    charged: std::sync::atomic::AtomicU32,
+}
+
+impl RequestCap {
+    pub(crate) fn new(left: u32) -> Self {
+        RequestCap {
+            left: left.into(),
+            charged: 0.into(),
+        }
+    }
+
+    /// Takes `n`, all or none.
+    fn take(&self, n: u32) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        let ok = self
+            .left
+            .try_update(SeqCst, SeqCst, |left| left.checked_sub(n))
+            .is_ok();
+        if ok {
+            self.charged.fetch_add(n, SeqCst);
+        }
+        ok
+    }
+
+    /// Gives back `n` an ask took and never sent.
+    fn give_back(&self, n: u32) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.left.fetch_add(n, SeqCst);
+        let _ = self
+            .charged
+            .try_update(SeqCst, SeqCst, |c| Some(c.saturating_sub(n)));
+    }
+
+    /// The requests asks kept since the last call: what a journal line
+    /// written now must count.
+    pub(crate) fn take_charge(&self) -> u32 {
+        self.charged.swap(0, std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 impl DecisionRunner {
@@ -401,6 +452,7 @@ impl DecisionRunner {
             ledger: Mutex::new(ledger),
             config_dir: apb_core::config::config_dir(),
             scripted: false,
+            request_cap: None,
         }
     }
 
@@ -718,12 +770,20 @@ impl DecisionRunner {
             },
             ledger.inflight,
         )?;
+        if let Some(cap) = &self.request_cap
+            && !cap.take(worst)
+        {
+            return None;
+        }
         // A smoke scenario's cap holds for its whole tree, per request: a
         // nested child run takes from its parent's count too, and an ask
         // takes the most requests it can send.
         if let Some(session) = crate::scenario::session::of(&self.run_dir)
             && !session.take_requests(worst)
         {
+            if let Some(cap) = &self.request_cap {
+                cap.give_back(worst);
+            }
             return None;
         }
         ledger.inflight += 1;
@@ -1052,20 +1112,26 @@ impl DecisionRunner {
         // provider, or the first provider answered from the cache.
         let nothing_sent = refused_here || worst == 0 || first_hit;
         let source = meta.source();
+        // How many requests an ask sent is not reported (retries, and
+        // providers tried before the one that answered), so a smoke
+        // scenario and a request cap give their reservation back only when
+        // nothing went out, before the line that counts it is written.
+        if nothing_sent {
+            if let Some(session) = crate::scenario::session::of(&self.run_dir) {
+                session.give_back_requests(worst);
+            }
+            if let Some(cap) = &self.request_cap {
+                cap.give_back(worst);
+            }
+        }
         let appended = journal.append_decision(event);
         {
             let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
             ledger.inflight = ledger.inflight.saturating_sub(1);
             // A request that went out counts whether or not it was
-            // journaled; a cache hit or an empty chain sent none. How many
-            // requests an ask sent is not reported (retries, and providers
-            // tried before the one that answered), so a smoke scenario
-            // gives its reservation back only when nothing went out.
+            // journaled; a cache hit or an empty chain sent none.
             if counted {
                 ledger.requests += 1;
-            }
-            if nothing_sent && let Some(session) = crate::scenario::session::of(&self.run_dir) {
-                session.give_back_requests(worst);
             }
             ledger.cost_usd += cost;
             if appended.is_ok() && applied_now && !reserved {
@@ -1217,6 +1283,7 @@ impl DecisionRunner {
             ledger: Mutex::new(Ledger::default()),
             config_dir: apb_core::config::config_dir(),
             scripted: false,
+            request_cap: None,
         }
     }
 
@@ -1315,6 +1382,24 @@ impl DecisionRunner {
             uses: BTreeMap::new(),
         };
         Self::with_settings(settings, root, run_dir, events, scrub_names)
+    }
+
+    /// A runner outside any run (the judge sandbox) over the machine's
+    /// `settings`: the run steps as they are (privacy classes, redaction
+    /// with every secret an installed connector of `root` references, the
+    /// clip, digests, the provider chain, the mode rule), no journal to
+    /// seed from and no run's secret values. `scratch` stands where a run
+    /// directory would: a clip note points into it, and a path that does
+    /// not exist leaves nothing behind (no budget marker, no debug state).
+    pub(crate) fn outside_run(settings: EffectiveDecisions, root: &Path, scratch: &Path) -> Self {
+        let scrub = apb_core::connector::resolve::all_referenced_env_names(root);
+        Self::with_settings(settings, root, scratch, &[], &scrub)
+    }
+
+    /// This runner with every ask taking its worst case from `cap`.
+    pub(crate) fn with_request_cap(mut self, cap: std::sync::Arc<RequestCap>) -> Self {
+        self.request_cap = Some(cap);
+        self
     }
 
     /// The runner of a quick scenario run: its snapshot's judge modes, one

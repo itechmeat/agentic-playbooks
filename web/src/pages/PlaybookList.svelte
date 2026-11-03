@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { deletePlaybook, fetchPlaybook, fetchPlaybooks, fetchRuns, fetchStats } from '../lib/api'
+  import { deletePlaybook, fetchPlaybook, fetchPlaybooks, fetchRuns, fetchStats, installDemo } from '../lib/api'
   import { formatDuration } from '../lib/format'
   import { storeDraftYaml, suggestDuplicateId } from '../lib/playbookdupe'
   import { ALL_PROJECTS, filterByProject, projectFilter } from '../lib/projectfilter'
@@ -204,6 +204,28 @@
     }
   })
 
+  // "Try the demo": installs the keyless demo project (idempotent) and opens
+  // its playbook page; running it is the ordinary Run with its
+  // acknowledgement, nothing here approves it.
+  let installingDemo = $state(false)
+  async function tryDemo() {
+    installingDemo = true
+    try {
+      const p = await installDemo()
+      if (!p.workspace_id) {
+        toast.message('The demo is installed', { description: `Open ${p.dir} with apb serve to see it here` })
+        return
+      }
+      location.hash = `#/playbook/${encodeURIComponent(p.workspace_id)}/${encodeURIComponent(p.playbook)}`
+    } catch (e) {
+      toast.error('The demo did not install', {
+        description: `${String(e)}. An edited demo is reinstalled with apb demo --reset.`,
+      })
+    } finally {
+      installingDemo = false
+    }
+  }
+
   async function duplicate(w: PlaybookSummary) {
     try {
       const detail = await fetchPlaybook(w.id, w.workspace_id)
@@ -293,10 +315,23 @@
           </Empty.Description>
         </Empty.Header>
         <Empty.Content>
-          <Button href="#/new" size="sm">
-            <Plus data-icon="inline-start" />
-            Create playbook
-          </Button>
+          <div class="demo-actions">
+            <Button href="#/new" size="sm">
+              <Plus data-icon="inline-start" />
+              Create playbook
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={installingDemo}
+              onclick={tryDemo}
+              data-testid="try-demo"
+              title="Install a small demo playbook that needs no key: a script writes a report, a person approves it"
+            >
+              Try the demo
+            </Button>
+          </div>
+          <p class="demo-note">The demo runs one script and waits for your approval: no agent, no key, no network.</p>
         </Empty.Content>
       </Empty.Root>
     {:else}
@@ -459,3 +494,17 @@
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>
+
+<style>
+  .demo-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+  }
+  .demo-note {
+    margin: 0;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+  }
+</style>

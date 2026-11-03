@@ -491,6 +491,33 @@ pub enum ImportedScripts<'a> {
     CarryCurrent,
 }
 
+/// A new playbook `id` written by a person together with its own
+/// `scripts` (relative to the version's `scripts/`), as `version` made
+/// current, through the same publication as every save (`apb demo`). It is
+/// neither marked imported nor approved: a start of it asks for the same
+/// acknowledgement as any playbook nobody approved.
+pub fn create_with_scripts(
+    root: &Path,
+    id: &str,
+    yaml: &str,
+    version: &str,
+    scripts: &[TreeFile],
+) -> Result<String, VersioningError> {
+    create_version_impl(
+        root,
+        id,
+        &NewVersion {
+            yaml,
+            base_version: None,
+            version_override: Some(version),
+            make_current: true,
+            imported_scripts: Some(scripts),
+            imported: None,
+            channel: SaveChannel::Person,
+        },
+    )
+}
+
 /// The import path behind `apb import` (see [`crate::bundle`]). Creates the
 /// YAML and its scripts as ONE new version: the scripts are written into the
 /// version's staging `scripts/` directory and the directory is committed by

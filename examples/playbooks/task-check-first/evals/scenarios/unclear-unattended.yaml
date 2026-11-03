@@ -1,0 +1,13 @@
+schema: 1
+id: unclear-unattended
+title: Unattended, an unclear task stops at the review instead of guessing
+instruction: Fix it.
+unattended: true
+answers:
+  check:
+    - { visit: 1, judge: { sufficient: { value: unclear, p: 0.88 } } }
+expect:
+  # The review has no unattended outcome, so the run fails hitl_required.
+  run: { outcome: [failed] }
+  route: { visits: [check], not_visits: [work, done] }
+  templates_empty: report

@@ -87,5 +87,27 @@ export const EXPLAIN_CLASSES = ['observed', 'inferred', 'unknown'] as const
 /** Every code of a "why it did not run" statement. */
 export const NOT_RUN_CODES = ['source_not_executed', 'routed_elsewhere', 'condition_not_matched', 'budget_spent', 'loop_exhausted', 'no_failure_to_route', 'failure_routed_elsewhere', 'delivered_not_executed', 'run_ended_first', 'cancelled_by_race', 'unreachable', 'no_input_delivered', 'run_not_finished', 'definition_unknown', 'duplicate_pair_before_edges', 'old_loop_round', 'output_clipped', 'open_execution', 'routing_not_recorded', 'cannot_tell'] as const
 
+/** Every boundary a scenario run answers. */
+export const BOUNDARY_KINDS = ['agent_attempt', 'question', 'success_check', 'completion_check', 'script', 'judge_native', 'judge_emulation', 'judge_edges', 'list_judge_check', 'engine_aid', 'list_source', 'review', 'publish', 'wait', 'child_playbook', 'baseline', 'goal_script', 'protect', 'worktree', 'provenance', 'notify', 'node_cache', 'retry_delay', 'infra_backoff', 'read_only_check', 'finish_hooks'] as const
+
+/** Every verdict of a scenario run. */
+export const SCENARIO_VERDICTS = ['passed', 'failed', 'invalid', 'stale', 'incomplete'] as const
+
+/** Every item code of a candidate summary, and those that refuse a promotion. */
+export const SUMMARY_CODES = ['validator_error', 'candidate_edited', 'scenario_failed', 'scenario_invalid', 'scenario_incomplete', 'scenario_stale', 'scenario_not_run', 'quality_not_promote', 'fitness_problem'] as const
+export const BLOCKING_SUMMARY_CODES = ['validator_error', 'candidate_edited'] as const
+
+/** The refusal of a promotion that names no expected version and digest. */
+export const EXPECTED_REQUIRED = 'expected_required'
+
+/** Judge sandbox requests per project and UTC day. */
+export const SANDBOX_DAILY_CAP = 100
+
+/** The most decision requests a smoke scenario run may be capped at. */
+export const SCENARIO_MAX_DECISION_REQUESTS = 200
+
+/** The keyless demo's playbook id. */
+export const DEMO_ID = 'demo-report'
+
 /** Starter document for a new playbook. */
 export const NEW_PLAYBOOK_TEMPLATE = "schema: 2\nid: new-playbook\nname: New Playbook\nversion: 0.1.0\n\nnodes:\n  - id: start\n    type: start\n    title: Start\n  - id: done\n    type: finish\n    outcome: success\n\nedges:\n  - { from: start, to: done }\n"

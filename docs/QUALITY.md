@@ -375,24 +375,74 @@ failure is in its grade (`outcome: poor`). The comparison is taken:
 
 A person may decide at any time, whatever the verdict:
 
-- `apb candidate <playbook>` shows the candidate, the gate, the comparison
-  per criterion and the decision recorded last;
-- `apb candidate <playbook> --promote` makes it `current`;
+- `apb candidate <playbook>` shows the candidate as `<version>@<digest>`,
+  its summary (below), the gate, the comparison per criterion and the
+  decision recorded last, and ends with the exact decision line to type;
+- `apb candidate <playbook> --promote --expect <version>@<digest> [--ack <summary_id>]`
+  makes it `current`;
 - `apb candidate <playbook> --keep-current [--reason <why>]` drops it and
   changes nothing;
 - the dashboard's playbook page shows the same card in the version history
-  (a `candidate` chip in the title opens it), with Promote and Keep current.
+  (a `candidate` chip in the title opens it), with Keep current, and above
+  it the summary card "before promoting" (below), which holds Promote.
 
-MCP `playbook_candidate` shows the comparison read-only: an agent reports
-it, a person decides. A decision from a run step is refused.
+On the dashboard, Promote lives only on the summary card. It names the
+version and digest the card shows; while attention items stand, it opens a
+confirmation that lists them, and "Acknowledge and promote" sends the
+card's `summary_id` with them. A scenario of the candidate without a fresh
+result has a "Run quick" button that plays it at quick against the
+candidate's version and reads the summary again. A refusal is shown as the
+server gave it: `stale` names what the candidate is now and reloads the
+card, `needs_acknowledgement` opens the confirmation again with the items
+as they stand, `blocked` lists the items. A dashboard older than this
+promotion check sends no expected version and is refused
+`expected_required`: reload the page.
+
+MCP `playbook_candidate` shows the comparison and the summary read-only: an
+agent reports it, a person decides. A decision from a run step is refused.
+
+### The summary a person reads first
+
+Before a person promotes a candidate, the summary puts three things side
+by side and never merges them:
+
+| Axis | What it says | Can it block |
+|---|---|---|
+| `fitness` | whether the candidate's own version can start on this machine (`fit`: agents, profiles, connectors, launch policy) | never: a missing local profile is attention only |
+| `definition` | the validator on the candidate, the diff from `current`, and the newest quick and smoke scenario results | a validator error, and a candidate edited after a run of it |
+| `quality` | the comparison above, unchanged | never |
+
+A scenario result counts only when it is fresh: it carries the candidate's
+trust digest and the scenario file's digest now. A failed, invalid,
+incomplete, stale or missing result is an attention item, and so is a
+scenario file that does not load, a quality verdict other than `promote`
+and a fitness problem. Every item has an axis, a code and a sentence.
+`summary_id` is a digest over the candidate, `current`, every scenario
+result, the quality comparison (its verdict, reason and every criterion's
+counts) and every item, never over a time, so it names exactly what was
+shown.
+
+A person's promotion is checked again under the candidate lock:
+
+| Refusal | When | HTTP |
+|---|---|---|
+| `expected_required` | the request names no expected version and digest (an older dashboard) | 422 |
+| `stale` | the candidate is not the version and digest the person saw (`found` says what it is now) | 409 |
+| `blocked` | an item blocks (`items`) | 422 |
+| `needs_acknowledgement` | attention items stand and `acknowledged` is not the summary id as it stands now (`summary_id`, `items`) | 409 |
+
+A new scenario result between reading and promoting changes the id, so
+the old acknowledgement is refused and the person reads again. A
+promotion records `summary_id` in the trial record. Automatic promotion by
+a policy never reads the summary.
 
 ## Surfaces
 
 | Surface | What |
 |---|---|
-| CLI | `apb grade <run>` (rules) or `--model` (the model grader), `--show`, `--json`, `--reopen` (a host may grade the run once more); `apb grade --backfill <playbook> [--version V] [--last N] [--model]` (grades for up to N earlier ended runs without one of that grader, so a comparison has a history; runs already graded or live are skipped and do not count); `apb candidate <playbook>` with `--promote`, `--keep-current [--reason]`; the `grade` lines of `apb runs <id>` |
+| CLI | `apb grade <run>` (rules) or `--model` (the model grader), `--show`, `--json`, `--reopen` (a host may grade the run once more); `apb grade --backfill <playbook> [--version V] [--last N] [--model]` (grades for up to N earlier ended runs without one of that grader, so a comparison has a history; runs already graded or live are skipped and do not count); `apb candidate <playbook>` with `--promote --expect <v>@<digest> [--ack <id>]`, `--keep-current [--reason]`; the `grade` lines of `apb runs <id>` |
 | MCP | `run_grade` (`grader` `rules` or `model`), `run_grade_start`, `run_grade_read`, `run_grade_submit`, `run_grades`, `playbook_candidate`, the `grades` block of `run_status` |
-| HTTP | `GET` and `POST /api/runs/{id}/grades` (POST grades by rules, or by the model grader with `{ "grader": "model" }`, answering `skipped` when it stored nothing; 409 while the run is live); `POST /api/runs/{id}/grades/reopen` (409 without a host grade); `GET /api/playbooks/{id}/candidate`; `POST /api/playbooks/{id}/candidate/promote`; `POST /api/playbooks/{id}/candidate/keep-current` with `{ reason? }` |
+| HTTP | `GET` and `POST /api/runs/{id}/grades` (POST grades by rules, or by the model grader with `{ "grader": "model" }`, answering `skipped` when it stored nothing; 409 while the run is live); `POST /api/runs/{id}/grades/reopen` (409 without a host grade); `GET /api/playbooks/{id}/candidate`; `GET /api/playbooks/{id}/candidate/summary`; `POST /api/playbooks/{id}/candidate/promote` with `{ expected_version, expected_digest, acknowledged? }` (a refusal is JSON `{ code, ... }`); `GET /api/playbooks/{id}/fit?version=` (the fitness of that version); `POST /api/playbooks/{id}/candidate/keep-current` with `{ reason? }` |
 | Run report | the Quality section of the HTML run report (`apb runs <run> --html <path>`, the run page's Save report): the latest trusted grade of each grader, one row per criterion with its level, reason, why and first citations, and how many unsigned grade files were left out |
 | Stats | `apb stats` and the dashboard's stats card: per version, each criterion's good and poor shares over the graded runs, and with `--compare` how they moved (docs/STATS.md) |
 | Dashboard | the run page's Quality panel (levels, reasons, citations that open the journal event or name the transcript file, the reading line, "Grade by rules", "Grade by model", and "Grade again" once a host graded the run); the playbook page's candidate card |
