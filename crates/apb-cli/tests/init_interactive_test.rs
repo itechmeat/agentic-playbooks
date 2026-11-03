@@ -1,3 +1,8 @@
+// Config isolation: before any test thread starts, the real config dir is
+// recorded as forbidden and `XDG_CONFIG_HOME` points at a sandbox that every
+// spawned process inherits (`apb_core::config::test_isolation`).
+apb_core::isolate_test_config!(env!("CARGO_TARGET_TMPDIR"));
+
 #[path = "suite/common.rs"]
 mod common;
 

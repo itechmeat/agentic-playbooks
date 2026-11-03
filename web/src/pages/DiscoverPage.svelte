@@ -10,6 +10,8 @@
   } from '../lib/api'
   import type { ResultSummary, ResultView, RootInfo, Suggestion } from '../lib/api.gen'
   import type { Project } from '../lib/types'
+  import { nestProjects } from '../lib/projectnest'
+  import ProjectLabel from '../lib/components/ProjectLabel.svelte'
   import {
     canAct,
     defaultRoots,
@@ -214,14 +216,14 @@
         {#if !projects.length}
           <p class="muted">No registered project.</p>
         {/if}
-        {#each projects as p (p.workspace_id)}
-          <label class="choice">
+        {#each nestProjects(projects) as { row: p, depth } (p.workspace_id)}
+          <label class="choice" class:worktree={depth > 0}>
             <input
               type="checkbox"
               checked={pickedProjects.includes(p.workspace_id)}
               onchange={() => (pickedProjects = toggle(pickedProjects, p.workspace_id))}
             />
-            {p.name}
+            <ProjectLabel name={p.name} {depth} />
           </label>
         {/each}
       </fieldset>
@@ -416,6 +418,10 @@
   }
   .choice.off {
     opacity: 0.6;
+  }
+  /* A git linked worktree row indents whole, checkbox included. */
+  .choice.worktree {
+    padding-inline-start: 0.75rem;
   }
   .run-row {
     display: flex;

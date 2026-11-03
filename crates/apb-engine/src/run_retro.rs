@@ -173,6 +173,9 @@ pub struct RetroReport {
     /// Absent when no earlier finished run of the version was found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline: Option<Baseline>,
+    /// What came into the run from outside its playbook's flow
+    /// ([`crate::run_stats::interventions`]).
+    pub interventions: crate::run_stats::interventions::RunInterventions,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -555,6 +558,7 @@ pub fn build(run: &RetroRun, history: &[StatsRun], compare_last: usize) -> Retro
         }),
         duration_ms: run_duration(&run.events),
         goal: goal_from(run.snapshot.as_ref(), &run.events),
+        interventions: crate::run_stats::interventions::of_run(&run.events),
         ..Default::default()
     };
     report.nodes = node_reports(run, w);

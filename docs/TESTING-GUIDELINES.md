@@ -178,7 +178,13 @@ timing-shaped: a run that finishes before a stop lands on a fast runner.
 - Every test carries its own temp dirs (`tempfile::tempdir`); nothing
   touches the developer's real config, HOME, or trust store. If a test
   needs the config dir, it points APB_CONFIG_DIR at a temp dir under the
-  shared lock, with a Drop restore.
+  shared lock, with a Drop restore. Every test binary installs
+  `apb_core::isolate_test_config!` at its crate root: before `main` it
+  records the real config dir as forbidden and points `XDG_CONFIG_HOME` at
+  a sandbox every spawned process inherits, and from then on
+  `apb_core::config::config_dir` panics in a test process or a test-build
+  `apb` that still resolves the real one. A test that removes
+  `XDG_CONFIG_HOME` or `HOME` puts both back on drop.
 - Do not weaken an existing assertion to make a new feature pass; that is a
   review finding, not a fix.
 - Snapshot tests normalize volatile fields (timestamps, pids, temp paths,

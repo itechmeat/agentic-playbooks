@@ -1,8 +1,11 @@
 import type {
+  CategoryStats,
   Comparison,
   DigestStats,
   ExecutorGroup,
   HintFollow,
+  InterventionStats,
+  KnownCount,
   NodeStats,
   PerRun,
   QualityDelta,
@@ -316,4 +319,79 @@ export function nodeLayer(n: NodeStats): { text: string; title: string } {
 export function nodeStatsOf(r: StatsReport | null, version: string): Map<string, NodeStats> {
   const v = r?.versions.find((x) => x.version === version)
   return new Map((v?.nodes ?? []).map((n) => [n.node, n]))
+}
+
+// Interventions (U24): what came into a version's finished runs from
+// outside the playbook's flow. A figure an older apb did not record is
+// known in fewer runs than the version has, and says so; it never reads as
+// zero.
+
+// `3`, or `3 (known in 2 of 3 runs)`.
+export function knownCountText(k: KnownCount): string {
+  if (k.known_runs === k.runs) return String(k.value)
+  return `${k.value} (known in ${k.known_runs} of ${k.runs} runs)`
+}
+
+const CATEGORY_LABELS: Record<string, string> = {
+  review: 'decided through the review channel',
+  question: 'answered by a person or the supervisor',
+  automatic: 'automatic decisions applied (not interventions)',
+  operator: 'operator actions',
+  supervisor_node: 'node corrections through the supervisor channel',
+  supervisor_run: 'run corrections through the supervisor channel',
+}
+
+export function categoryLabel(category: string): string {
+  return CATEGORY_LABELS[category] ?? slugText(category)
+}
+
+// Raw slugs are for the journal, not for people: `not_recorded` reads as
+// "not recorded", and no label keeps its underscores.
+export function slugText(slug: string): string {
+  return slug.replace(/_/g, ' ')
+}
+
+// `2 over 3 gate visits (channel 2, automatic 1)`: the count, its
+// denominator and the parts of the split that say something.
+export function categoryText(c: CategoryStats): string {
+  const parts = Object.entries(c.split)
+    .filter(([, k]) => k.value > 0 || k.known_runs !== k.runs)
+    .map(([name, k]) => `${slugText(name.replaceAll(':', ' '))} ${knownCountText(k)}`)
+  const head = `${knownCountText(c.count)} over ${c.denominator} ${c.unit}`
+  return parts.length ? `${head} (${parts.join(', ')})` : head
+}
+
+// The headline: the total, per run and the runs without any.
+export function interventionsHeadText(s: InterventionStats): string {
+  let t = `${knownCountText(s.total)} over ${s.runs} finished ${s.runs === 1 ? 'run' : 'runs'}`
+  if (s.per_run_median !== undefined && s.per_run_mean !== undefined) {
+    const mean = Number(s.per_run_mean.toFixed(2))
+    t += `, median ${s.per_run_median} and mean ${mean} per run`
+  }
+  return t
+}
+
+export function withoutAnyText(s: InterventionStats): string {
+  const k = s.without_any
+  const t = `${k.value} of ${k.known_runs}`
+  return k.known_runs === k.runs ? t : `${t} (known in ${k.known_runs} of ${k.runs} runs)`
+}
+
+// `infra retry 2, pause 1`, or null when empty.
+export function kindsText(map: { [key in string]: number }): string | null {
+  const parts = Object.entries(map).map(([k, v]) => `${slugText(k)} ${v}`)
+  return parts.length ? parts.join(', ') : null
+}
+
+// Whether any figure of the version is not known in every run: the headline
+// counts, the runs without any, the automatic total, and every entry of each
+// category's split.
+export function interventionsPartlyKnown(s: InterventionStats): boolean {
+  const partial = (k: KnownCount) => k.known_runs !== k.runs
+  return (
+    partial(s.total) ||
+    partial(s.without_any) ||
+    partial(s.automatic_total) ||
+    s.categories.some((c) => partial(c.count) || Object.values(c.split).some(partial))
+  )
 }

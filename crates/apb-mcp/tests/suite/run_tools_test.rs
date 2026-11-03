@@ -1801,3 +1801,54 @@ fn run_resume_from_a_node_past_an_undecided_person_only_gate_is_refused() {
         "a refused resume journals nothing"
     );
 }
+
+/// `runs_list` keeps its plain array without a filter; with one it answers
+/// `{ runs, not_indexed, withheld }` and every row carries its scope and
+/// search fields.
+#[test]
+fn runs_list_answers_a_search_filter_and_keeps_the_plain_array() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let def = "schema: 2\nid: intake\nname: Intake\nversion: 1.0.0\nparams:\n  - { name: customer, type: text, search: true }\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n";
+    for (id, customer, indexed) in [
+        ("a", "Acme", true),
+        ("b", "Globex", true),
+        ("c", "Acme", false),
+    ] {
+        let run = root.join(".apb/runs").join(id);
+        std::fs::create_dir_all(&run).unwrap();
+        let mut started = serde_json::json!({"seq": 1, "ts": 1, "type": "run_started", "playbook": "intake", "version": "1.0.0"});
+        if indexed {
+            started["definition"] = serde_json::json!(
+                apb_engine::run_definitions::store(&run, def.as_bytes()).unwrap()
+            );
+        }
+        std::fs::write(run.join("events.jsonl"), format!("{started}\n")).unwrap();
+        std::fs::write(
+            run.join("run.yaml"),
+            format!("params:\n  customer: {customer}\n"),
+        )
+        .unwrap();
+    }
+    let plain = runs_list(root).unwrap();
+    assert!(plain.is_array());
+    assert!(plain[0].get("search").is_none() && plain[0].get("scope").is_none());
+    let filter = apb_mcp::tools::run::run_filter(None, None, &["customer=ACME".into()], false)
+        .unwrap()
+        .expect("a filter");
+    let found = apb_mcp::tools::run::runs_list_filtered(root, &filter).unwrap();
+    assert_eq!(found["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(found["runs"][0]["run_id"], "a");
+    assert_eq!(found["runs"][0]["scope"], "project");
+    assert_eq!(found["runs"][0]["search"]["fields"][0]["value"], "Acme");
+    assert_eq!(found["not_indexed"], 1);
+    assert_eq!(found["withheld"], 0);
+    // No filter at all is the plain listing.
+    assert!(
+        apb_mcp::tools::run::run_filter(None, None, &[], false)
+            .unwrap()
+            .is_none()
+    );
+    let bad = apb_mcp::tools::run::run_filter(None, Some("other".into()), &[], false);
+    assert!(bad.is_err());
+}

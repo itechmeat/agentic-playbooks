@@ -1,0 +1,15 @@
+schema: 1
+id: clean
+title: Every item has a verdict and no MUST item fails
+params: { document: docs/design/cache.md }
+answers:
+  check:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { must_failed: 0, should_failed: 1, unchecked: 0, coverage: "CHECKLIST: 6/6" }
+expect:
+  run: { outcome: [succeeded] }
+  finish: done
+  visits: { check: 1 }
+  route: { not_visits: [revise, recheck, decide] }

@@ -19,6 +19,10 @@ pub mod lock;
 mod ratelimit;
 pub mod routes;
 pub mod state;
+// Unit tests run with an isolated global config dir, set before any test
+// thread starts (`apb_core::config::test_isolation`).
+#[cfg(test)]
+apb_core::isolate_test_config!(std::env::temp_dir());
 #[cfg(test)]
 mod ts_contract;
 pub mod watch;

@@ -20,6 +20,8 @@
   import type { RouteFocus } from '../lib/route'
   import { judgeDrag } from '../lib/judgeexits'
   import type { Project } from '../lib/types'
+  import { nestProjects } from '../lib/projectnest'
+  import ProjectLabel from '../lib/components/ProjectLabel.svelte'
   import CodeEditor from '../lib/CodeEditor.svelte'
   import DiffView from '../lib/DiffView.svelte'
   import {
@@ -630,8 +632,10 @@
         <Select.Trigger class="h-8 w-40">{projectName}</Select.Trigger>
         <Select.Content>
           <Select.Group>
-            {#each projects as p (p.workspace_id)}
-              <Select.Item value={p.workspace_id} label={p.name}>{p.name}</Select.Item>
+            {#each nestProjects(projects) as { row: p, depth } (p.workspace_id)}
+              <Select.Item value={p.workspace_id} label={p.name}
+                ><ProjectLabel name={p.name} {depth} /></Select.Item
+              >
             {/each}
           </Select.Group>
         </Select.Content>

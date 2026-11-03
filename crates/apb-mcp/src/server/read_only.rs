@@ -35,6 +35,7 @@ pub const READ_ONLY: &[(&str, ReadOnlyUse)] = &[
     ("playbook_adopt_report", ReadOnlyUse::Full),
     ("playbook_trash_list", ReadOnlyUse::Full),
     ("playbook_candidate", ReadOnlyUse::Full),
+    ("playbook_stats", ReadOnlyUse::Full),
     ("playbook_known_problems", ReadOnlyUse::Full),
     ("playbook_discover_results", ReadOnlyUse::Full),
     ("projects_list", ReadOnlyUse::Full),

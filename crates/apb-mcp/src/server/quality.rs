@@ -1,7 +1,8 @@
 //! MCP tool handlers for run quality: grading an ended run by rules or by
 //! the decision model (`run_grade`), a host's grading session over an
 //! ended run (`run_grade_start`, `run_grade_read`, `run_grade_submit`),
-//! a run's grades (`run_grades`) and a playbook's candidate compared by
+//! a run's grades (`run_grades`), the cross-run metrics of `apb stats`
+//! (`playbook_stats`) and a playbook's candidate compared by
 //! quality (`playbook_candidate`, read-only: promoting or keeping current
 //! is a person's decision, made in the CLI or the dashboard). The logic
 //! lives in `crate::tools::grade` and `crate::tools::candidate`, shared
@@ -263,6 +264,29 @@ impl WfMcp {
         off_runtime(move || {
             tools::grade::run_grades(&root, &run_id)
                 .and_then(|grades| to_value(json!({ "run_id": run_id, "grades": grades })))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Cross-run metrics of this workspace's runs per playbook version and node, the report apb stats --json prints: outcomes, first-pass runs, retries, fallbacks, loops, waits, durations, tokens and cost, goal results, findings, quality levels, and interventions (decisions through the review channel, questions answered by a person or the supervisor, operator actions and corrections through the supervisor channel, with automatic decisions and engine actions kept apart; a figure an older apb did not record reads known in N of M runs, never zero). Read-only, from journals only, no model.",
+        annotations(read_only_hint = true)
+    )]
+    pub(crate) async fn playbook_stats(
+        &self,
+        Parameters(PlaybookStatsArgs {
+            playbook,
+            since,
+            compare,
+            workspace,
+        }): Parameters<PlaybookStatsArgs>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        off_runtime(move || {
+            tools::stats::playbook_stats(&root, playbook, since.as_deref(), compare)
         })
         .await
     }

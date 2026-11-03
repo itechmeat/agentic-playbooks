@@ -827,6 +827,13 @@ pub struct Param {
     /// `type: text`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub secret: bool,
+    /// Runs can be found by this param's value (`apb runs --field
+    /// name=value`, `crate::run_search`). Never on a secret param (V160)
+    /// or one whose name looks secret (V161); at most
+    /// [`crate::run_search::MAX_SEARCH_PARAMS`] per playbook (V162). An
+    /// older apb drops the key and runs the playbook unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub search: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

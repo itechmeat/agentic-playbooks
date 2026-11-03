@@ -2,6 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { render } from 'svelte/server'
 import PlaybookStatsCard from './PlaybookStatsCard.svelte'
 import {
+  categoryText,
+  categoryLabel,
+  interventionsHeadText,
+  interventionsPartlyKnown,
+  kindsText,
+  knownCountText,
+  withoutAnyText,
   costKnownText,
   closeReasonWord,
   digestText,
@@ -31,7 +38,7 @@ import {
   versionsNewestFirst,
   waitsText,
 } from './playbookstats'
-import type { ExecutorGroup, NodeStats, QualityStats, StatsReport, StepStats, VersionStats } from './api.gen'
+import type { ExecutorGroup, KnownCount, NodeStats, QualityStats, StatsReport, StepStats, VersionStats } from './api.gen'
 
 const version = (v: string, extra: Partial<VersionStats> = {}): VersionStats => ({
   playbook: 'p',
@@ -439,5 +446,100 @@ describe('executor report', () => {
     const body = render(PlaybookStatsCard, { props: { report: { runs: 1, versions: [version('1.0.0', { nodes: [n] })] } as StatsReport } }).body
     expect(body).toContain('playbook-stats-executor-report')
     expect(body).toContain('step 0 to step 1: not recorded x1')
+  })
+})
+
+describe('interventions', () => {
+  const k = (value: number, known_runs: number, runs: number) => ({ value, known_runs, runs })
+
+  it('a count known in every run is the bare number, otherwise it says where', () => {
+    expect(knownCountText(k(3, 3, 3))).toBe('3')
+    expect(knownCountText(k(3, 2, 3))).toBe('3 (known in 2 of 3 runs)')
+  })
+
+  it('a category names its denominator and only the parts that say something', () => {
+    const text = categoryText({
+      category: 'review',
+      unit: 'gate visits',
+      denominator: 4,
+      count: k(2, 3, 3),
+      split: { channel: k(2, 3, 3), withdrawn: k(0, 3, 3), 'via:terminal': k(1, 2, 3) },
+    })
+    expect(text).toBe('2 over 4 gate visits (channel 2, via terminal 1 (known in 2 of 3 runs))')
+  })
+
+  it('the headline and the runs without any', () => {
+    const s = {
+      runs: 2,
+      total: k(1, 1, 2),
+      without_any: k(0, 1, 2),
+      automatic_total: k(0, 2, 2),
+      categories: [],
+      engine: {},
+      other: {},
+      actor_unknown: {},
+    }
+    expect(interventionsHeadText(s)).toBe('1 (known in 1 of 2 runs) over 2 finished runs')
+    expect(withoutAnyText(s)).toBe('0 of 1 (known in 1 of 2 runs)')
+    expect(kindsText({})).toBeNull()
+    expect(kindsText({ pause: 1 })).toBe('pause 1')
+  })
+
+  it('rounds the per run mean to two figures', () => {
+    const s = {
+      runs: 3,
+      total: k(4, 3, 3),
+      without_any: k(0, 3, 3),
+      automatic_total: k(0, 3, 3),
+      categories: [],
+      engine: {},
+      other: {},
+      actor_unknown: {},
+      per_run_median: 1,
+      per_run_mean: 4 / 3,
+    }
+    expect(interventionsHeadText(s)).toContain('mean 1.33 per run')
+  })
+
+  it('says partly known when any denominator or split entry misses runs', () => {
+    const full = (v: number): KnownCount => ({ value: v, known_runs: 2, runs: 2 })
+    const base = {
+      runs: 2,
+      total: full(3),
+      without_any: full(0),
+      automatic_total: full(1),
+      categories: [
+        { category: 'review', unit: 'gate visits', denominator: 2, count: full(2), split: { channel: full(2) } },
+      ],
+      engine: {},
+      other: {},
+      actor_unknown: {},
+    }
+    expect(interventionsPartlyKnown(base)).toBe(false)
+    expect(interventionsPartlyKnown({ ...base, without_any: { value: 0, known_runs: 1, runs: 2 } })).toBe(true)
+    expect(interventionsPartlyKnown({ ...base, automatic_total: { value: 1, known_runs: 1, runs: 2 } })).toBe(true)
+    expect(
+      interventionsPartlyKnown({
+        ...base,
+        categories: [{ ...base.categories[0], split: { channel: { value: 2, known_runs: 1, runs: 2 } } }],
+      }),
+    ).toBe(true)
+  })
+
+  it('maps raw slugs to readable words and keeps the automatic qualifier', () => {
+    expect(kindsText({ not_recorded: 1, infra_retry: 2 })).toBe('not recorded 1, infra retry 2')
+    expect(categoryLabel('automatic')).toBe('automatic decisions applied (not interventions)')
+    expect(categoryLabel('operator')).toBe('operator actions')
+  })
+
+  it('replaces every colon in a split name', () => {
+    const text = categoryText({
+      category: 'review',
+      unit: 'gate visits',
+      denominator: 3,
+      count: k(3, 3, 3),
+      split: { 'via:terminal:cli': k(3, 3, 3) },
+    })
+    expect(text).toContain('via terminal cli 3')
   })
 })

@@ -1,18 +1,32 @@
 <script lang="ts">
   import * as Select from '$lib/components/ui/select'
   import { cn } from '$lib/utils'
+  import ProjectLabel from '$lib/components/ProjectLabel.svelte'
+  import { fetchProjects } from '$lib/api/core'
   import {
     ALL_PROJECTS,
+    nestProjectOptions,
     projectFilter,
     projectOptions,
   } from '$lib/projectfilter'
+  import type { Project } from '$lib/types'
 
   type Item = { workspace_id: string; project?: string | null }
 
   let { items = [] as Item[], class: className = 'mb-4' }: { items?: Item[]; class?: string } =
     $props()
 
+  // The registry read only orders the options (worktrees under their parent);
+  // when it fails the picker falls back to the flat list.
+  let projects = $state<Project[]>([])
+  $effect(() => {
+    fetchProjects()
+      .then((p) => (projects = p))
+      .catch(() => {})
+  })
+
   const options = $derived(projectOptions(items))
+  const nested = $derived(nestProjectOptions(options, projects))
   const knownIds = $derived(new Set(options.map((o) => o.id)))
 
   // Unknown stored id: show "All projects" without mutating the store.
@@ -41,8 +55,10 @@
     </Select.Trigger>
     <Select.Content>
       <Select.Item value={ALL_PROJECTS} label="All projects">All projects</Select.Item>
-      {#each options as o (o.id)}
-        <Select.Item value={o.id} label={o.label}>{o.label}</Select.Item>
+      {#each nested as { row: o, depth } (o.id)}
+        <Select.Item value={o.id} label={o.label}>
+          <ProjectLabel name={o.label} {depth} />
+        </Select.Item>
       {/each}
     </Select.Content>
   </Select.Root>

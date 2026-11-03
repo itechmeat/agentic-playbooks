@@ -16,6 +16,23 @@ pub struct PlaybookIdArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlaybookStatsArgs {
+    /// Only this playbook id; every playbook of the workspace when absent.
+    #[serde(default)]
+    pub playbook: Option<String>,
+    /// Runs started at or after a date (2026-09-20) or a duration back from
+    /// now (30d, 24h).
+    #[serde(default)]
+    pub since: Option<String>,
+    /// Compare this version of `playbook` with the latest other version seen.
+    #[serde(default)]
+    pub compare: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct PlaybookGetArgs {
     pub id: String,
     /// Playbook version (defaults to the latest).
@@ -40,6 +57,22 @@ pub struct PlaybookGetArgs {
 pub struct WorkspaceArg {
     #[serde(default)]
     pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunsListArgs {
+    #[serde(default)]
+    pub workspace: Option<String>,
+    /// Only the runs of this playbook id.
+    #[serde(default)]
+    pub playbook: Option<String>,
+    /// `project` or `global`: where the run's playbook came from.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Search terms `name=value` over the params the run's playbook marks
+    /// `search: true`, all of which must match (at most 8).
+    #[serde(default)]
+    pub fields: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

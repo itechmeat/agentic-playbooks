@@ -174,6 +174,46 @@ An older apb keeps creating files readable by the group and shows params
 and outputs unredacted on its dashboard; the next drive by this release
 narrows the files again.
 
+### Search params
+
+A param marked `search: true` lets people find the runs that had a value:
+`apb runs --playbook intake --field customer=Acme`, MCP `runs_list {
+playbook, fields: ["customer=Acme"] }`, `GET
+/api/runs?playbook=intake&field=customer:Acme` and the filter row of the
+dashboard's run list all give the same runs.
+
+```yaml
+params:
+  - { name: customer, type: text, label: "Customer", search: true }
+  - { name: ticket, type: int, search: true }
+```
+
+- A `text` value is trimmed and compared without case (`acme` finds
+  `Acme`), an `enum` exactly, an `int` as a number (`042` finds `42`), a
+  `bool` as `true` or `false`. Terms are equality only and join with AND,
+  at most 8 per query; there is no prefix, range or full-text search.
+- A run's fields come from its own start definition and its `run.yaml`.
+  A later version or a patch that adds `search` affects new runs only: a
+  run whose start definition declared nothing searchable (and a run an
+  older apb started, whose definition was not stored) is not indexed, and
+  a filtered listing says how many such runs it skipped (`not_indexed`,
+  `N runs have no search fields`) so "no match" never hides "not
+  searchable".
+- A value over 200 characters, a credential-shaped value or one the run
+  redactor would change (it equals a secret of the run's tree) is shown as
+  `too_long` or `withheld`, never as text, and never matches: a query
+  cannot probe it. Runs a term skipped for that reason are counted as
+  `withheld`.
+- Nothing is stored: the fields are computed while the runs are listed.
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| V160 | error | a `search: true` param is also `secret: true` |
+| V161 | error | a `search: true` param is named like a secret (`api_token`, `password`, `client_secret`, ...) |
+| V162 | error | more than 8 params are `search: true` |
+
+An older apb drops the key and runs the playbook unchanged.
+
 ## Visual editor and graph check
 
 The dashboard renders a playbook as a top-to-bottom graph, and the canvas is
@@ -1741,6 +1781,60 @@ task-check-first --level quick` plays them in seconds without asking a
 model or starting an agent (docs/EVALS.md, "Scenario runs"). A scenario is
 the cheap way to see such a loop route before the first real run.
 
+
+## Check a document against a checklist
+
+Two examples check a text against a list of rules before it is used:
+`examples/playbooks/design-doc-check.yaml` (a design document an agent
+revises) and `examples/playbooks/document-checklist.yaml` (a contract, a
+report or a publication a person edits). The checklist is a project file:
+
+```yaml
+items:
+  - { id: failure-modes, level: must, text: "The design names its failure modes" }
+  - { id: rollout, level: should, text: "The design has a rollout plan" }
+```
+
+The `check` node gives every item a verdict (`pass`, `fail`,
+`not_applicable`) with a quote from the document, writes `check-report.md`
+and publishes four fields:
+
+```yaml
+- id: check
+  type: agent_task
+  outputs:
+    fields: [must_failed, should_failed, unchecked, coverage]
+  results:
+    - path: check-report.md
+```
+
+Condition nodes route on them in order: items without a verdict (any
+`unchecked` but `0`, a missing field included) get one bounded re-check,
+then a person; no failed MUST item ends the run with SHOULD findings left
+in the report; otherwise the document is fixed (by the `revise` agent, or
+by a person who chooses `fixed`) and a `recheck` looks at the failed items
+only, at most three rounds, before a person accepts the open findings
+(`accepted_with_open_findings`, a success) or rejects the document.
+
+What to know before using them:
+
+- Coverage is what the agent reports in `unchecked`: apb does not parse
+  the checklist. A missing output field only warns ("Named outputs"
+  above), which is why the examples route it to the re-check.
+- `coverage` carries the line `CHECKLIST: <checked>/<total>` the goal's
+  marker criterion looks for: with `outputs.fields` the node output is the
+  status file's JSON, so a marker in the reply alone would not be found.
+- `results:` keeps `check-report.md` per execution, so every round's
+  report stays readable (`apb results <run>`); a quick scenario keeps the
+  output and fields only.
+- `protect` takes static globs. The code example protects
+  `docs/checklists/**` everywhere and `docs/design/**` while checking, so
+  keep design documents there or change the globs; the non-code example
+  protects nothing, since the person edits the document.
+- `document` is a search param: `apb runs --field document=docs/design/cache.md`
+  lists the runs that checked that file.
+- The scenarios under `examples/playbooks/<id>/evals/scenarios/` play the
+  clean path and one round of fixing at `apb eval --level quick`.
 ## Human review and conditional edges
 
 A `human_review` node pauses the run for a human decision:
@@ -4198,6 +4292,10 @@ both directions so either end leads to the other:
 
 Keep the tracker write in one node near the end (after the gates), so a
 record is not updated for work that a later gate rejects.
+
+Mark the param that carries the record id `search: true` (see "Search
+params" above), and `apb runs --field issue=1234` lists the runs that
+worked on it, without reading the journals by hand.
 
 ## Language
 

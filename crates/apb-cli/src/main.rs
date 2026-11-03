@@ -7,6 +7,11 @@ macro_rules! say {
     };
 }
 
+// Unit tests run with an isolated global config dir, set before any test
+// thread starts (`apb_core::config::test_isolation`).
+#[cfg(test)]
+apb_core::isolate_test_config!(std::env::temp_dir());
+
 mod actions;
 mod budget;
 mod cache;
@@ -339,9 +344,22 @@ enum Command {
     Runs {
         /// Show only this run
         run_id: Option<String>,
-        /// With a run id: the run as JSON, the same object as MCP run_status
-        #[arg(long, requires = "run_id", conflicts_with = "items")]
+        /// With a run id: the run as JSON, the same object as MCP run_status;
+        /// with a filter: the listing as JSON, the same answer as MCP
+        /// runs_list
+        #[arg(long, conflicts_with = "items")]
         json: bool,
+        /// List only the runs of this playbook
+        #[arg(long, conflicts_with = "run_id")]
+        playbook: Option<String>,
+        /// List only the runs of a project or a global playbook
+        #[arg(long, value_parser = ["project", "global"], conflicts_with = "run_id")]
+        scope: Option<String>,
+        /// List only the runs whose search field `name` equals `value`
+        /// (the params a playbook marks `search: true`); repeatable, all
+        /// must match
+        #[arg(long = "field", value_name = "NAME=VALUE", conflicts_with = "run_id")]
+        fields: Vec<String>,
         /// With a run id: one line per item of the run's list nodes
         #[arg(long, requires = "run_id")]
         items: bool,
@@ -1093,7 +1111,23 @@ fn main() -> ExitCode {
             outputs_json: true,
             ..
         }) => run_outputs::outputs_json_cmd(&root, &run_id),
-        Some(Command::Runs { run_id, json, .. }) => runs_cmd(&root, run_id.as_deref(), json),
+        Some(Command::Runs {
+            run_id,
+            json,
+            playbook,
+            scope,
+            fields,
+            ..
+        }) => runs_cmd(
+            &root,
+            run_id.as_deref(),
+            json,
+            crate::run::RunsQuery {
+                playbook,
+                scope,
+                fields,
+            },
+        ),
         Some(Command::Notify {
             run,
             on,

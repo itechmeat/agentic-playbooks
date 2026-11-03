@@ -98,10 +98,11 @@ extern "C" fn isolate_config() {
             libc::atexit(remove_config);
         }
     }
+    // Records the real config dir as forbidden (`config_dir` then panics on
+    // it), then points `XDG_CONFIG_HOME` at `dir`.
+    apb_core::config::test_isolation::isolate(&dir);
     // SAFETY: runs before `main`, so no other thread exists yet.
     unsafe {
-        std::env::set_var("XDG_CONFIG_HOME", &dir);
-        std::env::remove_var("APB_CONFIG_DIR");
         // The basis of a reported cost reads claude's login: a developer's
         // own key or subscription login must not decide what a test sees.
         std::env::set_var("CLAUDE_CONFIG_DIR", dir.join("claude"));
@@ -367,6 +368,8 @@ mod interactive_live_test;
 mod interactive_reprompt_test;
 #[path = "suite/interactive_timeout_test.rs"]
 mod interactive_timeout_test;
+#[path = "suite/interventions_test.rs"]
+mod interventions_test;
 #[cfg(unix)]
 #[path = "suite/join_loop_test.rs"]
 mod join_loop_test;
@@ -445,6 +448,8 @@ mod protect_test;
 mod read_only_test;
 #[path = "suite/result_snapshot_test.rs"]
 mod result_snapshot_test;
+#[path = "suite/run_search_test.rs"]
+mod run_search_test;
 #[path = "suite/save_nudge_test.rs"]
 mod save_nudge_test;
 #[cfg(unix)]

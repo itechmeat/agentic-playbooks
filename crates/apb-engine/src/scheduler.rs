@@ -105,7 +105,7 @@ pub(crate) use journal::{
     questions_answered_before_seq, questions_asked_before_seq, review_decided_count,
     review_open_count, wait_active_ms, wait_ended_count, wait_signalled_count, wait_started_count,
 };
-pub use listing::{RunSummary, list_runs};
+pub use listing::{RunFilter, RunListing, RunSummary, list_runs, list_runs_filtered};
 pub(crate) use live::{observe_live_channels, tick_live_observation};
 use node::*;
 pub use outcome::RunResult;

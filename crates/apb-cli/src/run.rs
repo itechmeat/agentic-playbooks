@@ -1474,62 +1474,90 @@ pub(crate) fn pause_waker_cmd(root: &Path, run_id: &str, waker: WakerFor) -> Exi
     }
 }
 
-pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>, json: bool) -> ExitCode {
+/// The listing filters of `apb runs`.
+#[derive(Debug, Default)]
+pub(crate) struct RunsQuery {
+    pub(crate) playbook: Option<String>,
+    pub(crate) scope: Option<String>,
+    pub(crate) fields: Vec<String>,
+}
+
+pub(crate) fn runs_cmd(
+    root: &Path,
+    run_id: Option<&str>,
+    json: bool,
+    query: RunsQuery,
+) -> ExitCode {
     if let Some(run_id) = run_id {
         return run_detail_cmd(root, run_id, json);
     }
-    match list_runs(root) {
-        Ok(runs) if runs.is_empty() => {
+    let filter =
+        match apb_mcp::tools::run::run_filter(query.playbook, query.scope, &query.fields, false) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("runs: {e}");
+                return ExitCode::from(2);
+            }
+        };
+    if json && filter.is_none() {
+        // R3: a bare listing has no JSON form; a run or a filter does.
+        eprintln!("error: --json needs <RUN_ID> or a filter (--playbook, --scope, --field)");
+        return ExitCode::from(2);
+    }
+    if json {
+        let answer = match &filter {
+            None => apb_mcp::tools::runs_list(root),
+            Some(f) => apb_mcp::tools::run::runs_list_filtered(root, f),
+        };
+        return match answer {
+            Ok(v) => {
+                crate::util::print_json(&v);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("runs failed: {e}");
+                ExitCode::from(2)
+            }
+        };
+    }
+    let listed = match &filter {
+        None => list_runs(root).map(|runs| (runs, None)),
+        Some(f) => apb_engine::list_runs_filtered(root, f).map(|l| {
+            // `not_indexed` counts only what a field term left out; with no
+            // terms the runs without search fields stay listed and are
+            // counted here from their own row state.
+            let not_indexed = l.not_indexed
+                + l.runs
+                    .iter()
+                    .filter(|r| {
+                        r.search.as_ref() == Some(&apb_core::run_search::SearchFields::NotIndexed)
+                    })
+                    .count();
+            (l.runs, Some((not_indexed, l.withheld)))
+        }),
+    };
+    match listed {
+        Ok((runs, None)) if runs.is_empty() => {
             say!("no runs yet");
             ExitCode::SUCCESS
         }
-        Ok(runs) => {
-            // The execution mode column (0.24.0) appears only when some run
-            // has an execution block, so a table of plain `cli` runs reads
-            // exactly as before.
-            let modes: Vec<Option<String>> = runs
-                .iter()
-                .map(|r| crate::run_mode::list_mode(root, &r.run_id))
-                .collect();
-            let show_mode = modes.iter().any(Option::is_some);
-            // Each row redacted with its own run's values (and its
-            // ancestors'); the workspace's connector secrets resolved once.
-            let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
-            for (r, mode) in runs.into_iter().zip(modes) {
-                crate::util::with_run_redaction(redaction.run(&r.run_id), || {
-                    // The status column stays exactly as it always has (a script
-                    // parsing it must keep working); a dead driver and events a
-                    // newer apb wrote are called out as appended markers rather
-                    // than a rewrite of that text (#85 finding 4).
-                    let mut line = format!("{}\t{}\t{}", r.run_id, r.playbook, r.status);
-                    if show_mode {
-                        line.push('\t');
-                        line.push_str(mode.as_deref().unwrap_or("cli"));
-                    }
-                    if let Some(p) = &r.pause {
-                        line.push('\t');
-                        line.push_str(&crate::pause::marker(p));
-                    }
-                    if r.driver_dead {
-                        line.push_str("\tdriver dead");
-                    }
-                    if let Some(rel) = &r.released {
-                        line.push('\t');
-                        line.push_str(&apb_engine::retry_wait::released_line(rel));
-                    }
-                    if let Some(n) = &r.needs_look {
-                        line.push_str(&format!("\tneeds a look: {}", n.line()));
-                    }
-                    if let Some(t) = &r.candidate_trial {
-                        line.push_str(&format!("\tcandidate {} {}", t.version, t.verdict));
-                    }
-                    if r.unknown_events > 0 {
-                        line.push('\t');
-                        line.push_str(&unknown_events_note(r.unknown_events));
-                    }
-                    say!("{line}");
-                    print_waiting_on_question(r.progress.as_ref());
-                });
+        Ok((runs, counts)) => {
+            print_run_rows(root, runs);
+            if let Some((not_indexed, withheld)) = counts {
+                if not_indexed > 0 {
+                    let (n, have) = if not_indexed == 1 {
+                        ("1 run", "has")
+                    } else {
+                        (&*format!("{not_indexed} runs"), "have")
+                    };
+                    say!("{n} {have} no search fields");
+                }
+                if withheld > 0 {
+                    say!(
+                        "{withheld} run{} left out: a searched value is withheld",
+                        if withheld == 1 { "" } else { "s" }
+                    );
+                }
             }
             ExitCode::SUCCESS
         }
@@ -1537,6 +1565,93 @@ pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>, json: bool) -> ExitCod
             eprintln!("runs failed: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// `customer=Acme, ticket=withheld`: a run's search fields, a value shown
+/// only in state `value`.
+fn search_text(search: &apb_core::run_search::SearchFields) -> Option<String> {
+    use apb_core::run_search::{FieldState, SearchFields};
+    let SearchFields::Indexed { fields } = search else {
+        return None;
+    };
+    let parts: Vec<String> = fields
+        .iter()
+        .map(|f| {
+            let v = match (f.state, &f.value) {
+                (FieldState::Value, Some(v)) => v.clone(),
+                (FieldState::TooLong, _) => "too_long".into(),
+                (FieldState::Withheld, _) => "withheld".into(),
+                (FieldState::Invalid, _) => "invalid".into(),
+                _ => "absent".into(),
+            };
+            format!("{}={v}", f.name)
+        })
+        .collect();
+    Some(parts.join(", "))
+}
+
+/// One line per run, as `apb runs` has always printed them, with the run's
+/// scope and search fields appended in a filtered listing.
+fn print_run_rows(root: &Path, runs: Vec<apb_engine::RunSummary>) {
+    // The execution mode column (0.24.0) appears only when some run
+    // has an execution block, so a table of plain `cli` runs reads
+    // exactly as before.
+    let modes: Vec<Option<String>> = runs
+        .iter()
+        .map(|r| crate::run_mode::list_mode(root, &r.run_id))
+        .collect();
+    let show_mode = modes.iter().any(Option::is_some);
+    // Each row redacted with its own run's values (and its
+    // ancestors'); the workspace's connector secrets resolved once.
+    let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
+    for (r, mode) in runs.into_iter().zip(modes) {
+        crate::util::with_run_redaction(redaction.run(&r.run_id), || {
+            // The status column stays exactly as it always has (a script
+            // parsing it must keep working); a dead driver and events a
+            // newer apb wrote are called out as appended markers rather
+            // than a rewrite of that text (#85 finding 4).
+            let mut line = format!("{}\t{}\t{}", r.run_id, r.playbook, r.status);
+            if show_mode {
+                line.push('\t');
+                line.push_str(mode.as_deref().unwrap_or("cli"));
+            }
+            if let Some(p) = &r.pause {
+                line.push('\t');
+                line.push_str(&crate::pause::marker(p));
+            }
+            if r.driver_dead {
+                line.push_str("\tdriver dead");
+            }
+            if let Some(rel) = &r.released {
+                line.push('\t');
+                line.push_str(&apb_engine::retry_wait::released_line(rel));
+            }
+            if let Some(n) = &r.needs_look {
+                line.push_str(&format!("\tneeds a look: {}", n.line()));
+            }
+            if let Some(t) = &r.candidate_trial {
+                line.push_str(&format!("\tcandidate {} {}", t.version, t.verdict));
+            }
+            if r.unknown_events > 0 {
+                line.push('\t');
+                line.push_str(&unknown_events_note(r.unknown_events));
+            }
+            if let Some(scope) = &r.scope {
+                line.push_str(&format!("\t{scope}"));
+            }
+            if let Some(fields) = r.search.as_ref().and_then(search_text) {
+                // Through the terminal sanitizer like every other reported
+                // text: a value holding ESC or a newline must not reach the
+                // terminal or forge extra rows.
+                line.push_str(&format!(
+                    "\t{}",
+                    sanitize_for_terminal(&fields, QUESTION_TEXT_MAX * 2)
+                ));
+            }
+            say!("{line}");
+            print_waiting_on_question(r.progress.as_ref());
+        });
     }
 }
 

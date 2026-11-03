@@ -144,6 +144,13 @@ fn render_types() -> String {
         apb_engine::run_stats::executors::HintFollow::decl(&cfg),
         apb_engine::run_stats::executors::ExecutorGroup::decl(&cfg),
         apb_engine::run_stats::NodeStats::decl(&cfg),
+        apb_engine::run_stats::interventions::KnownCount::decl(&cfg),
+        apb_engine::run_stats::interventions::CategoryStats::decl(&cfg),
+        apb_engine::run_stats::interventions::InterventionStats::decl(&cfg),
+        apb_engine::run_stats::interventions::ReviewCounts::decl(&cfg),
+        apb_engine::run_stats::interventions::QuestionCounts::decl(&cfg),
+        apb_engine::run_stats::interventions::UseCounts::decl(&cfg),
+        apb_engine::run_stats::interventions::RunInterventions::decl(&cfg),
         apb_engine::run_stats::VersionStats::decl(&cfg),
         apb_engine::run_stats::Comparison::decl(&cfg),
         apb_engine::run_stats::StatsReport::decl(&cfg),
@@ -192,7 +199,11 @@ fn render_types() -> String {
         apb_engine::notify::view::NotifySent::decl(&cfg),
         apb_engine::notify::RunNotify::decl(&cfg),
         crate::routes::notify::MachineNotify::decl(&cfg),
+        apb_core::run_search::FieldState::decl(&cfg),
+        apb_core::run_search::SearchField::decl(&cfg),
+        apb_core::run_search::SearchFields::decl(&cfg),
         apb_engine::RunSummary::decl(&cfg),
+        apb_engine::RunListing::decl(&cfg),
         crate::routes::runs::RunListEntry::decl(&cfg),
         // The launch policy of agents.
         apb_core::launch::LaunchPolicy::decl(&cfg),
@@ -606,6 +617,11 @@ fn render_consts() -> String {
     render_route_consts(&mut out);
     render_close_consts(&mut out);
     render_check_consts(&mut out);
+    out.push_str(&format!(
+        "\n/** The most terms a run search takes, and the longest value it lists or matches, in characters. */\nexport const RUN_SEARCH_MAX_TERMS = {}\nexport const RUN_SEARCH_MAX_VALUE_CHARS = {}\n",
+        apb_core::run_search::MAX_TERMS,
+        apb_core::run_search::MAX_VALUE_CHARS
+    ));
     out.push_str(&format!(
         "\n/** Starter document for a new playbook. */\nexport const NEW_PLAYBOOK_TEMPLATE = {}\n",
         serde_json::to_string(&schema::new_playbook_template()).expect("a string serializes")

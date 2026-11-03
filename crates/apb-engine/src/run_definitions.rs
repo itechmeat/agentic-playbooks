@@ -49,6 +49,24 @@ fn stored_path(run_dir: &Path, digest: &str) -> std::path::PathBuf {
     STORE.path(run_dir, digest)
 }
 
+/// The length of the file stored under `digest`, read from its metadata
+/// alone (nothing is opened or hashed). `None` when there is no such file.
+pub fn stored_len(run_dir: &Path, digest: &str) -> Option<u64> {
+    // Same shape the run store accepts: 64 lowercase hex characters. Kept
+    // local so the store's own helper stays private.
+    let hex = digest.len() == 64
+        && digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if !hex {
+        return None;
+    }
+    std::fs::metadata(STORE.path(run_dir, digest))
+        .ok()
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+}
+
 /// Stores `yaml` as one of the run's definitions and returns its digest.
 /// Write-once: a definition already stored under the digest is kept. Refuses
 /// a `definitions` entry that is not a real directory (a link included) and

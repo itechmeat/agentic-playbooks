@@ -229,10 +229,22 @@ apb demo            install (--run: start) the keyless demo project; --remove de
 apb cache           status / inspect / prune / clear the node result cache
 apb decide          ask the configured decision models a bounded question
 apb decisions       decision-model report, stored thresholds, replay
-apb projects        list / remove entries of the workspace registry
+apb projects        list / remove / prune [--dry-run] entries of the workspace registry
 apb ingest          only the inbound webhook listener (headless)
 apb server key      issue / list / revoke the keys that protect a networked dashboard
 ```
+
+### The workspace registry
+
+Every project you run apb in is recorded in `projects.json` under the config
+dir, which the dashboard's project pickers and `apb projects list` read. An
+entry whose directory is gone turns `unreachable`; `apb projects prune`
+removes every such entry (unreachable or tombstoned) at once, printing each
+one, and `--dry-run` only prints them. Any registry write also drops an entry
+that has been unreachable for 30 days. A git linked worktree of a registered
+project records that project's workspace id, and both `apb projects list` and
+the dashboard's project pickers list it indented under its parent project
+instead of as a peer.
 
 ## Use from a coding agent (MCP)
 
@@ -277,7 +289,7 @@ playbook policy. Details: [docs/MCP.md](docs/MCP.md).
 
 ## Status
 
-The current release is the `1.0.0-beta.2` pre-release (the latest stable
+The current release is the `1.0.0-beta.3` pre-release (the latest stable
 release is `0.25.0`); each tagged release has its notes in
 [docs/release-notes/](docs/release-notes/) and on the GitHub releases page.
 The engine, web editor, versioning, MCP surface, and supervisor are

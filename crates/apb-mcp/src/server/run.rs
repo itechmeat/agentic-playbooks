@@ -662,18 +662,37 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "List runs recorded in the project; needs_look marks a run with a baseline regression, findings or warnings",
+        description = "List runs recorded in the project; needs_look marks a run with a baseline regression, findings or warnings. Without a filter the answer is the array of runs. With playbook, scope (project or global) or fields (name=value terms, equality, all must match, at most 8, over the params the run's own start definition marks search: true; text compared without case) the answer is { runs, not_indexed, withheld }: each run with its scope and search fields, not_indexed, when fields are given, the runs the terms left out because they have no search fields (zero without fields, when nothing is left out), withheld the runs a term skipped because that field's value is withheld or too long. A withheld value is never shown or matched.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn runs_list(
         &self,
-        Parameters(WorkspaceArg { workspace }): Parameters<WorkspaceArg>,
+        Parameters(RunsListArgs {
+            workspace,
+            playbook,
+            scope,
+            fields,
+        }): Parameters<RunsListArgs>,
     ) -> CallToolResult {
         let root = match self.effective_root(workspace.as_deref()) {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Ok(e)),
         };
-        to_call_tool_result(tools::runs_list(&root))
+        match tools::run::run_filter(playbook, scope, &fields, false) {
+            Ok(None) => {
+                // The plain listing also reads the journals: off the async
+                // runtime like every other filesystem-bound handler.
+                super::quality::off_runtime(move || tools::runs_list(&root)).await
+            }
+            Ok(Some(filter)) => {
+                // The filtered listing reads every run's start definition
+                // (blocking filesystem IO): off the async runtime like the
+                // other heavy handlers do.
+                super::quality::off_runtime(move || tools::run::runs_list_filtered(&root, &filter))
+                    .await
+            }
+            Err(e) => to_call_tool_result(Err(e)),
+        }
     }
 
     #[tool(

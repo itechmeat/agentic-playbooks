@@ -68,3 +68,37 @@ fn projects_list_and_remove() {
         "B should be gone: {after}"
     );
 }
+
+/// `apb projects prune --dry-run` prints the gone workspace and changes
+/// nothing; `apb projects prune` removes it and keeps the live one.
+#[test]
+fn projects_prune_removes_gone_workspaces() {
+    let cfg = tempfile::tempdir().unwrap();
+    let live = tempfile::tempdir().unwrap();
+    let gone = tempfile::tempdir().unwrap();
+    init(live.path());
+    init(gone.path());
+    for dir in [live.path(), gone.path()] {
+        run_projects(cfg.path(), dir, &["list"]);
+    }
+    let live_id = apb_core::workspace::ensure_id(live.path()).unwrap();
+    let gone_id = apb_core::workspace::ensure_id(gone.path()).unwrap();
+    drop(gone);
+
+    let (dry, _) = run_projects(cfg.path(), live.path(), &["prune", "--dry-run"]);
+    assert!(dry.contains(&format!("would remove {gone_id}")), "{dry}");
+    assert!(!dry.contains(&live_id), "{dry}");
+    let (still, _) = run_projects(cfg.path(), live.path(), &["list"]);
+    assert!(still.contains(&gone_id), "a dry run removed it: {still}");
+
+    let (out, _) = run_projects(cfg.path(), live.path(), &["prune"]);
+    assert!(out.contains(&format!("removed {gone_id}")), "{out}");
+    let (after, _) = run_projects(cfg.path(), live.path(), &["list"]);
+    assert!(
+        after.contains(&live_id) && !after.contains(&gone_id),
+        "{after}"
+    );
+
+    let (again, _) = run_projects(cfg.path(), live.path(), &["prune"]);
+    assert!(again.contains("nothing to prune"), "{again}");
+}

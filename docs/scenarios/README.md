@@ -1,6 +1,6 @@
 # Reference scenarios
 
-A fixed set of eleven realistic scenarios, half code work and half non-code
+A fixed set of thirteen realistic scenarios, half code work and half non-code
 routine, that apb features are checked against. Reliability features (honest
 run results, list processing, retry safety) are designed against these
 situations instead of against abstract ones.
@@ -52,6 +52,8 @@ Each scenario file has the same seven numbered sections:
 | [release-heartbeat](release-heartbeat.md) | routine | examples/playbooks/release-heartbeat.yaml | "exactly one issue" is prompt discipline; overlapping runs cannot see each other |
 | [bulk-reminders](bulk-reminders.md) | routine | examples/playbooks/bulk-reminders.yaml | per-row list steps with counts a goal checks; a lost answer stays unknown for a person; a re-run does not see the sends |
 | [crm-cleanup](crm-cleanup.md) | routine | examples/playbooks/crm-cleanup.yaml | no per-deal ledger: the engine-held count shows how many are left, not which |
+| [design-doc-check](design-doc-check.md) | code | examples/playbooks/design-doc-check.yaml | coverage of the checklist is the agent's count, not checked by apb; `protect` takes static globs |
+| [document-checklist](document-checklist.md) | routine | examples/playbooks/document-checklist.yaml | coverage is the agent's count; the gate cannot tell whether the document changed between rounds |
 
 Every runnable example lives in examples/playbooks/ and is validated on the
 current schema by `the_demo_playbooks_validate` in

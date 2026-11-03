@@ -21,6 +21,8 @@
     type ExecutorGroup,
   } from '../lib/profileedit'
   import type { Project } from '../lib/types'
+  import { nestProjects } from '../lib/projectnest'
+  import ProjectLabel from '../lib/components/ProjectLabel.svelte'
   import type { ProfileTier } from '../lib/profileedit'
   import { untrack } from 'svelte'
   import Plus from '@lucide/svelte/icons/plus'
@@ -414,8 +416,10 @@
               <Select.Trigger class="w-full">{projectName}</Select.Trigger>
               <Select.Content>
                 <Select.Group>
-                  {#each projects as p (p.workspace_id)}
-                    <Select.Item value={p.workspace_id} label={p.name}>{p.name}</Select.Item>
+                  {#each nestProjects(projects) as { row: p, depth } (p.workspace_id)}
+                    <Select.Item value={p.workspace_id} label={p.name}
+                      ><ProjectLabel name={p.name} {depth} /></Select.Item
+                    >
                   {/each}
                 </Select.Group>
               </Select.Content>

@@ -251,6 +251,73 @@ given against different text. The dashboard's stats card shows each
 version's quality rows and, with two versions or more, the deltas of the
 newest against the one before it.
 
+## Interventions
+
+Each version carries `interventions` over its finished runs (absent when it
+has none): what came into the runs from outside the playbook's own flow.
+The text block of `apb stats`, the `interventions` of `--json`, `GET
+/api/stats`, MCP `playbook_stats`, the dashboard's stats card and the run
+retro (`run_retro_context`, `{{run.retro}}`) all read the same fold
+(`apb_engine::run_stats::interventions`).
+
+| Category | Counted from | Over |
+|---|---|---|
+| `review` | every `review_requested` is a gate visit; its decision is `automatic` (an applied `review_triage` decision of the visit, which the engine journals just before the visit's `review_requested`, `decided_by: model` or `unattended`, or `via` the engine) or through the review channel; a `review_withdrawn` is `withdrawn` | gate visits; split by `channel`, `automatic`, `withdrawn`, `option:<name>` and `via:<surface>` |
+| `question` | `question_answered` by `answered_by`; `human` and `supervisor` are interventions, `unattended` an automatic answer, `timeout` neither; `question_abandoned` apart | questions asked |
+| `automatic` | applied `decision_made` of `completion_check`, `retry_advice`, `supervisor_triage`, `review_triage` and `routing`, once per use, node, list item, execution and attempt (a cached replay after a resume counts once; the same question in a later execution counts again). Judge answers are the playbook's own routing and are not counted | decisions asked; split `asked:<use>` and `applied:<use>` |
+| `operator` | pause, resume, abort and `retry_expedited` with `by: operator`. The abort a parent's stop propagates into a sub-playbook child (`run_aborted` with reason `parent aborted`, `by` the parent's actor) is the parent's operator action, never the child's: the child keeps it apart as the engine's `abort_propagated` | runs |
+| `supervisor_node` | `node_retry`, `run_continue_from`, a note aimed at a node, an interrupt whose control entry targeted one node (counted once per control entry), a profile rebind | node executions |
+| `supervisor_run` | a note for the run, a patch, a broadcast interrupt (an interrupt with no node in its control entry is the run's correction whatever attempts observed it), and pause, resume, abort or expedite `by: supervisor` | runs |
+
+The total counts every gate decision through the review channel, every
+human and supervisor answer, every operator action and every correction.
+It is called interventions, never human interventions: the supervisor
+channel does not tell a supervising agent from a person (`apb note` posts
+the same `context_append` as the MCP tool), and the review channel says
+only the surface a decision came through. Automatic decisions, automatic
+gate decisions and unattended answers are a separate `automatic_total`.
+
+Kept apart and never in a total: `engine` (the engine's own markers:
+`infra_retry`, `timeout_continuation`, `quota_probe`, `attempt_stalled`,
+`interaction_downgraded`, `retry_superseded_by_stop`, a billing hold, a
+refused directive, an expedite by a caller not shown to be a person
+(`expedite_by_host`: the host is not the operator), the abort a parent's
+stop propagated into a child (`abort_propagated`), and pause, resume,
+abort or expedite `by: engine`);
+`actor_unknown` (a pause, resume, abort or expedite without `by`); `other`
+(a `supervisor_action` name this apb does not know, a newer apb's). The
+`triage_retry` and `retry_advice` markers are the effects of automatic
+decisions and are counted once, through their decision. A refused patch
+(`patch_rejected`) or rebind (`rebind_rejected`) is its own event, not a
+`supervisor_action`, and is not counted anywhere: the correction it
+refused never happened. The refusal to move a run past a gate is the
+engine's `directive_refused`, kept apart like the other engine markers.
+
+**Absence is not zero.** Every count is `{ value, known_runs, runs }`. A
+run written by an apb older than 1.0.0-beta.3 (`run_provenance.apb`, and
+the `apb` of every resume; a run with none predates them) does not say who
+decided a gate without `via` or `decided_by`, so its review and total
+figures are unknown for that run and the text reads `known in N of M
+runs`. A pause, resume or abort without `by` leaves the operator,
+run-correction and total figures of its run unknown, never read as the
+supervisor. Requests, decisions, questions, directives, rebinds and patches
+exist in every journal and are known for every run. Medians and means are
+over the runs where the total is known.
+
+```
+  interventions: 4 over 3 finished runs, median 1 and mean 1.33 per run, runs without any 1 of 3
+    decided through the review channel: 2 over 3 gate visits (automatic 1, channel 2, option:approve 2, option:reject 1, via:dashboard_session 1, via:not_recorded 1)
+
+The `via` split names the surface a gate decision came through. A gate
+with `approves` or `person_only` stamps it; ordinary gates never stamp a
+surface, so their decisions read `via:not_recorded` (the surface is not
+stamped, not unknown).
+    operator actions: 1 over 3 runs (pause 1)
+    run corrections through the supervisor channel: 1 over 3 runs (context_append 1)
+    automatic total: 1
+    engine actions (not interventions): infra_retry 1
+```
+
 ## The run estimate
 
 `apb run --estimate`, MCP `playbook_get(estimate: true)`, the dashboard's
@@ -344,6 +411,13 @@ no history at start. The method:
                     "runs_with_warnings": { "count": 1, "of": 2, "rate": 0.5 } },
       "baseline": [ { "check": "tests", "observation": "cargo_test", "compared": 2,
                       "met": { "count": 1, "of": 2, "rate": 0.5 }, "regressed": 1, "unknown": 0 } ],
+      "interventions": { "runs": 2, "total": { "value": 1, "known_runs": 2, "runs": 2 },
+                         "per_run_median": 0.5, "per_run_mean": 0.5,
+                         "without_any": { "value": 1, "known_runs": 2, "runs": 2 },
+                         "automatic_total": { "value": 0, "known_runs": 2, "runs": 2 },
+                         "categories": [ { "category": "review", "unit": "gate visits", "denominator": 1,
+                                           "count": { "value": 1, "known_runs": 2, "runs": 2 }, "split": {} } ],
+                         "engine": {}, "other": {}, "actor_unknown": {} },
       "quality": [ { "criterion": "outcome", "source": "builtin", "grader": "rules/1",
                      "task_type": "default", "digest": "sha256:...", "graded_runs": 2,
                      "tally": { "good": 2, "partial": 0, "poor": 0, "not_applicable": 0,

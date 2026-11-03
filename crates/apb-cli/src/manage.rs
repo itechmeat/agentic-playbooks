@@ -15,6 +15,13 @@ pub(crate) enum ProjectsAction {
     List,
     /// Remove a workspace registry entry by its workspace_id
     Remove { workspace_id: String },
+    /// Remove every registry entry whose directory is gone (paths that only
+    /// fail the reachability check are kept), printing each one
+    Prune {
+        /// Print what would be removed and change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 pub(crate) fn migrate_cmd(root: &Path, apply: bool) -> ExitCode {
@@ -358,19 +365,42 @@ pub(crate) fn projects_cmd(action: Option<ProjectsAction>) -> ExitCode {
                 println!("no registered workspaces");
                 return ExitCode::SUCCESS;
             }
-            for e in entries {
-                let state = match e.state {
-                    apb_core::projects::State::Active => "active",
-                    apb_core::projects::State::Unreachable { .. } => "unreachable",
-                    apb_core::projects::State::Tombstoned { .. } => "tombstoned",
-                };
+            // A git linked worktree is listed under its parent project.
+            for (depth, e) in apb_core::projects::nest_worktrees(entries) {
+                let indent = if depth > 0 { "  " } else { "" };
                 println!(
-                    "{}  {}  [{}]  {} playbooks  {}",
-                    e.workspace_id, e.name, state, e.playbook_count, e.path
+                    "{indent}{}  {}  [{}]  {} playbooks  {}",
+                    e.workspace_id,
+                    e.name,
+                    state_word(&e.state),
+                    e.playbook_count,
+                    e.path
                 );
             }
             ExitCode::SUCCESS
         }
+        ProjectsAction::Prune { dry_run } => match apb_core::projects::prune(dry_run) {
+            Ok(removed) => {
+                let verb = if dry_run { "would remove" } else { "removed" };
+                for e in &removed {
+                    println!(
+                        "{verb} {}  {}  [{}]  {}",
+                        e.workspace_id,
+                        e.name,
+                        state_word(&e.state),
+                        e.path
+                    );
+                }
+                if removed.is_empty() {
+                    println!("nothing to prune");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("projects: {e}");
+                ExitCode::from(1)
+            }
+        },
         ProjectsAction::Remove { workspace_id } => {
             match apb_core::projects::remove(&workspace_id) {
                 Ok(true) => {
@@ -387,6 +417,14 @@ pub(crate) fn projects_cmd(action: Option<ProjectsAction>) -> ExitCode {
                 }
             }
         }
+    }
+}
+
+fn state_word(state: &apb_core::projects::State) -> &'static str {
+    match state {
+        apb_core::projects::State::Active => "active",
+        apb_core::projects::State::Unreachable { .. } => "unreachable",
+        apb_core::projects::State::Tombstoned { .. } => "tombstoned",
     }
 }
 

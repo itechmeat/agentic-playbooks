@@ -2585,3 +2585,85 @@ async fn a_keyless_resume_past_an_undecided_person_only_gate_is_refused() {
         "a refused resume journals nothing"
     );
 }
+
+/// `GET /api/runs` with search fields (U45): the same runs as MCP
+/// `runs_list`, the plain array without a filter, `{ runs, not_indexed,
+/// withheld }` with one, and at most 8 `field` parameters.
+#[tokio::test]
+async fn lists_runs_by_search_field_like_runs_list() {
+    let _cfg = common::config_sandbox().await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    apb_core::registry::init_project(root).unwrap();
+    let def = "schema: 2\nid: intake\nname: Intake\nversion: 1.0.0\nparams:\n  - { name: customer, type: text, search: true }\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n";
+    let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    for (id, ts, customer, indexed) in [
+        ("a", 1, "Acme", true),
+        ("b", 2, "Globex", true),
+        ("c", 3, "Acme", false),
+        ("d", 4, token, true),
+    ] {
+        let run = root.join(".apb/runs").join(id);
+        fs::create_dir_all(&run).unwrap();
+        let mut started = serde_json::json!({"seq": 1, "ts": ts, "type": "run_started", "playbook": "intake", "version": "1.0.0"});
+        if indexed {
+            started["definition"] = serde_json::json!(
+                apb_engine::run_definitions::store(&run, def.as_bytes()).unwrap()
+            );
+        }
+        fs::write(run.join("events.jsonl"), format!("{started}\n")).unwrap();
+        fs::write(
+            run.join("run.yaml"),
+            format!("params:\n  customer: {customer}\n"),
+        )
+        .unwrap();
+    }
+    let app = build_router(AppState::new(root.to_path_buf()));
+    let (status, plain) = get_json(app.clone(), "/api/runs").await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = plain.as_array().expect("the plain array");
+    assert_eq!(rows.len(), 4);
+    assert!(
+        rows.iter()
+            .all(|r| r.get("scope").is_none() && r.get("search").is_none())
+    );
+
+    let (status, found) =
+        get_json(app.clone(), "/api/runs?playbook=intake&field=customer:acme").await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    let ids: Vec<&str> = found["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["run_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["a"]);
+    assert_eq!(found["not_indexed"], 1);
+    assert_eq!(found["withheld"], 1);
+    let filter = apb_mcp::tools::run::run_filter(
+        Some("intake".into()),
+        None,
+        &["customer=acme".to_string()],
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    let mcp = apb_mcp::tools::run::runs_list_filtered(root, &filter).unwrap();
+    assert_eq!(mcp["runs"][0]["run_id"], "a");
+    assert_eq!(mcp["runs"].as_array().unwrap().len(), 1);
+
+    // `search=1`: every row with its fields, nothing filtered; the token
+    // never appears.
+    let (status, all) = get_json(app.clone(), "/api/runs?search=1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(all["runs"].as_array().unwrap().len(), 4);
+    assert!(!all.to_string().contains(token), "{all}");
+
+    let many: String = (0..9).map(|i| format!("&field=p{i}:v")).collect();
+    let (status, _) = get_json(app.clone(), &format!("/api/runs?playbook=intake{many}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = get_json(app.clone(), "/api/runs?scope=elsewhere").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = get_json(app, "/api/runs?field=nothing").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

@@ -26,7 +26,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `continue_session`, declared output fields, node `workdir`, the run
   `worktree` and `cache.key`, `baseline` for V62-V67, `list` for the list
   rules V85-V89 and V93-V95, `budget` for V96-V98, `params` for the secret
-  param rules V99 and V100, `quality` for the `quality:` block and the
+  param rules V99 and V100 and the search param rules V160-V162, `quality` for the `quality:` block and the
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
@@ -120,7 +120,13 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   to the installation by a MAC for a global playbook), the credential-shape
   detector of values and param names (`token_shape.rs`), a run's sensitive
   params (`run_params.rs`: `sensitive`, the one rule remembered input and
-  run redaction share, and `redacted`), the end-of-turn save check of
+  run redaction share, and `redacted`), run search fields (`run_search.rs`:
+  the params a playbook marks `search: true` as one run's values, `normalize`
+  by type, `parse_terms`, the equality `matches` and the limits; the engine
+  computes them while listing, `scheduler/listing` `list_runs_filtered`
+  from the start definition and `run.yaml` only, and `apb_mcp::tools::run`
+  `run_filter` and `runs_list_filtered` serve MCP `runs_list`, `GET
+  /api/runs` and `apb runs --field`), the end-of-turn save check of
   `apb hook stop` (`save_nudge/`: the language-independent rule over the
   last task in `mod`, `task` the session tail read by the discovery
   decoder, `state` once per session and the cached model answers under
@@ -310,7 +316,12 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `stats_run` one run as the report reads it, `route` for membership over established
   definitions and the reasons a node did not run, `findings` for findings and baseline
   results, `quality` for the levels of signed grades per comparable key and
-  their `--compare` deltas), the irreversible-effects consent a run
+  their `--compare` deltas, `interventions` the pure fold of a run's
+  interventions by category (review channel, questions, automatic
+  decisions, operator, corrections through the supervisor channel, engine
+  actions apart) with `known in N of M runs` for a fact an older writer did
+  not record, shared with the retro; MCP `playbook_stats` in
+  `apb_mcp::tools::stats`), the irreversible-effects consent a run
   start records (`consent.rs`), the eval checks and result store behind
   `apb eval` (`eval/`), the reading view of a run's result snapshots every
   surface answers through (`result_view.rs`: rows by node, execution and

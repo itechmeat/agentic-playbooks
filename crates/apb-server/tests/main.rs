@@ -5,6 +5,11 @@
 //! this one `main.rs` collapses that to a single binary. No content was
 //! changed in the moved files - only their location and this file are new.
 
+// Config isolation: before any test thread starts, the real config dir is
+// recorded as forbidden and `XDG_CONFIG_HOME` points at a sandbox that every
+// spawned process inherits (`apb_core::config::test_isolation`).
+apb_core::isolate_test_config!(env!("CARGO_TARGET_TMPDIR"));
+
 // Billed use (`apb_core::billing`): the stand-in agents these tests start
 // have an unknown cost basis, which the default `ask` would hold. Set for
 // the whole process before any test thread starts (and inherited by every

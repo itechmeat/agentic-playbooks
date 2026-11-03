@@ -22,6 +22,7 @@ pub(crate) async fn list_projects_handler() -> impl IntoResponse {
                 "name": e.name,
                 "path": e.path,
                 "playbook_count": e.playbook_count,
+                "parent_workspace_id": e.parent_workspace_id,
             })
         })
         .collect();

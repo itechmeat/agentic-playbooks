@@ -15,7 +15,8 @@
 //! deliverables and output fields; the goal criteria results; the findings
 //! and warnings the attempts reported, and each baseline observation's
 //! results ([`findings`]); the levels the runs' signed grades gave each
-//! criterion ([`quality`]). Per node:
+//! criterion ([`quality`]); the interventions of its finished runs
+//! ([`interventions`]). Per node:
 //! runs it ran in, first-pass executions, retries, fallbacks, re-entries,
 //! duration against its declared `expected_duration`.
 
@@ -233,6 +234,14 @@ pub struct VersionStats {
     )]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub quality: Vec<quality::QualityStats>,
+    /// What came into its finished runs from outside the playbook's flow
+    /// ([`interventions`]); absent when the version has no finished run.
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<interventions::InterventionStats>", optional)
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interventions: Option<interventions::InterventionStats>,
     pub nodes: Vec<NodeStats>,
     #[cfg_attr(feature = "ts", ts(optional))]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -325,25 +334,60 @@ fn version_key(v: &str) -> VersionKey {
 
 /// Reads every run under `roots` that apb created here and builds the report.
 pub fn stats(roots: &[PathBuf], filter: &StatsFilter) -> StatsReport {
-    let runs: Vec<StatsRun> = run_dirs(roots)
-        .iter()
-        .filter_map(|d| StatsRun::load(d).map(|r| r.with_grades(d)))
-        .collect();
-    build(&runs, filter)
+    stats_with_runs(roots, filter).0
 }
 
-/// Builds the report over already-read runs.
-pub fn build(runs: &[StatsRun], filter: &StatsFilter) -> StatsReport {
-    let kept: Vec<&StatsRun> = runs
-        .iter()
-        .filter(|r| !r.playbook.is_empty())
-        .filter(|r| crate::run_history::counts_as_history(r))
-        .filter(|r| filter.playbook.as_ref().is_none_or(|p| &r.playbook == p))
-        .filter(|r| {
+/// [`stats`] with the ids of the runs the report was built from, each with
+/// the root it lives under, so a surface can redact the answer with each
+/// contributing run's redactor (a finding location, a baseline observation
+/// or a `last_run` line can echo a secret param value).
+pub fn stats_with_runs(
+    roots: &[PathBuf],
+    filter: &StatsFilter,
+) -> (StatsReport, Vec<(String, PathBuf)>) {
+    let mut runs: Vec<StatsRun> = Vec::new();
+    let mut owner: Vec<Option<PathBuf>> = Vec::new();
+    for d in run_dirs(roots) {
+        if let Some(r) = StatsRun::load(&d).map(|r| r.with_grades(&d)) {
+            owner.push(roots.iter().find(|root| d.starts_with(*root)).cloned());
+            runs.push(r);
+        }
+    }
+    let contributed = kept_ids(&runs, filter)
+        .into_iter()
+        .map(|i| {
+            let root = owner[i]
+                .clone()
+                .or_else(|| roots.first().cloned())
+                .unwrap_or_default();
+            (runs[i].run_id.clone(), root)
+        })
+        .collect();
+    (build(&runs, filter), contributed)
+}
+
+/// The indexes of the runs [`build`] reads: created by apb, counted as
+/// history, and inside the filter's playbook and window.
+fn kept_ids(runs: &[StatsRun], filter: &StatsFilter) -> Vec<usize> {
+    runs.iter()
+        .enumerate()
+        .filter(|(_, r)| !r.playbook.is_empty())
+        .filter(|(_, r)| crate::run_history::counts_as_history(r))
+        .filter(|(_, r)| filter.playbook.as_ref().is_none_or(|p| &r.playbook == p))
+        .filter(|(_, r)| {
             filter
                 .since_ms
                 .is_none_or(|s| r.started_ms().is_some_and(|t| t >= s))
         })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Builds the report over already-read runs.
+pub fn build(runs: &[StatsRun], filter: &StatsFilter) -> StatsReport {
+    let kept: Vec<&StatsRun> = kept_ids(runs, filter)
+        .into_iter()
+        .map(|i| &runs[i])
         .collect();
     let mut groups: BTreeMap<(String, VersionKey), Vec<&StatsRun>> = BTreeMap::new();
     for r in &kept {
@@ -631,6 +675,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
     let (mut tokens, mut cost) = (0u64, 0f64);
     let (mut cost_attempts, mut finished_attempts) = (0usize, 0usize);
     let mut notes = findings::Acc::default();
+    let mut counted: Vec<interventions::RunInterventions> = Vec::new();
     for run in runs {
         notes.add(
             &run.run_id,
@@ -639,6 +684,9 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
             &run.events,
         );
         let f = run_facts(run, &mut nodes, &mut goal);
+        if f.outcome.is_some() {
+            counted.push(interventions::of_run(&run.events));
+        }
         match f.outcome {
             Some("succeeded") => outcomes.succeeded += 1,
             Some("failed") => outcomes.failed += 1,
@@ -772,6 +820,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
         baseline,
         model_use,
         quality: quality::of_runs(runs),
+        interventions: interventions::version_stats(&counted),
         nodes,
         note: (runs.len() < MIN_RUNS).then(|| {
             format!(
@@ -786,6 +835,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
 pub mod digests;
 pub mod executors;
 pub mod findings;
+pub mod interventions;
 pub mod models;
 pub mod quality;
 mod rate;

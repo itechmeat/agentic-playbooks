@@ -265,21 +265,101 @@ pub struct RunDetail {
 /// the run, so without it a caller could not narrow the listing to the
 /// workspace it was about to ask about. An unknown id is a 404 through
 /// `resolve_root`, exactly like the detail endpoint.
+///
+/// `playbook`, `scope` (`project` or `global`) and repeatable `field`
+/// (`name:value`, at most 8) filter the listing by the runs' search fields;
+/// `search=1` asks for every row's `scope` and `search` without filtering
+/// (the run list's filter row). With any of them the answer is `{ runs,
+/// not_indexed, withheld }` summed over the workspaces; without, the plain
+/// array as before.
 pub(crate) async fn list_runs_handler(
     State(state): State<AppState>,
-    Query(q): Query<WorkspaceQuery>,
+    Query(pairs): Query<Vec<(String, String)>>,
 ) -> impl IntoResponse {
-    let workspaces = match selected_workspaces(&state, q.workspace.as_deref()) {
+    let one = |key: &str| {
+        pairs
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    let fields: Vec<String> = pairs
+        .iter()
+        .filter(|(k, _)| k == "field")
+        .map(|(_, v)| v.clone())
+        .collect();
+    if fields.len() > apb_core::run_search::MAX_TERMS {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "at most {} field parameters",
+                apb_core::run_search::MAX_TERMS
+            ),
+        )
+            .into_response();
+    }
+    let with_fields = matches!(one("search").as_deref(), Some("1" | "true"));
+    let filter = match apb_mcp::tools::run::run_filter(
+        one("playbook"),
+        one("scope"),
+        &fields,
+        with_fields,
+    ) {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let workspaces = match selected_workspaces(&state, one("workspace").as_deref()) {
         Ok(w) => w,
         Err(e) => return e,
     };
     // The listing reads every run's files and resolves the workspaces'
     // connector secrets: off the async runtime.
-    match tokio::task::spawn_blocking(move || listed_runs(workspaces)).await {
+    let work = move || match filter {
+        None => listed_runs(workspaces).map(serde_json::Value::Array),
+        Some(f) => searched_runs(workspaces, &f),
+    };
+    match tokio::task::spawn_blocking(work).await {
         Ok(Ok(rows)) => Json(rows).into_response(),
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// The runs of `workspaces` `filter` keeps, each stamped and redacted like
+/// [`listed_runs`], with the counts summed over the workspaces.
+fn searched_runs(
+    workspaces: Vec<(String, String, std::path::PathBuf)>,
+    filter: &apb_engine::RunFilter,
+) -> Result<serde_json::Value, String> {
+    let mut out: Vec<(u128, serde_json::Value)> = Vec::new();
+    let (mut not_indexed, mut withheld) = (0usize, 0usize);
+    for (workspace_id, project, root) in workspaces {
+        let Ok(listing) = apb_engine::list_runs_filtered(&root, filter) else {
+            continue;
+        };
+        not_indexed += listing.not_indexed;
+        withheld += listing.withheld;
+        let redaction = apb_engine::run_redact::WorkspaceRedaction::new(&root);
+        for run in listing.runs {
+            let redactor = redaction.run(&run.run_id);
+            let started = run.started_ts;
+            let run_id = run.run_id.clone();
+            let entry = RunListEntry {
+                run,
+                workspace_id: workspace_id.clone(),
+                project: project.clone(),
+            };
+            let mut v = serde_json::to_value(&entry).map_err(|e| format!("run `{run_id}`: {e}"))?;
+            redactor.redact_json(&mut v);
+            out.push((started, v));
+        }
+    }
+    out.sort_by_key(|(started, _)| std::cmp::Reverse(*started));
+    Ok(serde_json::json!({
+        "runs": out.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
+        "not_indexed": not_indexed,
+        "withheld": withheld,
+    }))
 }
 
 /// Every run of `workspaces`, each redacted with its own values (and its

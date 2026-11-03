@@ -1,0 +1,21 @@
+schema: 1
+id: open-findings
+title: Items stay without a verdict, the bounded re-check runs out, the person accepts them as open findings
+params: { document: reports/q3-summary.md }
+answers:
+  check:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { must_failed: 0, should_failed: 0, unchecked: 1, coverage: "CHECKLIST: 8/9" }
+    - visit: 2
+      attempts:
+        - status: succeeded
+          outputs: { must_failed: 0, should_failed: 0, unchecked: 1, coverage: "CHECKLIST: 8/9" }
+  decide:
+    - { visit: 1, review: { decision: accept_open, note: "The one open item needs a source." } }
+expect:
+  run: { outcome: [succeeded] }
+  finish: accepted_with_open_findings
+  visits: { check: 2 }
+  route: { not_visits: [verdict, fix, recheck, recheck_verdict, rejected] }
