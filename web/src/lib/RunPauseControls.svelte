@@ -12,9 +12,10 @@
   // no estimate, or let the paused node run once.
   import { toast } from 'svelte-sonner'
   import { ApiError, pauseRun, resumeRun } from './api'
-  import { launchQuestion, launchStep } from './launch'
+  import { launchQuestion, launchStep, type LaunchQuestion } from './launch'
   import { consentStep } from './irreversibleconsent'
   import IrreversibleRunDialog from './IrreversibleRunDialog.svelte'
+  import LaunchConfirmDialog from './LaunchConfirmDialog.svelte'
   import {
     canPause,
     canResume,
@@ -56,6 +57,10 @@
   let form = $state<PauseForm>({ mode: 'drain', reason: '', until: '', keepLock: false })
 
   let irreversibleOpen = $state(false)
+  // A refused resume the person can confirm here.
+  let launchOpen = $state(false)
+  let launchAsked = $state<LaunchQuestion | null>(null)
+  let launchRetry: (() => void) | null = null
   let irreversibleSources = $state<string[]>([])
   let irreversibleNonce = $state('')
 
@@ -131,10 +136,10 @@
       const launchNext = e instanceof ApiError ? launchStep(e.body, sent) : null
       if (launchNext?.kind === 'confirm') {
         busy = false
-        if (window.confirm(launchQuestion(launchNext))) {
-          const nonce = launchNext.confirmation.nonce
-          queueMicrotask(() => void resume(consentNonce, change, nonce))
-        }
+        const nonce = launchNext.confirmation.nonce
+        launchAsked = launchQuestion(launchNext)
+        launchRetry = () => void resume(consentNonce, change, nonce)
+        launchOpen = true
         return
       }
       if (launchNext) {
@@ -326,6 +331,13 @@
     </form>
   {/if}
 {/if}
+
+<LaunchConfirmDialog
+  bind:open={launchOpen}
+  question={launchAsked}
+  action="resume"
+  onconfirm={() => launchRetry?.()}
+/>
 
 <IrreversibleRunDialog
   bind:open={irreversibleOpen}

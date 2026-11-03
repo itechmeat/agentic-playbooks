@@ -127,6 +127,27 @@ pub fn plan_resume(
         ));
     }
 
+    // A run paused before its first node (a supervisor its billing held at
+    // start, an operator's pause right after the start) has nothing to
+    // advance from: it starts from its start node. Reported as an
+    // interrupted restart, the closest public reason.
+    if state.last_node.is_none() && state.nodes.is_empty() && state.run_status == RunStatus::Paused
+    {
+        let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml"))?;
+        let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)?;
+        if let Some(start) = playbook
+            .nodes
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Start))
+        {
+            return Ok(ResumeDecision {
+                start_node: start.id.clone(),
+                mode: StartMode::Rerun,
+                reason: ResumeReason::InterruptedRestart,
+            });
+        }
+    }
+
     // Interrupted = started but never finished: a node left `Running` (its
     // journal ends at `node_started`) or `Interrupted` (an open
     // `attempt_started` with no `attempt_finished`). Both are nodes whose work
@@ -851,7 +872,9 @@ fn try_journal_resumed(
             *launch = record;
         }
     }
-    let budget = crate::budget::resume::resume_events(&events, plan.budget, plan.by)?;
+    let counts = crate::pause::billing::settings_of(&plan.root.join(".apb/runs").join(plan.run_id))
+        .budget_counts_subscription;
+    let budget = crate::budget::resume::resume_events(&events, plan.budget, plan.by, counts)?;
     let changed = !budget.is_empty();
     for e in budget {
         log.append(e)?;

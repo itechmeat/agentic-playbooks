@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod billing;
 pub mod budget;
 pub mod cause;
 pub mod display;

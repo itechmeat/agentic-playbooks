@@ -44,6 +44,7 @@ use apb_core::step_env::StepCaller;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::billing::BillingCheck;
 use crate::run_config::ChildExpectation;
 
 /// The channel a run step launched through.
@@ -136,6 +137,15 @@ impl Initiator {
             Initiator::DashboardKeyless => "dashboard_keyless".into(),
             Initiator::Engine { by } => format!("engine:{}", by.as_str()),
         }
+    }
+
+    /// Whether a redirected config dir is held to the default one's
+    /// settings for this initiator: a run step or a CLI without a terminal.
+    pub fn checks_redirect(&self) -> bool {
+        matches!(
+            self,
+            Initiator::RunStep { .. } | Initiator::CliUnattested { terminal: false }
+        )
     }
 
     /// Whether this channel is an agent's: a damaged settings or floor file
@@ -259,7 +269,7 @@ pub enum LaunchConfirmation {
     /// The dashboard without keys: `confirm_launch: <nonce>` in the request.
     DashboardNonce { nonce: String },
     /// A grant another process checked and handed over.
-    Forwarded { handoff: HandoffGrant },
+    Forwarded { handoff: Box<HandoffGrant> },
 }
 
 /// Everything the launch check needs to know about the caller.
@@ -382,9 +392,36 @@ pub struct LaunchGrant {
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub choice: Option<Choice>,
+    /// The billing challenge this launch was confirmed with, still open:
+    /// consumed by [`Self::consume_challenge`] once the start is otherwise
+    /// committed ([`super::challenge`]). Only ever in memory or in a
+    /// handoff file, never in the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge: Option<super::challenge::Claim>,
 }
 
+/// The refusal of a start whose billing challenge was consumed by another
+/// start, or lapsed, between its check and its commit.
+pub const CHALLENGE_SPENT: &str = "billing_confirmation_spent";
+
 impl LaunchGrant {
+    /// Consumes the billing challenge this launch was confirmed with, where
+    /// the start is committed: one confirmation, one start. A grant without
+    /// one passes; one whose challenge another start consumed meanwhile, or
+    /// that lapsed, is refused, and the start is asked again.
+    pub fn consume_challenge(&self) -> Result<(), String> {
+        let Some(claim) = &self.challenge else {
+            return Ok(());
+        };
+        let launch = self.nonce.as_deref().unwrap_or_default();
+        if super::challenge::redeem(&claim.root, &claim.token, launch) {
+            return Ok(());
+        }
+        Err(format!(
+            "{CHALLENGE_SPENT}: the billing confirmation was already used by another start or lapsed; start it again and confirm the billed use once more"
+        ))
+    }
+
     /// A child's grant: its parent's authorization through the pin it was
     /// spawned under.
     pub fn child(parent_run: &str, parent: &LaunchRecord) -> Self {
@@ -395,6 +432,7 @@ impl LaunchGrant {
                 confirmation: parent.confirmation.clone(),
                 policy: parent.policy,
                 sources: parent.sources.clone(),
+                billing: parent.billing.clone(),
             },
             permit_digest: None,
             policy_state: None,
@@ -404,6 +442,7 @@ impl LaunchGrant {
             nonce: None,
             version: None,
             choice: None,
+            challenge: None,
         }
     }
 }
@@ -426,6 +465,7 @@ pub fn is_launch_refusal(policy: &str) -> bool {
         ASK_POLICY | DENY_POLICY | STEP_POLICY | ENGINE_POLICY | CHOICE_CHANGED | POLICY_CHANGED
     ) || policy == SETTINGS_INVALID
         || policy == floor::INVALID
+        || super::billing::is_billing_refusal(policy)
 }
 
 /// The tree whose policy is resolved: the playbook a run executes, where
@@ -513,10 +553,7 @@ pub fn effective_for(
     handed_config_dir: Option<&Path>,
 ) -> Result<(EffectivePolicy, Vec<String>), Value> {
     let out = effective(tree, tolerant)?;
-    let checked = matches!(
-        initiator,
-        Initiator::RunStep { .. } | Initiator::CliUnattested { terminal: false }
-    );
+    let checked = initiator.checks_redirect();
     if !checked || !apb_core::config::config_dir_redirected() {
         return Ok(out);
     }
@@ -719,7 +756,12 @@ pub struct Subject<'a> {
 }
 
 /// The nonce a confirmation echoes.
-pub fn nonce(subject: &Subject<'_>, effective: &EffectivePolicy, kind: &LaunchKind) -> String {
+pub fn nonce(
+    subject: &Subject<'_>,
+    effective: &EffectivePolicy,
+    kind: &LaunchKind,
+    billing: &BillingCheck,
+) -> String {
     let workspace = apb_core::workspace::read_id(subject.root).unwrap_or_else(|| {
         std::fs::canonicalize(subject.root)
             .unwrap_or_else(|_| subject.root.to_path_buf())
@@ -728,7 +770,7 @@ pub fn nonce(subject: &Subject<'_>, effective: &EffectivePolicy, kind: &LaunchKi
     });
     let mut sources = effective.sources.clone();
     sources.sort();
-    let lines = [
+    let mut lines = vec![
         workspace,
         format!(
             "{}:{}",
@@ -743,25 +785,40 @@ pub fn nonce(subject: &Subject<'_>, effective: &EffectivePolicy, kind: &LaunchKi
         kind.label().to_string(),
         kind.run_id().unwrap_or_default().to_string(),
     ];
+    lines.extend(billing.nonce_lines());
     apb_core::content::short_nonce("launch", &lines)
 }
 
 /// The launch check: the grant, or the structured refusal with every hint
-/// a retry needs.
+/// a retry needs. The launch policy decides first; then the billing check
+/// ([`super::billing`]): `deny` refuses everyone, `ask` needs a person's
+/// confirmation of the exact predicted set, which the same nonce covers.
 pub fn decide(
     ctx: &LaunchContext,
     subject: &Subject<'_>,
     effective: &EffectivePolicy,
+    billing: &BillingCheck,
     tolerant: bool,
 ) -> Result<LaunchGrant, Value> {
-    let expected = nonce(subject, effective, &ctx.kind);
-    let grant = |confirmation: Option<String>| LaunchGrant {
+    if billing.required() == LaunchPolicy::Deny {
+        return Err(billing_refusal(
+            super::billing::BILLING_DENIED,
+            ctx,
+            subject,
+            effective,
+            billing,
+            None,
+        ));
+    }
+    let expected = nonce(subject, effective, &ctx.kind, billing);
+    let grant = |confirmation: Option<String>, billed: Option<String>| LaunchGrant {
         record: LaunchRecord {
             kind: ctx.kind.label().to_string(),
             initiator: ctx.initiator.label(),
             confirmation,
             policy: effective.policy,
             sources: effective.sources.clone(),
+            billing: Some(billing.record(billed)),
         },
         permit_digest: Some(subject.permit_digest.clone()),
         policy_state: Some(policy_state(effective)),
@@ -771,87 +828,240 @@ pub fn decide(
         nonce: Some(expected.clone()),
         version: Some(subject.version.to_string()),
         choice: Some(subject.choice),
+        challenge: None,
     };
     let nonce_matches = |n: &str| apb_core::secret::ct_eq_str(n, &expected);
+    // Billed use a person must confirm covers one launch: the nonce handed
+    // out is a fresh challenge ([`super::challenge`]), and a confirmation
+    // echoing it on a channel that may confirm is accepted while it is open.
+    // It is consumed only where the start commits (the grant's claim), so a
+    // check that refuses for another reason leaves it open. Without billing
+    // to confirm the nonce is the launch's own, as it always was.
+    let single_use = billing.required() == LaunchPolicy::Ask;
+    let echoed = (single_use && echoes_on_its_channel(ctx))
+        .then(|| confirmation_nonce(ctx))
+        .flatten();
+    let claim = echoed
+        .filter(|n| super::challenge::is_open(subject.root, n, &expected))
+        .map(|n| super::challenge::Claim {
+            root: subject.root.to_path_buf(),
+            token: n.to_string(),
+        });
+    let open = claim.is_some();
+    let accepted = |n: &str| {
+        if single_use { open } else { nonce_matches(n) }
+    };
+    let offer = || {
+        if single_use {
+            super::challenge::issue(subject.root, &expected)
+        } else {
+            expected.clone()
+        }
+    };
     // A forwarded grant stands for the decision another process made: the
     // run keeps that process's record (its initiator and confirmation),
     // with the policy state rechecked here.
     if let Some(LaunchConfirmation::Forwarded { handoff }) = &ctx.confirmation {
-        let matches = match &handoff.binding {
-            HandoffBinding::Nonce { nonce } => nonce_matches(nonce),
+        let (matches, billing_ok) = match &handoff.binding {
+            // The nonce covers the predicted set whenever it needed a
+            // confirmation.
+            HandoffBinding::Nonce { nonce } => (nonce_matches(nonce), true),
             HandoffBinding::Definition {
                 id,
                 version,
                 digest,
                 children,
-            } => {
+            } => (
                 id == subject.id
                     && version == subject.version
                     && digest == subject.definition_digest
                     && apb_core::secret::ct_eq_str(children, &subject.children_digest)
                     // Decided for the policy then in force: a tree that
                     // became stricter since is decided afresh.
-                    && effective.policy <= handoff.record.policy
-            }
+                    && effective.policy <= handoff.record.policy,
+                billing.required() == LaunchPolicy::Allow
+                    || handoff
+                        .record
+                        .billing
+                        .as_ref()
+                        .is_some_and(|r| billing.covered_by(r)),
+            ),
         };
-        if matches && !matches!(ctx.initiator, Initiator::RunStep { .. }) {
-            let mut g = grant(None);
+        if matches && billing_ok && !matches!(ctx.initiator, Initiator::RunStep { .. }) {
+            let mut g = grant(None, None);
             g.record = handoff.record.clone();
+            if g.record.billing.is_none() {
+                g.record.billing = Some(billing.record(None));
+            }
             return Ok(g);
         }
     }
-    if effective.policy == LaunchPolicy::Allow {
-        return Ok(grant(None));
+    let launch =
+        launch_confirmation(ctx, subject, effective, &accepted, &offer).map_err(|mut v| {
+            // One question to the person covers both: the nonce already covers
+            // the predicted set.
+            if billing.required() != LaunchPolicy::Allow {
+                v["billing"] = billing.block();
+            }
+            v
+        })?;
+    if billing.required() == LaunchPolicy::Allow {
+        return Ok(grant(launch, None));
     }
+    let ask_refusal = |code: &str, with_nonce: bool| {
+        let offered = with_nonce.then(offer);
+        Err(billing_refusal(
+            code,
+            ctx,
+            subject,
+            effective,
+            billing,
+            offered.as_deref(),
+        ))
+    };
+    let billed = match billing_confirmation(ctx, &accepted) {
+        Ok(label) => label,
+        Err(code) => return ask_refusal(code, code == super::billing::BILLING_ASK),
+    };
+    let mut g = grant(launch, Some(billed.to_string()));
+    g.challenge = claim;
+    Ok(g)
+}
+
+/// Whether the caller passes a nonce back on the one channel its
+/// initiator may confirm on (a run step and the engine never do), so a
+/// nonce echoed anywhere else never consumes a challenge.
+fn echoes_on_its_channel(ctx: &LaunchContext) -> bool {
+    matches!(
+        (&ctx.initiator, &ctx.confirmation),
+        (
+            Initiator::CliUnattested { .. },
+            Some(LaunchConfirmation::CliFlag { .. })
+        ) | (
+            Initiator::AgentMcp { .. },
+            Some(LaunchConfirmation::HostRelayed { .. })
+        ) | (
+            Initiator::Dashboard | Initiator::DashboardKeyless,
+            Some(LaunchConfirmation::DashboardNonce { .. })
+        )
+    )
+}
+
+/// The nonce a confirmation passes back, if it is one that does.
+fn confirmation_nonce(ctx: &LaunchContext) -> Option<&str> {
+    match &ctx.confirmation {
+        Some(
+            LaunchConfirmation::CliFlag { nonce }
+            | LaunchConfirmation::HostRelayed { nonce }
+            | LaunchConfirmation::DashboardNonce { nonce },
+        ) => Some(nonce),
+        _ => None,
+    }
+}
+
+/// How a person confirmed billed use, or the billing refusal code: a run
+/// step and the engine never confirm it, a terminal question does at a
+/// terminal, and otherwise only a nonce `nonce_ok` accepts, passed back on
+/// the caller's own channel.
+pub(crate) fn billing_confirmation(
+    ctx: &LaunchContext,
+    nonce_ok: &dyn Fn(&str) -> bool,
+) -> Result<&'static str, &'static str> {
+    let nonce_matches = |n: &str| nonce_ok(n);
+    match (&ctx.initiator, &ctx.confirmation) {
+        (Initiator::RunStep { .. }, _) => Err(super::billing::BILLING_STEP),
+        (Initiator::Engine { .. }, _) => Err(super::billing::BILLING_ENGINE),
+        (Initiator::CliUnattested { terminal: true }, Some(LaunchConfirmation::TerminalPrompt)) => {
+            Ok("terminal_prompt")
+        }
+        (Initiator::CliUnattested { .. }, Some(LaunchConfirmation::CliFlag { nonce }))
+            if nonce_matches(nonce) =>
+        {
+            Ok("cli_flag")
+        }
+        (Initiator::AgentMcp { .. }, Some(LaunchConfirmation::HostRelayed { nonce }))
+            if nonce_matches(nonce) =>
+        {
+            Ok("host_relayed")
+        }
+        (
+            Initiator::Dashboard | Initiator::DashboardKeyless,
+            Some(LaunchConfirmation::DashboardNonce { nonce }),
+        ) if nonce_matches(nonce) => Ok("dashboard_nonce"),
+        _ => Err(super::billing::BILLING_ASK),
+    }
+}
+
+/// The launch policy's half of [`decide`]: how the launch was confirmed
+/// (`None` for an `allow` launch), or its refusal.
+fn launch_confirmation(
+    ctx: &LaunchContext,
+    subject: &Subject<'_>,
+    effective: &EffectivePolicy,
+    nonce_ok: &dyn Fn(&str) -> bool,
+    offer: &dyn Fn() -> String,
+) -> Result<Option<String>, Value> {
+    if effective.policy == LaunchPolicy::Allow {
+        return Ok(None);
+    }
+    let nonce_matches = |n: &str| nonce_ok(n);
     let ask = effective.policy == LaunchPolicy::Ask;
-    let confirmed_by = |label: String| Ok(grant(Some(label)));
+    let confirmed_by = |label: &str| Ok(Some(label.to_string()));
+    let refuse = |code: &str, with_nonce: bool| {
+        let offered = with_nonce.then(offer);
+        Err(refusal(code, ctx, subject, effective, offered.as_deref()))
+    };
     match &ctx.initiator {
-        Initiator::Dashboard => confirmed_by("dashboard".into()),
-        Initiator::Engine { .. } => Err(refusal(ENGINE_POLICY, ctx, subject, effective, None)),
-        Initiator::RunStep { .. } => Err(refusal(STEP_POLICY, ctx, subject, effective, None)),
+        Initiator::Dashboard => confirmed_by("dashboard"),
+        Initiator::Engine { .. } => refuse(ENGINE_POLICY, false),
+        Initiator::RunStep { .. } => refuse(STEP_POLICY, false),
         Initiator::AgentMcp { .. } => match &ctx.confirmation {
             Some(LaunchConfirmation::HostRelayed { nonce }) if ask && nonce_matches(nonce) => {
-                confirmed_by("host_relayed".into())
+                confirmed_by("host_relayed")
             }
-            _ if ask => Err(refusal(
-                ASK_POLICY,
-                ctx,
-                subject,
-                effective,
-                Some(&expected),
-            )),
-            _ => Err(refusal(DENY_POLICY, ctx, subject, effective, None)),
+            _ if ask => refuse(ASK_POLICY, true),
+            _ => refuse(DENY_POLICY, false),
         },
         Initiator::CliUnattested { terminal } => match &ctx.confirmation {
             Some(LaunchConfirmation::TerminalPrompt) if *terminal => {
-                confirmed_by("terminal_prompt".into())
+                confirmed_by("terminal_prompt")
             }
             Some(LaunchConfirmation::CliFlag { nonce }) if ask && nonce_matches(nonce) => {
-                confirmed_by("cli_flag".into())
+                confirmed_by("cli_flag")
             }
-            _ if ask => Err(refusal(
-                ASK_POLICY,
-                ctx,
-                subject,
-                effective,
-                Some(&expected),
-            )),
-            _ => Err(refusal(DENY_POLICY, ctx, subject, effective, None)),
+            _ if ask => refuse(ASK_POLICY, true),
+            _ => refuse(DENY_POLICY, false),
         },
         Initiator::DashboardKeyless => match &ctx.confirmation {
             Some(LaunchConfirmation::DashboardNonce { nonce }) if ask && nonce_matches(nonce) => {
-                confirmed_by("dashboard_nonce".into())
+                confirmed_by("dashboard_nonce")
             }
-            _ if ask => Err(refusal(
-                ASK_POLICY,
-                ctx,
-                subject,
-                effective,
-                Some(&expected),
-            )),
-            _ => Err(refusal(DENY_POLICY, ctx, subject, effective, None)),
+            _ if ask => refuse(ASK_POLICY, true),
+            _ => refuse(DENY_POLICY, false),
         },
     }
+}
+
+/// A billing refusal with the launch fields of `subject` a retry needs.
+fn billing_refusal(
+    code: &str,
+    ctx: &LaunchContext,
+    subject: &Subject<'_>,
+    effective: &EffectivePolicy,
+    billing: &BillingCheck,
+    nonce: Option<&str>,
+) -> Value {
+    let mut v = super::billing::refusal(code, billing, nonce);
+    v["id"] = json!(subject.id);
+    v["launch_policy"] = json!(effective.policy);
+    v["launch_sources"] = json!(effective.sources);
+    v["launch_version"] = json!(subject.version);
+    v["launch_choice"] = json!(subject.choice.as_str());
+    v["launch_kind"] = json!(ctx.kind.label());
+    if let Some(run) = ctx.kind.run_id() {
+        v["run_id"] = json!(run);
+    }
+    v
 }
 
 /// The structured refusal of a launch.
@@ -914,6 +1124,7 @@ fn refusal(
 /// one question to the person covers both answers.
 pub(crate) fn merge_hint(into: &mut Value, from: &Value) {
     for k in [
+        "billing",
         "launch_policy",
         "launch_sources",
         "launch_version",

@@ -50,6 +50,7 @@ ts-rs = { version = "12", optional = true }
 ts = ["dep:ts-rs"]
 # `apb_core::process_mode::testing`: runs a test body in a read-only child
 # process. Enabled by the dev-dependencies of the crates whose tests use it.
+# Refused at compile time in a build without debug assertions (`lib.rs`).
 testing = []
 
 [dev-dependencies]

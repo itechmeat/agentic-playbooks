@@ -275,8 +275,6 @@ describe('NextActionsPanel', () => {
         }),
       )
       .mockResolvedValueOnce({ run_id: 'parent', retry_now: ['work'] })
-    const confirm = vi.fn(() => true)
-    vi.stubGlobal('confirm', confirm)
     const retry: NextAction = {
       code: 'retry_now',
       run_id: 'parent',
@@ -289,10 +287,11 @@ describe('NextActionsPanel', () => {
     show({ actions: runActions([retry], { status: 'running', stop: 'progresses_by_itself' }) })
     byTestId('next-action-retry-now')!.click()
     await tick()
+    flushSync()
+    expect(resumeRun).toHaveBeenCalledTimes(1)
+    byTestId('launch-confirm-ok')!.click()
     await tick()
-    await new Promise((r) => setTimeout(r, 0))
     await tick()
-    expect(confirm).toHaveBeenCalledTimes(1)
     expect(resumeRun).toHaveBeenCalledTimes(2)
     expect(resumeRun).toHaveBeenLastCalledWith('parent', 'w', {
       consentNonce: undefined,

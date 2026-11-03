@@ -170,6 +170,7 @@ fn a_drifted_output_format_exits_1() {
         .env("PATH", bin.path())
         .env("HOME", home.path())
         .env("APB_CONFIG_DIR", home.path().join("config"))
+        .env("APB_TEST_DEFAULT_CONFIG_DIR", home.path().join("config"))
         .env_remove("APB_AGENT_CMD")
         .assert()
         .code(1)
@@ -196,4 +197,44 @@ fn the_paid_probe_is_refused_inside_a_run_step() {
         .code(2)
         .stderr(predicate::str::contains("refused inside run `r1`"))
         .stderr(predicate::str::contains("paid model call").not());
+}
+
+/// A CLI without a terminal is held to the default config dir's billing
+/// settings, as at a launch: a config dir redirected to an empty one does
+/// not hide the default one's `billed: deny`, and the billed probe is
+/// refused before the agent is spawned.
+#[test]
+fn a_redirected_config_dir_does_not_hide_a_billing_deny_from_the_probe() {
+    let bin = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let default = tempfile::tempdir().unwrap();
+    fs::write(
+        default.path().join("policy.yaml"),
+        "billing:\n  billed: deny\n",
+    )
+    .unwrap();
+    let marker = bin.path().join("spawned");
+    let agent = bin.path().join("claude");
+    fs::write(
+        &agent,
+        format!("#!/bin/sh\n: > '{}'\necho OK\n", marker.display()),
+    )
+    .unwrap();
+    let mut p = fs::metadata(&agent).unwrap().permissions();
+    p.set_mode(0o755);
+    fs::set_permissions(&agent, p).unwrap();
+    crate::common::apb()
+        .args(["doctor", "--probe-agent", "claude", "--model", "haiku"])
+        .current_dir(home.path())
+        .env("PATH", bin.path())
+        .env("HOME", home.path())
+        .env("APB_CONFIG_DIR", home.path().join("config"))
+        .env("APB_TEST_DEFAULT_CONFIG_DIR", default.path())
+        .env("ANTHROPIC_API_KEY", "k")
+        .env_remove("APB_AGENT_CMD")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("billing_denied"))
+        .stderr(predicate::str::contains("default config dir"));
+    assert!(!marker.exists(), "nothing was spawned");
 }

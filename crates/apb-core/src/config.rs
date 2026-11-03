@@ -462,7 +462,17 @@ pub fn config_dir() -> Option<PathBuf> {
 /// `<home>/.config/apb`, the home taken from the password database for the
 /// real user id (never `HOME`, `XDG_CONFIG_HOME` or `APB_CONFIG_DIR`, which
 /// a caller sets). `None` off unix or when the user has no entry.
+///
+/// In apb's own test builds `APB_TEST_DEFAULT_CONFIG_DIR` names it, so a
+/// test controls the default dir a redirected one is held to and never
+/// reads the developer's real one. The override exists only with debug
+/// assertions, and the `testing` feature is refused without them
+/// (`lib.rs`), so no release or dist binary reads it.
 pub fn default_config_dir() -> Option<PathBuf> {
+    #[cfg(all(debug_assertions, any(test, feature = "testing")))]
+    if let Some(dir) = std::env::var_os("APB_TEST_DEFAULT_CONFIG_DIR") {
+        return Some(PathBuf::from(dir));
+    }
     real_home().map(|h| h.join(".config/apb"))
 }
 

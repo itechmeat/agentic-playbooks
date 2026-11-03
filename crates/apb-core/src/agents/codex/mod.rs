@@ -2,6 +2,7 @@
 //! config home that carries no MCP servers.
 
 pub mod actions;
+mod billing;
 pub mod home;
 pub mod mcp;
 pub mod output;
@@ -124,6 +125,14 @@ impl HostSetup for CodexSetup {
             providers: (!providers.is_empty()).then_some(providers),
             notes: Vec::new(),
         }
+    }
+
+    // From the login facts codex reads, by name only (`billing`).
+    fn cost_basis(
+        &self,
+        facts: &super::cost_basis::CostFacts,
+    ) -> Option<super::cost_basis::CostReading> {
+        billing::cost_basis(facts)
     }
 
     fn memo_files(&self, home: &Path) -> Vec<PathBuf> {

@@ -32,7 +32,7 @@ apb-mcp = { version = "1.0.0-beta.2", path = "../apb-mcp" }
 # The generated-TypeScript contract test (`src/ts_contract.rs`) needs the run
 # types' and the trash types' TS derives.
 apb-engine = { version = "1.0.0-beta.2", path = "../apb-engine", features = ["ts"] }
-apb-core = { path = "../apb-core", features = ["ts"] }
+apb-core = { path = "../apb-core", features = ["ts", "testing"] }
 apb-mcp = { version = "1.0.0-beta.2", path = "../apb-mcp", features = ["ts"] }
 ts-rs = "12"
 http-body-util = "0.1.3"

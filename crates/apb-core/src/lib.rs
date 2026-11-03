@@ -1,8 +1,21 @@
+// The `testing` feature compiles test seams (shipped content of a test's
+// own, a read-only child process, the billing defaults of the test suites)
+// that no person's apb may carry. Cargo turns it on through the
+// dev-dependencies whenever a test target is built, also next to an
+// optimized binary (`cargo build --release --all-targets`), so it is
+// refused outright in any build without debug assertions: a release or
+// dist binary can never hold a seam, whatever else was built with it.
+#[cfg(all(feature = "testing", not(debug_assertions)))]
+compile_error!(
+    "the apb-core `testing` feature is for test builds only and is refused in a build without debug assertions (a release or dist profile)"
+);
+
 pub mod agent_actions;
 pub mod agent_catalog;
 pub mod agent_output;
 pub mod agents;
 pub mod baseline;
+pub mod billing;
 pub mod budget;
 pub mod bundle;
 pub mod bundled;

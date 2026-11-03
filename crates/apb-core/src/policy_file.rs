@@ -3,9 +3,9 @@
 //! so it lives beside `config.yaml` instead of inside it: an older apb
 //! never opens it and loads its config exactly as before.
 //!
-//! Two sections: `notify:`, the filters of a default notification
-//! subscription, and `launch:`, the launch policy of agents
-//! ([`crate::launch`]):
+//! Three sections: `notify:`, the filters of a default notification
+//! subscription, `launch:`, the launch policy of agents
+//! ([`crate::launch`]), and `billing:`, billed use ([`crate::billing`]):
 //!
 //! ```yaml
 //! notify:
@@ -15,6 +15,10 @@
 //!   agent: ask                           # every playbook, for an agent
 //!   playbooks:                           # machine: exact `<workspace id>/<id>` or `global/<id>`
 //!     "3f2a.../deploy": allow            # project file: `<id>` or `global:<id>`
+//! billing:
+//!   billed: ask                          # agent work whose cost is billed
+//!   unknown_basis: ask                   # agent work whose basis is not known
+//!   budget_counts_subscription: true     # a budget counts subscription equivalents
 //! ```
 //!
 //! The machine file sets them; a project file may only narrow them. The
@@ -45,6 +49,7 @@ pub const GLOBAL_PREFIX: &str = "global:";
 pub struct PolicyFile {
     pub notify: NotifyPolicy,
     pub launch: LaunchSection,
+    pub billing: crate::billing::section::BillingSection,
 }
 
 /// The `launch:` section: the default for every playbook an agent
@@ -269,7 +274,7 @@ impl Policies {
 
 /// One file at `path`: absent or empty is the default; anything present
 /// must read whole.
-fn read(path: &Path, source: PolicySource) -> Result<PolicyFile, String> {
+pub(crate) fn read(path: &Path, source: PolicySource) -> Result<PolicyFile, String> {
     let raw = match crate::fsutil::read_settings_file(path, crate::fsutil::SETTINGS_FILE_MAX_BYTES)
     {
         Ok(Some(raw)) => raw,
@@ -362,6 +367,7 @@ fn summary(file: &PolicyFile) -> String {
                 .join(", ")
         ));
     }
+    sets.extend(file.billing.describe());
     if sets.is_empty() {
         "valid, sets nothing".into()
     } else {

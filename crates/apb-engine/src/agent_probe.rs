@@ -26,6 +26,7 @@ use apb_core::config::GlobalConfig;
 use apb_core::step_env::StepCaller;
 
 use crate::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, HermeticEnv, SpawnEnv};
+use crate::gate::launch::Initiator;
 
 /// Printed before the probe runs.
 pub const COST_NOTICE: &str =
@@ -100,6 +101,10 @@ pub struct ProbeRequest<'a> {
     /// The project whose connector configs name the variables the agent
     /// must not inherit.
     pub project: &'a Path,
+    /// Who asked for the probe: a CLI without a terminal or a run step is
+    /// held to the default config dir's billing settings when its config dir
+    /// was redirected, exactly as at a launch (`Initiator::checks_redirect`).
+    pub initiator: &'a Initiator,
 }
 
 /// The error of a probe whose cancel flag stopped the agent.
@@ -168,6 +173,22 @@ pub fn probe(
         transcript_dir: None,
         output_limits: Default::default(),
     };
+    // Billed use: a person starts the probe, which is the confirmation an
+    // `ask` needs, but `deny` never starts billed or unknown-basis work, for
+    // anyone. The basis is read from what this spawn sees, and a redirected
+    // config dir does not hide the default one's stricter settings from an
+    // initiator the launch check holds to them.
+    let basis = crate::adapter::read_cost_basis(&task).basis;
+    let settings =
+        crate::gate::billing::settings_for(req.project, req.initiator.checks_redirect(), None);
+    if settings.policy_for(basis) == apb_core::launch::LaunchPolicy::Deny {
+        return Err(ProbeError(format!(
+            "{}: the probe's call to `{id}` reads as `{}` work, which the billing settings deny ({})",
+            crate::gate::billing::BILLING_DENIED,
+            basis.key(),
+            settings.sources.join(", ")
+        )));
+    }
     let report = adapter
         .run_cancellable(&task, cancel, None, None, None, None)
         .map_err(|f| {

@@ -85,6 +85,7 @@
   import CodeEditor from '../lib/CodeEditor.svelte'
   import NodePanel from '../lib/NodePanel.svelte'
   import IrreversibleRunDialog from '../lib/IrreversibleRunDialog.svelte'
+  import LaunchConfirmDialog from '../lib/LaunchConfirmDialog.svelte'
   import RunStartDialog from '../lib/RunStartDialog.svelte'
   import StartActionsList from '../lib/StartActionsList.svelte'
   import { startRefusalOf } from '../lib/nextactions'
@@ -92,7 +93,12 @@
   import type { StartAction } from '../lib/api.gen'
   import type { RunBudget, RunInput } from '../lib/api'
   import { consentStep } from '../lib/irreversibleconsent'
-  import { launchQuestion, launchStep, type LaunchConfirmation } from '../lib/launch'
+  import {
+    launchQuestion,
+    launchStep,
+    type LaunchConfirmation,
+    type LaunchQuestion,
+  } from '../lib/launch'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import PlaybookEdge from '../lib/PlaybookEdge.svelte'
   import NodeSummary from '../lib/NodeSummary.svelte'
@@ -763,6 +769,11 @@
   // refusal's structured sources, and only its confirm button sends the
   // refusal's consent nonce, which binds the consent to what it showed.
   let irreversibleOpen = $state(false)
+  // A refused start the person can confirm here: the question, and the
+  // retry it makes.
+  let launchOpen = $state(false)
+  let launchAsked = $state<LaunchQuestion | null>(null)
+  let launchRetry: (() => void) | null = null
   let irreversibleSources = $state<string[]>([])
   let irreversibleNonce = $state('')
   // The Run dialog (estimate and budget) opens first; the budget it returns
@@ -841,10 +852,10 @@
       // nonce of its refusal, after the person confirms here.
       const launchNext = e instanceof ApiError ? launchStep(e.body, launch) : null
       if (launchNext?.kind === 'confirm') {
-        if (window.confirm(launchQuestion(launchNext))) {
-          const confirmation = launchNext.confirmation
-          queueMicrotask(() => void run(consentNonce, confirmation))
-        }
+        const confirmation = launchNext.confirmation
+        launchAsked = launchQuestion(launchNext)
+        launchRetry = () => void run(consentNonce, confirmation)
+        launchOpen = true
         return
       }
       if (e instanceof ApiError && e.code === 'budget_needs_decision') {
@@ -1554,6 +1565,12 @@
     ondone={moved}
   />
 {/if}
+
+<LaunchConfirmDialog
+  bind:open={launchOpen}
+  question={launchAsked}
+  onconfirm={() => launchRetry?.()}
+/>
 
 <!-- 0.24.0 irreversible consent -->
 <IrreversibleRunDialog

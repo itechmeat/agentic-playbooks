@@ -235,7 +235,8 @@ pub(crate) struct RunBody {
 /// The launch context of a click in the dashboard: a person's with keys;
 /// without keys anything on the machine reaches the port, so it is decided
 /// like the CLI without a terminal (an `ask` launch only with its nonce, a
-/// `deny` launch refused).
+/// `deny` launch refused). Either way billed use starts only with the
+/// nonce of its refusal, after the dashboard asked the person.
 pub(crate) fn dashboard_launch(
     auth: &crate::auth::AuthState,
     kind: apb_engine::gate::launch::LaunchKind,
@@ -244,12 +245,11 @@ pub(crate) fn dashboard_launch(
     launch_choice: Option<&str>,
 ) -> apb_engine::gate::launch::LaunchContext {
     use apb_engine::gate::launch::{LaunchConfirmation, LaunchContext};
-    let keys = auth.enabled();
-    let ctx = LaunchContext::dashboard_with(keys, kind);
-    if keys {
-        return ctx;
-    }
-    ctx.confirmed(confirm_launch.map(|nonce| LaunchConfirmation::DashboardNonce { nonce }))
+    // With keys the click is a person's launch, and the nonce still
+    // confirms billed use (`apb_engine::gate::billing`), which needs the
+    // person's explicit confirmation of the predicted set.
+    LaunchContext::dashboard_with(auth.enabled(), kind)
+        .confirmed(confirm_launch.map(|nonce| LaunchConfirmation::DashboardNonce { nonce }))
         .fixed(launch_version, launch_choice)
 }
 

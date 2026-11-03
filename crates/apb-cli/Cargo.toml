@@ -33,6 +33,8 @@ yaml_serde.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+# `APB_TEST_BILLING_DEFAULT` in the `apb` the suites spawn.
+apb-core = { path = "../apb-core", features = ["testing"] }
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
 tempfile = "3.27.0"

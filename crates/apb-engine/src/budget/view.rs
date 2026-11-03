@@ -90,7 +90,7 @@ pub struct BudgetStatus {
 pub fn status(run_dir: &Path, events: &[Event]) -> Option<BudgetStatus> {
     let fold = BudgetFold::of(events)?;
     let est = crate::run_estimate::snapshot::read(run_dir);
-    let spent = Spent::of(run_dir, events, est.as_ref());
+    let spent = Spent::of(run_dir, events, est.as_ref(), fold.counts_subscription);
     Some(BudgetStatus {
         limit: fold.limit,
         on_no_estimate: fold.on_no_estimate,

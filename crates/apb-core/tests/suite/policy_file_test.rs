@@ -91,6 +91,18 @@ fn an_unknown_section_key_or_value_is_an_error_that_names_it() {
     assert!(err.contains("../x"), "{err}");
     let err = parse("notify:\n  finished: []\n").unwrap_err();
     assert!(err.contains("no outcome"), "{err}");
+    let err = parse("billing:\n  metered: allow\n").unwrap_err();
+    assert!(err.contains("metered"), "{err}");
+    let err = parse("billing:\n  billed: sometimes\n").unwrap_err();
+    assert!(err.contains("sometimes"), "{err}");
+    let ok = parse(
+        "billing:\n  billed: deny\n  unknown_basis: allow\n  budget_counts_subscription: false\n",
+    )
+    .unwrap();
+    assert_eq!(
+        ok.billing.billed,
+        Some(apb_core::launch::LaunchPolicy::Deny)
+    );
 }
 
 #[test]

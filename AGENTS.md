@@ -39,6 +39,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the settings file `policy.yaml` of the machine and the project
   (`policy_file.rs`: the strict reader of its `notify:` filters and its
   `launch:` section, and the doctor line; nothing in apb writes it), the
+  billed use (`billing.rs`: the `billing:` section of `policy.yaml`,
+  `EffectiveBilling` with a project only narrowing, the `BillingRecord` a
+  run keeps and `covers`), the
   launch policy of agents (`launch.rs`: `resolve` and `EffectivePolicy`
   over a run's tree, the `LaunchRecord` a run keeps; `launch/policy.rs` the
   three policies, a leaf the schema and the settings reader share;
@@ -295,7 +298,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `display` the one text line of a pause, `quota` the quota pause policy and
   schedule, `probe` the wake-up probe of a quota pause, run by
   `scheduler/quota_probe`; `budget` the budget pause's reason and request,
-  `cause` the cause a quota or budget pause's reason names),
+  `cause` the cause a quota, budget or billing pause's reason names,
+  `billing` the billing pause a spawn takes),
   the run budget (`budget.rs`; `budget/`: `kind` the journal-facing types,
   `fold` the limit in force and the gate's pauses and waivers, `spent` what
   the run spent per dimension with unknown attempts imputed, `gate` the pure
@@ -439,7 +443,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   handoff file a checked launch crosses a detached spawn in
   (`launch_handoff.rs`: `Supervise`, `Eval` and `Resume`, private,
   single-use, written by the receiver's parent), the run
-  policy gate every launch surface calls (`gate/`, with `trust_scan` the
+  policy gate every launch surface calls (`gate/`, with `billing` the
+  billing half of the launch check: the predicted basis of every executor
+  of the tree and the `billing_*` refusals, `challenge` the single-use
+  nonce of a billing confirmation, `trust_scan` the
   connector and profile-bundle trust facts collected before any refusal,
   `isolation` the `isolation_unavailable` refusal, `unattended` the
   `unattended_unsupported` refusal of an unattended start in host or
@@ -733,6 +740,24 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `supervisor_*` MCP tools; its binding exists in the manifest only when the run
   is actually externally supervised. `supervisor_interrupt_attempt` takes an
   optional `node`: targeted at one attempt, or a whole-run broadcast when omitted.
+- **Billed use** (GUARDRAILS.md "Billed use",
+  [decision record 0012](docs/adr/0012-billed-agent-work-starts-only-on-a-persons-command.md)):
+  the `billing:` section of `policy.yaml` (`billed`, `unknown_basis`:
+  `allow | ask | deny`, default `ask`; `budget_counts_subscription`,
+  default `true`) is decided in the launch check on the basis predicted
+  for every executor the run binds (the supervisor on the agent's own
+  settings); an `ask` refusal carries a single-use challenge
+  (`gate::challenge`, one start per confirmation) over the launch and the
+  predicted set, looked at by the check and consumed only where the start
+  commits (`LaunchGrant::consume_challenge`), and the run keeps
+  `launch.billing`. A settings file that does not read denies
+  (`EffectiveBilling::load`). Every spawn, the supervisor and the quota
+  probe included, reads the basis again (`pause::billing::spawn_hold`);
+  uncovered work pauses the run and only a person's resume adds it (a held
+  supervisor is journaled and pauses the run, `hold_for_supervisor`). Tests set `APB_TEST_BILLING_DEFAULT=allow`
+  (a `testing` seam) so stand-in agents of unknown basis are not held;
+  the `testing` features of apb-core, apb-engine and apb-decide are a
+  compile error without debug assertions, so no release binary has a seam.
 - An **operator pause** (issue #200) goes through
   `apb_engine::pause::request_pause`: a live driver gets `Control::Pause`
   (drain: no new node; now: the stop watcher fires a separate pause fanout,

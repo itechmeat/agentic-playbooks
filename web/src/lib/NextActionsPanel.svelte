@@ -17,9 +17,10 @@
   import { ApiError, resumeRun } from './api'
   import type { NextAction, RunActions } from './api.gen'
   import { authState } from './auth.svelte'
-  import { launchQuestion, launchStep } from './launch'
+  import { launchQuestion, launchStep, type LaunchQuestion } from './launch'
   import { consentStep } from './irreversibleconsent'
   import IrreversibleRunDialog from './IrreversibleRunDialog.svelte'
+  import LaunchConfirmDialog from './LaunchConfirmDialog.svelte'
   import {
     autoLine,
     choiceArg,
@@ -78,6 +79,10 @@
   let pendingIntent = $state<{ key: string; action: NextAction; sent: boolean } | null>(null)
 
   let irreversibleOpen = $state(false)
+  // A refused resume the person can confirm here.
+  let launchOpen = $state(false)
+  let launchAsked = $state<LaunchQuestion | null>(null)
+  let launchRetry: (() => void) | null = null
   let irreversibleSources = $state<string[]>([])
   let irreversibleNonce = $state('')
   let resumeTarget = $state<string | null>(null)
@@ -177,10 +182,10 @@
       const sent = launchNonce ? { nonce: launchNonce } : undefined
       const launchNext = e instanceof ApiError ? launchStep(e.body, sent) : null
       if (launchNext?.kind === 'confirm') {
-        if (window.confirm(launchQuestion(launchNext))) {
-          const nonce = launchNext.confirmation.nonce
-          queueMicrotask(() => void resume(key, target, consentNonce, nonce, retryNow))
-        }
+        const nonce = launchNext.confirmation.nonce
+        launchAsked = launchQuestion(launchNext)
+        launchRetry = () => void resume(key, target, consentNonce, nonce, retryNow)
+        launchOpen = true
       } else if (launchNext) {
         toast.error('Resume refused', { description: launchNext.message })
       } else if (e instanceof ApiError && e.code === 'irreversible_requires_confirmation') {
@@ -404,6 +409,13 @@
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>
+
+<LaunchConfirmDialog
+  bind:open={launchOpen}
+  question={launchAsked}
+  action="resume"
+  onconfirm={() => launchRetry?.()}
+/>
 
 <IrreversibleRunDialog
   bind:open={irreversibleOpen}

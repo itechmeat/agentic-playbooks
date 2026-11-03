@@ -441,7 +441,14 @@ fn an_interactive_supervised_start_of_a_deny_playbook_asks_once() {
     keys.sort();
     assert_eq!(
         keys,
-        ["confirmation", "initiator", "kind", "policy", "sources"],
+        [
+            "billing",
+            "confirmation",
+            "initiator",
+            "kind",
+            "policy",
+            "sources"
+        ],
         "the record holds no nonce: {manifest}"
     );
 }
@@ -463,6 +470,7 @@ fn a_supervised_driver_without_a_valid_handoff_is_the_cli_without_a_terminal() {
                 confirmation: Some("terminal_prompt".into()),
                 policy: apb_core::launch::LaunchPolicy::Deny,
                 sources: vec!["declared deny".into()],
+                billing: None,
             },
             binding: HandoffBinding::Nonce {
                 nonce: nonce.into(),

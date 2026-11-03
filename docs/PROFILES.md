@@ -553,7 +553,9 @@ connector-referenced variables are withheld, codex gets an isolated home and
 zcode its provider config inside the probe's directory, and claude its
 minimal-environment settings. It names the autonomy flags it left out,
 prints the usage and cost the agent reported, and exits 1 when the format
-drifted. Ctrl-C (or SIGTERM) stops the agent and removes the directory. A
+drifted. Ctrl-C (or SIGTERM) stops the agent and removes the directory.
+A call whose basis the `billing:` settings deny is refused before the agent
+starts (GUARDRAILS.md "Billed use"). A
 run step is refused (`APB_RUN_ID` or `APB_HOST_TASK` set): only a person
 spends that call.
 

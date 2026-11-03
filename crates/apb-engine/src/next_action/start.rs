@@ -147,15 +147,27 @@ fn launch_action(of: StartOf<'_>, refusal: &Value) -> Option<StartAction> {
     let policy = refusal["launch_policy"].as_str()?;
     let sources = strings(refusal, "launch_sources").join(", ");
     let version = refusal["launch_version"].as_str().map(str::to_string);
+    let billed = refusal["policy"]
+        .as_str()
+        .is_some_and(crate::gate::billing::is_billing_refusal);
+    let held = strings(&refusal["billing"], "held").join(", ");
     if let Some(nonce) = refusal["launch_nonce"].as_str() {
+        let why = if billed {
+            format!(
+                "playbook `{}` would start agent work that is billed or of unknown basis ({held}); a person confirms this launch",
+                of.playbook
+            )
+        } else {
+            format!(
+                "playbook `{}` is `{policy}` for agents ({sources}); a person confirms this launch",
+                of.playbook
+            )
+        };
         let mut a = of.action(
             StartActionCode::ConfirmLaunch,
             vec![Principal::Person, Principal::Operator, Principal::Host],
             None,
-            format!(
-                "playbook `{}` is `{policy}` for agents ({sources}); a person confirms this launch",
-                of.playbook
-            ),
+            why,
         );
         a.version = version.or(a.version);
         a.args = vec![given("confirm_launch", nonce)];
@@ -168,15 +180,18 @@ fn launch_action(of: StartOf<'_>, refusal: &Value) -> Option<StartAction> {
         return Some(a);
     }
     refusal["launch_by_person"].as_bool()?.then(|| {
-        let mut a = of.action(
-            StartActionCode::LaunchByPerson,
-            vec![Principal::Person],
-            None,
+        let why = if billed {
+            format!(
+                "playbook `{}` would start agent work that is billed or of unknown basis ({held}); a person launches it from the dashboard or a terminal",
+                of.playbook
+            )
+        } else {
             format!(
                 "playbook `{}` is `{policy}` for agents ({sources}); a person launches it from the dashboard or a terminal",
                 of.playbook
-            ),
-        );
+            )
+        };
+        let mut a = of.action(StartActionCode::LaunchByPerson, vec![Principal::Person], None, why);
         a.version = version.or(a.version);
         a
     })

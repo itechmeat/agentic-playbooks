@@ -37,6 +37,9 @@ pub struct BudgetFold {
     pub pause_resolved: bool,
     /// The node a person let run once over the budget, until it does.
     pub waiver: Option<String>,
+    /// Whether the dollar limit counts subscription equivalents, as the
+    /// latest `budget_set` recorded it (absent: it does).
+    pub counts_subscription: bool,
 }
 
 impl BudgetFold {
@@ -50,6 +53,7 @@ impl BudgetFold {
                     usd,
                     on_no_estimate,
                     source,
+                    counts_subscription,
                     ..
                 } => {
                     let f = fold.get_or_insert_with(|| BudgetFold {
@@ -61,7 +65,9 @@ impl BudgetFold {
                         pause_open: false,
                         pause_resolved: false,
                         waiver: None,
+                        counts_subscription: true,
                     });
+                    f.counts_subscription = counts_subscription.unwrap_or(true);
                     f.limit = BudgetLimit {
                         tokens: *tokens,
                         usd: *usd,

@@ -254,6 +254,7 @@ mod tests {
                     confirmation: None,
                     policy: LaunchPolicy::Allow,
                     sources: Vec::new(),
+                    billing: None,
                 },
             );
             let e = crate::launch_handoff::write(dir.path(), &crate::launch_handoff::Handoff::Resume(grant))

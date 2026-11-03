@@ -31,6 +31,14 @@ the diff against the invariants and conventions they state. A new piece of
 code that duplicates a hardened helper the project already has (file
 opening, locking, process spawning, redaction) is a finding.
 
+A fix for a disclosure or authorization defect is checked at every boundary
+where the protected data leaves or is kept: every surface, cache, stored
+copy and derived text, not only the consumer the finding named. The
+reviewer lists those boundaries and says for each whether the fix holds.
+Prefer a fix that makes the unsafe use impossible (a type or a refusing
+API) over one that patches call sites. Agree the protected boundary before
+the fix; widening it later turns one finding into a long chain.
+
 Two roles always run their audit skill, on every review:
 
 - The tests role runs the apb-test-audit skill in audit mode on every test
@@ -84,8 +92,10 @@ every review cycle, not an option. Installed helpers are the ones the setup
 plan lists with `required: true` in its `suggestions`, and the ones the
 project declares among its checks.
 
-- Run each one on the candidate and fold its output into the findings, each
-  verified like any other finding.
+- Run each one on the candidate in every review round and fold its output
+  into the findings, each verified like any other finding. The round's
+  report lists each helper as run or failed; a round without them is not
+  complete.
 - Checks and helpers run code and configuration that come from the
   candidate (build scripts, tests, a helper's settings in the repository).
   For a change by an author the person does not trust, run them only inside

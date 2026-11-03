@@ -49,8 +49,16 @@ fn add(dim: &mut SpentDim, value: Option<f64>, imputed: Option<f64>) {
 
 impl Spent {
     /// The spent amounts of the run at `run_dir` over `events`, estimating
-    /// unknown attempts with `est`.
-    pub fn of(run_dir: &Path, events: &[Event], est: Option<&RunEstimate>) -> Spent {
+    /// unknown attempts with `est`. The dollar dimension counts every
+    /// reported cost whatever its basis, unless `counts_subscription` is
+    /// false (`billing.budget_counts_subscription`), which leaves
+    /// subscription equivalents out.
+    pub fn of(
+        run_dir: &Path,
+        events: &[Event],
+        est: Option<&RunEstimate>,
+        counts_subscription: bool,
+    ) -> Spent {
         let mut s = Spent {
             tokens: SpentDim {
                 imputed: Some(0.0),
@@ -70,7 +78,8 @@ impl Spent {
                     a.tokens.map(|t| t as f64),
                     median.and_then(|m| m.tokens).map(|t| t as f64),
                 );
-                add(&mut s.usd, a.cost, median.and_then(|m| m.cost_usd));
+                let usd = if counts_subscription { a.price } else { a.cost };
+                add(&mut s.usd, usd, median.and_then(|m| m.cost_usd));
             };
             if let Some((node, a)) = attempt_spend(&e.payload) {
                 count(node, a);
@@ -185,7 +194,7 @@ mod tests {
         ];
         let dir = tempfile::tempdir().unwrap();
         let est = estimate(&[("a", Some(40)), ("b", Some(7))]);
-        let s = Spent::of(dir.path(), &events, Some(&est));
+        let s = Spent::of(dir.path(), &events, Some(&est), true);
         assert_eq!(s.tokens.known, 100.0);
         assert_eq!(s.tokens.unknown_attempts, 2);
         assert_eq!(s.tokens.total(), Some(147.0));
@@ -195,10 +204,15 @@ mod tests {
         // A node without a median leaves the tokens unknown too.
         let est = estimate(&[("a", Some(40))]);
         assert_eq!(
-            Spent::of(dir.path(), &events, Some(&est)).tokens.total(),
+            Spent::of(dir.path(), &events, Some(&est), true)
+                .tokens
+                .total(),
             None
         );
-        assert_eq!(Spent::of(dir.path(), &events, None).tokens.total(), None);
+        assert_eq!(
+            Spent::of(dir.path(), &events, None, true).tokens.total(),
+            None
+        );
         let limit = BudgetLimit {
             tokens: Some(1000),
             usd: None,
@@ -207,6 +221,7 @@ mod tests {
             dir.path(),
             &events,
             Some(&estimate(&[("a", Some(40)), ("b", Some(7))])),
+            true,
         );
         let (t, u) = remaining(
             &limit,
@@ -245,6 +260,7 @@ mod tests {
             pause_open: false,
             pause_resolved: false,
             waiver: None,
+            counts_subscription: true,
         };
         let gate = |f: &BudgetFold, s: &Spent, need: Need| {
             decide(&GateInput {
@@ -258,7 +274,7 @@ mod tests {
         };
         // `a` has no estimate: what was spent is unknown, but its known
         // 50000 alone are over the 10000 limit, so even `continue` pauses.
-        let unknown = Spent::of(dir.path(), &events, None);
+        let unknown = Spent::of(dir.path(), &events, None, true);
         assert_eq!(unknown.tokens.total(), None);
         let v = gate(
             &fold(10_000, OnNoEstimate::Continue),
@@ -278,7 +294,7 @@ mod tests {
         // Under `pause`, with a median for `a`, the spend is known: the
         // limit pauses the run and a raise lets the next node run.
         let est = estimate(&[("a", Some(400)), ("c", Some(300))]);
-        let known = Spent::of(dir.path(), &events, Some(&est));
+        let known = Spent::of(dir.path(), &events, Some(&est), true);
         assert_eq!(known.tokens.total(), Some(50_400.0));
         let need = Need::Known(BudgetAmount {
             tokens: Some(300.0),
@@ -319,7 +335,7 @@ mod tests {
                 serde_json::json!({"type": "child_run_started", "node_id": "sub", "run_id": "child"}),
             ),
         ];
-        let s = Spent::of(&parent, &events, None);
+        let s = Spent::of(&parent, &events, None, true);
         assert_eq!(s.tokens.total(), Some(100.0));
         assert_eq!(s.usd.total(), Some(0.5));
     }

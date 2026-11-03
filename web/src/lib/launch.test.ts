@@ -38,6 +38,35 @@ describe('launchStep', () => {
     expect(step).toEqual({ kind: 'person', message: 'only a person launches it' })
   })
 
+  it('asks the person before billed agent work, and leaves a billing deny to a person', () => {
+    const billed = {
+      policy: 'billing_requires_confirmation',
+      detail: 'this run would start billed agent work (codex: billed)',
+      launch_nonce: 'launch-9',
+      launch_version: '1.0.0',
+      launch_choice: 'current',
+      billing: { held: ['codex: billed'], sources: ['default'] },
+    }
+    const step = launchStep(billed)
+    expect(step).toEqual({
+      kind: 'confirm',
+      message: 'this run would start billed agent work (codex: billed)',
+      confirmation: { nonce: 'launch-9', version: '1.0.0', choice: 'current' },
+      billing: { held: ['codex: billed'], sources: ['default'] },
+    })
+    // The person is shown the held agents and the settings, never the
+    // instructions the refusal gives an agent.
+    const question = launchQuestion(step as { message: string; billing: { held: string[]; sources: string[] } })
+    expect(question.title).toBe('Start billed agent work?')
+    expect(question.held).toEqual(['codex: billed'])
+    expect(question.sources).toEqual(['the built-in default'])
+    expect(question.reason).not.toContain('confirm_launch')
+    expect(launchStep({ policy: 'billing_denied', detail: 'denied' })).toEqual({
+      kind: 'person',
+      message: 'denied',
+    })
+  })
+
   it('ignores refusals that are not the launch policy', () => {
     expect(launchStep({ policy: 'irreversible_requires_confirmation' })).toBeNull()
     expect(launchStep(undefined)).toBeNull()
@@ -51,7 +80,16 @@ describe('launchStep', () => {
       launch_choice: 'explicit',
     })
     expect(launchFields({ nonce: 'n' })).toEqual({ confirm_launch: 'n' })
-    expect(launchQuestion({ message: 'why' })).toContain('why')
+    expect(
+      launchQuestion({
+        message: 'playbook `p` asks a person (agent_launch `ask`: default); ask the person, then call again with confirm_launch',
+      }),
+    ).toEqual({
+      title: 'Launch this playbook?',
+      reason: 'playbook `p` asks a person (agent_launch `ask`: default)',
+      held: [],
+      sources: [],
+    })
   })
 })
 

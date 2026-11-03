@@ -1574,6 +1574,13 @@ fn eval_launch(
         msg
     })?;
     let digest = loaded.trust_digest().map_err(|e| e.to_string())?;
+    // One confirmation covers this whole eval: its cases take the grant
+    // from a handoff bound to the definition, so the challenge is spent
+    // here, once.
+    checked
+        .grant
+        .consume_challenge()
+        .map_err(|e| format!("eval {e}"))?;
     Ok(apb_engine::gate::launch::HandoffGrant {
         record: checked.grant.record,
         // The verified child pins are bound too: a child that changes
@@ -1602,7 +1609,9 @@ pub(crate) fn case_launch(
     let ctx = LaunchContext::new(Initiator::cli(false), kind);
     match apb_engine::launch_handoff::take(root, path, apb_engine::launch_handoff::parent_pid()) {
         Ok(apb_engine::launch_handoff::Handoff::Eval { grant }) => {
-            ctx.confirmed(Some(LaunchConfirmation::Forwarded { handoff: grant }))
+            ctx.confirmed(Some(LaunchConfirmation::Forwarded {
+                handoff: Box::new(grant),
+            }))
         }
         Ok(_) => {
             eprintln!("apb: the launch handoff is not an eval case's");
@@ -1680,6 +1689,11 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
         };
         return fail(args.json, "no_suite", format!("`{}` has {what}", args.id));
     }
+    // The arguments first, so a typo does not spend a billing confirmation.
+    let overrides = match build_overrides(&args, &playbook) {
+        Ok(o) => o,
+        Err(e) => return fail(args.json, "bad_overrides", e),
+    };
     // The launch policy, once, before anything is copied or asked.
     let launch_grant = if args.dry_run {
         None
@@ -1688,10 +1702,6 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
             Ok(g) => Some(g),
             Err(msg) => return fail(args.json, "launch_refused", msg),
         }
-    };
-    let overrides = match build_overrides(&args, &playbook) {
-        Ok(o) => o,
-        Err(e) => return fail(args.json, "bad_overrides", e),
     };
     // The pid keeps two invocations started in the same millisecond apart.
     let eval_id = format!("eval-{}-{}", apb_core::clock::now_ms(), std::process::id());

@@ -65,6 +65,10 @@ extern "C" fn isolate_config() {
         std::env::set_var("CLAUDE_CONFIG_DIR", dir.join("claude"));
         // Nor do the machine's managed claude settings: an empty system root.
         std::env::set_var("APB_TEST_SYSTEM_ROOT", dir.join("system"));
+        // Billed use (`apb_core::billing`): the stand-in agents of these
+        // tests have an unknown basis, which the default `ask` would hold;
+        // the billing tests clear this or write their own settings.
+        std::env::set_var("APB_TEST_BILLING_DEFAULT", "allow");
         for login in [
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",
@@ -168,6 +172,9 @@ mod background_supervisor_test;
 #[cfg(unix)]
 #[path = "suite/baseline_test.rs"]
 mod baseline_test;
+#[cfg(unix)]
+#[path = "suite/billing_spawn_test.rs"]
+mod billing_spawn_test;
 #[cfg(unix)]
 #[path = "suite/bounded_output_test.rs"]
 mod bounded_output_test;

@@ -1349,6 +1349,17 @@ fn a_spent_invocation_budget_stops_the_next_repetition() {
     );
 }
 
+/// The claude login and endpoint variables a developer's shell may carry,
+/// which would change the cost basis these tests read.
+const CLAUDE_LOGIN_VARS: [&str; 6] = [
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+];
+
 /// The invocation's total cost is split by basis, in the stored result and
 /// in the text, like every repetition's: an api key's cost reads as billed.
 #[test]
@@ -1366,14 +1377,18 @@ fn the_eval_total_is_split_by_basis() {
         serde_json::json!({ "billed_usd": 1.2 }),
         "{v:#}"
     );
-    let out = apb()
-        .args(["eval", "rev", "--yes", "--repeat", "1"])
+    let mut cmd = apb();
+    cmd.args(["eval", "rev", "--yes", "--repeat", "1"])
         .current_dir(env.project.path())
         .env("APB_CONFIG_DIR", env.cfg.path())
         .env("APB_AGENT_CMD", &env.stub)
         .env("APB_NO_REGISTRY", "1")
         .env_remove("APB_RUN_ID")
-        .env_remove("APB_HOST_TASK")
+        .env_remove("APB_HOST_TASK");
+    for var in CLAUDE_LOGIN_VARS {
+        cmd.env_remove(var);
+    }
+    let out = cmd
         .env("ANTHROPIC_API_KEY", "set-by-test")
         .output()
         .unwrap();
@@ -1445,6 +1460,11 @@ impl Env {
             .env("APB_NO_REGISTRY", "1")
             .env_remove("APB_RUN_ID")
             .env_remove("APB_HOST_TASK");
+        // The developer's own claude login or endpoint must not decide the
+        // basis these tests expect.
+        for var in CLAUDE_LOGIN_VARS {
+            cmd.env_remove(var);
+        }
         for (k, v) in vars {
             cmd.env(k, v);
         }

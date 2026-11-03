@@ -125,8 +125,8 @@ pub(crate) use resume::{
 pub use resume::{ResumeDecision, ResumeReason, StartMode, lifecycle_seq, plan_resume};
 use revive::{reoffer_revived_joins, restore_revived_frontier};
 pub use run_ref::{run_playbook_ref, run_profile_origin};
-pub use supervisor::spawn_supervisor_agent;
 use supervisor::*;
+pub use supervisor::{SUPERVISOR_BILLING_HOLD, SupervisorSpawn, spawn_supervisor_agent};
 
 /// A one-line, machine-facing detail extracted from a failed finish-answer
 /// attempt's last output, for the `RunError` anomaly reason. Empty output (a
@@ -812,6 +812,9 @@ fn drive_inner(
     // we log SupervisorLost and respawn ONCE for the whole
     // drive loop - see the check at the start of each iteration below.
     let mut supervisor_lost_logged = false;
+    // Whether this drive already checked for a supervisor never tried
+    // (`monitor_supervisor_heartbeat`).
+    let mut supervisor_spawn_tried = false;
     // A single cursor over control.jsonl for the whole drive call: both the
     // top-of-loop scan at the start of each iteration and await_control (the
     // supervised wait) read from it, so the same entry can never be applied
@@ -899,6 +902,10 @@ fn drive_inner(
     // patch cannot change `baseline_check` once an acting node started.
     let mut baseline_before_done = false;
     let gate = budget_gate::DriveGate::load(run_dir, cfg.unattended)?;
+    // An unattended run's billing held agent work (the sequential arm, a
+    // batch member or a list pool): it fails instead of pausing for the
+    // person it does not have, once the members in flight reported back.
+    let mut billing_stop: Option<(String, String)> = None;
     let notifier = crate::notify::send::Notifier::new(root, run_dir, &run_id);
 
     loop {
@@ -911,10 +918,27 @@ fn drive_inner(
         // An unattended run's budget refused a node or a batch (the
         // sequential arm, a batch member or a list pool): it fails instead
         // of pausing, once the members in flight reported back.
-        if let Some((node, reason)) = gate.exhausted() {
+        if let Some((node, reason)) = gate.exhausted().or_else(|| billing_stop.take()) {
             return Ok(RunResult {
                 run_id,
                 outcome: unattended_stop(log, run_dir, &node, reason, &mut frontier)?,
+            });
+        }
+        // A supervisor its billing held (a supervised run is refused
+        // unattended at its start, so this only guards that refusal).
+        if cfg.unattended
+            && cfg.mode.expects_supervisor_agent()
+            && let Some(reason) = unattended::supervisor_held(&read_all(run_dir)?)
+        {
+            return Ok(RunResult {
+                run_id,
+                outcome: unattended_stop(
+                    log,
+                    run_dir,
+                    unattended::SUPERVISOR_NODE,
+                    reason,
+                    &mut frontier,
+                )?,
             });
         }
         if steps >= max_steps {
@@ -953,6 +977,7 @@ fn drive_inner(
                 &playbook,
                 log,
                 &mut supervisor_lost_logged,
+                &mut supervisor_spawn_tried,
             )?;
         }
 
@@ -1714,10 +1739,20 @@ fn drive_inner(
                                         for ev in events {
                                             journal.append(ev)?;
                                         }
-                                        if !engine_pause(run_dir, &node, pause, &mut |e| {
-                                            journal.append(e)
-                                        })? {
-                                            halt.store(true, Ordering::SeqCst);
+                                        match unattended::billing_hold(&pause, &node)
+                                            .filter(|_| cfg.unattended)
+                                        {
+                                            Some(reason) => {
+                                                billing_stop.get_or_insert((node, reason));
+                                                halt.store(true, Ordering::SeqCst);
+                                            }
+                                            None => {
+                                                if !engine_pause(run_dir, &node, pause, &mut |e| {
+                                                    journal.append(e)
+                                                })? {
+                                                    halt.store(true, Ordering::SeqCst);
+                                                }
+                                            }
                                         }
                                         continue;
                                     }
@@ -2929,7 +2964,15 @@ fn drive_inner(
                         for ev in events {
                             log.append(ev)?;
                         }
-                        engine_pause(run_dir, &current, pause, &mut |e| log.append(e).map(|_| ()))?;
+                        match unattended::billing_hold(&pause, &current).filter(|_| cfg.unattended)
+                        {
+                            Some(reason) => billing_stop = Some((current.clone(), reason)),
+                            None => {
+                                engine_pause(run_dir, &current, pause, &mut |e| {
+                                    log.append(e).map(|_| ())
+                                })?;
+                            }
+                        }
                         continue;
                     }
                     // Its retry waits: the hold at the top of the loop keeps
@@ -3067,7 +3110,15 @@ fn drive_inner(
                         for ev in events {
                             log.append(ev)?;
                         }
-                        engine_pause(run_dir, &current, pause, &mut |e| log.append(e).map(|_| ()))?;
+                        match unattended::billing_hold(&pause, &current).filter(|_| cfg.unattended)
+                        {
+                            Some(reason) => billing_stop = Some((current.clone(), reason)),
+                            None => {
+                                engine_pause(run_dir, &current, pause, &mut |e| {
+                                    log.append(e).map(|_| ())
+                                })?;
+                            }
+                        }
                         continue;
                     }
                     // A list node stopped between items for a pause: no

@@ -38,6 +38,8 @@ pub const LOCAL_ENTRIES: &[&str] = &[
     "problems/",
     // Scenario runs and their results index: never history, never shared.
     "scenario-runs/",
+    // The open single-use challenges of billing confirmations.
+    "launch-challenges/",
 ];
 
 /// The projects `dir` lies in, nearest first: `dir` itself and every

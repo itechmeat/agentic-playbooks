@@ -1847,6 +1847,19 @@ fn execute_node_kind(
                         transcript_dir: Some(&transcript_dir),
                         output_limits: cfg.output_limits(),
                     };
+                    // Billed use (`pause::billing`): the basis is read again
+                    // from what this spawn sees, and work the run holds no
+                    // confirmation for pauses the run before it starts. A
+                    // host step runs in the host's own session.
+                    if !step.host
+                        && let Some(pause) = crate::pause::billing::spawn_hold(
+                            run_dir,
+                            &step.agent,
+                            crate::adapter::read_cost_basis(&task).basis,
+                        )
+                    {
+                        return Ok(AttemptOutcome::EnginePaused { pause, events });
+                    }
                     // Spawn-time attempt journaling. The adapter invokes `on_spawn`
                     // right after the agent process starts, so `attempt_started`
                     // (carrying the child pid) is on disk BEFORE the agent does any
@@ -3606,6 +3619,25 @@ pub(crate) fn execute_finish_answer(
             // live sidecar (`None`), it carries no `expected_duration`, so no
             // stall watch (`None`), and the terminal answer composition is not a
             // supervisor-interruptible node, so no control observation (`None`).
+            // Billed use (`pause::billing`): work the run holds no
+            // confirmation for is not started; the terminal answer fails
+            // with the reason instead of spending.
+            if !host_mode
+                && let Some(pause) = crate::pause::billing::spawn_hold(
+                    run_dir,
+                    &ri.agent_id,
+                    crate::adapter::read_cost_basis(&task).basis,
+                )
+            {
+                return Ok((
+                    NodeStatus::Failed,
+                    format!(
+                        "the terminal answer was not composed: {} needs a person's confirmation",
+                        pause.journal_reason()
+                    ),
+                    events,
+                ));
+            }
             step_env.journal(journal, node_id, attempt, &ri.agent_id)?;
             let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn), None, None, None);
             last_close = Some(crate::host_task::FallbackOf {
@@ -4370,6 +4402,17 @@ pub(crate) fn maybe_compact_context(
         transcript_dir: None,
         output_limits: cfg.output_limits(),
     };
+    // Billed use (`pause::billing`): compaction is not critical, so work
+    // the run holds no confirmation for is skipped.
+    if crate::pause::billing::spawn_hold(
+        run_dir,
+        claude,
+        crate::adapter::read_cost_basis(&task).basis,
+    )
+    .is_some()
+    {
+        return Ok(None);
+    }
     // The compacted context is the summarizer's full reply body (issue #42
     // finding 1), not its one-line report summary.
     let summary = match adapter.run(&task) {

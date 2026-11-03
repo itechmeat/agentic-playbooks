@@ -435,6 +435,17 @@ impl ProfileEmulation<'_, '_> {
             transcript_dir: None,
             output_limits: self.output_limits,
         };
+        // Billed use (`pause::billing`): work the run holds no confirmation
+        // for is not started; the attempt fails without spending.
+        if crate::pause::billing::spawn_hold(
+            self.run_dir,
+            &ri.agent_id,
+            crate::adapter::read_cost_basis(&task).basis,
+        )
+        .is_some()
+        {
+            return Ok(None);
+        }
         let spawn_at: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
         let spawn_err: std::cell::RefCell<Option<EngineError>> = std::cell::RefCell::new(None);
         let started = |pid: Option<u32>, spawn_ms: Option<u64>| EventPayload::AttemptStarted {
