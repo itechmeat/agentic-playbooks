@@ -584,11 +584,12 @@ pub mod test_isolation {
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
 
-    /// Removes the sandbox directories under `base` whose owning process is
-    /// provably gone (the pid in the name no longer exists), or whose
-    /// mtime is a week old, so a pid reused by an unrelated process cannot
-    /// keep a leftover forever. A live process's sandbox, this process's own
-    /// included, is never swept.
+    /// Removes the sandbox directories of other processes whose owning
+    /// process is provably gone (the pid in the name no longer exists, or
+    /// the sandbox mtime is a week old, so a pid reused by an unrelated
+    /// process cannot keep a leftover forever). A live process's sandbox,
+    /// this process's own included, is never swept, and only a real
+    /// directory is removed: a sandbox-named link is never followed.
     pub fn sweep_dead_sandboxes(base: &Path) {
         let Ok(entries) = std::fs::read_dir(base) else {
             return;
@@ -606,14 +607,22 @@ pub mod test_isolation {
                 continue;
             };
             #[cfg(unix)]
-            let safe = owner != std::process::id() && !pid_alive(owner);
+            let dead = !pid_alive(owner);
             #[cfg(not(unix))]
-            let safe = owner != std::process::id();
+            let dead = false;
             let ancient = entry
                 .metadata()
                 .and_then(|m| m.modified())
                 .is_ok_and(|t| t < week_ago);
-            if safe || ancient {
+            // Only a real directory (read_dir's file type never follows a
+            // link) owned by another, provably dead process is removable.
+            // This process's own sandbox is never swept: its top-level
+            // mtime only moves when entries are added directly under it, so
+            // an ancient mtime proves nothing about the live owner.
+            let removable = entry.file_type().is_ok_and(|t| t.is_dir())
+                && owner != std::process::id()
+                && (dead || ancient);
+            if removable {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
         }
@@ -1304,5 +1313,57 @@ mod isolation_tests {
         let b = sandbox_for(base.path());
         assert_ne!(a, b, "two sandboxes got the same name");
         assert!(a.starts_with(base.path()));
+    }
+
+    /// A sandbox's top-level mtime only changes when entries are added
+    /// directly under it, so an ancient mtime proves nothing about a live
+    /// process: this process's own sandbox must survive even when it reads
+    /// as a week old, and a sandbox-named symlink must not be followed into
+    /// a removal in a shared base such as /tmp.
+    #[cfg(unix)]
+    #[test]
+    fn the_sandbox_sweep_never_takes_this_processs_own_or_a_symlink() {
+        use std::time::{Duration, SystemTime};
+
+        let _lock = crate::env_test_lock();
+        let base = tempfile::tempdir().unwrap();
+
+        let ours = base
+            .path()
+            .join(format!("{SANDBOX_PREFIX}{}-abc123", std::process::id()));
+        std::fs::create_dir(&ours).unwrap();
+        std::fs::write(ours.join("config.yaml"), "x: 1\n").unwrap();
+        // Make it read as a week old: an mtime alone must not cost a live
+        // process its sandbox.
+        let week_ago = SystemTime::now() - Duration::from_secs(8 * 24 * 3600);
+        std::fs::File::open(&ours)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_accessed(week_ago)
+                    .set_modified(week_ago),
+            )
+            .unwrap();
+
+        // A symlink that carries a dead pid in its name, pointing at a
+        // directory that must stay.
+        let target = base.path().join("real-config-dir");
+        std::fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(
+            &target,
+            base.path().join(format!("{SANDBOX_PREFIX}2-abc123")),
+        )
+        .unwrap();
+
+        super::test_isolation::sweep_dead_sandboxes(base.path());
+
+        assert!(
+            ours.exists(),
+            "this process's own ancient-looking sandbox was swept"
+        );
+        assert!(
+            target.exists(),
+            "a sandbox-named symlink was followed into a removal"
+        );
     }
 }

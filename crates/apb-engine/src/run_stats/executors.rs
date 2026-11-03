@@ -235,7 +235,9 @@ impl GroupAcc {
                 row.cost_by_basis.add(f.basis, c);
             }
         }
-        if id.is_host() {
+        // Only a hinted attempt counts, so a group without hints has none,
+        // as `HintFollow::of_views` reads it.
+        if id.is_host() && id.model_requested_by_apb.is_some() {
             hint_follow(self.hint.get_or_insert_with(HintFollow::default), id);
         }
     }

@@ -62,3 +62,18 @@ describe('ProjectLabel', () => {
     expect(render(ProjectLabel, { props: { name: 'main' } }).body).not.toContain('worktree')
   })
 })
+
+describe('picker preselection', () => {
+  it('the first row shown is not the first project as stored', () => {
+    // A worktree may come first in the raw list, but the picker shows the
+    // sorted mains first, so a picker that preselects `rows[0]` preselects
+    // a row a person never sees first.
+    const rows = [
+      project('w2', 'b-feature', 'b'),
+      project('a', 'alpha'),
+      project('b', 'beta'),
+    ]
+    expect(rows[0].workspace_id).toBe('w2')
+    expect(nestProjects(rows)[0].row.workspace_id).toBe('a')
+  })
+})

@@ -334,9 +334,11 @@ fn searched_runs(
     let mut out: Vec<(u128, serde_json::Value)> = Vec::new();
     let (mut not_indexed, mut withheld) = (0usize, 0usize);
     for (workspace_id, project, root) in workspaces {
-        let Ok(listing) = apb_engine::list_runs_filtered(&root, filter) else {
-            continue;
-        };
+        // A workspace whose listing fails must not look like one with no
+        // matching runs: surface the failure with its workspace id, the way
+        // the unfiltered [`listed_runs`] path does.
+        let listing = apb_engine::list_runs_filtered(&root, filter)
+            .map_err(|e| format!("workspace `{workspace_id}`: {e}"))?;
         not_indexed += listing.not_indexed;
         withheld += listing.withheld;
         let redaction = apb_engine::run_redact::WorkspaceRedaction::new(&root);

@@ -176,7 +176,7 @@
       agents = md.agents
       modelsTable = md.models
       optionsByAgent = md.options_by_agent
-      if (isNew && !workspaceInput && projects.length) workspaceInput = projects[0].workspace_id
+      if (isNew && !workspaceInput && projects.length) workspaceInput = nestProjects(projects)[0].row.workspace_id
     } catch (e) {
       toast.error('Failed to load form data', { description: String(e) })
     } finally {

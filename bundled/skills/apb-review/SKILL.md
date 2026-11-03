@@ -139,7 +139,8 @@ Every finding gets one class:
 
 Checks and helpers leave scratch output behind: temporary directories, logs,
 build output outside the project's usual build directory, servers or browser
-sessions started for a check. Before you report, delete what this review
+sessions started for a check. Before you report, and also when the review
+stops early because a check or helper failed, delete what this review
 created under one parent directory named for it and stop the processes it
 started. Delete only your own, never by a wide pattern: other sessions may
 share the machine. Findings keep their evidence as text, not as files left

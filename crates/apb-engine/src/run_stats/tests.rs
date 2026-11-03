@@ -1565,6 +1565,30 @@ fn hint_follow_counts_followed_not_followed_and_not_reported() {
     assert_eq!(models.get("none"), Some(&1));
 }
 
+/// A host group whose attempts carried no hint has no hint counts at all,
+/// as `HintFollow::of_views` reads it: never an all-zero line.
+#[test]
+fn a_host_group_without_hints_has_no_hint_counts() {
+    let mut body = vec![(1_000, started("work"))];
+    for v in [
+        serde_json::json!({"type": "host_task_requested", "task_id": "t0", "node": "work", "attempt": 1}),
+        serde_json::json!({"type": "attempt_started", "node": "work", "attempt": 1, "agent": "host"}),
+        serde_json::json!({"type": "host_task_submitted", "task_id": "t0", "status": "failed", "submitted_by": "host", "model": "opus"}),
+        serde_json::json!({"type": "attempt_finished", "node": "work", "attempt": 1, "status": "failed"}),
+    ] {
+        body.push((1_000, v));
+    }
+    body.push((9_000, end("failed")));
+    let r = with_identities(
+        run("r1", "1.0.0", None, &body),
+        "x1:hhhhhhhhhhhhhhhh",
+        false,
+    );
+    let report = build(&[r], &StatsFilter::default());
+    let g = &group_of(&report)[0];
+    assert_eq!(g.hint_follow, None);
+}
+
 /// Design 2.8 item 6: a node criterion's levels split by executor when
 /// its graded runs bound the node to more than one; the comparable key is
 /// untouched.

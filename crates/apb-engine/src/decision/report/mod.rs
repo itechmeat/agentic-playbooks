@@ -130,6 +130,13 @@ impl ReportSettings {
         }
     }
 
+    /// The legacy file's threshold of `key`'s use, provider and model.
+    fn legacy_of(&self, key: &GroupKey) -> bool {
+        self.stored.iter().any(|t| {
+            t.use_name == key.use_site && t.provider == key.provider && t.model == key.model
+        })
+    }
+
     fn target(&self, use_site: &str) -> f64 {
         self.use_thresholds
             .get(use_site)
@@ -629,16 +636,8 @@ fn group_report(
             m
         });
     let mut notes = Vec::new();
-    if stored.is_none()
-        && let Some(other) = settings
-            .stored
-            .iter()
-            .find(|t| t.use_name == key.use_site && t.provider == key.provider)
-    {
-        notes.push(format!(
-            "the threshold stored for {}/{} does not carry over to model {}: a new shadow period is needed",
-            other.provider, other.model, key.model
-        ));
+    if stored.is_none() {
+        notes.extend(missing_threshold_notes(settings, key));
     }
     if !key.calibrated {
         notes
@@ -937,6 +936,54 @@ pub fn parse_since(s: &str, now_ms: u128) -> Option<u128> {
         return None;
     }
     Some(now_ms.saturating_sub(u128::from(secs) * 1000))
+}
+
+/// Why a group without a stored threshold of its own has none, when
+/// other stored thresholds might look like they apply. A row under a rule
+/// version reads only the thresholds of its rule: a legacy threshold of the
+/// same provider and model does not apply under it, and one of the same
+/// rule for another model does not carry over. A row without a rule
+/// version reads the legacy file, where only another model's can stand.
+fn missing_threshold_notes(settings: &ReportSettings, key: &GroupKey) -> Vec<String> {
+    let carry_over = |provider: &str, model: &str| {
+        format!(
+            "the threshold stored for {provider}/{model} does not carry over to model {}: a new shadow period is needed",
+            key.model
+        )
+    };
+    match key.rule.as_deref() {
+        Some(rule) if rule != apb_core::decision_thresholds::RETRY_ADVICE_LEGACY_RULE => {
+            let mut notes = Vec::new();
+            if settings.legacy_of(key) {
+                notes.push(format!(
+                    "the legacy threshold for {}/{} is not enforced: re-measure under rule {rule}",
+                    key.provider, key.model
+                ));
+            }
+            notes.extend(
+                settings
+                    .stored_v2
+                    .iter()
+                    .find(|t| {
+                        t.use_name == key.use_site
+                            && t.provider == key.provider
+                            && t.rule == rule
+                            && t.model != key.model
+                    })
+                    .map(|t| carry_over(&t.provider, &t.model)),
+            );
+            notes
+        }
+        _ => settings
+            .stored
+            .iter()
+            .find(|t| {
+                t.use_name == key.use_site && t.provider == key.provider && t.model != key.model
+            })
+            .map(|t| carry_over(&t.provider, &t.model))
+            .into_iter()
+            .collect(),
+    }
 }
 
 #[cfg(test)]

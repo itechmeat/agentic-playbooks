@@ -1,5 +1,6 @@
 import type { RunDecisions } from './api.gen'
 import { formatCost } from './runusage'
+import { shownNumber } from './format'
 import type { WfEvent } from './types'
 
 // Decision-model totals and rows on the run page (issue #165 Part 4). The
@@ -75,10 +76,13 @@ function answerText(answers: unknown): string {
     if (!raw || typeof raw !== 'object') continue
     const a = raw as Record<string, unknown>
     const p = num(a.p)
+    const confidence = num(a.confidence)
     const value = a.value
+    const shown = typeof value === 'number' ? shownNumber(value) : String(value)
+    const how =
+      p !== undefined ? ` (p=${fmtP(p)})` : confidence !== undefined ? ` (confidence ${shownNumber(confidence)})` : ''
     if (typeof a.invalid === 'string') parts.push(`${q} invalid`)
-    else if (value !== undefined && value !== null)
-      parts.push(`${q} ${String(value)}${p !== undefined ? ` (p=${fmtP(p)})` : ''}`)
+    else if (value !== undefined && value !== null) parts.push(`${q} ${shown}${how}`)
     else if (p !== undefined) parts.push(`${q} p=${fmtP(p)}`)
   }
   return parts.join(', ')

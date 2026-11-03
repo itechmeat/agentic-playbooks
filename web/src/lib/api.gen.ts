@@ -4044,7 +4044,7 @@ expected: { [key in string]: ExpectedAnswer }, source: ExampleSource, labelled_b
  */
 labelled_at: string, observed?: ObservedAnswers, note: string, };
 
-export type ExampleStatus = "checked" | "stale" | "state_changed";
+export type ExampleStatus = "checked" | "stale" | "state_changed" | "unanswered";
 
 export type QuestionAgreement = { question: string, expected: ExpectedAnswer, 
 /**

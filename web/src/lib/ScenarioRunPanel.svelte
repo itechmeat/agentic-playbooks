@@ -388,10 +388,12 @@
     gap: 0.375rem;
   }
   /* The name and the title wrap inside their own block, so the Run button
-     keeps its place at the end of the first line whatever the title. */
+     keeps its place at the end of the first line whatever the title. The
+     button is taller than a line of text, so the name and the button's
+     label share one baseline instead of their top edges. */
   .head {
     display: flex;
-    align-items: flex-start;
+    align-items: baseline;
     gap: 0.375rem;
   }
   .what {

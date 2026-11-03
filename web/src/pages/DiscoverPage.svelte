@@ -217,7 +217,7 @@
           <p class="muted">No registered project.</p>
         {/if}
         {#each nestProjects(projects) as { row: p, depth } (p.workspace_id)}
-          <label class="choice" class:worktree={depth > 0}>
+          <label class="choice">
             <input
               type="checkbox"
               checked={pickedProjects.includes(p.workspace_id)}
@@ -418,10 +418,6 @@
   }
   .choice.off {
     opacity: 0.6;
-  }
-  /* A git linked worktree row indents whole, checkbox included. */
-  .choice.worktree {
-    padding-inline-start: 0.75rem;
   }
   .run-row {
     display: flex;

@@ -3514,7 +3514,12 @@ another while its trust stays the same.
 
 `effects` declares the playbook's side effects. Declarations can only widen what
 the server infers from node types, never narrow it. Values: `fs_read`,
-`fs_write`, `network`, `external`, `secrets`, `irreversible`. Declare
+`fs_write`, `network`, `external`, `secrets`, `irreversible`. A script or
+agent node may declare what it really does in its own `effects` (the demo's
+script declares `[fs_read, fs_write]`): a run still counts everything such a
+node can do, and the dashboard's effects box marks the rest `assumed`
+(`assumed_effects` of the playbook detail) instead of listing it as an
+effect the playbook has. Declare
 `irreversible` for anything that cannot be rolled back (a push, a merged or
 opened pull request, deploys, publishes, external notifications): a run of a
 playbook whose tree declares it starts only with an explicit consent (MCP

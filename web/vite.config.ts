@@ -15,7 +15,12 @@ export function inlineAsset(file: string): false | undefined {
 }
 
 export default defineConfig({
-  plugins: [tailwindcss(), svelte()],
+  // Under vitest, drop the tailwind plugin: its startup scan fetches a
+  // component's virtual style module before the svelte plugin has compiled
+  // it, the load falls back to the raw file, and the CSS parser fails on the
+  // script text (CssSyntaxError on a comment that holds an apostrophe). No
+  // test imports `app.css`, so tests need plain CSS passthrough only.
+  plugins: [...(process.env.VITEST ? [] : [tailwindcss()]), svelte()],
   build: {
     assetsInlineLimit: inlineAsset,
   },

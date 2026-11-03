@@ -173,8 +173,9 @@ index; re-indexing old runs against a newer declaration.
    document. Coverage is the agent's count; apb does not parse the
    checklist, and the examples say so. A structured rules register is
    deferred.
-4. Two quick scenarios each (`clean`, `must-fail-then-fixed`; `clean`,
-   `fixed-by-person`), the reference scenarios `docs/scenarios/design-doc-check.md`
+4. Three quick scenarios each (`clean`, `must-fail-then-fixed`,
+   `open-findings`; `clean`, `fixed-by-person`, `open-findings`), the
+   reference scenarios `docs/scenarios/design-doc-check.md`
    and `docs/scenarios/document-checklist.md`, and
    `demo_playbooks_test.rs` validating both, playing the scenarios and
    running the code example on a stub agent to show one stored

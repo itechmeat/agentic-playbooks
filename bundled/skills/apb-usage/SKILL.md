@@ -100,7 +100,9 @@ other routine. Before you report done, and after a merge:
 
 - Remove the worktrees and merged branches of a finished change (in git:
   `git worktree remove`, `git branch -d`, `git worktree prune`) and the
-  build output they used. Keep a worktree a paused run or an open pull
+  build output they used. A squash-merged branch is not reachable from the
+  base, so `git branch -d` refuses it: use `git branch -D` only after you
+  checked that the base holds its work. Keep a worktree a paused run or an open pull
   request still needs.
 - Delete the temporary files, logs, downloads, browser profiles and
   sessions the task created. Keep what must survive in a named cache

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatDuration, shortModel } from './format'
+import { formatDuration, shortModel, shownNumber } from './format'
 
 describe('formatDuration', () => {
   it('rounds milliseconds below a second', () => {
@@ -39,5 +39,15 @@ describe('shortModel', () => {
     expect(shortModel('gpt-5')).toBe('gpt-5')
     expect(shortModel('gpt-4-0613')).toBe('gpt-4-0613')
     expect(shortModel('glm-4.6')).toBe('glm-4.6')
+  })
+})
+
+describe('shownNumber', () => {
+  it('shows a recorded 32-bit float as a person would write it, never as float noise', () => {
+    expect(shownNumber(0.8999999761581421)).toBe('0.9')
+    expect(shownNumber(0.6200000047683716)).toBe('0.62')
+    expect(shownNumber(1.4999999701976776)).toBe('1.5')
+    expect(shownNumber(3)).toBe('3')
+    expect(shownNumber(0.123456789)).toBe('0.123457')
   })
 })

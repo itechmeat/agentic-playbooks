@@ -37,6 +37,8 @@ import {
   saveMemory,
   saveLayout,
   updatePlaybook,
+  refusalText,
+  ApiError,
 } from './api'
 import { DEMO_ID } from './consts.gen'
 
@@ -610,5 +612,22 @@ describe('the demo id', () => {
     // The page hints and the scenarios box key on it; a hand-kept literal
     // drifted once already (the `apb-` prefix is reserved for shipped content).
     expect(DEMO_PLAYBOOK).toBe(DEMO_ID)
+  })
+})
+
+describe('refusalText', () => {
+  it('shows the sentence of a plain-text refusal without the error name or the request address', () => {
+    const why =
+      'saving an example is refused by a dashboard without keys, since anything on this machine can reach it'
+    expect(refusalText(new ApiError(`/api/runs/r1/judge/check/examples?workspace=w: ${why}`, 409))).toBe(why)
+    expect(refusalText(new ApiError(`http://127.0.0.1:7357/api/playbooks/p/judge/check/evaluate: ${why}`, 409))).toBe(
+      why,
+    )
+  })
+
+  it('reads the error of a JSON refusal body, and a plain error by its message', () => {
+    expect(refusalText(new ApiError('/api/x: busy', 409, 'busy', undefined, { error: 'busy' }))).toBe('busy')
+    expect(refusalText(new Error('offline'))).toBe('offline')
+    expect(refusalText('offline')).toBe('offline')
   })
 })

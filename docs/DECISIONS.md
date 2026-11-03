@@ -819,7 +819,10 @@ state templates or `on_unavailable`; a title does not count), `state_changed`
 when the stored inputs render another state, and otherwise whether each
 label agrees with what the current thresholds make of the observed answers
 (or, with `--live`, of a new sandbox ask inside the cap), with counts and a
-confusion table per node. Nothing is tuned from the examples, and they are
+confusion table per node. A live ask that got no answer (the day's cap is
+spent or every provider failed) reads `unanswered`, and none of its labels
+counts as a disagreement; an answer of an invalid shape is an answer, and its
+labels disagree. Nothing is tuned from the examples, and they are
 not labels of `apb decisions report` or stored thresholds: they help an
 author choose thresholds by hand. "Fill from a run" (`apb judge values`,
 MCP `judge_run_values`) shows the inputs of one judge execution and every

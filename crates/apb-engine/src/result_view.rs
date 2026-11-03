@@ -397,7 +397,9 @@ impl ResultsView {
         let index = crate::identity::index(&events);
         let visits = crate::identity::list_visits(&events);
         let run_id = run_id_of(run_dir);
-        let redactor = RunRedactor::for_run_dir(run_dir);
+        // Both are made at the first stamp: a run without one resolves no
+        // connector secret (which may start a program) and opens nothing.
+        let mut redactor: Option<RunRedactor> = None;
         let mut beneath: Option<Beneath> = None;
         let mut view = ResultsView::default();
         for e in &events {
@@ -426,8 +428,9 @@ impl ResultsView {
                 beneath = Some(Beneath::open(run_dir)?);
             }
             let b = beneath.as_ref().expect("opened above");
+            let redactor = redactor.get_or_insert_with(|| RunRedactor::for_run_dir(run_dir));
             view.rows
-                .push(row(b, &redactor, &events, run_id, &index, &visits, &s)?);
+                .push(row(b, redactor, &events, run_id, &index, &visits, &s)?);
         }
         // A capture that failed after its stamp (its transaction left open)
         // has a row; only a settlement without one is listed.

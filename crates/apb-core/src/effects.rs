@@ -52,15 +52,32 @@ pub fn node_acts(node: &Node) -> bool {
 /// script node.
 pub fn inferred(playbook: &Playbook) -> BTreeSet<Effect> {
     let mut set = BTreeSet::new();
-    for n in playbook.nodes.iter().filter(|n| node_acts(n)) {
-        if n.kind.takes_workdir_lock() {
-            set.extend(ACTING);
-        }
-        if !n.kind.connector_bindings().is_empty() {
-            set.extend(REACHES_OUT);
-        }
-        set.extend(n.kind.implied_effects().iter().copied());
+    for n in &playbook.nodes {
+        set.extend(node_inferred(n));
     }
+    set.extend(baseline_inferred(playbook));
+    set
+}
+
+/// What one node adds to [`inferred`].
+fn node_inferred(n: &Node) -> BTreeSet<Effect> {
+    let mut set = BTreeSet::new();
+    if !node_acts(n) {
+        return set;
+    }
+    if n.kind.takes_workdir_lock() {
+        set.extend(ACTING);
+    }
+    if !n.kind.connector_bindings().is_empty() {
+        set.extend(REACHES_OUT);
+    }
+    set.extend(n.kind.implied_effects().iter().copied());
+    set
+}
+
+/// What the baseline check's sources add to [`inferred`].
+fn baseline_inferred(playbook: &Playbook) -> BTreeSet<Effect> {
+    let mut set = BTreeSet::new();
     for c in playbook.baseline_checks() {
         match c.source() {
             Some(BaselineSource::Connector(_)) => set.extend(REACHES_OUT),
@@ -71,6 +88,33 @@ pub fn inferred(playbook: &Playbook) -> BTreeSet<Effect> {
         }
     }
     set
+}
+
+/// The effects of [`effective`] that only the pessimistic reading of a
+/// script or agent node puts there, for a node that declared its own: what
+/// the author says such a node does not do, while apb, which does not read
+/// what a script or an agent does, still counts it. Display only: the run
+/// policy uses [`effective`], which keeps every one of them.
+///
+/// An effect is not assumed when the playbook declares it, when any node
+/// declares it or its kind implies it, when a node that declares nothing
+/// infers it, when a connector binding reaches out, or when a baseline
+/// source infers it.
+pub fn assumed(playbook: &Playbook) -> BTreeSet<Effect> {
+    let mut covered: BTreeSet<Effect> = playbook.effects.iter().copied().collect();
+    covered.extend(baseline_inferred(playbook));
+    for n in &playbook.nodes {
+        covered.extend(n.own_effects());
+        if n.effects.is_empty() {
+            covered.extend(node_inferred(n));
+        } else if node_acts(n) && !n.kind.connector_bindings().is_empty() {
+            covered.extend(REACHES_OUT);
+        }
+    }
+    effective(playbook)
+        .into_iter()
+        .filter(|e| !covered.contains(e))
+        .collect()
 }
 
 /// Effective effects = inferred ∪ declared (spec 8.5). A declaration only
@@ -226,5 +270,43 @@ edges:
             "project_checks: { only: [test] }",
         );
         assert!(inferred(&playbook(&tests)).contains(&Effect::FsWrite));
+    }
+
+    #[test]
+    fn a_script_that_declares_its_effects_has_the_rest_assumed() {
+        let yaml = SCRIPT_WF.replace("runner: sh }", "runner: sh, effects: [fs_read, fs_write] }");
+        let p = playbook(&yaml);
+        // The run policy still counts everything a script can do.
+        let set = effective(&p);
+        assert!(set.contains(&Effect::Network));
+        assert!(set.contains(&Effect::External));
+        // Only what nothing declared is assumed.
+        assert_eq!(
+            assumed(&p),
+            BTreeSet::from([Effect::Network, Effect::External])
+        );
+    }
+
+    #[test]
+    fn nothing_is_assumed_where_a_node_declares_nothing_or_the_playbook_declares_it() {
+        // A script that declares nothing is counted as before, unmarked.
+        assert!(assumed(&playbook(SCRIPT_WF)).is_empty());
+        // The playbook's own declaration covers an effect for every node.
+        let yaml = SCRIPT_WF
+            .replace("runner: sh }", "runner: sh, effects: [fs_write] }")
+            .replace("nodes:", "effects: [network]\nnodes:");
+        assert_eq!(
+            assumed(&playbook(&yaml)),
+            BTreeSet::from([Effect::FsRead, Effect::External])
+        );
+        // Another acting node that declares nothing infers the effect.
+        let yaml = SCRIPT_WF
+            .replace("runner: sh }", "runner: sh, effects: [fs_write] }")
+            .replace(
+                "  - { id: done,",
+                "  - { id: more, type: script, script: \"scripts/y.sh\", runner: sh }\n  - { id: done,",
+            )
+            .replace("  - { from: work, to: done }", "  - { from: work, to: more }\n  - { from: more, to: done }");
+        assert!(assumed(&playbook(&yaml)).is_empty());
     }
 }

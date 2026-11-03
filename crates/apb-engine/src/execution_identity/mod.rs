@@ -64,9 +64,14 @@ pub struct ExecStep {
     pub executed_by: String,
     /// How the step before this one closed: set on the first attempt of a
     /// step other than the first one walked, `None` otherwise and in logs
-    /// written before it existed.
+    /// written before it existed. A shape a newer apb wrote reads as
+    /// absent, so the rest of the step survives it.
     #[cfg_attr(feature = "ts", ts(optional))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::event::lenient_option"
+    )]
     pub entered: Option<StepEntry>,
 }
 

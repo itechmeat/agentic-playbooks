@@ -96,6 +96,8 @@ async fn playbook_detail_includes_model_and_validation() {
         .map(|e| e.as_str().unwrap())
         .collect();
     assert!(effective.contains(&"fs_write"), "{effective:?}");
+    // No node declares effects of its own, so nothing is merely assumed.
+    assert_eq!(json["assumed_effects"], serde_json::json!([]));
     // The seed's `architect` directory holds no profile and the `lint`
     // script was never added: shown as warnings (V91, V92), since the editor
     // saves the YAML first and the profile or the scripts may follow.

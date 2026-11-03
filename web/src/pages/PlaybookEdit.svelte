@@ -325,7 +325,7 @@
       revision++
       try {
         projects = await fetchProjects()
-        if (!targetWorkspace && projects.length) targetWorkspace = projects[0].workspace_id
+        if (!targetWorkspace && projects.length) targetWorkspace = nestProjects(projects)[0].row.workspace_id
       } catch (e) {
         toast.error('Failed to load projects', { description: String(e) })
       }

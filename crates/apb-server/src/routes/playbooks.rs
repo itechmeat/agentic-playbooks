@@ -744,6 +744,10 @@ pub(crate) async fn get_playbook(
                 // from the nodes, plus the playbook's and each node's own
                 // declaration. The declared list alone can understate it.
                 "effective_effects": apb_core::effects::effective(&loaded.playbook),
+                // The part of it only the pessimistic reading of a script or
+                // agent node that declared its own effects puts there: shown
+                // as assumed, still counted by the run policy.
+                "assumed_effects": apb_core::effects::assumed(&loaded.playbook),
                 "layout": loaded.layout,
                 "validation": validation,
                 // The address of every edge of the shown definition, aligned

@@ -149,6 +149,14 @@ describe('JudgeSandboxPanel', () => {
     expect(q('sandbox-error')!.textContent).toBe('a live ask is refused by a dashboard without keys')
   })
 
+  it('shows a refusal the server sent as plain text in its own sentence, never as the raw error', async () => {
+    render()
+    fetchMock.mockResolvedValueOnce(new Response('a live ask is refused by a dashboard without keys', { status: 409 }))
+    q('sandbox-evaluate')!.click()
+    await settle()
+    expect(q('sandbox-error')!.textContent).toBe('a live ask is refused by a dashboard without keys')
+  })
+
   it('offers the live ask only with keys: a dashboard without keys points to the command line', () => {
     auth.set({ required: false, authenticated: true, checked: true })
     render()
@@ -177,6 +185,31 @@ describe('JudgeSandboxPanel', () => {
     const options = [...(q('sandbox-place-target-0') as HTMLSelectElement).options].map((o) => o.textContent)
     expect(options).toEqual(labels)
     expect(labels).toEqual(['run.instruction', 'nodes.clarify.review_note'])
+  })
+
+  it('labels each copy from the run with what is copied, from which run, into which input', async () => {
+    render()
+    const values: RunValues = {
+      run_id: 'r1',
+      node: 'check',
+      execution: 2,
+      inputs: { params: {}, instruction: 'x', outputs: {}, reviews: {}, rejected_outputs: {}, hooks: {}, context: '' },
+      recorded: [{ label: 'outputs.work', text: 'patched parse.rs' }],
+    }
+    expect(q('sandbox-fill')!.textContent!.trim()).toBe('Fill the inputs and answers from this run')
+    type(q('sandbox-run-id'), 'r1')
+    fetchMock.mockResolvedValueOnce(json(values))
+    q('sandbox-fill')!.click()
+    await settle()
+    expect(q('sandbox-recorded-note')!.textContent).toContain('Other values run r1 recorded')
+    // The note names the run once; the row and the button's title keep it short and full.
+    expect(q('sandbox-place-from-0')!.textContent).toBe('copy outputs.work')
+    expect(q('sandbox-place-target-0')!.getAttribute('aria-label')).toBe('the input outputs.work is copied into')
+    const use = q('sandbox-place-0')!
+    expect(use.textContent!.trim()).toBe('Copy into the input')
+    expect(use.getAttribute('title')).toBe('Copy outputs.work of run r1 into run.instruction')
+    type(q('sandbox-place-target-0'), q('sandbox-place-target-0')!.querySelectorAll('option')[1].value, 'change')
+    expect(q('sandbox-place-0')!.getAttribute('title')).toBe('Copy outputs.work of run r1 into nodes.clarify.review_note')
   })
 
   it('shows the numbers a run recorded rounded, never as float noise', async () => {
@@ -318,6 +351,36 @@ describe('JudgeSandboxPanel', () => {
     props.node = { ...node, id: 'other' }
     flushSync()
     expect(q('sandbox-result')).toBeNull()
+  })
+
+  it('keeps a late answer for one node off the next node the page shows', async () => {
+    const props = $state({ id: 'p', workspace: 'w1', node: { ...node } })
+    app = mount(JudgeSandboxPanel, { target: document.body, props })
+    flushSync()
+    let answer!: (r: Response) => void
+    fetchMock.mockReturnValueOnce(new Promise<Response>((r) => (answer = r)))
+    q('sandbox-evaluate')!.click()
+    flushSync()
+    props.node = { ...node, id: 'other' }
+    flushSync()
+    answer(json(evaluation))
+    await settle()
+    expect(q('sandbox-result')).toBeNull()
+    expect(q('sandbox-error')).toBeNull()
+    expect((q('sandbox-evaluate') as HTMLButtonElement).disabled).toBe(false)
+
+    // The same for a fill and for a refusal.
+    type(q('sandbox-run-id'), 'r1')
+    let values!: (r: Response) => void
+    fetchMock.mockReturnValueOnce(new Promise<Response>((r) => (values = r)))
+    q('sandbox-fill')!.click()
+    flushSync()
+    props.node = { ...node, id: 'third' }
+    flushSync()
+    values(json({ error: 'no such run' }, 404))
+    await settle()
+    expect(q('sandbox-error')).toBeNull()
+    expect(q('sandbox-recorded-note')).toBeNull()
   })
 
   it('starts another node with given answers, not a live ask', async () => {
