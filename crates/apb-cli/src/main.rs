@@ -24,6 +24,7 @@ mod doctor;
 // --- 0.24.0 eval suites ---
 mod eval;
 // --- end 0.24.0 eval suites ---
+mod evidence;
 mod grade;
 mod hook;
 mod import_preview;
@@ -283,6 +284,12 @@ enum Command {
     Trash {
         #[command(subcommand)]
         action: TrashAction,
+    },
+    /// Read the results of earlier steps through an attempt's evidence
+    /// session (an agent step of a node with `evidence:`)
+    Evidence {
+        #[command(subcommand)]
+        action: evidence::EvidenceAction,
     },
     /// The send intents of a run: list what became of each send, or record
     /// a person's decision on one whose outcome is not known
@@ -1048,6 +1055,7 @@ fn main() -> ExitCode {
         Some(Command::Trash { action }) => trash_cmd(&root, action),
         Some(Command::Trust { action }) => trust_cmd(&root, action),
         Some(Command::Intent { action }) => intent_cmd(&root, action),
+        Some(Command::Evidence { action }) => evidence::evidence_cmd(&root, action),
         Some(Command::Run(args)) => run_cmd(&root, args),
         Some(Command::Tasks {
             action,

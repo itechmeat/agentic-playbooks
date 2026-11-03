@@ -200,7 +200,11 @@ fn refuses_as_newer(err: impl std::fmt::Display) {
 #[test]
 fn a_guard_naming_an_unknown_feature_refuses_all_but_stop() {
     let finished = r#"{"seq":1,"ts":2,"type":"node_finished","node":"a","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#;
-    let (tmp, dir) = journal_dir(&[STARTED, finished, &guard(2, &["person_only", "evidence"])]);
+    let (tmp, dir) = journal_dir(&[
+        STARTED,
+        finished,
+        &guard(2, &["person_only", "evidence_v2"]),
+    ]);
     refuses_as_newer(read_all(&dir).unwrap_err());
     refuses_as_newer(EventLog::open(&dir).err().expect("the open refuses"));
     let journal = read_journal(&dir).unwrap();
@@ -220,7 +224,7 @@ fn a_guard_naming_an_unknown_feature_refuses_all_but_stop() {
 #[test]
 fn an_unknown_feature_settled_by_a_later_checkpoint_reads() {
     let finished = r#"{"seq":2,"ts":3,"type":"node_finished","node":"a","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#;
-    let (_tmp, dir) = journal_dir(&[STARTED, &guard(1, &["evidence"]), finished]);
+    let (_tmp, dir) = journal_dir(&[STARTED, &guard(1, &["evidence_v2"]), finished]);
     let events = read_all(&dir).unwrap();
     assert_eq!(events.len(), 2);
 }

@@ -872,6 +872,7 @@ mod result_txn {
                     digest,
                     redacted: false,
                     format: ResultFormat::Text,
+                    records_invalid: None,
                 }
             })
             .collect();

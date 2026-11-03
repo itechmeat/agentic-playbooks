@@ -425,6 +425,7 @@ fn fill(req: &Request<'_>, b: &mut Builder<'_>, scrub_ok: bool) -> std::io::Resu
             digest,
             redacted,
             format: ResultFormat::Text,
+            records_invalid: None,
         }),
         Err(OmissionReason::StorageLimit) => {
             b.output_omitted = Some(if b.snapshot_full {
@@ -446,6 +447,7 @@ fn fill(req: &Request<'_>, b: &mut Builder<'_>, scrub_ok: bool) -> std::io::Resu
                     digest,
                     redacted,
                     format: ResultFormat::Text,
+                    records_invalid: None,
                 }),
                 Err(reason) => b.omit(EntryPart::Fields, None, reason),
             },
@@ -705,6 +707,12 @@ fn file(
         b.omit(EntryPart::File, at, OmissionReason::BinaryNotSupported);
         return Ok(());
     };
+    // A declared package that does not parse is kept as plain text with
+    // its first problem ([`apb_core::records`]).
+    let records_invalid = match decl.format {
+        ResultFormat::Records => apb_core::records::parse(text).err(),
+        ResultFormat::Text => None,
+    };
     match b.stage(text)? {
         Ok((digest, redacted, size)) => {
             let path = b.path(rel);
@@ -715,7 +723,12 @@ fn file(
                 size,
                 digest,
                 redacted,
-                format: decl.format,
+                format: if records_invalid.is_some() {
+                    ResultFormat::Text
+                } else {
+                    decl.format
+                },
+                records_invalid,
             });
         }
         Err(reason) => b.omit(EntryPart::File, at, reason),
@@ -861,6 +874,7 @@ mod tests {
                 digest,
                 redacted: false,
                 format: ResultFormat::Text,
+                records_invalid: None,
             }],
             omitted: Vec::new(),
             incomplete: None,

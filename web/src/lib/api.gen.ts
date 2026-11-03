@@ -1822,7 +1822,13 @@ digest: string,
 /**
  * The secret scrub changed the text; nothing of the original is kept.
  */
-redacted: boolean, format: ResultFormat, };
+redacted: boolean, format: ResultFormat, 
+/**
+ * For an entry declared `format: records` whose text is not a package
+ * ([`crate::records::parse`]): the first problem. The entry is then
+ * stored as `format: text`.
+ */
+records_invalid?: string, };
 
 export type ResultStamp = { snapshot_id: string, entries: number, bytes: number, omitted?: number, incomplete?: boolean, };
 
@@ -1900,6 +1906,34 @@ size: number,
 range: [number, number], redacted_at_capture: boolean, redacted_on_read: boolean, };
 
 export type LiveComparison = "same" | "differs" | "missing" | "unreadable" | "not_comparable";
+
+export type EvidenceVerdict = "structurally_valid" | "unsupported" | "absence_ok" | "not_enough_data";
+
+export type EvidenceFlag = "whole_record" | "short_span" | "self_citation" | "shared_record" | "no_shared_words";
+
+export type CitedFragment = { ref: string, fragment: string, };
+
+export type ViewSummary = { id: string, kind: string, complete: boolean, collector_complete?: boolean, records: number, };
+
+export type ClaimRow = { id: string, verdict: EvidenceVerdict, 
+/**
+ * The fixed wording of the verdict.
+ */
+wording: string, text: string, problems: Array<string>, flags: Array<EvidenceFlag>, cites: Array<CitedFragment>, absence?: Array<string>, };
+
+export type EvidenceRow = { node: string, item?: string, attempt_number: number, attempt?: number, session: string, closed: boolean, read_chars: number, budget_chars: number, 
+/**
+ * The bound snapshots.
+ */
+snapshots: Array<string>, 
+/**
+ * The session's views, without text.
+ */
+views: Array<ViewSummary>, 
+/**
+ * `false` until the attempt's claims were checked.
+ */
+checked: boolean, output_unsupported: boolean, problems: Array<string>, claims: Array<ClaimRow>, };
 
 export type CommitAttempt = { 
 /**

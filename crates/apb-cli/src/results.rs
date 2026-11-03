@@ -109,8 +109,82 @@ fn list(root: &Path, run_id: &str, node: Option<&str>, json: bool) -> ExitCode {
         view.legacy.retain(|r| r.execution.node == node);
         view.not_stored.retain(|r| r.node == node);
     }
+    let mut evidence = apb_engine::evidence::rows(&run_dir);
+    if let Some(node) = node {
+        evidence.retain(|r| r.node == node);
+    }
     let redactor = apb_engine::run_redact::WorkspaceRedaction::new(root).run_dir(&run_dir);
-    crate::util::with_run_redaction(redactor, || list_text(run_id, &view))
+    crate::util::with_run_redaction(redactor, || {
+        let code = list_text(run_id, &view);
+        evidence_text(&evidence);
+        code
+    })
+}
+
+/// The claims each evidence session checked, with the fixed wording of
+/// each verdict and the fragment each citation points at.
+fn evidence_text(rows: &[apb_engine::evidence::EvidenceRow]) {
+    let clip = |t: &str| sanitize_for_terminal(t, 320);
+    for r in rows {
+        let item = r
+            .item
+            .as_deref()
+            .map(|i| format!(" item {}", sanitize_for_terminal(i, QUESTION_TEXT_MAX)))
+            .unwrap_or_default();
+        say!(
+            "evidence {}{item} attempt {}: read {} of {} chars{}",
+            r.node,
+            r.attempt_number,
+            r.read_chars,
+            r.budget_chars,
+            if r.checked {
+                ""
+            } else {
+                ", claims not checked"
+            }
+        );
+        for v in r.views.iter().filter(|v| v.collector_complete.is_some()) {
+            let collector = if v.collector_complete == Some(true) {
+                apb_engine::evidence::COLLECTOR_COMPLETE_WORDING.to_string()
+            } else {
+                "the collector says the package is not complete".to_string()
+            };
+            say!(
+                "  {}: {collector}; {}",
+                clip(&v.id),
+                if v.complete { "complete" } else { "incomplete" }
+            );
+        }
+        for p in &r.problems {
+            say!("  {}", clip(p));
+        }
+        for c in &r.claims {
+            say!("  {} {}: {}", clip(&c.id), clip(&c.text), clip(&c.wording));
+            if !c.flags.is_empty() {
+                let flags: Vec<String> = c
+                    .flags
+                    .iter()
+                    .map(|f| {
+                        serde_json::to_value(f)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_string))
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                say!(
+                    "    {}: {}",
+                    apb_engine::evidence::FLAGS_WORDING,
+                    flags.join(", ")
+                );
+            }
+            for p in &c.problems {
+                say!("    {}", clip(p));
+            }
+            for f in &c.cites {
+                say!("    {}: \"{}\"", clip(&f.r#ref), clip(&f.fragment));
+            }
+        }
+    }
 }
 
 fn list_text(run_id: &str, view: &ResultsView) -> ExitCode {

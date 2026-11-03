@@ -209,6 +209,9 @@ fn observe_control(
 struct Rejection {
     reason: String,
     fatal: bool,
+    /// The attempt's journaled failure kind: `check_rejected` for claims
+    /// the evidence check refused, else none.
+    failure_kind: Option<String>,
 }
 
 impl Rejection {
@@ -216,12 +219,19 @@ impl Rejection {
         Rejection {
             reason,
             fatal: false,
+            failure_kind: None,
         }
     }
 }
 
+/// The failure kind of an attempt whose claims the evidence check refused
+/// under `on_invalid: fail`.
+pub(crate) const CHECK_REJECTED: &str = "check_rejected";
+
+#[allow(clippy::too_many_arguments)]
 fn success_check_rejection(
     protect_violation: Option<&str>,
+    evidence: Option<(&str, &apb_core::schema::Evidence)>,
     check: Option<&apb_core::schema::SuccessCheck>,
     run_dir: &Path,
     attempt_workdir: &Path,
@@ -233,6 +243,18 @@ fn success_check_rejection(
     // any check runs: the check would judge a tree the engine just restored.
     if let Some(reason) = protect_violation {
         return Ok(Some(Rejection::retry(reason.to_string())));
+    }
+    // The claims of an attempt with `evidence:`, checked against its
+    // session before the success decision; the verdicts are stored either
+    // way, and `on_invalid: fail` refuses an invalid outcome.
+    if let Some((session, spec)) = evidence
+        && let Some(reason) = crate::evidence::check::at_success(run_dir, session, spec)?
+    {
+        return Ok(Some(Rejection {
+            reason,
+            fatal: false,
+            failure_kind: Some(CHECK_REJECTED.to_string()),
+        }));
     }
     match check {
         // Deterministic sh-script check (spec 6.2): a non-zero exit rejects the
@@ -261,6 +283,7 @@ fn success_check_rejection(
                 return Ok(Some(Rejection {
                     reason: v.reason,
                     fatal: v.fatal,
+                    failure_kind: None,
                 }));
             }
             Ok((r.status != NodeStatus::Succeeded)
@@ -1349,6 +1372,9 @@ fn execute_node_kind(
             // A delayed retry continues the execution's attempt numbers.
             let mut attempt: u32 = continuation.as_ref().map_or(0, |c| c.attempt);
             let mut last_msg = String::new();
+            // The problems of the last attempt's claims that the evidence
+            // check refused (`on_invalid: fail`), told to the next attempt.
+            let mut evidence_refused: Option<String> = None;
             // The ordinary retries of this node wait out its `retry_delay`
             // (`super::deferred`), never the first attempt of a step.
             let retry_delay = playbook.effective_retry_delay(node);
@@ -1836,6 +1862,29 @@ fn execute_node_kind(
                             )),
                             _ => std::borrow::Cow::Borrowed(text.as_str()),
                         };
+                    // The attempt's evidence session (`crate::evidence`),
+                    // opened before it starts and bound to its
+                    // `attempt_started` in `on_spawn`.
+                    let evidence_session = match &node.evidence {
+                        Some(spec) => Some(crate::evidence::session::open(
+                            run_dir,
+                            &crate::evidence::session::Opening {
+                                run_id,
+                                node: node_id,
+                                item: key.item,
+                                attempt_number: attempt,
+                                stem: key.stem(attempt),
+                                spec,
+                            },
+                        )?),
+                        None => None,
+                    };
+                    // Every path between this and the explicit close below
+                    // leaves the session closed on the way out, so an early
+                    // error never leaves it readable.
+                    let mut evidence_guard = evidence_session
+                        .as_ref()
+                        .map(|s| crate::evidence::session::CloseGuard::new(run_dir, s));
                     let attempt_prompt: std::borrow::Cow<'_, str> = match &continued {
                         Some(_) if answer_round => std::borrow::Cow::Borrowed(text.as_str()),
                         // A handed-off session holds the earlier step, not
@@ -1877,11 +1926,29 @@ fn execute_node_kind(
                             super::attempt_memory::retry_briefing_now(run_dir, key)
                         )),
                     };
+                    let attempt_prompt = match (&evidence_session, &node.evidence) {
+                        (Some(session), Some(spec)) => std::borrow::Cow::Owned(format!(
+                            "{attempt_prompt}{}",
+                            crate::context::evidence_section(
+                                session,
+                                spec,
+                                spec.budget_chars
+                                    .unwrap_or(crate::grade::reader::DEFAULT_BUDGET_CHARS),
+                                evidence_refused.as_deref(),
+                            )
+                        )),
+                        _ => attempt_prompt,
+                    };
+                    // The note named the earlier attempt in this prompt;
+                    // clear it so a later attempt that fails some other way
+                    // does not inherit it.
+                    evidence_refused = None;
                     timeout_continuation = false;
                     let attempt_policy = spawn_env
                         .with_attempt(attempt)
                         .with_process(step_env.process.clone())
-                        .with_sandbox(place.sandbox.clone());
+                        .with_sandbox(place.sandbox.clone())
+                        .with_evidence(evidence_session.clone());
                     let task = AgentTask {
                         prompt: attempt_prompt.as_ref(),
                         model: &step.model,
@@ -1990,6 +2057,13 @@ fn execute_node_kind(
                             Ok(seq) => {
                                 started_seq.set(seq);
                                 super::provenance::attempt_started(run_dir, node_id, seq);
+                                if let Some(session) = &evidence_session
+                                    && let Err(e) = crate::evidence::session::bind_attempt(
+                                        run_dir, session, seq,
+                                    )
+                                {
+                                    *spawn_err.borrow_mut() = Some(e);
+                                }
                                 if let Err(e) = read_only::journal_check(
                                     journal,
                                     node_id,
@@ -2148,7 +2222,19 @@ fn execute_node_kind(
                         stall_hooks.as_ref(),
                         Some(&control_hooks),
                     );
-                    if let Some(e) = spawn_err.borrow_mut().take() {
+                    // The attempt ended: its evidence session serves no
+                    // more reads. The spawn or bind error is reported
+                    // first; a close error never hides it.
+                    if let Some(session) = &evidence_session {
+                        let closed = crate::evidence::session::close(run_dir, session);
+                        if let Some(g) = &mut evidence_guard {
+                            g.defuse();
+                        }
+                        if let Some(e) = spawn_err.borrow_mut().take() {
+                            return Err(e);
+                        }
+                        closed?;
+                    } else if let Some(e) = spawn_err.borrow_mut().take() {
                         return Err(e);
                     }
                     if let Some(e) = tick_err.borrow_mut().take() {
@@ -2604,6 +2690,7 @@ fn execute_node_kind(
                                 // cancellation here.
                                 let rejection = success_check_rejection(
                                     protect_violation.as_deref(),
+                                    evidence_session.as_deref().zip(node.evidence.as_ref()),
                                     node.success_check.as_ref(),
                                     run_dir,
                                     &attempt_workdir,
@@ -2621,7 +2708,13 @@ fn execute_node_kind(
                                     // and fallbacks exactly like an ordinary failure.
                                     // The raw agent text is preserved for the
                                     // downstream `nodes.<id>.rejected_output`.
-                                    Some(Rejection { reason, fatal }) => {
+                                    Some(Rejection {
+                                        reason,
+                                        fatal,
+                                        failure_kind,
+                                    }) => {
+                                        evidence_refused =
+                                            failure_kind.is_some().then(|| reason.clone());
                                         end.protected = protect_violation.is_some();
                                         end.check_rejected = true;
                                         last_close = close_now(&end);
@@ -2637,7 +2730,7 @@ fn execute_node_kind(
                                             summary: Some(report.summary.clone()),
                                             rejected_output: Some(report.output.clone()),
                                             partial_output: None,
-                                            failure_kind: None,
+                                            failure_kind,
                                             usage: report.usage.clone(),
                                         })?;
                                         if fatal {
@@ -2872,6 +2965,7 @@ fn execute_node_kind(
                                     // preserved (S3 behavior).
                                     match success_check_rejection(
                                         protect_violation.as_deref(),
+                                        evidence_session.as_deref().zip(node.evidence.as_ref()),
                                         node.success_check.as_ref(),
                                         run_dir,
                                         &attempt_workdir,
@@ -2944,7 +3038,13 @@ fn execute_node_kind(
                                                 });
                                             }
                                         }
-                                        Some(Rejection { reason, fatal }) => {
+                                        Some(Rejection {
+                                            reason,
+                                            fatal,
+                                            failure_kind,
+                                        }) => {
+                                            evidence_refused =
+                                                failure_kind.is_some().then(|| reason.clone());
                                             end.protected = protect_violation.is_some();
                                             end.check_rejected = true;
                                             last_close = close_now(&end);
@@ -2961,7 +3061,7 @@ fn execute_node_kind(
                                                 summary: None,
                                                 rejected_output: Some(output.clone()),
                                                 partial_output: None,
-                                                failure_kind: None,
+                                                failure_kind,
                                                 usage: failed_usage.clone(),
                                             })?;
                                             if fatal {

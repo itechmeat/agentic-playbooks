@@ -313,6 +313,8 @@ mod digest_binding_test;
 mod edge_route_test;
 #[path = "suite/event_test.rs"]
 mod event_test;
+#[path = "suite/evidence_test.rs"]
+mod evidence_test;
 #[cfg(unix)]
 #[path = "suite/execution_identity_test.rs"]
 mod execution_identity_test;

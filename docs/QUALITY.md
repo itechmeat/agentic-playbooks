@@ -190,6 +190,12 @@ workspace's redactor first, and every character it returns counts against
 the budget: a listing or a search stops when the budget is spent, as a
 read does.
 
+The reader and the citation rules are shared with the evidence sessions of
+node outputs (`docs/RESULTS.md`, "Evidence for node outputs"): there the
+records are those of result snapshots (`r:<snapshot>/<entry>`, a package
+record `@<id>`), a second reference family under the same rules. Grades
+keep their references and their meaning; `rules/1` is unchanged.
+
 ## Grading by a host
 
 A host agent grades the playbook's own criteria only when a person asks

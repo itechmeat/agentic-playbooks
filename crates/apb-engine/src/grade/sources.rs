@@ -13,11 +13,12 @@
 //! A run-level view is complete once the run has ended; a transcript view
 //! carries the completeness of its stream.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use apb_core::quality::criteria::ReadKind;
 
+use crate::citation::ViewSet;
 use crate::error::EngineError;
 use crate::event::EventPayload;
 use crate::run_retro::RetroRun;
@@ -28,30 +29,7 @@ pub const OUTPUTS: &str = "outputs";
 pub const CONNECTOR_CALLS: &str = "connector_calls";
 pub const FINDINGS: &str = "findings";
 
-/// One record of a view: its citation and its text before redaction.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SourceRecord {
-    pub r#ref: String,
-    pub text: String,
-}
-
-/// One readable view.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SourceView {
-    pub id: String,
-    pub kind: ReadKind,
-    pub complete: bool,
-    pub records: Vec<SourceRecord>,
-}
-
-impl SourceView {
-    pub fn chars(&self) -> u64 {
-        self.records
-            .iter()
-            .map(|r| r.text.chars().count() as u64)
-            .sum()
-    }
-}
+pub use crate::citation::views::{SourceRecord, SourceView};
 
 /// How a run ended, for a grade made while it is ending (the inline grade
 /// runs before `run_finished` is written).
@@ -72,11 +50,9 @@ pub struct RunSources {
     pub outcome: Option<String>,
     /// The parsed transcripts, in journal order (the facts rules read).
     pub transcripts: Vec<View>,
-    pub views: Vec<SourceView>,
-    /// Where each reference is: `(view, record)` indexes, every view that
-    /// holds it (a `j:` reference is in the journal and in a filtered
-    /// view).
-    index: HashMap<String, Vec<(usize, usize)>>,
+    /// The views, with where each reference is (a `j:` reference is in
+    /// the journal and in a filtered view).
+    pub views: ViewSet,
     /// The record texts went through a redactor already
     /// ([`RunSources::redact`]).
     redacted: bool,
@@ -116,19 +92,12 @@ impl RunSources {
                     .collect(),
             }
         }));
-        let mut index: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
-        for (vi, v) in views.iter().enumerate() {
-            for (ri, r) in v.records.iter().enumerate() {
-                index.entry(r.r#ref.clone()).or_default().push((vi, ri));
-            }
-        }
         Ok(RunSources {
             run_dir: run_dir.to_path_buf(),
             run,
             outcome,
             transcripts,
-            views,
-            index,
+            views: ViewSet::new(views),
             redacted: false,
         })
     }
@@ -139,11 +108,7 @@ impl RunSources {
         if self.redacted {
             return;
         }
-        for v in &mut self.views {
-            for r in &mut v.records {
-                r.text = redactor.redact(&r.text);
-            }
-        }
+        self.views.map_texts(|t| redactor.redact(t));
         self.redacted = true;
     }
 
@@ -153,27 +118,22 @@ impl RunSources {
     }
 
     pub fn view(&self, id: &str) -> Option<&SourceView> {
-        self.views.iter().find(|v| v.id == id)
+        self.views.view(id)
     }
 
     /// Every view that holds the record `r`.
     pub fn views_holding(&self, r: &str) -> impl Iterator<Item = &SourceView> {
-        self.index
-            .get(r)
-            .into_iter()
-            .flatten()
-            .map(|(v, _)| &self.views[*v])
+        self.views.holding(r)
     }
 
     /// The views of the kinds a criterion reads.
     pub fn views_of(&self, kinds: &[ReadKind]) -> impl Iterator<Item = &SourceView> {
-        self.views.iter().filter(move |v| kinds.contains(&v.kind))
+        self.views.of_kinds(kinds)
     }
 
     /// The record a citation names, wherever it is.
     pub fn record(&self, r: &str) -> Option<&SourceRecord> {
-        let (v, i) = *self.index.get(r)?.first()?;
-        Some(&self.views[v].records[i])
+        self.views.record(r)
     }
 
     pub fn run_id(&self) -> &str {

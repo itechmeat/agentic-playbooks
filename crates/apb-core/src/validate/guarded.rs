@@ -2,7 +2,8 @@
 //!
 //! An apb that does not know `approves`, `requires_approval` or
 //! `person_only` drops them on load and would decide and run the gate as a
-//! plain one. A run whose definition uses any of them carries a `run_guard`
+//! plain one; one that does not know `evidence` would run the node without
+//! its reading session and leave its claims unchecked. A run whose definition uses any of them carries a `run_guard`
 //! naming them after every checkpoint, so such an apb refuses to continue
 //! it. A later release adds names here instead of a new guard.
 
@@ -21,14 +22,18 @@ pub enum GuardedFeature {
     /// A node needs a gate's approval before it starts
     /// (`requires_approval`).
     RequiredApproval,
+    /// A node reads through an evidence session and its claims are checked
+    /// (`evidence`).
+    Evidence,
 }
 
 impl GuardedFeature {
     /// Every feature this binary knows, in declaration order.
-    pub const ALL: [GuardedFeature; 3] = [
+    pub const ALL: [GuardedFeature; 4] = [
         GuardedFeature::ApprovalBinding,
         GuardedFeature::PersonOnly,
         GuardedFeature::RequiredApproval,
+        GuardedFeature::Evidence,
     ];
 
     /// The name a `run_guard` carries.
@@ -37,6 +42,7 @@ impl GuardedFeature {
             GuardedFeature::ApprovalBinding => "approval_binding",
             GuardedFeature::PersonOnly => "person_only",
             GuardedFeature::RequiredApproval => "required_approval",
+            GuardedFeature::Evidence => "evidence",
         }
     }
 
@@ -61,6 +67,9 @@ pub fn guarded_features(playbook: &Playbook) -> Vec<GuardedFeature> {
         if node.requires_approval.is_some() {
             used.insert(GuardedFeature::RequiredApproval);
         }
+        if node.evidence.is_some() {
+            used.insert(GuardedFeature::Evidence);
+        }
     }
     used.into_iter().collect()
 }
@@ -83,7 +92,7 @@ mod tests {
     fn each_declaration_names_its_feature_once_in_order() {
         use GuardedFeature::*;
         let work = "  - { id: w, type: script, script: s, runner: sh }\n";
-        let cases: [(String, Vec<GuardedFeature>); 5] = [
+        let cases: [(String, Vec<GuardedFeature>); 6] = [
             (
                 format!("{work}  - {{ id: g, type: human_review }}\n"),
                 vec![],
@@ -110,6 +119,12 @@ mod tests {
                 ),
                 vec![ApprovalBinding, PersonOnly, RequiredApproval],
             ),
+            (
+                format!(
+                    "{work}  - {{ id: e, type: agent_task, prompt: p, evidence: {{ from: [w] }} }}\n"
+                ),
+                vec![Evidence],
+            ),
         ];
         for (nodes, want) in cases {
             assert_eq!(guarded_features(&playbook(&nodes)), want, "{nodes}");
@@ -121,6 +136,6 @@ mod tests {
         for f in GuardedFeature::ALL {
             assert_eq!(GuardedFeature::parse(f.as_str()), Some(f));
         }
-        assert_eq!(GuardedFeature::parse("evidence"), None);
+        assert_eq!(GuardedFeature::parse("evidence_v2"), None);
     }
 }

@@ -89,6 +89,8 @@ mod promotion_test;
 mod provenance_test;
 #[path = "suite/quality_test.rs"]
 mod quality_test;
+#[path = "suite/records_test.rs"]
+mod records_test;
 #[path = "suite/registry_test.rs"]
 mod registry_test;
 #[path = "suite/result_store_test.rs"]
@@ -119,6 +121,8 @@ mod validate_baseline_test;
 mod validate_budget_test;
 #[path = "suite/validate_duration_test.rs"]
 mod validate_duration_test;
+#[path = "suite/validate_evidence_test.rs"]
+mod validate_evidence_test;
 #[path = "suite/validate_fork_test.rs"]
 mod validate_fork_test;
 #[path = "suite/validate_goal_test.rs"]

@@ -131,7 +131,7 @@ impl ResultScope {
 }
 
 /// How a stored text entry is meant: plain text, or a records package
-/// (stored as metadata only until the records reader exists).
+/// ([`crate::records`]).
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -238,6 +238,12 @@ pub struct SnapshotEntry {
     /// The secret scrub changed the text; nothing of the original is kept.
     pub redacted: bool,
     pub format: ResultFormat,
+    /// For an entry declared `format: records` whose text is not a package
+    /// ([`crate::records::parse`]): the first problem. The entry is then
+    /// stored as `format: text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub records_invalid: Option<String>,
 }
 
 impl SnapshotEntry {
@@ -559,12 +565,16 @@ impl std::str::FromStr for EntryId {
     }
 }
 
-/// `r:<snapshot_id>/<entry>` with an optional byte range `#[a,b)` into the
-/// stored UTF-8 text.
+/// `r:<snapshot_id>/<entry>` with an optional record of a package
+/// `@<record id, percent-encoded>` ([`crate::records`]) and an optional
+/// byte range `#[a,b)` into the stored UTF-8 text (of the record's text,
+/// when a record is named).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Citation {
     pub snapshot_id: String,
     pub entry: EntryId,
+    /// One record of a records package, by id.
+    pub record: Option<String>,
     pub range: Option<(u64, u64)>,
 }
 
@@ -579,6 +589,8 @@ pub enum CitationError {
     Entry,
     /// The range is not `#[a,b)` with `a <= b`.
     Range,
+    /// The record part is not `@<record id, percent-encoded>`.
+    Record,
 }
 
 impl fmt::Display for CitationError {
@@ -588,6 +600,7 @@ impl fmt::Display for CitationError {
             CitationError::SnapshotId => "the snapshot id is not 64 lowercase hex characters",
             CitationError::Entry => "the entry is not output, fields or file:<scope>:<path>",
             CitationError::Range => "the range is not #[a,b) with a <= b",
+            CitationError::Record => "the record is not @<record id, percent-encoded>",
         })
     }
 }
@@ -597,6 +610,9 @@ impl std::error::Error for CitationError {}
 impl fmt::Display for Citation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "r:{}/{}", self.snapshot_id, self.entry)?;
+        if let Some(id) = &self.record {
+            write!(f, "@{}", crate::records::encode_id(id))?;
+        }
         if let Some((a, b)) = self.range {
             write!(f, "#[{a},{b})")?;
         }
@@ -617,9 +633,18 @@ impl std::str::FromStr for Citation {
             Some((entry, range)) => (entry, Some(parse_range(range)?)),
             None => (rest, None),
         };
+        // An entry never holds a literal `@` (a path segment encodes it).
+        let (entry, record) = match entry.split_once('@') {
+            Some((entry, id)) => (
+                entry,
+                Some(crate::records::decode_id(id).ok_or(CitationError::Record)?),
+            ),
+            None => (entry, None),
+        };
         Ok(Citation {
             snapshot_id: snapshot_id.to_string(),
             entry: entry.parse()?,
+            record,
             range,
         })
     }

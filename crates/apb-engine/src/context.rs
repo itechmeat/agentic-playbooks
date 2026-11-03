@@ -311,6 +311,41 @@ pub fn assemble_agent_prompt(
     text
 }
 
+/// The `## evidence` section of an attempt of a node with `evidence:` (see
+/// [`crate::evidence`]): its session, how to read through it, how to write
+/// claims, and the problems of the previous attempt's claims when the check
+/// refused them. Appended per attempt, outside the cache-keyed prompt.
+pub fn evidence_section(
+    session: &str,
+    spec: &apb_core::schema::Evidence,
+    budget_chars: u64,
+    refused: Option<&str>,
+) -> String {
+    let env = crate::evidence::SESSION_ENV;
+    let required = match spec.claims {
+        apb_core::schema::ClaimsRequirement::Required => {
+            "Claims are required: an output without them is unsupported."
+        }
+        apb_core::schema::ClaimsRequirement::Optional => "Claims are optional.",
+    };
+    let mut text = format!(
+        "\n\n## evidence\n\n\
+This step reads the results of earlier steps through evidence session `{session}` (also in {env}), with a budget of {budget_chars} characters. \
+Read with `apb evidence read --session {session} <op>` (op: `outline`, `children --view <view>`, `read --ref <ref> [--span <from>,<to>]`, `page --view <view>`, `search --phrase <text>`), or with the MCP tool `run_evidence_read` (session, op, ref, span, view, from, count, phrase). \
+Only a record returned whole by `read` or `page` may be cited; `outline`, `children` and `search` only show where to look. \
+Back your output with claims in the status file named by APB_STATUS_FILE: \
+\"outputs\": {{\"claims\": [{{\"id\": \"c1\", \"text\": \"what you state\", \"cites\": [{{\"ref\": \"r:...\", \"span\": [from, to]}}]}}]}}, \
+a span counting characters of the record as it was returned. \
+A claim that something is absent writes \"absence\": {{\"kinds\": [...]}} instead of cites and needs every view of those kinds read to its end. {required}\n"
+    );
+    if let Some(problems) = refused {
+        text.push_str(&format!(
+            "\nThe previous attempt's claims were refused; correct them:\n{problems}\n"
+        ));
+    }
+    text
+}
+
 /// The finish-answer composer's task statement (issue #70 item 1): its sole
 /// deliverable is a human-readable closing message summarizing the recorded run
 /// context; its whole reply IS that message, and it is handed no status/verdict

@@ -154,6 +154,7 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "run_grades",
         "run_results",
         "run_result_read",
+        "run_evidence_read",
         "playbook_candidate",
         "playbook_known_problems",
         "known_problem_decide",

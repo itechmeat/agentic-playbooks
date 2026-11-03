@@ -1,4 +1,6 @@
-//! A run's result snapshots on every surface (MCP `run_results` and
+//! A run's result snapshots and the claims its evidence sessions checked
+//! (`evidence`, see [`apb_engine::evidence::rows`]) on every surface (MCP
+//! `run_results` and
 //! `run_result_read`, `apb results`, the HTTP results routes), over
 //! [`apb_engine::result_view`], so they agree on bytes, digests and
 //! verdicts. Reading writes nothing; only [`run_results_clean`] removes
@@ -27,11 +29,16 @@ pub fn run_results(root: &Path, run_id: &str, node: Option<&str>) -> Result<Valu
         view.legacy.retain(|r| r.execution.node == node);
         view.not_stored.retain(|r| r.node == node);
     }
+    let mut evidence = apb_engine::evidence::rows(&dir);
+    if let Some(node) = node {
+        evidence.retain(|r| r.node == node);
+    }
     let answer = json!({
         "run_id": run_id,
         "rows": view.rows,
         "legacy": view.legacy,
         "not_stored": view.not_stored,
+        "evidence": evidence,
     });
     Ok(redacted_answer(root, &dir, answer))
 }

@@ -98,6 +98,10 @@
 //! reads an ended guard. E8 (synthetic): a `run_guard` naming a
 //! feature no apb knows; the new binary refuses to resume and stops it.
 //!
+//! Row E9 covers evidence for node outputs: a definition with `evidence`
+//! carries a `run_guard` naming `evidence` after `run_provenance`; both old
+//! binaries read the run, refuse to resume it and stop it.
+//!
 //! Row S1 covers scenario runs: a quick scenario run the new binary plays
 //! (`apb eval --level quick`) lives under `.apb/scenario-runs/` with
 //! `origin: scenario` in its manifest; neither old binary lists it, shows
@@ -4068,4 +4072,68 @@ fn e8_synthetic_unknown_guard_feature_new_refuses_resume_stop_goes_through() {
     );
     assert_eq!(case.journal_bytes(&run), before, "row E8: wrote nothing");
     case.stop(&new, &run);
+}
+
+// ------------------------------------------- evidence for node outputs (20c)
+
+/// Row E9's playbook: `work` (held while `hold.work` exists, its report
+/// snapshotted) feeds `read`, an agent_task that reads it through an
+/// evidence session; the run never gets that far.
+const E9_EVIDENCE: &str = r#"schema: 2
+id: corpus-evidence
+name: Journal corpus evidence run
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: script, script: "scripts/work.sh", runner: sh, results: [ { path: report.md } ] }
+  - { id: read, type: agent_task, prompt: "READ", profile: corpus, evidence: { from: [work], on_invalid: fail } }
+  - { id: ok, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: read }
+  - { from: read, to: ok }
+"#;
+
+/// Row E9: a run whose definition uses `evidence` carries a `run_guard`
+/// naming it right after `run_provenance`. With its driver gone while
+/// `work` runs, both old binaries read the run (the guard counted as an
+/// unknown event), refuse to resume it, naming `run_guard`, and stop it.
+#[test]
+fn e9_evidence_guard_old_binaries_read_refuse_resume_stop() {
+    let mut case = Case::new("row E9");
+    let new = new_binary();
+    case.seed_inline(
+        &new,
+        "corpus-evidence",
+        E9_EVIDENCE,
+        &[("work.sh", E_WORK_SH)],
+    );
+    fs::write(case.root().join("hold.work"), "").unwrap();
+    let run = case.start_inline(&new, "corpus-evidence", &[]);
+    let journal = case.wait_journal(&run, "work to start", |j| {
+        j.iter()
+            .any(|e| e["type"] == "node_started" && e["node"] == "work")
+    });
+    case.kill_driver(&run);
+    let provenance = journal
+        .iter()
+        .position(|e| e["type"] == "run_provenance")
+        .expect("run_provenance");
+    assert_run_guard_after(&journal, provenance, "row E9", &["evidence"]);
+    case.save();
+    // The orphaned script ends on its own; the saved state is the one read.
+    fs::remove_file(case.root().join("hold.work")).unwrap();
+    let Some((beta1, v025)) = old_readers(&case) else {
+        return;
+    };
+    for reader in [beta1, v025] {
+        let ran = case.read(&reader, &run);
+        assert!(
+            ran.stdout.contains("unknown event"),
+            "row E9: {} counts the guard it skipped: {ran:?}",
+            label(&reader)
+        );
+        case.resume_refused(&reader, &run, "run_guard");
+        case.stop(&reader, &run);
+    }
 }

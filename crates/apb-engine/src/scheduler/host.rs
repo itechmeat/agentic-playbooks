@@ -144,6 +144,11 @@ fn task_env(task: &AgentTask) -> BTreeMap<String, String> {
     if let Some(token) = &task.spawn_env.attempt_token {
         env.insert(crate::adapter::ATTEMPT_TOKEN_ENV.to_string(), token.clone());
     }
+    // The evidence session the host's subagent reads through MCP
+    // `run_evidence_read`; the prompt names it too.
+    if let Some(session) = &task.spawn_env.evidence_session {
+        env.insert(crate::evidence::SESSION_ENV.to_string(), session.clone());
+    }
     if let Some(sf) = &task.status_file {
         env.insert(
             "APB_STATUS_FILE".to_string(),

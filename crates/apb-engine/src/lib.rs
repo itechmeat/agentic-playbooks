@@ -16,6 +16,7 @@ pub mod budget;
 // candidate trials (issue #192)
 pub mod candidate;
 pub mod capture;
+pub(crate) mod citation;
 pub mod connector;
 // 0.24.0 irreversible consent
 pub mod consent;
@@ -33,6 +34,7 @@ pub mod execution_identity;
 // --- 0.24.0 eval suites ---
 pub mod eval;
 // --- end 0.24.0 eval suites ---
+pub mod evidence;
 pub mod failure_class;
 pub mod fit;
 // fork branch-failure policies and join refusals on the run surfaces (issue #195)

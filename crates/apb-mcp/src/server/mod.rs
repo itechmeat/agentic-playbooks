@@ -24,6 +24,7 @@ pub use args::*;
 
 mod decision;
 mod discover;
+mod evidence;
 mod judge;
 mod playbook;
 mod problems;
@@ -653,6 +654,7 @@ impl WfMcp {
             + Self::discover_router()
             + Self::judge_router()
             + Self::scenario_router()
+            + Self::evidence_router()
     }
 }
 

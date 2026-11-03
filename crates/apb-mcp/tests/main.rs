@@ -58,6 +58,8 @@ mod connector_policy;
 mod decision_ask_test;
 #[path = "suite/discover_tool_test.rs"]
 mod discover_tool_test;
+#[path = "suite/evidence_tool_test.rs"]
+mod evidence_tool_test;
 #[path = "suite/forward_patch_tool_test.rs"]
 mod forward_patch_tool_test;
 #[path = "suite/grade_tool_test.rs"]

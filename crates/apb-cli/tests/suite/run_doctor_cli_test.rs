@@ -502,6 +502,7 @@ mod results_cli {
                     digest,
                     redacted: p.redacted,
                     format: Default::default(),
+                    records_invalid: None,
                 });
             }
             let manifest = SnapshotManifest {
@@ -767,6 +768,7 @@ mod results_cli {
                     digest,
                     redacted: false,
                     format: Default::default(),
+                    records_invalid: None,
                 }],
                 omitted: Vec::new(),
                 incomplete: None,
@@ -999,6 +1001,7 @@ mod results_cli {
                     digest,
                     redacted: false,
                     format: Default::default(),
+                    records_invalid: None,
                 }],
                 omitted: Vec::new(),
                 incomplete: None,

@@ -28,7 +28,7 @@ nodes:
       - path: notes/summary.txt
         scope: run                      # relative to the run directory
       - path: records.jsonl
-        format: records                 # stored as text, marked as a package
+        format: records                 # a records package (see below)
 ```
 
 Each entry has:
@@ -39,9 +39,10 @@ Each entry has:
   tree (the `worktree` once it is resolved, else the project root), the
   same root `outputs.files` uses; a node's own `workdir` does not move it.
   `run` is the run directory `runs/<id>/`.
-- `format`: `text` (default) or `records`. A `records` entry is stored and
-  shown like text; the format is kept as metadata for a later reader of
-  record packages.
+- `format`: `text` (default) or `records`. A `records` entry is a
+  package an evidence session serves record by record (see "Evidence for
+  node outputs"). A file that does not parse as a package is stored as
+  `format: text` with `records_invalid` naming its first problem.
 
 `results: []` is a declaration too: the node keeps its output and fields,
 and no file.
@@ -426,6 +427,109 @@ inexact. Script nodes
 journal no attempts, and older runs carry no heads; their commit rows read
 as before.
 
+## Evidence for node outputs
+
+An `agent_task` with `evidence: { from, kinds?, claims?, on_invalid?,
+budget_chars? }` reads the latest stamped snapshots of its `from` nodes
+through a reading session the engine opens for every attempt, and backs its
+output with claims. The design is
+[2026-11-03-evidence-citations-design.md](superpowers/specs/2026-11-03-evidence-citations-design.md).
+
+### Record packages
+
+A `format: records` entry is UTF-8 JSON Lines: the first line a header
+`{"apb_records": 1, "complete": true|false, "source": "<text>"}`, then one
+record per line `{"id", "kind", "text", "source"?, "version"?, "at"?}`. An
+id matches `[A-Za-z0-9._:-]{1,128}` and is unique; a kind is a slug; at most
+10000 records. `complete` is the collector's own statement and is shown as
+such ("the collector says the package is complete"); a package from an
+incomplete snapshot, or one that lost entries, makes its views incomplete.
+Completeness relative to the outside world (all mail, all customers) is
+never promised.
+
+A package record is cited as `r:<snapshot_id>/<entry>@<record id>`, the id
+percent-encoded (`m:2` is `@m%3A2`).
+
+### The session
+
+The session file `runs/<id>/evidence/<session>.json` (private) holds the
+bound snapshot ids, the views (id, kind, complete, each record's reference,
+the digest of its stored text and whether it is citable), the budget and
+the read state; once the attempt ends, the read trace and the claim
+verdicts. No source text and no claim text is stored.
+
+Per bound snapshot the views are: `output` (one record), `fields`, one
+`file` view per plain text file, and per package one `records` view, or,
+when `kinds` is declared, one view per named kind (empty when the package
+has no record of it). With `kinds`, only views of those kinds are served.
+
+The agent gets the session id in a `## evidence` prompt section and in
+`APB_EVIDENCE_SESSION`; a host task carries both. It reads with `apb
+evidence read --session <id> <op>` or MCP `run_evidence_read`: `outline`,
+`children`, `read`, `page` and `search`, the grader's reader. Only a record
+returned whole by `read` or `page` may be cited; every returned text goes
+through the run redactor and counts against the budget. A record the
+redactor changes is served redacted and is never citable. A read from a
+step of another run, or after the attempt ended, is refused.
+
+### Claims
+
+The agent writes `outputs.claims` in its status file:
+
+```json
+{"claims": [
+  {"id": "c1", "text": "The March invoice was paid.",
+   "cites": [{"ref": "r:<snapshot>/file:workspace:mail.jsonl@m1", "span": [4, 30]}]},
+  {"id": "c2", "text": "No complaint arrived.", "absence": {"kinds": ["complaint"]}}
+]}
+```
+
+Spans are character offsets into the record text as served. At the end of
+a succeeded attempt each claim gets one verdict:
+
+| Verdict | Means |
+|---|---|
+| `structurally_valid` | every cited record is a record of this session, of an allowed kind, returned whole to this attempt, and every span is non-empty and inside it |
+| `absence_ok` | every view of the claimed kinds is complete and was read to its end |
+| `not_enough_data` | an absence over a view that is not complete (`incomplete_view`) |
+| `unsupported` | anything else, with its problems |
+
+`claims: required` makes a missing or empty list an unsupported output.
+`on_invalid: mark` keeps the node's status and marks the claims;
+`on_invalid: fail` fails the attempt with failure kind `check_rejected`, and
+the retry's prompt carries the problems. `not_enough_data` is an honest
+answer, not an invalid one. Each accepted citation is stored in the byte
+form `r:...#[a,b)` of the record's stored text.
+
+Every surface shows the same words. Next to a structurally valid claim:
+"Structurally valid: the cited record exists, was returned whole to this
+attempt, is of an allowed kind, and the span lies inside it. Whether it
+supports the claim was not checked." Next to an unsupported one: "Not
+supported by a cited record (not shown as a fact)." Each citation shows its
+fragment (the span, or the first 300 characters of the record), so a person
+compares. Worth a look, never an error: `whole_record` (no span),
+`short_span` (under 16 characters), `self_citation` (a record of the node's
+own earlier execution), `shared_record` (one record cited by more than five
+claims), `no_shared_words` (no word of four or more letters shared by the
+claim and its fragment).
+
+The claims show in `apb results <run>`, the `evidence` of MCP `run_results`
+and `GET /api/runs/{id}/results`, and the run page's Results panel.
+
+Guaranteed for a `structurally_valid` claim: the record exists in a stored
+snapshot named by this run's journal, was returned whole to this attempt
+through the engine's reader, is of a kind the declaration allows, and the
+span lies inside it; for an absence, every view of the named kinds was
+complete and read to its end. Not promised: that the record supports the
+claim, that the record is true (a node output is what an agent wrote), that
+the agent read nothing past the reader, or that a package is complete
+relative to the outside world. A record the agent read directly (a `cat` of
+the package) fails the check: that is an honest refusal, not a bypass.
+
+`isolation: full` with `evidence` is V159: the reader needs the run
+directory. A run whose definition uses `evidence` carries a `run_guard`
+naming `evidence`, so an older apb refuses to continue it.
+
 ## What is not promised
 
 For an execution apb snapshotted, the stored entries are the bytes of the
@@ -453,4 +557,6 @@ Every new field is display and storage only; no routing decision reads it.
 | `list_item_settled.result` | dropped; where the event itself is unknown it is skipped up to the next checkpoint, as every list event already is |
 | `artifacts_committed.attempt`, `artifacts_committed.attempts` | dropped |
 | the node field `results:` | dropped on load: the run takes no snapshot |
+| `SnapshotEntry.records_invalid` | dropped |
+| the node field `evidence:` | the run carries a `run_guard` naming `evidence`: an older apb refuses to resume it |
 | `runs/<id>/results/` | never opened |

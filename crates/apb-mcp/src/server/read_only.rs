@@ -78,6 +78,8 @@ pub const REMOVED_IN_READ_ONLY: &[&str] = &[
     "run_task_submit",
     "run_intent_resolve",
     "run_notify",
+    // Every read spends an evidence session's budget and writes its trace.
+    "run_evidence_read",
     "run_progress_report",
     "run_report_html",
     // Supervision.
