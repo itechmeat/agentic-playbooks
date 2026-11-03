@@ -28,12 +28,19 @@ pub(crate) enum Consume<'a> {
 /// an unattended run's declared decision).
 pub(crate) struct GateRequest {
     pub(crate) event: EventPayload,
-    pub(crate) auto: Option<(String, String)>,
-    /// Who decided `auto`: `model` for an enforced recommendation,
-    /// `unattended` for an unattended run's declared decision, stamped on
-    /// the channel entry and journaled as `decided_by`. `auto` is posted
-    /// only with a decider named here.
-    pub(crate) by: Option<crate::event::DecidedBy>,
+    /// A decision the engine posts by itself, with who decided it:
+    /// `model` for an enforced recommendation, `unattended` for an
+    /// unattended run's declared decision, stamped on the channel entry and
+    /// journaled as `decided_by`.
+    pub(crate) auto: Option<AutoDecision>,
+}
+
+/// A decision the engine posts for a gate: the option, its note, and who
+/// decided it (never a person).
+pub(crate) struct AutoDecision {
+    pub(crate) decision: String,
+    pub(crate) note: String,
+    pub(crate) by: crate::event::DecidedBy,
 }
 
 /// What one look at the gate found.
@@ -104,7 +111,7 @@ pub(crate) fn await_decision(
         // consumed and journaled like a person's decision but never reads
         // as one. A decision a person already queued wins (the channel
         // refuses a second one).
-        if let (Some((decision, note)), Some(by)) = (req.auto, req.by) {
+        if let Some(AutoDecision { decision, note, by }) = req.auto {
             let cmd = crate::review::ReviewCommand {
                 node: current.clone(),
                 decision,
@@ -255,8 +262,11 @@ pub(crate) fn human_review_request(
             recommendation: rec.recommendation,
             plan_digest: None,
         },
-        by: rec.auto.as_ref().map(|_| crate::event::DecidedBy::Model),
-        auto: rec.auto,
+        auto: rec.auto.map(|(decision, note)| AutoDecision {
+            decision,
+            note,
+            by: crate::event::DecidedBy::Model,
+        }),
     })
 }
 
@@ -283,8 +293,11 @@ pub(crate) fn unattended_review_request(
             recommendation: None,
             plan_digest: None,
         },
-        auto: Some(decision),
-        by: Some(crate::event::DecidedBy::Unattended),
+        auto: Some(AutoDecision {
+            decision: decision.0,
+            note: decision.1,
+            by: crate::event::DecidedBy::Unattended,
+        }),
     }
 }
 

@@ -333,7 +333,6 @@ fn request(node: &str, s: &Spec<'_>, plan: &Plan) -> GateRequest {
             plan_digest: Some(plan.digest.clone()),
         },
         auto: None,
-        by: None,
     }
 }
 

@@ -968,6 +968,17 @@ mod tests {
         }
         let unattended = vec![requested(1, "g"), unattended];
         assert!(matches!(l.label(&first, &unattended), Label::Unlabelled(_)));
+        // Nor is a model's enforced decision, by its decider alone (no
+        // `auto:` note to fall back on).
+        let mut by_model = decided(2, "g", "needs_changes", "");
+        if let EventPayload::ReviewDecided { decided_by, .. } = &mut by_model.payload {
+            *decided_by = Some(crate::event::DecidedBy::Model);
+        }
+        let by_model = vec![requested(1, "g"), by_model];
+        assert_eq!(
+            l.label(&first, &by_model),
+            Label::Unlabelled("the model decided the gate itself")
+        );
         // Shown to the reviewer outside shadow; acting never picks approve.
         assert!(!l.shown_to_labeller(&first));
         assert!(l.shown_to_labeller(&answered(

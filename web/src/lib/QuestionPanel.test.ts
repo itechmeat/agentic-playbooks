@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { render } from 'svelte/server'
+import { Window } from 'happy-dom'
 import QuestionPanel from './QuestionPanel.svelte'
 import type { QuestionEntry } from './rungates'
 
@@ -85,14 +86,16 @@ describe('QuestionPanel', () => {
   // The next-actions panel leaves the question's `answer_question` to this
   // card, so what an unattended run does there must show here, as on the CLI.
   it('shows what an unattended run does at the question, marked where it stops', () => {
-    const line = (unattended: QuestionEntry['unattended']) =>
-      render(QuestionPanel, {
+    const note = (unattended: QuestionEntry['unattended']) => {
+      const { body } = render(QuestionPanel, {
         props: { question: { runId: 'r', node: 'ask', question: 'Which?', options: [], unattended }, onAnswer: () => {} },
-      }).body
-    const defaults = line({ kind: 'answers_default' })
-    expect(defaults).toMatch(/<p class="unattended[^"]*"[^>]*data-testid="question-unattended"[^>]*>\s*unattended: posts the default answer at once/)
-    expect(defaults).not.toMatch(/class="unattended[^"]*\bstops\b/)
-    const fails = line({ kind: 'fails_run', code: 'hitl_required' })
-    expect(fails).toMatch(/class="unattended[^"]*\bstops\b[^"]*"[^>]*data-testid="question-unattended"[^>]*>\s*unattended: fails the run \(hitl_required\)/)
+      })
+      const doc = new Window().document
+      doc.body.innerHTML = body
+      const p = doc.querySelector('[data-testid="question-unattended"]')
+      return [p?.textContent?.trim(), p?.classList.contains('stops')]
+    }
+    expect(note({ kind: 'answers_default' })).toEqual(['unattended: posts the default answer at once', false])
+    expect(note({ kind: 'fails_run', code: 'hitl_required' })).toEqual(['unattended: fails the run (hitl_required)', true])
   })
 })
