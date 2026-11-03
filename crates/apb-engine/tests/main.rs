@@ -60,6 +60,22 @@ extern "C" fn isolate_config() {
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", &dir);
         std::env::remove_var("APB_CONFIG_DIR");
+        // The basis of a reported cost reads claude's login: a developer's
+        // own key or subscription login must not decide what a test sees.
+        std::env::set_var("CLAUDE_CONFIG_DIR", dir.join("claude"));
+        // Nor do the machine's managed claude settings: an empty system root.
+        std::env::set_var("APB_TEST_SYSTEM_ROOT", dir.join("system"));
+        for login in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        ] {
+            std::env::remove_var(login);
+        }
     }
 }
 

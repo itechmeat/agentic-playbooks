@@ -245,7 +245,15 @@ pub struct EvalResult {
     /// Why the invocation did not run every planned repetition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incomplete: Option<String>,
+    /// Every repetition's reported cost, any basis.
     pub total_cost_usd: f64,
+    /// `total_cost_usd` split by basis ([`EvalResult::cost_by_basis`]);
+    /// empty in a result an older apb stored.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::run_view::CostByBasis::is_empty"
+    )]
+    pub total_cost_by_basis: crate::run_view::CostByBasis,
     pub total_tokens: u64,
     /// The run journal the checks read lives in the agent's own tree, so the
     /// agent under test could have edited it (usage, route and deliverable
@@ -255,6 +263,21 @@ pub struct EvalResult {
 }
 
 impl EvalResult {
+    /// The repetitions' reported costs split by basis; a repetition an
+    /// older apb stored without a split counts as of unknown basis.
+    pub fn cost_by_basis(cases: &[CaseResult]) -> crate::run_view::CostByBasis {
+        let mut total = crate::run_view::CostByBasis::default();
+        for u in cases.iter().flat_map(|c| &c.repetitions).map(|r| &r.usage) {
+            match u.cost_usd {
+                Some(c) if u.cost_by_basis.is_empty() => {
+                    total.add(apb_core::agent_output::CostBasis::Unknown, c)
+                }
+                _ => total.merge(&u.cost_by_basis),
+            }
+        }
+        total
+    }
+
     /// Whether any repetition started a run (only then does the result
     /// carry a real configuration key).
     pub fn started_any(&self) -> bool {
@@ -463,6 +486,21 @@ pub fn latest_for<'a>(all: &'a [EvalResult], workspace: &str) -> Option<&'a Eval
     all.iter().rev().find(|r| r.workspace == workspace)
 }
 
+/// A repetition's cost split by basis; a figure stored without one (an
+/// older apb) is of unknown basis.
+fn rep_cost(u: &super::checks::RepUsage) -> String {
+    if !u.cost_by_basis.is_empty() {
+        return u.cost_by_basis.describe(|c| format!("${c:.4}"));
+    }
+    match u.cost_usd {
+        Some(c) => format!(
+            "${c:.4} {}",
+            apb_core::agent_output::CostBasis::Unknown.label()
+        ),
+        None => "n/a".into(),
+    }
+}
+
 fn money(v: Option<f64>) -> String {
     v.map(|c| format!("${c:.4}"))
         .unwrap_or_else(|| "n/a".into())
@@ -533,7 +571,7 @@ pub fn render_result(r: &EvalResult) -> String {
             .map(|(lo, hi)| format!(" [95% {lo:.2}-{hi:.2}]"))
             .unwrap_or_default();
         s.push_str(&format!(
-            "  {}: {}/{}{wilson}; median cost {}, median duration {}\n",
+            "  {}: {}/{}{wilson}; median reported cost {} (any basis), median duration {}\n",
             c.case,
             c.passes,
             c.of,
@@ -551,7 +589,7 @@ pub fn render_result(r: &EvalResult) -> String {
                     .map(|x| format!(", {x}"))
                     .unwrap_or_default(),
                 rep.usage.tokens(),
-                money(rep.usage.cost_usd)
+                rep_cost(&rep.usage)
             ));
             for ch in rep
                 .checks
@@ -570,8 +608,14 @@ pub fn render_result(r: &EvalResult) -> String {
             }
         }
     }
+    let split = EvalResult::cost_by_basis(&r.cases);
+    let split = if split.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", split.describe(|c| format!("${c:.4}")))
+    };
     s.push_str(&format!(
-        "  total: {} tokens, cost ${:.4}\n",
+        "  total: {} tokens, reported cost ${:.4} (any basis){split}\n",
         r.total_tokens, r.total_cost_usd
     ));
     if let Some(why) = &r.incomplete {
@@ -616,6 +660,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 cost_usd: Some(0.01),
+                ..RepUsage::default()
             },
             duration_ms: Some(2000),
             kept_worktree: None,
@@ -641,9 +686,51 @@ mod tests {
             cases: vec![CaseResult::new("c1", "sha256:case", reps)],
             incomplete: None,
             total_cost_usd: 0.0,
+            total_cost_by_basis: Default::default(),
             total_tokens: 0,
             journal_agent_writable: true,
         }
+    }
+
+    /// A repetition's cost says what it is; one an older apb stored
+    /// without a basis reads as of unknown basis.
+    #[test]
+    fn a_repetition_cost_is_shown_with_its_basis() {
+        let mut r = result("e1", 100, key("haiku"), &[true, true]);
+        r.cases[0].repetitions[1].usage.cost_by_basis.add(
+            apb_core::agent_output::CostBasis::SubscriptionEquivalent,
+            0.01,
+        );
+        let text = render_result(&r);
+        assert!(
+            text.contains("tokens, cost $0.0100 basis unknown"),
+            "{text}"
+        );
+        assert!(
+            text.contains("tokens, cost $0.0100 subscription equivalent, not billed"),
+            "{text}"
+        );
+    }
+
+    /// The total splits the repetitions' costs by basis, an older
+    /// repetition's unsplit cost as of unknown basis.
+    #[test]
+    fn the_total_is_split_by_basis() {
+        use apb_core::agent_output::CostBasis as B;
+        let mut r = result("e1", 100, key("haiku"), &[true, true, true]);
+        let reps = &mut r.cases[0].repetitions;
+        reps[0].usage.cost_by_basis.add(B::Billed, 0.01);
+        reps[1]
+            .usage
+            .cost_by_basis
+            .add(B::SubscriptionEquivalent, 0.01);
+        let text = render_result(&r);
+        assert!(
+            text.contains(
+                "(any basis): $0.0100 billed; $0.0100 subscription equivalent, not billed; $0.0100 basis unknown"
+            ),
+            "{text}"
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! ask-server, hermetic settings and a session record apb reads.
 
 pub mod actions;
+mod billing;
 pub mod hooks;
 pub mod mcp;
 pub mod output;
@@ -12,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{Interaction, SoulDelivery};
 
+use super::cost_basis::{CostFacts, CostReading};
 use super::forms::headless;
 use super::{Access, HomeBind, HomeCopy, SandboxNeeds};
 use super::{
@@ -189,6 +191,12 @@ impl HostSetup for ClaudeSetup {
             .filter_map(|e| e.ok())
             .map(|project| project.path().join(&file))
             .find(|candidate| candidate.is_file())
+    }
+
+    // An api key or a cloud account is billed; a subscription login prices
+    // work nobody is billed for (see `billing`).
+    fn cost_basis(&self, facts: &CostFacts) -> Option<CostReading> {
+        billing::cost_basis(facts)
     }
 
     // Checked against the variable names claude 2.1.311 reads.

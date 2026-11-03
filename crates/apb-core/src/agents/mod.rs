@@ -12,6 +12,7 @@
 
 mod agent;
 pub mod check;
+pub mod cost_basis;
 mod exposure;
 mod forms;
 pub mod hook_host;
@@ -41,7 +42,7 @@ pub use forms::{Forms, FreshForm, FreshSession, SessionListing};
 pub use hook_host::{HookRegistration, StopEvent, StopHookHost};
 pub use mcp_host::{McpHost, McpMethod, McpRegistration, McpServer};
 pub use output::{
-    AgentUsage, Conformance, OutputFormat, PlainText, Promises, Reply, UsageSource,
+    AgentUsage, Conformance, CostBasis, OutputFormat, PlainText, Promises, Reply, UsageSource,
     json_string_field,
 };
 pub use policy::{ClosedList, ModelPolicy, OpenModels};

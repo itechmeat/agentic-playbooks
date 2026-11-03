@@ -67,6 +67,9 @@ pub struct AttemptRetro {
     pub tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// What `cost_usd` is; present with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_basis: Option<apb_core::agent_output::CostBasis>,
     /// Host tasks the attempt handed out (a blocked task's follow-up is a
     /// second one).
     #[serde(skip_serializing_if = "is_zero")]
@@ -106,6 +109,9 @@ pub struct NodeRetro {
     pub tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// `cost_usd` split by basis.
+    #[serde(skip_serializing_if = "crate::run_view::CostByBasis::is_empty")]
+    pub cost_by_basis: crate::run_view::CostByBasis,
     /// The distinct models the attempts actually ran on, in order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
@@ -151,6 +157,9 @@ pub struct RetroReport {
     pub tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// `cost_usd` split by basis.
+    #[serde(skip_serializing_if = "crate::run_view::CostByBasis::is_empty")]
+    pub cost_by_basis: crate::run_view::CostByBasis,
     /// In the order the nodes first started.
     pub nodes: Vec<NodeRetro>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -384,6 +393,10 @@ impl Walk {
                 rec.failure_kind.clone_from(failure_kind);
                 rec.tokens = usage.as_ref().map(tokens_of);
                 rec.cost_usd = usage.as_ref().and_then(|u| u.cost_usd);
+                rec.cost_basis = usage
+                    .as_ref()
+                    .filter(|u| u.cost_usd.is_some())
+                    .map(|u| u.cost_basis);
             }
             EventPayload::HostTaskRequested {
                 task_id,
@@ -520,6 +533,7 @@ pub fn build(run: &RetroRun, history: &[StatsRun], compare_last: usize) -> Retro
     for n in &report.nodes {
         report.tokens = add_opt_u64(report.tokens, n.tokens);
         report.cost_usd = add_opt_f64(report.cost_usd, n.cost_usd);
+        report.cost_by_basis.merge(&n.cost_by_basis);
     }
     let compare_last = compare_last.min(MAX_COMPARE_LAST);
     report.baseline = baseline(&report, history, compare_last);
@@ -588,6 +602,9 @@ fn node_report(run: &RetroRun, id: &str, acc: NodeAcc, attempts: Vec<AttemptRetr
     for a in &attempts {
         n.tokens = add_opt_u64(n.tokens, a.tokens);
         n.cost_usd = add_opt_f64(n.cost_usd, a.cost_usd);
+        if let (Some(c), Some(b)) = (a.cost_usd, a.cost_basis) {
+            n.cost_by_basis.add(b, c);
+        }
         n.host_wait_ms = add_opt_u64(n.host_wait_ms, a.host_wait_ms);
         if let Some(m) = &a.model
             && !n.models.contains(m)

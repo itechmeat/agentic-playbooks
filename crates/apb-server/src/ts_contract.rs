@@ -91,6 +91,7 @@ fn render_types() -> String {
         apb_engine::progress::ProgressSummary::decl(&cfg),
         apb_engine::run_view::ChildRun::decl(&cfg),
         apb_engine::run_view::RunUsage::decl(&cfg),
+        apb_engine::run_view::CostByBasis::decl(&cfg),
         apb_engine::run_view::RunDecisions::decl(&cfg),
         apb_engine::run_view::RunDecisionUse::decl(&cfg),
         // Issue #193: the model each attempt actually ran on.
@@ -129,6 +130,7 @@ fn render_types() -> String {
         // --- end of 0.23.0 stats ---
         apb_core::agent_output::UsageSource::decl(&cfg),
         apb_core::agent_output::AgentUsage::decl(&cfg),
+        apb_core::agent_output::CostBasis::decl(&cfg),
         // Issue #192: candidate trials.
         apb_engine::candidate::CandidateTrial::decl(&cfg),
         // Issue #200: operator pause.
@@ -462,6 +464,14 @@ fn render_consts() -> String {
             label_entries(GapKind::ALL.iter().map(|k| (serde_key(k), k.label())))
         ));
     }
+    out.push_str(&format!(
+        "\n/** What a reported cost is, in words, by its basis. */\nexport const COST_BASIS_LABELS = {{ {} }} as const\n",
+        label_entries(
+            apb_core::agent_output::CostBasis::ALL
+                .iter()
+                .map(|b| (serde_key(b), b.label()))
+        )
+    ));
     {
         use apb_core::known_problems::recheck::{QUOTE_MAX, QUOTE_MIN};
         out.push_str(&format!(

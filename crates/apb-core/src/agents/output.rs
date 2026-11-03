@@ -181,12 +181,92 @@ pub struct AgentUsage {
     pub cache_read_tokens: u64,
     #[serde(default)]
     pub cache_write_tokens: u64,
-    /// The attempt's cost in US dollars, only when the CLI printed a
-    /// non-zero one (a subscription plan prints `0`, which is not a price).
+    /// The attempt's cost in US dollars as the CLI printed it, whatever its
+    /// basis ([`Self::cost_basis`] says whether anybody is billed for it).
+    /// A printed `0` is no figure and is left out: some CLIs print it on a
+    /// login they do not price, and a non-zero figure is no proof of money
+    /// spent either, since a CLI may price work a subscription covers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub cost_usd: Option<f64>,
     pub source: UsageSource,
+    /// What `cost_usd` is: money billed, the list price of work a
+    /// subscription covers, or not known. Absent in a journal an older apb
+    /// wrote, and a value a newer apb wrote reads as unknown.
+    #[serde(default)]
+    pub cost_basis: CostBasis,
+}
+
+/// What a reported cost is. apb never guesses it: the agent's own module
+/// tells it from facts it reads locally, else the person's declared
+/// subscription for the agent or provider, else it stays unknown
+/// (`crate::agents::cost_basis::resolve`).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(rename_all = "snake_case"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum CostBasis {
+    /// Money somebody is billed: an api key or a cloud account.
+    Billed,
+    /// What the work would cost at list price on a subscription that covers
+    /// it: nobody is billed this figure.
+    SubscriptionEquivalent,
+    /// Not known. A run budget counts it as money (`docs/HOWTO-authoring.md`,
+    /// "budget (run spend limit)").
+    #[default]
+    Unknown,
+}
+
+impl Serialize for CostBasis {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.key())
+    }
+}
+
+/// A basis this binary does not know (a newer apb wrote it, in any shape:
+/// another name, an object, `null`) reads as unknown, so the usage block
+/// around it still decodes.
+impl<'de> Deserialize<'de> for CostBasis {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(d)?;
+        Ok(CostBasis::ALL
+            .into_iter()
+            .find(|b| raw.as_str() == Some(b.key()))
+            .unwrap_or(CostBasis::Unknown))
+    }
+}
+
+impl CostBasis {
+    /// Every basis, billed first: the order a split lists them in.
+    pub const ALL: [CostBasis; 3] = [
+        CostBasis::Billed,
+        CostBasis::SubscriptionEquivalent,
+        CostBasis::Unknown,
+    ];
+
+    /// The journal's name of the basis.
+    pub fn key(self) -> &'static str {
+        match self {
+            CostBasis::Billed => "billed",
+            CostBasis::SubscriptionEquivalent => "subscription_equivalent",
+            CostBasis::Unknown => "unknown",
+        }
+    }
+
+    /// The plain words every surface shows next to a figure.
+    pub fn label(self) -> &'static str {
+        match self {
+            CostBasis::Billed => "billed",
+            CostBasis::SubscriptionEquivalent => "subscription equivalent, not billed",
+            CostBasis::Unknown => "basis unknown",
+        }
+    }
+
+    /// Whether a run budget's money limit counts a cost on this basis:
+    /// everything but a subscription equivalent, an unknown basis being
+    /// counted as the money it may be.
+    pub fn counts_as_money(self) -> bool {
+        self != CostBasis::SubscriptionEquivalent
+    }
 }
 
 /// The reply an agent CLI's machine output carries.
@@ -217,7 +297,7 @@ pub(super) fn u64_at(v: &Value, key: &str) -> u64 {
     v.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
-/// A reported cost, dropped when it is zero (not a price, see
+/// A reported cost, dropped when it is zero (no figure, see
 /// [`AgentUsage::cost_usd`]).
 pub(super) fn cost(v: Option<f64>) -> Option<f64> {
     v.filter(|c| c.is_finite() && *c > 0.0)

@@ -11,6 +11,7 @@ import type {
   VersionStats,
   Waits,
 } from './api.gen'
+import { costByBasisText, costWithBasis } from './runusage'
 import { EXPLAIN_CLASSES } from './consts.gen'
 import { classWord } from './runoverlay'
 import { tallyLeftOut } from './quality'
@@ -51,6 +52,10 @@ export function spendText(v: VersionStats): string | null {
   let line = `${(t.per_run ?? 0).toFixed(2)} tokens per run (${t.total} over ${t.runs} runs)`
   if (s.cost_per_run_usd !== undefined) {
     line += `, $${s.cost_per_run_usd.toFixed(4)} per run reported by ${s.runs_with_cost} of ${v.runs} runs`
+    // What the figures are: a per-run average mixes bases, the split says
+    // how much of it anybody is billed.
+    const split = s.cost_by_basis ? costByBasisText(s.cost_by_basis) : ''
+    line += ` (in all ${split || costWithBasis(s.cost_usd, undefined)})`
   }
   return line
 }

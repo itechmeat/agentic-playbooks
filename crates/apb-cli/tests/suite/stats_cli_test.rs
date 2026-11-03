@@ -273,3 +273,41 @@ fn stats_shows_quality_per_version_and_its_deltas() {
     assert_eq!(outcome["good_delta"], -0.5);
     assert_eq!(outcome["poor_delta"], 0.5);
 }
+
+/// `apb stats` splits the reported cost by basis, so a subscription
+/// equivalent nobody is billed never reads as money spent.
+#[test]
+fn stats_splits_the_cost_by_basis() {
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    let cfg = sandbox_config_dir();
+    let key = cfg.join("run-origin.key");
+    if !key.exists() {
+        fs::write(&key, "k".repeat(64)).unwrap();
+    }
+    for (id, cost, basis) in [
+        ("demo-1", 0.02, "billed"),
+        ("demo-2", 0.03, "subscription_equivalent"),
+    ] {
+        let run = dir.path().join(".apb/runs").join(id);
+        fs::create_dir_all(&run).unwrap();
+        let journal = format!(
+            r#"{{"seq":0,"ts":1790000000000,"type":"run_started","playbook":"demo","version":"1.0.0"}}
+{{"seq":1,"ts":1790000000000,"type":"node_started","node":"w","attempt":1}}
+{{"seq":2,"ts":1790000001000,"type":"attempt_finished","node":"w","attempt":1,"status":"succeeded","usage":{{"input_tokens":10,"output_tokens":5,"cost_usd":{cost},"source":"reported","cost_basis":"{basis}"}}}}
+{{"seq":3,"ts":1790000004000,"type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"ok","artifacts":[]}}
+{{"seq":4,"ts":1790000005000,"type":"run_finished","outcome":"succeeded"}}
+"#
+        );
+        fs::write(run.join("events.jsonl"), journal).unwrap();
+        apb_core::run_origin::stamp_in(cfg, &run, id).unwrap();
+    }
+    apb()
+        .args(["stats", "--playbook", "demo"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "cost by basis: $0.0200 billed; $0.0300 subscription equivalent, not billed",
+        ));
+}

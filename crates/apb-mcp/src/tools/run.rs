@@ -400,6 +400,11 @@ fn add_journal_extras(out: &mut Value, view: &apb_engine::run_view::RunView) {
     }
     if let Some(usage) = view.usage() {
         out["usage"] = json!(usage);
+        // The split in plain words, so a relayed cost always says whether
+        // anybody is billed it.
+        if !usage.cost_by_basis.is_empty() {
+            out["usage"]["cost_text"] = json!(usage.cost_by_basis.describe(|c| format!("${c:.4}")));
+        }
     }
     let isolation = view.isolation();
     if !isolation.is_empty() {

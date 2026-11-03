@@ -273,7 +273,11 @@ budget (`--max-usd`, else `budget.max_usd_per_invocation`, else 10 USD)
 keeps the next repetition from starting once the spend reported so far
 reaches it; the result is then marked `incomplete`.
 
-The budget and `max_usd` count only the cost an agent CLI reports. claude
+The budget and `max_usd` count only the cost an agent CLI reports, whatever
+its basis (a subscription equivalent included); the report shows each
+repetition's cost with its basis, the medians as reported costs of any
+basis, and the total of any basis followed by its split by basis (a
+repetition an older apb stored without a basis counts as unknown). claude
 reports one; codex does not, and a custom invocation form or a plain-text
 stub reports nothing. When a repetition reports no cost, `apb eval` warns
 once (`warnings` in `--json`) that the budget cannot be enforced for that
@@ -363,7 +367,9 @@ for every node with `environment: full`, as the `--dry-run --json` plan
 does); `result` has `eval_id`, `playbook`, `version`, `started_at_ms`,
 `finished_at_ms`, `apb_version`, `workspace`, `config_key`, `config`,
 `cases` (each with `case`, `case_digest`, `passes`, `of`, `wilson95`,
-`repetitions`), `incomplete`, `total_cost_usd`, `total_tokens` and
+`repetitions`), `incomplete`, `total_cost_usd`, `total_cost_by_basis`
+(`billed_usd`, `subscription_equivalent_usd`, `unknown_basis_usd`, each
+absent when no repetition reported a cost on it), `total_tokens` and
 `journal_agent_writable`; a repetition has
 `repetition`, `run_id`, `run_dir`, `verdict`, `outcome`, `stopped`,
 `checks`, `goal`, `usage`, `duration_ms` and `kept_worktree`.

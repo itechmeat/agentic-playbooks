@@ -69,7 +69,10 @@ and the report says the review was same-family.
 In a profile: `executor.agent`, `executor.model` and `executor.fallbacks`
 (each fallback an `{ agent, model }` entry) in the order above; the third
 rung, a fresh session, needs no entry. In a report: the role, the executor
-that ran, its rung and why it was chosen. Do not hardcode a model in a
+that ran, its rung and why it was chosen, and its cost line: the figure or
+"no figure", its basis (billed, subscription equivalent and not billed, or
+basis unknown) and the class of login it loaded (an api key, a subscription
+login, a cloud account, or unknown), never a secret value. Do not hardcode a model in a
 shared playbook; bind it through a profile.
 
 The role profiles `apb setup` writes rank the other usable agents by the

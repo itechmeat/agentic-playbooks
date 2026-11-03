@@ -135,6 +135,7 @@ fn usage_of(result: &Value) -> Option<AgentUsage> {
             cache_write_tokens: sum("cacheCreationInputTokens"),
             cost_usd: total_cost,
             source: UsageSource::Reported,
+            cost_basis: Default::default(),
         });
     }
     let u = result.get("usage").filter(|u| u.is_object())?;
@@ -145,5 +146,6 @@ fn usage_of(result: &Value) -> Option<AgentUsage> {
         cache_write_tokens: u64_at(u, "cache_creation_input_tokens"),
         cost_usd: total_cost,
         source: UsageSource::Reported,
+        cost_basis: Default::default(),
     })
 }

@@ -3219,7 +3219,7 @@ comparable past runs, and pauses the run before the node when it does not.
 ```yaml
 budget:
   tokens: 400000          # input plus output tokens of the run's agent attempts (cache excluded)
-  usd: 4.00               # cost the agent CLIs reported, in US dollars
+  usd: 4.00               # money the agent attempts cost, in US dollars (see "What counts as money")
   on_no_estimate: ask     # ask (default) | pause | continue
 ```
 
@@ -3230,6 +3230,57 @@ pauses the run before it, and `ask` makes the person decide at start (see
 below); an `ask` nobody answered acts as `pause`. One exception: a run that
 already spent its limit (what its attempts reported alone reaches it)
 pauses before the next gated node under `continue` too.
+
+**What counts as money.** Every cost an agent CLI reports carries its
+basis (`cost_basis` on `attempt_finished.usage`): `billed` (an api key or a
+cloud account), `subscription_equivalent` (the list price of work a
+subscription covers: some CLIs print a non-zero cost on a subscription
+login, and nobody is billed it) or `unknown`. The basis is never guessed,
+and a cost reads as a subscription equivalent only when the facts show a
+subscription login is what the agent uses; any doubt reads as `billed` or
+`unknown`. The agent's own module tells it from what it can read locally
+without a network call and without reading a secret value (which login
+variables reach the spawned process, by name; the agent's settings and
+login files, by key name); a module that does not know its agent's logins
+leaves it to a subscription you declared for the agent or for the provider
+of the model (`subscriptions:` in `<config_dir>/models.yaml`, written by
+`apb subscriptions` or MCP `subscriptions_set`; one declared with
+`coverage: partial` decides nothing); else it stays `unknown`.
+
+Today only claude's module tells a basis, and it decides every case itself
+(a declaration says what you pay for, not how the process logs in). It
+reads the login variables that reach claude and the same names in the
+`env` block of every settings file claude loads (the managed ones, your
+user settings unless the profile runs in the minimal environment, which
+leaves them out, the project's `.claude/settings.json` and
+`.claude/settings.local.json` in the working directory, and the local file
+at the root of the git repository around it, or of the main checkout for a
+worktree), their `apiKeyHelper` and `forceLoginMethod`, and the login
+claude recorded. A git variable that moves the repository claude finds
+(`GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`) or a `.git` entry apb cannot
+follow is `unknown`. claude reloads its settings while it works, so these
+facts are read before the attempt starts and again after it ends; when
+anything differs (a settings file changed, added or removed in between,
+or the login changed) the attempt's basis is `unknown`. A cloud provider switch
+is `billed`; `ANTHROPIC_BASE_URL` (a gateway or another endpoint) is
+`unknown`; a key, a key helper or a Console login (a key that login created,
+or `forceLoginMethod: console`) is `billed`; a settings file that cannot be
+read honestly (not a regular file, larger than 1 MiB, not JSON, a project
+file reached through a link) is `unknown`; a subscription token
+(`CLAUDE_CODE_OAUTH_TOKEN`) or a recorded subscription login of a known
+plan is a subscription equivalent; anything else is `unknown`. A host
+task's usage (host execution mode) has an unknown basis.
+
+The `usd` limit counts `billed` costs and costs of `unknown` basis (the
+conservative reading, as an attempt that reported no cost is estimated,
+never zero); a subscription equivalent never spends it (it counts as `0`,
+a known amount). The estimate's dollar figure is different: it is the price
+the work was reported at, whatever the login of the runs it was learned
+from, so the gate weighs a node at what it would cost when billed. History
+recorded on a subscription therefore never lets the same work through as
+free on an api key; a run on a subscription is weighed at list price before
+a node while spending nothing. There is no separate limit for subscription
+equivalents.
 
 **Precedence.** A run argument overrides the block per field: MCP
 `playbook_run` and `playbook_execute_plan` take `budget: { tokens, usd,
@@ -3263,6 +3314,9 @@ comparable runs it is indicative only. See `docs/STATS.md` for the method.
 - what is left is the limit minus what the run spent, minus the medians of
   the members of a parallel batch that were admitted and are still running
   (so parallel branches do not all pass against the same amount);
+- a cost on a subscription basis is money `0`; one of unknown basis counts
+  in full; a node's median is the price its work was reported at, whatever
+  the basis (see "What counts as money");
 - an attempt that reported no usage (or no cost, for dollars) is never
   counted as zero: it is estimated with its node's median per attempt, and
   when no median exists what was spent is unknown. What the attempts did

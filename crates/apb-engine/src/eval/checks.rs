@@ -77,6 +77,12 @@ pub struct RepUsage {
     pub output_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// `cost_usd` split by basis; empty in a result an older apb stored.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::run_view::CostByBasis::is_empty"
+    )]
+    pub cost_by_basis: crate::run_view::CostByBasis,
 }
 
 impl RepUsage {
@@ -86,6 +92,7 @@ impl RepUsage {
                 input_tokens: u.input_tokens,
                 output_tokens: u.output_tokens,
                 cost_usd: u.cost_usd,
+                cost_by_basis: u.cost_by_basis,
             },
             None => RepUsage::default(),
         }

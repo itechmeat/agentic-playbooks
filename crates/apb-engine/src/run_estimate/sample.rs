@@ -13,12 +13,21 @@ use crate::event::{Event, EventPayload};
 /// How deep a sub-playbook's own sub-playbooks are followed for spend.
 const CHILD_DEPTH: usize = apb_core::schema::MAX_SUBPLAYBOOK_DEPTH;
 
-/// One attempt's spend: billable tokens and reported cost, each `None` when
-/// the attempt did not report it.
+/// One attempt's spend: billable tokens, the money it cost and the price it
+/// was reported at, each `None` when the attempt did not report it.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct AttemptSpend {
     pub tokens: Option<u64>,
+    /// The money the attempt cost, what a run's budget counts as spent: the
+    /// reported figure unless it is a subscription equivalent, which costs
+    /// no money (`0`, a known amount). A figure of unknown basis counts as
+    /// money, the conservative reading
+    /// (`apb_core::agents::CostBasis::counts_as_money`).
     pub cost: Option<f64>,
+    /// The reported figure whatever its basis: what the work costs when it
+    /// is billed. Estimates predict from it, so history recorded on a
+    /// subscription never lets the same work through as free on a key.
+    pub price: Option<f64>,
 }
 
 impl AttemptSpend {
@@ -26,7 +35,14 @@ impl AttemptSpend {
     pub fn of(usage: Option<&apb_core::agent_output::AgentUsage>) -> Self {
         AttemptSpend {
             tokens: usage.map(crate::run_view::billable_tokens),
-            cost: usage.and_then(|u| u.cost_usd),
+            cost: usage.and_then(|u| {
+                if u.cost_basis.counts_as_money() {
+                    u.cost_usd
+                } else {
+                    Some(0.0)
+                }
+            }),
+            price: usage.and_then(|u| u.cost_usd),
         }
     }
 }
@@ -77,7 +93,8 @@ pub struct VisitSample {
     /// Billable tokens, only when every finished attempt in the visit
     /// reported usage.
     pub tokens: Option<u64>,
-    /// Reported cost, only when every finished attempt reported one.
+    /// The price reported (whatever its basis, see [`AttemptSpend::price`]),
+    /// only when every finished attempt reported one.
     pub cost: Option<f64>,
     pub active_ms: u64,
     pub attempts: u32,
@@ -199,6 +216,7 @@ pub fn sum_spend(attempts: &[AttemptSpend]) -> AttemptSpend {
     AttemptSpend {
         tokens: attempts.iter().map(|a| a.tokens).sum(),
         cost: attempts.iter().map(|a| a.cost).sum(),
+        price: attempts.iter().map(|a| a.price).sum(),
     }
 }
 
@@ -212,11 +230,11 @@ fn visit_of(
     let count = |f: fn(&AttemptSpend) -> bool| attempts.iter().filter(|a| f(a)).count() as u32;
     VisitSample {
         tokens: total.tokens,
-        cost: total.cost,
+        cost: total.price,
         active_ms,
         attempts: attempts.len() as u32,
         attempts_without_usage: count(|a| a.tokens.is_none()),
-        attempts_without_cost: count(|a| a.cost.is_none()),
+        attempts_without_cost: count(|a| a.price.is_none()),
         fell_back,
         status: status.to_string(),
     }
@@ -330,7 +348,7 @@ impl RunSample {
         for a in all {
             n += 1;
             no_usage += u32::from(a.tokens.is_none());
-            no_cost += u32::from(a.cost.is_none());
+            no_cost += u32::from(a.price.is_none());
         }
         (n, no_usage, no_cost)
     }

@@ -20,7 +20,7 @@
   import { listProgressByNode } from '../lib/listprogress'
   import { runGates, type QuestionEntry } from '../lib/rungates'
   import { postDecision, postReply, type PostTarget } from '../lib/runposts'
-  import { formatCost, formatTokens, runUsageSummary, unknownEventsNote } from '../lib/runusage'
+  import { formatCost, formatTokens, runCostNote, runUsageSummary, unknownEventsNote } from '../lib/runusage'
   import {
     currentStage,
     decisionSource,
@@ -159,24 +159,9 @@
   // Attempts started, from the journal: one meaning whether or not any
   // attempt reported usage.
   const attemptsTotal = $derived([...facts.values()].reduce((n, f) => n + f.attempts, 0))
-  // The reported cost reads as approximate when only some attempts reported
+  // The cost split by basis, approximate when only some attempts reported
   // one or apb estimated part of it, the way the usage line says it.
-  const costNote = $derived.by(() => {
-    const u = detail?.usage
-    if (!u || u.cost_usd === undefined) return null
-    const all = Math.max(u.finished_attempts ?? u.attempts, u.attempts)
-    const partial = u.cost_attempts < all
-    const why = [
-      partial ? `reported by ${u.cost_attempts} of ${all} attempts` : 'reported by every attempt',
-      u.estimated ? 'partly estimated by apb' : '',
-    ]
-      .filter(Boolean)
-      .join('; ')
-    return {
-      text: `${partial || u.estimated ? '~' : ''}${formatCost(u.cost_usd)}${partial ? ' partial' : ''}`,
-      title: why,
-    }
-  })
+  const costNote = $derived(detail?.usage ? runCostNote(detail.usage) : null)
   const parallel = $derived(detail ? maxParallel(detail) : null)
   const supervised = $derived(
     !!supervisor || (detail?.events ?? []).some((e) => e.type === 'supervisor_action' || e.type === 'wake_raised'),

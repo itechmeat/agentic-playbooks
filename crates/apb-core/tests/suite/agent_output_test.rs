@@ -34,9 +34,10 @@ fn claude_is_error_and_usage_without_a_model_breakdown() {
             output_tokens: 7,
             cache_read_tokens: 11,
             cache_write_tokens: 13,
-            // A zero cost is what a subscription prints, not a price.
+            // A printed zero is no figure.
             cost_usd: None,
             source: UsageSource::Reported,
+            cost_basis: Default::default(),
         }
     );
 }

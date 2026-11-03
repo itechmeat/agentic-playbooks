@@ -192,6 +192,12 @@ fn a_host_mode_run_reports_per_node_numbers_with_the_actual_model() {
     assert_eq!(report.duration_ms, Some(71_000));
     assert_eq!(report.tokens, Some(165));
     assert_eq!(report.cost_usd, Some(0.021));
+    // No attempt said what its cost is: the retro says so next to it.
+    assert!(
+        run_retro::text::render(&report).contains("cost $0.0210 basis unknown"),
+        "{}",
+        run_retro::text::render(&report)
+    );
     assert!(report.baseline.is_none());
     let goal = report.goal.as_ref().expect("the snapshot declares a goal");
     assert_eq!(goal.passed, 1);

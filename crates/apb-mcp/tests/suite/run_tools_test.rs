@@ -1233,6 +1233,49 @@ fn a_run_over_its_own_worktree_is_not_blocked_by_the_root_and_reports_it() {
     );
 }
 
+/// `run_status` and `run_report` split the reported cost by basis and say
+/// it in plain words, so an agent relaying the run never passes a
+/// subscription equivalent off as money spent.
+#[test]
+fn run_status_and_report_split_the_cost_by_basis() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let run = dir.path().join(".apb/runs/r-cost");
+    fs::create_dir_all(&run).unwrap();
+    let attempt = |seq: u64, cost: f64, basis: &str| {
+        format!(
+            r#"{{"seq":{seq},"ts":2,"type":"attempt_finished","node":"w","attempt":{seq},"status":"succeeded","usage":{{"input_tokens":10,"output_tokens":4,"cost_usd":{cost},"source":"reported","cost_basis":"{basis}"}}}}"#
+        )
+    };
+    let journal = [
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"noagent","version":"1.0.0"}"#
+            .to_string(),
+        attempt(1, 0.5, "billed"),
+        attempt(2, 0.25, "subscription_equivalent"),
+        attempt(3, 0.125, "unknown"),
+        r#"{"seq":4,"ts":5,"type":"run_finished","outcome":"succeeded"}"#.to_string(),
+    ]
+    .join("\n");
+    fs::write(run.join("events.jsonl"), journal + "\n").unwrap();
+    for out in [
+        run_status(dir.path(), "r-cost").unwrap(),
+        apb_mcp::tools::run_report(dir.path(), "r-cost").unwrap(),
+    ] {
+        assert_eq!(
+            out["usage"]["cost_by_basis"],
+            serde_json::json!({
+                "billed_usd": 0.5,
+                "subscription_equivalent_usd": 0.25,
+                "unknown_basis_usd": 0.125,
+            })
+        );
+        assert_eq!(
+            out["usage"]["cost_text"],
+            "$0.5000 billed; $0.2500 subscription equivalent, not billed; $0.1250 basis unknown"
+        );
+    }
+}
+
 /// A journal with token usage and an event a newer apb wrote (issue #167):
 /// `run_status` and `run_report` read it, report the usage totals and name
 /// the skipped event; a run without either carries neither field.

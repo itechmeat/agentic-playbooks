@@ -713,6 +713,97 @@ fn a_shown_estimate_is_recomputed_for_the_bindings_of_run_overrides() {
     assert_eq!(snap.unestimated, vec!["a".to_string()]);
 }
 
+/// The money limit counts only money: a cost printed for a subscription
+/// login (a price nobody is billed) never spends it, while the same figure
+/// on an api key does. The history runs and the gated run share the login.
+#[test]
+fn only_a_billed_cost_spends_the_money_budget() {
+    for (login, outcome) in [
+        ("CLAUDE_CODE_OAUTH_TOKEN", RunStatus::Succeeded),
+        ("ANTHROPIC_API_KEY", RunStatus::Paused),
+    ] {
+        let mut p = project(LINE);
+        p._env.push(common::EnvVar::set(login, "set-by-test"));
+        p.history(3);
+        let res = p.run(Some(BudgetRequest {
+            usd: Some(0.025),
+            ..BudgetRequest::default()
+        }));
+        assert_eq!(res.outcome, outcome, "{login}");
+        let dir = p.run_dir(&res.run_id);
+        let view = RunView::load(&dir, &res.run_id).unwrap();
+        let usd = view.budget(&dir).and_then(|b| b.usd).expect("a usd status");
+        let expected_spent = if outcome == RunStatus::Succeeded {
+            0.0
+        } else {
+            0.02
+        };
+        assert!(
+            (usd.spent - expected_spent).abs() < 1e-9,
+            "{login}: spent {}",
+            usd.spent
+        );
+    }
+}
+
+/// History recorded on a subscription costs no money, yet it must not let a
+/// later run on an api key through as if its work were free: the estimate
+/// predicts the price the work is reported at, whatever the login, so the
+/// billed run pauses before the node that would cross its limit.
+#[test]
+fn subscription_history_does_not_admit_billed_work_for_free() {
+    let (p, res) = billed_run_after_subscription_history(LINE, 0.025);
+    assert_eq!(res.outcome, RunStatus::Paused);
+    let dir = p.run_dir(&res.run_id);
+    let view = RunView::load(&dir, &res.run_id).unwrap();
+    let usd = view.budget(&dir).and_then(|b| b.usd).expect("a usd status");
+    assert!(usd.spent <= 0.025, "spent {}", usd.spent);
+}
+
+/// The same for a list node: the per-item price comes from subscription
+/// history too, so a billed list whose two-item batches cost $0.02 runs its
+/// first batch and pauses before the second, which no longer fits $0.025.
+#[test]
+fn subscription_history_does_not_admit_a_billed_list_batch_for_free() {
+    let yaml = crate::list_run_test::playbook(
+        &format!(
+            "items: {{ inline: {} }}\nbatch: {{ size: 2, parallel: 2 }}",
+            crate::list_run_test::inline_items(4)
+        ),
+        "",
+        "",
+    )
+    .replace("id: lst", "id: bud");
+    let (p, res) = billed_run_after_subscription_history(&yaml, 0.025);
+    assert_eq!(res.outcome, RunStatus::Paused);
+    let ev = p.events(&res.run_id);
+    let fold = apb_engine::list::ledger::ListFold::of(&ev, "work").unwrap();
+    assert_eq!(fold.counts().processed, 2);
+    let dir = p.run_dir(&res.run_id);
+    let view = RunView::load(&dir, &res.run_id).unwrap();
+    let usd = view.budget(&dir).and_then(|b| b.usd).expect("a usd status");
+    assert!(usd.spent <= 0.025, "spent {}", usd.spent);
+}
+
+/// Three history runs of `yaml` on a subscription token, then one on an api
+/// key with a money limit of `usd`.
+fn billed_run_after_subscription_history(
+    yaml: &str,
+    usd: f64,
+) -> (Project, apb_engine::scheduler::RunResult) {
+    let mut p = project(yaml);
+    let token = common::EnvVar::set("CLAUDE_CODE_OAUTH_TOKEN", "set-by-test");
+    p.history(3);
+    drop(token);
+    p._env
+        .push(common::EnvVar::set("ANTHROPIC_API_KEY", "set-by-test"));
+    let res = p.run(Some(BudgetRequest {
+        usd: Some(usd),
+        ..BudgetRequest::default()
+    }));
+    (p, res)
+}
+
 /// `a` fails once (with `flaky` present) and its retry waits a second.
 const DEFERRED: &str = "schema: 2\nid: bud\nname: Budget\nversion: 1.0.0\ndefaults: { profile: main }\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: agent_task, prompt: FLAKYA, max_retries: 1, retry_delay: { initial: 1s } }\n  - { id: b, type: agent_task, prompt: b }\n  - { id: c, type: agent_task, prompt: c }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: b, to: c }\n  - { from: c, to: done }\n";
 

@@ -541,12 +541,18 @@ export type RunUsage = {
 attempts: number, input_tokens: number, output_tokens: number, cache_read_tokens: number, cache_write_tokens: number, 
 /**
  * The sum of the costs the agent CLIs reported, absent when none did.
+ * It mixes bases; `cost_by_basis` splits it, and a surface shows the
+ * split rather than this sum alone.
  */
 cost_usd?: number, 
 /**
  * How many of `attempts` reported a cost, so a partial sum reads as one.
  */
 cost_attempts: number, 
+/**
+ * `cost_usd` split by what each figure is.
+ */
+cost_by_basis?: CostByBasis, 
 /**
  * At least one attempt's numbers are apb's own estimate rather than a
  * count the agent CLI printed (`source: estimated`).
@@ -558,6 +564,20 @@ estimated?: boolean,
  * ones off as all of them.
  */
 finished_attempts: number, };
+
+export type CostByBasis = { 
+/**
+ * Money billed.
+ */
+billed_usd?: number, 
+/**
+ * The list price of work a subscription covers; nobody is billed it.
+ */
+subscription_equivalent_usd?: number, 
+/**
+ * Figures whose basis is not known.
+ */
+unknown_basis_usd?: number, };
 
 export type RunDecisions = { 
 /**
@@ -752,7 +772,17 @@ runs_with_cost: number,
  * Finished attempts that reported a cost, over every finished attempt:
  * how much of the spend the cost figures cover.
  */
-cost_known: Rate, cost_usd: number, cost_per_run_usd?: number, };
+cost_known: Rate, 
+/**
+ * The reported costs of every run, whatever their basis;
+ * `cost_by_basis` splits it.
+ */
+cost_usd: number, cost_per_run_usd?: number, 
+/**
+ * `cost_usd` split by what each figure is: billed, a subscription
+ * equivalent nobody is billed, or of unknown basis.
+ */
+cost_by_basis?: CostByBasis, };
 
 export type ModelUse = { 
 /**
@@ -1016,10 +1046,21 @@ input_tokens: number,
  */
 output_tokens: number, cache_read_tokens: number, cache_write_tokens: number, 
 /**
- * The attempt's cost in US dollars, only when the CLI printed a
- * non-zero one (a subscription plan prints `0`, which is not a price).
+ * The attempt's cost in US dollars as the CLI printed it, whatever its
+ * basis ([`Self::cost_basis`] says whether anybody is billed for it).
+ * A printed `0` is no figure and is left out: some CLIs print it on a
+ * login they do not price, and a non-zero figure is no proof of money
+ * spent either, since a CLI may price work a subscription covers.
  */
-cost_usd?: number, source: UsageSource, };
+cost_usd?: number, source: UsageSource, 
+/**
+ * What `cost_usd` is: money billed, the list price of work a
+ * subscription covers, or not known. Absent in a journal an older apb
+ * wrote, and a value a newer apb wrote reads as unknown.
+ */
+cost_basis: CostBasis, };
+
+export type CostBasis = "billed" | "subscription_equivalent" | "unknown";
 
 export type CandidateTrial = { 
 /**
@@ -1232,8 +1273,10 @@ execution: string, comparable: Comparable, time: TimeEstimate,
  */
 tokens: SpendEstimate<number> | null, 
 /**
- * Reported cost over the estimated nodes; `None` when no comparable
- * attempt reported a cost.
+ * What the estimated nodes cost when billed: the reported figures
+ * whatever their basis (a subscription equivalent is priced like billed
+ * work, so subscription history never admits billed work as free);
+ * `None` when no comparable attempt reported a cost.
  */
 cost_usd: SpendEstimate<number> | null, nodes: Array<NodeEstimate>, 
 /**

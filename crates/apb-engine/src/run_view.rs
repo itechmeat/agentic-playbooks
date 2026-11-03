@@ -371,11 +371,20 @@ pub struct RunUsage {
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
     /// The sum of the costs the agent CLIs reported, absent when none did.
+    /// It mixes bases; `cost_by_basis` splits it, and a surface shows the
+    /// split rather than this sum alone.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub cost_usd: Option<f64>,
     /// How many of `attempts` reported a cost, so a partial sum reads as one.
     pub cost_attempts: u32,
+    /// `cost_usd` split by what each figure is.
+    #[serde(skip_serializing_if = "CostByBasis::is_empty")]
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<crate::run_view::CostByBasis>", optional)
+    )]
+    pub cost_by_basis: CostByBasis,
     /// At least one attempt's numbers are apb's own estimate rather than a
     /// count the agent CLI printed (`source: estimated`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -385,6 +394,76 @@ pub struct RunUsage {
     /// can say "5 attempts, 3 with usage" instead of passing the reporting
     /// ones off as all of them.
     pub finished_attempts: u32,
+}
+
+/// Reported costs split by their basis (`apb_core::agent_output::CostBasis`):
+/// each amount is absent when no attempt reported a figure on that basis.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CostByBasis {
+    /// Money billed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub billed_usd: Option<f64>,
+    /// The list price of work a subscription covers; nobody is billed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub subscription_equivalent_usd: Option<f64>,
+    /// Figures whose basis is not known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub unknown_basis_usd: Option<f64>,
+}
+
+impl CostByBasis {
+    /// Whether no figure was added.
+    pub fn is_empty(&self) -> bool {
+        self.parts().is_empty()
+    }
+
+    /// Adds `usd` on `basis`.
+    pub fn add(&mut self, basis: apb_core::agent_output::CostBasis, usd: f64) {
+        use apb_core::agent_output::CostBasis as B;
+        let slot = match basis {
+            B::Billed => &mut self.billed_usd,
+            B::SubscriptionEquivalent => &mut self.subscription_equivalent_usd,
+            B::Unknown => &mut self.unknown_basis_usd,
+        };
+        *slot = Some(slot.unwrap_or(0.0) + usd);
+    }
+
+    /// Adds every amount of `other`.
+    pub fn merge(&mut self, other: &CostByBasis) {
+        for (basis, usd) in other.parts() {
+            self.add(basis, usd);
+        }
+    }
+
+    /// The amounts present, billed first, with their basis.
+    pub fn parts(&self) -> Vec<(apb_core::agent_output::CostBasis, f64)> {
+        use apb_core::agent_output::CostBasis as B;
+        B::ALL
+            .into_iter()
+            .filter_map(|b| {
+                let v = match b {
+                    B::Billed => self.billed_usd,
+                    B::SubscriptionEquivalent => self.subscription_equivalent_usd,
+                    B::Unknown => self.unknown_basis_usd,
+                };
+                v.map(|v| (b, v))
+            })
+            .collect()
+    }
+
+    /// The amounts in plain words, each formatted by `money`:
+    /// `$0.0100 billed; $0.0125 subscription equivalent, not billed`.
+    pub fn describe(&self, money: impl Fn(f64) -> String) -> String {
+        self.parts()
+            .into_iter()
+            .map(|(b, v)| format!("{} {}", money(v), b.label()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
 }
 
 /// The tokens one attempt's usage counts toward a budget and the run
@@ -430,6 +509,7 @@ impl RunUsage {
             if let Some(c) = u.cost_usd {
                 total.cost_usd = Some(total.cost_usd.unwrap_or(0.0) + c);
                 total.cost_attempts = total.cost_attempts.saturating_add(1);
+                total.cost_by_basis.add(u.cost_basis, c);
             }
             total.estimated |= u.source == apb_core::agent_output::UsageSource::Estimated;
         }

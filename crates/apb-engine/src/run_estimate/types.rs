@@ -192,8 +192,10 @@ pub struct RunEstimate {
     pub time: TimeEstimate,
     /// Tokens over the estimated nodes; `None` when no node is estimated.
     pub tokens: Option<SpendEstimate<u64>>,
-    /// Reported cost over the estimated nodes; `None` when no comparable
-    /// attempt reported a cost.
+    /// What the estimated nodes cost when billed: the reported figures
+    /// whatever their basis (a subscription equivalent is priced like billed
+    /// work, so subscription history never admits billed work as free);
+    /// `None` when no comparable attempt reported a cost.
     pub cost_usd: Option<SpendEstimate<f64>>,
     pub nodes: Vec<NodeEstimate>,
     /// Gated nodes with no spend sample: the run figures leave them out.

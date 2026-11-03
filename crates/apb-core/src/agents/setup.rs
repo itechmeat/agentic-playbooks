@@ -3,8 +3,10 @@
 //! keeps under `process_env: allowlist`, and the run-scoped files it is
 //! pointed at.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use super::output::CostBasis;
 use super::sandbox::SandboxNeeds;
 use super::types::{AgentEnvSet, AuthHint, Authority};
 
@@ -99,6 +101,59 @@ pub trait HostSetup: Send + Sync {
     /// then refuses it and `best_effort` runs it without a sandbox.
     fn sandbox_needs(&self) -> Option<SandboxNeeds> {
         None
+    }
+
+    /// What a cost this agent reports is, from facts about the spawned
+    /// process (see [`CostFacts`]); `None` when the module cannot tell it
+    /// reliably, and the person's declared subscription decides
+    /// (`crate::agents::cost_basis::resolve`).
+    fn cost_basis(&self, _facts: &CostFacts) -> Option<CostReading> {
+        None
+    }
+}
+
+/// What a module may read about the process an attempt spawned, to tell its
+/// cost basis (`crate::agents::cost_basis`). `present` says whether a
+/// variable reaches the process (never its value); `setting` gives the value
+/// of a variable that is a path or a switch, and must not be asked for a
+/// credential; `home` is the operator's home directory; `workdir` is where
+/// the agent runs; `hermetic` says the agent runs in apb's minimal
+/// environment (its module's `hermetic_settings`), which leaves the user's
+/// own settings out; `system_root` is the root the machine-wide files
+/// (managed settings) are read under, `/` outside apb's own tests.
+pub struct CostFacts<'a> {
+    pub present: &'a dyn Fn(&str) -> bool,
+    pub setting: &'a dyn Fn(&str) -> Option<OsString>,
+    pub home: Option<&'a Path>,
+    pub workdir: Option<&'a Path>,
+    pub hermetic: bool,
+    pub system_root: &'a Path,
+}
+
+/// A basis with a digest of every fact it was decided from (never a
+/// credential value), so the readings taken before an attempt's spawn and
+/// after its exit can be compared ([`CostReading::across`], `crate::agents::cost_basis`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CostReading {
+    pub basis: CostBasis,
+    evidence: String,
+}
+
+impl CostReading {
+    pub fn new(basis: CostBasis, evidence: String) -> Self {
+        CostReading { basis, evidence }
+    }
+
+    /// The basis of an attempt read before its spawn and after its exit:
+    /// the one both readings agree on, from the same facts. A login or a
+    /// settings file that changed while the agent worked cannot tell how
+    /// its earlier calls were paid for, so the basis is unknown.
+    pub fn across(before: &CostReading, after: &CostReading) -> CostBasis {
+        if before == after {
+            before.basis
+        } else {
+            CostBasis::Unknown
+        }
     }
 }
 

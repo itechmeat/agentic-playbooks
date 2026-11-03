@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { attemptUsageNote, formatCost, formatTokens, runUsageSummary, unknownEventsNote } from './runusage'
+import { attemptUsageNote, formatCost, formatTokens, runCostNote, runUsageSummary, unknownEventsNote } from './runusage'
 import type { RunUsage } from './api.gen'
 
 const total: RunUsage = {
@@ -10,8 +10,11 @@ const total: RunUsage = {
   cache_write_tokens: 0,
   cost_attempts: 3,
   cost_usd: 0.4312,
+  cost_by_basis: { billed_usd: 0.3, subscription_equivalent_usd: 0.1312 },
   finished_attempts: 3,
 }
+
+const split = '$0.3000 billed; $0.1312 subscription equivalent, not billed'
 
 describe('formatTokens', () => {
   it('keeps small counts exact and abbreviates large ones', () => {
@@ -34,24 +37,29 @@ describe('formatCost', () => {
 })
 
 describe('runUsageSummary', () => {
-  it('lists the totals, skipping an empty cache write, and the reported cost', () => {
-    expect(runUsageSummary(total)).toBe('1.3k in · 820 out · 1.5M cache read · 3 attempts · $0.4312 reported')
+  it('lists the totals, skipping an empty cache write, and the cost split by basis', () => {
+    expect(runUsageSummary(total)).toBe(`1.3k in · 820 out · 1.5M cache read · 3 attempts · ${split}`)
+  })
+
+  it('says a cost from a server that reported no basis is of unknown basis', () => {
+    const { cost_by_basis: _, ...noBasis } = total
+    expect(runUsageSummary(noBasis)).toBe('1.3k in · 820 out · 1.5M cache read · 3 attempts · $0.4312 basis unknown')
   })
 
   it('says when only some attempts reported a cost or when counts are estimates', () => {
     expect(runUsageSummary({ ...total, cost_attempts: 1, estimated: true })).toBe(
-      "1.3k in · 820 out · 1.5M cache read · 3 attempts · $0.4312 reported by 1 of 3 · partly estimated by apb",
+      `1.3k in · 820 out · 1.5M cache read · 3 attempts · ${split} (reported by 1 of 3) · partly estimated by apb`,
     )
   })
 
   it('counts every attempt of the run and says how many reported usage', () => {
     expect(runUsageSummary({ ...total, cost_attempts: 3, finished_attempts: 5 })).toBe(
-      '1.3k in · 820 out · 1.5M cache read · 5 attempts, 3 with usage · $0.4312 reported by 3 of 5',
+      `1.3k in · 820 out · 1.5M cache read · 5 attempts, 3 with usage · ${split} (reported by 3 of 5)`,
     )
   })
 
   it('shows no cost when no attempt reported one', () => {
-    const { cost_usd: _, ...noCost } = total
+    const { cost_usd: _, cost_by_basis: __, ...noCost } = total
     expect(runUsageSummary({ ...noCost, attempts: 1, cost_attempts: 0, finished_attempts: 1 })).toBe('1.3k in · 820 out · 1.5M cache read · 1 attempt')
   })
 })
@@ -60,13 +68,31 @@ describe('attemptUsageNote', () => {
   it('renders an attempt_finished usage block', () => {
     expect(
       attemptUsageNote({ input_tokens: 18, output_tokens: 443, cache_read_tokens: 52079, cache_write_tokens: 14967, cost_usd: 0.0374, source: 'reported' }),
-    ).toBe('tokens: 18 in, 443 out, 52.1k cache read, 15k cache write, $0.0374')
+    ).toBe('tokens: 18 in, 443 out, 52.1k cache read, 15k cache write, $0.0374 basis unknown')
+    expect(
+      attemptUsageNote({ input_tokens: 1, output_tokens: 2, cost_usd: 0.0374, source: 'reported', cost_basis: 'subscription_equivalent' }),
+    ).toBe('tokens: 1 in, 2 out, $0.0374 subscription equivalent, not billed')
+    expect(attemptUsageNote({ input_tokens: 1, output_tokens: 2, cost_usd: 0.5, source: 'reported', cost_basis: 'billed' })).toBe(
+      'tokens: 1 in, 2 out, $0.5000 billed',
+    )
     expect(attemptUsageNote({ input_tokens: 5, output_tokens: 1, source: 'estimated' })).toBe('tokens: 5 in, 1 out, estimated')
   })
 
   it('is absent for an attempt without usage or with an unexpected shape', () => {
     expect(attemptUsageNote(undefined)).toBeUndefined()
     expect(attemptUsageNote({ tokens: 3 })).toBeUndefined()
+  })
+})
+
+describe('runCostNote', () => {
+  it('shows the cost split by basis, marked approximate when partial', () => {
+    expect(runCostNote(total)).toEqual({ text: split, title: 'reported by every attempt' })
+    expect(runCostNote({ ...total, cost_attempts: 1 })).toEqual({
+      text: `~${split} partial`,
+      title: 'reported by 1 of 3 attempts',
+    })
+    const { cost_usd: _, cost_by_basis: __, ...noCost } = total
+    expect(runCostNote(noCost)).toBeNull()
   })
 })
 
