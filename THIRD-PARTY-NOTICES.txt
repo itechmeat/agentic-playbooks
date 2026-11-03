@@ -14,7 +14,7 @@ PART 1. RUST CRATES
 
 The apb binary for the release targets (aarch64-apple-darwin,
 x86_64-apple-darwin, x86_64-unknown-linux-gnu, x86_64-unknown-linux-musl)
-includes 297 third-party crates. Where a crate offers a choice of
+includes 300 third-party crates. Where a crate offers a choice of
 licenses, the license listed is the one apb uses it under.
 
 --------------------------------------------------------------------------------
@@ -1362,7 +1362,7 @@ Apache License 2.0 (Apache-2.0)
 Used by:
   aws-lc-sys 0.45.0 https://github.com/aws/aws-lc-rs
   rmcp-macros 3.8.0 https://github.com/modelcontextprotocol/rust-sdk/
-  rmcp 3.7.0 https://github.com/modelcontextprotocol/rust-sdk/
+  rmcp 3.8.0 https://github.com/modelcontextprotocol/rust-sdk/
   ryu 1.0.23 https://github.com/dtolnay/ryu
   sync_wrapper 1.0.2 https://github.com/Actyx/sync_wrapper
 
@@ -1534,7 +1534,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 Creative Commons Zero v1.0 Universal (CC0-1.0)
 
 Used by:
-  notify 8.2.0 https://github.com/notify-rs/notify.git
+  notify 8.2.1 https://github.com/notify-rs/notify.git
 
 Creative Commons CC0 1.0 Universal
 
@@ -2186,8 +2186,8 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  libsqlite3-sys 0.38.2 https://github.com/rusqlite/rusqlite
-  rusqlite 0.40.2 https://github.com/rusqlite/rusqlite
+  libsqlite3-sys 0.39.1 https://github.com/rusqlite/rusqlite
+  rusqlite 0.41.1 https://github.com/rusqlite/rusqlite
 
 Copyright (c) 2014 The rusqlite developers
 
@@ -5007,8 +5007,8 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  jsonschema 0.58.5 https://github.com/Stranger6667/jsonschema
-  referencing 0.58.5 https://github.com/Stranger6667/jsonschema
+  jsonschema 0.60.2 https://github.com/Stranger6667/jsonschema
+  referencing 0.60.2 https://github.com/Stranger6667/jsonschema
 
 MIT License
 
@@ -5148,7 +5148,7 @@ SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  cliclack 0.5.6 https://github.com/fadeevab/cliclack
+  cliclack 0.5.7 https://github.com/fadeevab/cliclack
 
 MIT License
 
@@ -5291,12 +5291,15 @@ MIT License (MIT)
 Used by:
   aws-lc-sys 0.45.0 https://github.com/aws/aws-lc-rs
   axoupdater 0.10.3 https://github.com/axodotdev/axoupdater
-  hashify 0.2.9 https://github.com/stalwartlabs/hashify
+  encodify 1.0.2 https://github.com/stalwartlabs/encodify
+  hashify 0.3.2 https://github.com/stalwartlabs/hashify
   imap-proto 0.10.2 https://github.com/djc/tokio-imap
-  jsonschema-regex 0.58.5 https://github.com/Stranger6667/jsonschema
-  jsonschema-value 0.58.5 https://github.com/Stranger6667/jsonschema
-  mail-parser 0.11.9 https://github.com/stalwartlabs/mail-parser
+  jsonschema-regex 0.60.2 https://github.com/Stranger6667/jsonschema
+  jsonschema-value 0.60.2 https://github.com/Stranger6667/jsonschema
+  mail-parser 1.0.1 https://github.com/stalwartlabs/mail-parser
   num-cmp 0.1.0 https://github.com/lifthrasiir/num-cmp
+  objc2-core-foundation 0.3.2 https://github.com/madsmtm/objc2
+  objc2-core-services 0.3.2 https://github.com/madsmtm/objc2
   uuid-simd 0.8.0 https://github.com/Nugine/simd
   vsimd 0.8.0 https://github.com/Nugine/simd
 
@@ -5469,6 +5472,32 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
+--------------------------------------------------------------------------------
+MIT License (MIT)
+
+Used by:
+  simdutf8 0.1.5 https://github.com/rusticstuff/simdutf8
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License (MIT)
@@ -5709,7 +5738,7 @@ MIT License (MIT)
 Used by:
   aho-corasick 1.1.4 https://github.com/BurntSushi/aho-corasick
   byteorder-lite 0.1.0 https://github.com/image-rs/byteorder-lite
-  globset 0.4.20 https://github.com/BurntSushi/ripgrep/tree/master/crates/globset
+  globset 0.4.21 https://github.com/BurntSushi/ripgrep/tree/master/crates/globset
   memchr 2.8.3 https://github.com/BurntSushi/memchr
   walkdir 2.5.0 https://github.com/BurntSushi/walkdir
 
@@ -5774,34 +5803,6 @@ The MIT License (MIT)
 Copyright (c) 2015 Danny Guo
 Copyright (c) 2016 Titus Wormer <tituswormer@gmail.com>
 Copyright (c) 2018 Akash Kurdekar
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
---------------------------------------------------------------------------------
-MIT License (MIT)
-
-Used by:
-  fsevent-sys 4.1.0 https://github.com/octplane/fsevent-rust/tree/master/fsevent-sys
-
-The MIT License (MIT)
-
-Copyright (c) 2015 Pierre Baillet
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -6313,11 +6314,11 @@ the following restrictions:
 PART 2. WEB DASHBOARD (NPM PACKAGES)
 ================================================================================
 
-The web frontend embedded in apb includes 56 npm packages.
+The web frontend embedded in apb includes 55 npm packages.
 
   BSD-3-Clause: 1
   ISC: 10
-  MIT: 43
+  MIT: 42
   OFL-1.1: 2
 
 --------------------------------------------------------------------------------
@@ -6483,7 +6484,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-@dagrejs/dagre 3.1.2
+@dagrejs/dagre 3.1.3
 License: MIT
 Source: https://github.com/dagrejs/dagre
 
@@ -6917,7 +6918,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-@lucide/svelte 1.61.0
+@lucide/svelte 1.67.0
 License: ISC
 Source: https://github.com/lucide-icons/lucide
 
@@ -7150,6 +7151,7 @@ Copyright 2010-2022 Mike Bostock
 Permission to use, copy, modify, and/or distribute this software for any purpose
 with or without fee is hereby granted, provided that the above copyright notice
 and this permission notice appear in all copies.
+
 THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
 REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
 FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
@@ -7456,34 +7458,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-runed 0.28.0
-License: MIT
-Source: https://github.com/svecosystem/runed
-
-MIT License
-
-Copyright (c) 2024 Hunter Johnston <https://github.com/huntabyte>
-Copyright (c) 2024 Thomas G. Lopes <https://github.com/tglide>
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
---------------------------------------------------------------------------------
 runed 0.35.1
 License: MIT
 Source: https://github.com/svecosystem/runed
@@ -7512,7 +7486,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-shadcn-svelte 1.7.1
+shadcn-svelte 1.7.2
 License: MIT
 Source: https://github.com/huntabyte/shadcn-svelte
 
@@ -7594,7 +7568,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-svelte 5.57.2
+svelte 5.57.3
 License: MIT
 Source: https://github.com/sveltejs/svelte
 
@@ -7607,7 +7581,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-svelte-sonner 1.2.1
+svelte-sonner 1.2.3
 License: MIT
 Source: https://github.com/wobsoriano/svelte-sonner
 
@@ -7742,13 +7716,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-tailwind-variants 3.3.1
+tailwind-variants 4.0.1
 License: MIT
 Source: https://github.com/heroui-inc/tailwind-variants
 
 MIT License
 
-Copyright (c) 2020 Tailwid Variants
+Copyright (c) 2020 Tailwind Variants
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

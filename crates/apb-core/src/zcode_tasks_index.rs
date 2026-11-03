@@ -504,12 +504,7 @@ mod tests {
         // The one row, as column name -> JSON value.
         let row: serde_json::Map<String, serde_json::Value> = con
             .query_row("SELECT * FROM tasks", [], |r| {
-                let names: Vec<String> = r
-                    .as_ref()
-                    .column_names()
-                    .iter()
-                    .map(|n| n.to_string())
-                    .collect();
+                let names: Vec<String> = r.as_ref().column_names().map(|n| n.to_string()).collect();
                 let mut out = serde_json::Map::new();
                 for (i, name) in names.into_iter().enumerate() {
                     let v = match r.get_ref(i)? {
