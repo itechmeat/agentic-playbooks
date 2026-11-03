@@ -142,6 +142,19 @@ pub struct PlaybookRunArgs {
     /// `current` or `explicit`), passed back with confirm_launch.
     #[serde(default)]
     pub launch_choice: Option<String>,
+    /// unattended - run with no person watching (a CI job): every wait the
+    /// playbook gives no unattended outcome (a review without `unattended:
+    /// { decide }`, a publish, a question without a default) fails the run
+    /// at once with `hitl_required`, and a budget pause fails it with
+    /// `budget_exhausted`. It grants nothing: trust, the irreversible
+    /// consent and the launch policy are asked as for any start. It does
+    /// not combine with execution "host" or supervise "self" (refused with
+    /// unattended_unsupported before the run exists), and the run gets no
+    /// host fallback. Pass it only when the person asked for an
+    /// unattended run; each next action's `unattended` says what the mode
+    /// does at that wait.
+    #[serde(default)]
+    pub unattended: Option<bool>,
 }
 
 /// A run's budget argument. A predictive stop, not a security control: the

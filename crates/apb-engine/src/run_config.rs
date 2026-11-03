@@ -246,7 +246,27 @@ pub struct RunConfig {
     /// the defaults apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_limits: Option<apb_core::output_limits::OutputLimits>,
+    /// The run is unattended: a copy of the manifest's write-once
+    /// `unattended`, which is the authoritative record (an older apb's
+    /// rewrite of `run.yaml` drops this field). Carried here for the drive
+    /// and for the child runs it starts. `false` for every config written
+    /// before the field existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unattended: bool,
 }
+
+/// The run error code of an unattended run that reached a wait with no
+/// declared outcome (`hitl_required: <kind> `<node>` has no unattended
+/// outcome`).
+pub const HITL_REQUIRED: &str = "hitl_required";
+
+/// The run error code of an unattended run its budget stops instead of
+/// pausing.
+pub const BUDGET_EXHAUSTED: &str = "budget_exhausted";
+
+/// The start refusal of an unattended start the mode cannot hold (host
+/// execution, a supervised mode).
+pub const UNATTENDED_UNSUPPORTED: &str = "unattended_unsupported";
 
 /// The settings of an eval repetition's run (`apb eval`).
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]

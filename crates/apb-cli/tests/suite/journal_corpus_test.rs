@@ -51,9 +51,15 @@
 //! its guard (D1), released (D2), paused (D3), cut inside the guard's write
 //! (D4, synthetic), crashed before any checkpoint (D5) or closed (D6, D8);
 //! in D7 beta.1 starts the run and the new binary resumes it; in D9 the new
-//! binary's driver dies during the delay and the new binary resumes it. D8's
-//! `review_decided.decided_by` and `attempt_isolation.tree` belong to later
-//! features and are not in these journals yet.
+//! binary's driver dies during the delay and the new binary resumes it.
+//!
+//! Rows D11 to D13 cover the read-only node and unattended mode, with
+//! their playbooks inline: the old binaries load a playbook with every
+//! newer field (D11); an unattended run with `review_decided.decided_by`
+//! and `read_only_checked` is read, stopped and resumed by them and stays
+//! unattended for the new binary (D12); `read_only_violated` before its
+//! `node_finished` is skipped and routed the same (D13). The new-binary
+//! part of each runs without the old binaries.
 //!
 //! Rows 3 and 4 run with a real notification subscription the new writer
 //! takes at start: a filtered end-of-run notice (`finished:failed`) and the
@@ -2478,4 +2484,386 @@ fn d10_project(case: &Case, run: &str) {
         "{}: {ran:?}",
         case.name
     );
+}
+
+// ------------------------------------------- read-only node, unattended mode
+
+/// The stub profile `corpus` an `agent_task` of the rows below names (it
+/// never runs: validation only needs it to exist).
+fn seed_corpus_profile(root: &Path) {
+    let profile = root.join(".apb/profiles/corpus");
+    fs::create_dir_all(&profile).unwrap();
+    fs::write(
+        profile.join("profile.yaml"),
+        "name: corpus\ndescription: the stub agent\nexecutor:\n  agent: claude-code\n  model: haiku\n",
+    )
+    .unwrap();
+    fs::write(profile.join("SOUL.md"), "").unwrap();
+}
+
+impl Case {
+    /// `apb init` by the writer, the corpus playbooks, then playbook `id`
+    /// (`yaml`, with `scripts` under `scripts/`) and the stub profile.
+    fn seed_inline(&mut self, writer: &Path, id: &str, yaml: &str, scripts: &[(&str, &str)]) {
+        self.seed(writer);
+        let vdir = self.root().join(".apb/playbooks").join(id).join("1.0.0");
+        fs::create_dir_all(vdir.join("scripts")).unwrap();
+        fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
+        for (name, body) in scripts {
+            fs::write(vdir.join("scripts").join(name), body).unwrap();
+        }
+        fs::write(
+            self.root().join(".apb/playbooks").join(id).join("current"),
+            "1.0.0",
+        )
+        .unwrap();
+        seed_corpus_profile(&self.root());
+        // The profile's agent never runs; a binary that checks it can start
+        // finds a command.
+        self.env.retain(|(k, _)| *k != "APB_AGENT_CMD");
+        self.env.push(("APB_AGENT_CMD", "/bin/true".to_string()));
+    }
+
+    /// Starts `id` detached with `extra` flags and returns its run id.
+    fn start_inline(&mut self, writer: &Path, id: &str, extra: &[&str]) -> String {
+        let mut args = vec!["run", id, "--detach"];
+        args.extend_from_slice(extra);
+        let ran = self.run(writer, &args);
+        assert!(ran.ok(), "{}: apb {}: {ran:?}", self.name, args.join(" "));
+        let run = ran
+            .stdout
+            .lines()
+            .find_map(|l| l.strip_prefix("run started: "))
+            .unwrap_or_else(|| panic!("{}: no run id in {ran:?}", self.name))
+            .trim()
+            .to_string();
+        self.guards.push(RunGuard::new(&self.root(), &run));
+        run
+    }
+}
+
+/// Row D11's playbook: every playbook field 19c adds or uses (`outputs`, a
+/// node's `read_only` and `retry_delay`, a gate's `unattended`) in one
+/// definition. `look` is a read-only script that writes a file; `fix`
+/// never runs.
+const D11_FIELDS: &str = r#"schema: 2
+id: corpus-fields
+name: Journal corpus newer fields
+version: 1.0.0
+outputs:
+  look: { from: { node: look } }
+nodes:
+  - { id: start, type: start }
+  - { id: look, type: script, script: "scripts/write.sh", runner: sh, read_only: true }
+  - { id: gate, type: human_review, options: [approved, rejected], unattended: { decide: approved } }
+  - { id: fix, type: agent_task, prompt: "FIX", profile: corpus, max_retries: 1, retry_delay: { initial: 1s } }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: look }
+  - { from: look, to: gate }
+  - { from: gate, to: ok, condition: { type: review_status, equals: approved } }
+  - { from: gate, to: fix, condition: { type: review_status, equals: rejected } }
+  - { from: fix, to: no }
+"#;
+
+/// A script that changes the tree it runs in (the project root).
+const WRITE_SH: &str = "echo written >> written.txt\necho wrote\n";
+
+/// Row D11: beta.1 and 0.25.0 load a playbook with the newer fields: both
+/// validate it and run it, ignoring what they do not know (the read-only
+/// script writes and succeeds, the gate waits for a person, who approves).
+/// The new binary validates the same playbook and fails the read-only
+/// script `read_only_dirty`, with its declared output missing.
+#[test]
+fn d11_old_binaries_load_the_newer_playbook_fields() {
+    let new = new_binary();
+    let mut case = Case::new("row D11 (new)");
+    case.seed_inline(&new, "corpus-fields", D11_FIELDS, &[("write.sh", WRITE_SH)]);
+    let ran = case.run(&new, &["validate", "corpus-fields"]);
+    assert!(ran.ok(), "row D11: the new binary validates: {ran:?}");
+    let ran = case.run(&new, &["run", "corpus-fields", "--unattended"]);
+    assert_eq!(ran.code, Some(1), "row D11: the new run fails: {ran:?}");
+    let run = only_run_id(&case);
+    let journal = case.journal(&run);
+    assert!(
+        journal.iter().any(|e| e["type"] == "read_only_violated"
+            && e["node"] == "look"
+            && e["changes"][0]["path"] == "written.txt"),
+        "row D11: {}",
+        summary(&journal)
+    );
+    assert!(
+        journal.iter().any(|e| e["type"] == "node_finished"
+            && e["node"] == "look"
+            && e["status"] == "failed"
+            && e["output"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("read_only_dirty: "))),
+        "row D11: {}",
+        summary(&journal)
+    );
+    // The failure went on along the unconditional edge, so the run fails
+    // at its end naming the node.
+    assert_eq!(
+        last_of(&journal, "run_error").map(|e| e["node"].clone()),
+        Some(Value::from("look")),
+        "row D11: {}",
+        summary(&journal)
+    );
+    let ran = case.run(&new, &["runs", &run, "--outputs-json"]);
+    let o: Value = serde_json::from_str(&ran.stdout).unwrap();
+    assert_eq!(o["outputs"][0]["name"], "look", "row D11: {o:#}");
+    assert_eq!(o["outputs"][0]["reason"], "not_succeeded", "row D11: {o:#}");
+
+    for (tag, name) in [(BETA1, "row D11 (beta.1)"), (V025, "row D11 (0.25.0)")] {
+        let mut case = Case::new(name);
+        let Some(old) = old_binary(tag, &case) else {
+            continue;
+        };
+        case.seed_inline(&old, "corpus-fields", D11_FIELDS, &[("write.sh", WRITE_SH)]);
+        let ran = case.run(&old, &["validate", "corpus-fields"]);
+        assert!(ran.ok(), "{name}: validates: {ran:?}");
+        let run = case.start_inline(&old, "corpus-fields", &[]);
+        let journal = case.wait_journal(&run, "the gate", |j| {
+            j.iter().any(|e| e["type"] == "review_requested")
+        });
+        assert!(
+            journal.iter().any(|e| e["type"] == "node_finished"
+                && e["node"] == "look"
+                && e["status"] == "succeeded"),
+            "{name}: the read-only script wrote and succeeded: {}",
+            summary(&journal)
+        );
+        assert!(case.root().join("written.txt").is_file(), "{name}");
+        case.kill_driver(&run);
+        case.save();
+        case.approve_and_resume(&old, &run);
+    }
+}
+
+/// The run id of the case's only run.
+fn only_run_id(case: &Case) -> String {
+    let ids: Vec<String> = fs::read_dir(case.runs())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(ids.len(), 1, "{}: {ids:?}", case.name);
+    ids[0].clone()
+}
+
+/// Row D12's playbook: a read-only script that only reads, a gate the
+/// unattended run decides, a script the harness holds to pause the run,
+/// and a second gate with no unattended outcome.
+const D12_UNATTENDED: &str = r#"schema: 2
+id: corpus-unattended
+name: Journal corpus unattended run
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: look, type: script, script: "scripts/look.sh", runner: sh, read_only: true }
+  - { id: gate1, type: human_review, options: [approved, rejected], unattended: { decide: approved, note: ci } }
+  - { id: work, type: script, script: "scripts/work.sh", runner: sh, expected_duration: 10s }
+  - { id: gate, type: human_review, options: [approved, rejected] }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: look }
+  - { from: look, to: gate1 }
+  - { from: gate1, to: work, condition: { type: review_status, equals: approved } }
+  - { from: gate1, to: no, condition: { type: review_status, equals: rejected } }
+  - { from: work, to: gate }
+  - { from: gate, to: ok, condition: { type: review_status, equals: approved } }
+  - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
+"#;
+
+const LOOK_SH: &str = "cat playbook.yaml >/dev/null 2>&1; echo looked\n";
+
+/// The `work` script of the corpus writer: `work.started`, then held while
+/// `hold` exists.
+const WORK_SH: &str = ": > work.started\nwhile [ -f hold ]; do sleep 0.05; done\necho work done\n";
+
+/// The new binary resumes `run` (unattended): the plain gate fails the run
+/// `hitl_required`, so the run stayed unattended whoever drove it before.
+fn d12_new_resume_stays_unattended(case: &Case, run: &str) {
+    let new = new_binary();
+    let ran = case.run(&new, &["resume", run]);
+    assert_eq!(ran.code, Some(1), "{}: new resume: {ran:?}", case.name);
+    let journal = case.journal(run);
+    let error = last_of(&journal, "run_error").expect("a run_error");
+    assert_eq!(error["node"], "gate", "{}: {error}", case.name);
+    assert!(
+        error["reason"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("hitl_required: ")),
+        "{}: {error}",
+        case.name
+    );
+    assert_eq!(
+        last_of(&journal, "run_finished").map(|e| e["outcome"].clone()),
+        Some(Value::from("failed")),
+        "{}",
+        case.name
+    );
+}
+
+/// Row D12: the new binary runs `corpus-unattended` unattended: the
+/// read-only check is journaled (`read_only_checked`), gate 1 is decided
+/// `decided_by: unattended`, and its driver is lost while `work` runs,
+/// before gate 2. Both old binaries read it (skipping `read_only_checked`)
+/// and stop it; beta.1 resumes it and waits at gate 2 (`apb wait` exits
+/// 3); the new binary that resumes it afterwards still runs it
+/// unattended. Without the old
+/// binaries, the new binary's own resume of the saved state shows the same.
+#[test]
+fn d12_unattended_run_old_binaries_read_stop_resume_new_stays_unattended() {
+    let new = new_binary();
+    let mut case = Case::new("row D12");
+    case.seed_inline(
+        &new,
+        "corpus-unattended",
+        D12_UNATTENDED,
+        &[("look.sh", LOOK_SH), ("work.sh", WORK_SH)],
+    );
+    fs::write(case.root().join("hold"), "").unwrap();
+    let run = case.start_inline(&new, "corpus-unattended", &["--unattended"]);
+    case.wait_file("work.started");
+    let journal = case.wait_journal(&run, "work to start", |j| {
+        j.iter()
+            .any(|e| e["type"] == "node_started" && e["node"] == "work")
+    });
+    case.kill_driver(&run);
+    fs::remove_file(case.root().join("hold")).unwrap();
+    case.save();
+    assert!(
+        journal.iter().any(|e| e["type"] == "read_only_checked"
+            && e["node"] == "look"
+            && e["check"]["tier"] == "detected"),
+        "row D12: {}",
+        summary(&journal)
+    );
+    let decided: Vec<&Value> = journal
+        .iter()
+        .filter(|e| e["type"] == "review_decided")
+        .collect();
+    assert_eq!(decided.len(), 1, "row D12: {}", summary(&journal));
+    assert_eq!(decided[0]["node"], "gate1");
+    assert_eq!(decided[0]["decided_by"], "unattended");
+    assert!(
+        !journal
+            .iter()
+            .any(|e| e["type"] == "review_requested" && e["node"] == "gate"),
+        "row D12: stopped before gate 2"
+    );
+
+    // The new binary alone: it reads the run and its resume stays
+    // unattended.
+    let ran = case.read(&new, &run);
+    assert!(!ran.stdout.contains("unknown event"), "row D12: {ran:?}");
+    d12_new_resume_stays_unattended(&case, &run);
+
+    let Some((beta1, v025)) = old_readers(&case) else {
+        return;
+    };
+    for reader in [&beta1, &v025] {
+        let ran = case.read(reader, &run);
+        assert!(
+            ran.stdout.contains("unknown event"),
+            "row D12: {} skips read_only_checked: {ran:?}",
+            label(reader)
+        );
+        case.stop(reader, &run);
+    }
+    case.restore();
+    let resume = case.spawn(&beta1, &["resume", &run]);
+    case.wait_journal(&run, "beta.1 at gate 2", |j| {
+        j.iter()
+            .any(|e| e["type"] == "review_requested" && e["node"] == "gate")
+    });
+    let waited = case.run(&beta1, &["wait", &run, "--timeout", "30"]);
+    assert_eq!(waited.code, Some(3), "row D12: beta.1 waits: {waited:?}");
+    drop(resume);
+    case.forget_driver(&run);
+    d12_new_resume_stays_unattended(&case, &run);
+}
+
+/// Row D13's playbook: a read-only script that writes, whose failure is
+/// routed to the gate.
+const D13_VIOLATION: &str = r#"schema: 2
+id: corpus-violation
+name: Journal corpus read-only violation
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: script, script: "scripts/write.sh", runner: sh, read_only: true }
+  - { id: gate, type: human_review, options: [approved, rejected] }
+  - { id: clean, type: finish, outcome: success }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: gate, condition: { type: node_status, node: work, equals: failure } }
+  - { from: work, to: clean, condition: { type: node_status, node: work, equals: success } }
+  - { from: gate, to: ok, condition: { type: review_status, equals: approved } }
+  - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
+"#;
+
+/// Row D13: the new binary's read-only script changes the tree, so the run
+/// journals `read_only_violated` before `node_finished { failed }` and
+/// routes the failure to the gate, where it waits. Both old binaries read
+/// it, skipping the two read-only records with the count shown, and
+/// resume it with the routing of the new binary.
+#[test]
+fn d13_read_only_violation_old_binaries_skip_it_and_route_the_same() {
+    let new = new_binary();
+    let mut case = Case::new("row D13");
+    case.seed_inline(
+        &new,
+        "corpus-violation",
+        D13_VIOLATION,
+        &[("write.sh", WRITE_SH)],
+    );
+    let run = case.start_inline(&new, "corpus-violation", &[]);
+    let journal = case.wait_journal(&run, "the gate", |j| {
+        j.iter().any(|e| e["type"] == "review_requested")
+    });
+    case.kill_driver(&run);
+    case.save();
+    let violated = journal
+        .iter()
+        .position(|e| e["type"] == "read_only_violated")
+        .unwrap_or_else(|| panic!("row D13: {}", summary(&journal)));
+    let finished_at = journal
+        .iter()
+        .position(|e| e["type"] == "node_finished" && e["node"] == "work")
+        .expect("row D13: work finished");
+    assert!(violated < finished_at, "row D13: {}", summary(&journal));
+    assert_eq!(journal[finished_at]["status"], "failed");
+
+    let from = journal.len();
+    let ran = case.read(&new, &run);
+    assert!(!ran.stdout.contains("unknown event"), "row D13: {ran:?}");
+    case.approve_and_resume(&new, &run);
+    let expected = routing(&case.journal(&run), from);
+    let Some((beta1, v025)) = old_readers(&case) else {
+        return;
+    };
+    for reader in [beta1, v025] {
+        let ran = case.read(&reader, &run);
+        assert!(
+            ran.stdout.contains("unknown event"),
+            "row D13: {} skips the read-only records: {ran:?}",
+            label(&reader)
+        );
+        case.approve_and_resume(&reader, &run);
+        assert_eq!(
+            routing(&case.journal(&run), from),
+            expected,
+            "row D13: {} routes as the new binary",
+            label(&reader)
+        );
+        case.stop(&reader, &run);
+    }
 }

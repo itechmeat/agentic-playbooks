@@ -164,6 +164,9 @@ pub struct Request<'a> {
     /// The attempt's skill copies (an empty directory when the profile
     /// grants none, which still covers the tree's own skills).
     pub skills: Option<PathBuf>,
+    /// A `read_only` node: the tree and its git directories are bound
+    /// read-only.
+    pub read_only_tree: bool,
 }
 
 /// Builds one attempt's plan: gathers the facts, lays the sandbox home
@@ -262,6 +265,7 @@ pub fn build(req: &Request) -> Result<SandboxPlan, String> {
         helper: Some(helper.clone()),
         skills: req.skills.clone(),
         skill_points,
+        read_only_tree: req.read_only_tree,
     };
     Ok(SandboxPlan {
         bwrap: bw.path.clone(),
@@ -312,6 +316,23 @@ fn declared_extras(
         writable.push(c);
     }
     Ok((read_only, writable))
+}
+
+/// The first of the node's writable extra paths that resolves inside
+/// `tree` (or is the tree), as the reason a read-only node cannot run: the
+/// tree's read-only bind would cover it. `None` when there is none, or the
+/// tree cannot be resolved (the build refuses that itself).
+pub fn writable_inside_tree(spec: &IsolationSpec, tree: &Path) -> Option<String> {
+    let tree = tree.canonicalize().ok()?;
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    spec.writable.iter().find_map(|p| {
+        let c = paths::expand(p, &home).canonicalize().ok()?;
+        c.starts_with(&tree).then(|| {
+            format!(
+                "writable path `{p}` lies inside the tree of a read_only node, whose read-only bind would cover it"
+            )
+        })
+    })
 }
 
 fn push_unique(v: &mut Vec<PathBuf>, p: PathBuf) {

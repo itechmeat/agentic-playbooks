@@ -628,6 +628,7 @@ async fn supervise_self_returns_token() {
             notify: None,
             launch_version: None,
             launch_choice: None,
+            unattended: None,
             confirm_launch: None,
         }))
         .await;
@@ -688,6 +689,7 @@ async fn playbook_run_remember_keeps_the_input_for_this_project() {
             notify: None,
             launch_version: None,
             launch_choice: None,
+            unattended: None,
             confirm_launch: None,
         }))
         .await;
@@ -736,6 +738,7 @@ async fn playbook_run_remember_keeps_the_input_for_this_project() {
         notify: None,
         launch_version: None,
         launch_choice: None,
+        unattended: None,
         confirm_launch: None,
     };
     // A refused start remembers nothing.
@@ -795,6 +798,7 @@ async fn background_run_returns_run_id_without_blocking() {
             notify: None,
             launch_version: None,
             launch_choice: None,
+            unattended: None,
             confirm_launch: None,
         }))
         .await;
@@ -1957,6 +1961,7 @@ async fn global_scope_playbook_runs_in_current_project() {
             notify: None,
             launch_version: None,
             launch_choice: None,
+            unattended: None,
             confirm_launch: None,
         }))
         .await;
@@ -2108,6 +2113,7 @@ async fn a_host_request_under_the_kill_switch_returns_the_execution_note() {
             notify: None,
             launch_version: None,
             launch_choice: None,
+            unattended: None,
             confirm_launch: None,
         }))
         .await;
@@ -2223,6 +2229,7 @@ fn rel_args(
         notify: None,
         launch_version: None,
         launch_choice: None,
+        unattended: None,
         confirm_launch: None,
     }
 }
@@ -2713,6 +2720,7 @@ async fn playbook_run_refuses_a_param_without_a_value() {
             notify: None,
             launch_version: None,
             launch_choice: None,
+            unattended: None,
             confirm_launch: None,
         }))
         .await;
@@ -2876,5 +2884,123 @@ fn run_resume_retry_now_expedites_a_live_run() {
     assert_eq!(
         last(&dir),
         json!({"type": "retry_expedited", "node": "side", "by": "supervisor"})
+    );
+}
+
+// --- unattended mode: the MCP start surface ---
+
+/// A `playbook_run` of the seeded no-agent playbook, acknowledged.
+fn unattended_args(
+    id: &str,
+    unattended: Option<bool>,
+    supervise: Option<&str>,
+    execution: Option<&str>,
+    background: Option<bool>,
+) -> PlaybookRunArgs {
+    PlaybookRunArgs {
+        id: id.to_string(),
+        version: None,
+        params: BTreeMap::new(),
+        instruction: None,
+        supervise: supervise.map(str::to_string),
+        background,
+        acknowledge_untrusted: Some(true),
+        confirm_irreversible: None,
+        scope: None,
+        continued_from: None,
+        worktree: None,
+        execution: execution.map(str::to_string),
+        budget: None,
+        remember: None,
+        notify: None,
+        launch_version: None,
+        launch_choice: None,
+        unattended,
+        confirm_launch: None,
+    }
+}
+
+/// `playbook_run { unattended: true }` with `supervise: "self"` or
+/// `execution: "host"` is refused before any run file: the policy
+/// `unattended_unsupported` with a `fix_requirement` start action and a
+/// manual remedy, no supervisor token, and no run directory.
+#[tokio::test]
+async fn an_unattended_start_that_needs_a_watcher_is_refused_before_any_run_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    seed_noagent(dir.path());
+    let server = WfMcp::new(dir.path().to_path_buf());
+    for (supervise, execution, conflict) in [
+        (Some("self"), None, "autonomous_mode"),
+        (None, Some("host"), "cli_execution"),
+    ] {
+        let result = server
+            .playbook_run(Parameters(unattended_args(
+                "noagent_sv",
+                Some(true),
+                supervise,
+                execution,
+                None,
+            )))
+            .await;
+        let text = result_text(&result);
+        let v: serde_json::Value = serde_json::from_str(&text).expect("json body");
+        assert_eq!(
+            v["policy_refusal"]["policy"], "unattended_unsupported",
+            "{text}"
+        );
+        assert_eq!(v["policy_refusal"]["requirement"], conflict, "{text}");
+        assert!(v.get("supervisor_token").is_none(), "{text}");
+        let actions = v["start_actions"].as_array().expect("start actions");
+        assert_eq!(actions.len(), 1, "{text}");
+        assert_eq!(actions[0]["code"], "fix_requirement");
+        assert_eq!(actions[0]["remedy"]["remedy"], "manual");
+        let runs = dir.path().join(".apb/runs");
+        assert!(
+            fs::read_dir(&runs).map_or(true, |mut d| d.next().is_none()),
+            "a refused start wrote a run"
+        );
+    }
+}
+
+/// An unattended MCP start records the mode in the manifest and gets no
+/// host fallback even as a background start, which an attended background
+/// start does get; `run_status` says `unattended: true` only for it.
+#[tokio::test]
+async fn an_unattended_start_records_the_mode_and_gets_no_host_fallback() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    seed_noagent(dir.path());
+    let server = WfMcp::new(dir.path().to_path_buf());
+    let mut seen = Vec::new();
+    for unattended in [Some(true), None] {
+        let result = server
+            .playbook_run(Parameters(unattended_args(
+                "noagent_sv",
+                unattended,
+                None,
+                None,
+                Some(true),
+            )))
+            .await;
+        let text = result_text(&result);
+        assert_eq!(result.is_error, Some(false), "{text}");
+        let v: serde_json::Value = serde_json::from_str(&text).expect("json body");
+        let run_id = v["run_id"].as_str().expect("run_id").to_string();
+        let run_dir = dir.path().join(".apb/runs").join(&run_id);
+        let manifest = apb_engine::manifest::read(&run_dir)
+            .expect("manifest reads")
+            .unwrap_or_default();
+        let status = tools::run_status(dir.path(), &run_id).expect("run_status");
+        seen.push((
+            manifest.unattended,
+            manifest.falls_back_to_host(),
+            status.get("unattended").cloned(),
+        ));
+    }
+    assert_eq!(
+        seen,
+        [
+            (true, false, Some(serde_json::json!(true))),
+            (false, true, None)
+        ]
     );
 }

@@ -99,6 +99,13 @@ fn render_types() -> String {
         apb_engine::event::IsolationViewEntry::decl(&cfg),
         apb_engine::event::AttemptIsolation::decl(&cfg),
         apb_engine::run_view::AttemptIsolationRow::decl(&cfg),
+        // The read-only node: each attempt's check and what failed it.
+        apb_engine::event::ReadOnlyTier::decl(&cfg),
+        apb_engine::event::ReadOnlyLimit::decl(&cfg),
+        apb_engine::event::ReadOnlyCheck::decl(&cfg),
+        apb_engine::event::ReadOnlyChange::decl(&cfg),
+        apb_engine::run_view::ReadOnlyViolation::decl(&cfg),
+        apb_engine::run_view::ReadOnlyRow::decl(&cfg),
         // --- 0.23.0 stats (C3) ---
         apb_engine::run_stats::Rate::decl(&cfg),
         apb_engine::run_stats::PerRun::decl(&cfg),
@@ -201,6 +208,7 @@ fn render_types() -> String {
         apb_engine::next_action::ActionArg::decl(&cfg),
         apb_engine::next_action::AutoOutcome::decl(&cfg),
         apb_engine::next_action::AutoProgress::decl(&cfg),
+        apb_engine::next_action::UnattendedOutcome::decl(&cfg),
         apb_engine::next_action::NotReady::decl(&cfg),
         apb_engine::next_action::NextAction::decl(&cfg),
         apb_engine::next_action::StopVerdict::decl(&cfg),

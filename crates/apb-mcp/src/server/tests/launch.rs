@@ -40,6 +40,7 @@ fn start(confirm: Option<&Value>) -> PlaybookRunArgs {
         confirm_launch: arg("launch_nonce"),
         launch_version: arg("launch_version"),
         launch_choice: arg("launch_choice"),
+        unattended: None,
     }
 }
 

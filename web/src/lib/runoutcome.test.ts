@@ -170,6 +170,31 @@ describe('protected_paths_modified in the event journal', () => {
   })
 })
 
+describe('read_only_violated in the event journal', () => {
+  it('lists each changed path by name with its change and counts the ones left out', () => {
+    const events: WfEvent[] = [
+      {
+        seq: 1,
+        ts: 1,
+        type: 'read_only_violated',
+        node: 'scan',
+        attempt: 1,
+        tier: 'detected',
+        changes: [
+          { path: 'notes.md', change: 'modified' },
+          { path: '.env', change: 'added' },
+        ],
+        truncated: 4,
+      },
+      { seq: 2, ts: 2, type: 'read_only_violated', node: 'sh', attempt: 1, changes: [] },
+    ]
+    expect(runEventJournal(events).map((e) => e.note)).toEqual([
+      'read-only (detected) node changed the tree: modified notes.md, added .env, 4 more',
+      'read-only (detected) node changed the tree: changed',
+    ])
+  })
+})
+
 describe('inboxGapLine', () => {
   it('names one lost event or a range of them', () => {
     const gap = { node: 'watch', connector: 'echo-hooks', account: 'main', from: 4, through: 4 }

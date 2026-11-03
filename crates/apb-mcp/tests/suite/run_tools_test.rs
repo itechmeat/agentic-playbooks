@@ -1152,6 +1152,7 @@ fn run_wait_answer_is_built_from_the_observation_the_wait_decided_on() {
         decision: "approved".into(),
         note: String::new(),
         plan_digest: None,
+        decided_by: None,
     })
     .unwrap();
 

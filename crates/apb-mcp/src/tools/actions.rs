@@ -263,6 +263,10 @@ pub fn render(a: &NextAction, caller: ActionCaller) -> Value {
     if let Some(auto) = &a.auto {
         out["auto"] = json!(auto);
     }
+    // What an unattended run does at this wait, on every run.
+    if let Some(u) = &a.unattended {
+        out["unattended"] = json!(u);
+    }
     out
 }
 
@@ -296,7 +300,7 @@ pub fn of_view(
 /// A start refusal with the start actions that answer it: the refusal
 /// object itself, with `start_actions` added when there is any.
 pub fn refusal_with_actions(of: StartOf<'_>, refusal: Value) -> Value {
-    let actions = apb_engine::next_action::start::from_refusal(of, &refusal);
+    let actions = start_actions(of, &refusal);
     with_start_actions(refusal, &actions)
 }
 
@@ -304,8 +308,13 @@ pub fn refusal_with_actions(of: StartOf<'_>, refusal: Value) -> Value {
 /// `policy_refusal` as before, and beside it the `start_actions` that
 /// answer it.
 pub fn policy_refusal(of: StartOf<'_>, refusal: Value) -> Value {
-    let actions = apb_engine::next_action::start::from_refusal(of, &refusal);
+    let actions = start_actions(of, &refusal);
     with_start_actions(json!({ "policy_refusal": refusal }), &actions)
+}
+
+/// The start actions of a refusal, as the engine names them.
+pub fn start_actions(of: StartOf<'_>, refusal: &Value) -> Vec<StartAction> {
+    apb_engine::next_action::start::from_refusal(of, refusal)
 }
 
 /// `value` (an object) with `start_actions` set to `actions`, left as it
@@ -343,6 +352,7 @@ mod tests {
             not_ready: None,
             auto: None,
             command: None,
+            unattended: None,
             reason: "node `ask` asks a question".into(),
         }
     }
@@ -410,6 +420,28 @@ mod tests {
             },
             required: true,
         }
+    }
+
+    /// Every rendered action carries what an unattended run does at the
+    /// wait, in the engine's shape, and nothing where it does not apply.
+    #[test]
+    fn a_rendered_action_carries_its_unattended_outcome() {
+        let mut a = action(ActionCode::DecideReview, vec![Principal::Person], vec![]);
+        assert!(render(&a, ActionCaller::Host).get("unattended").is_none());
+        a.unattended = Some(apb_engine::next_action::UnattendedOutcome::Decides {
+            option: "approve".into(),
+        });
+        assert_eq!(
+            render(&a, ActionCaller::Host)["unattended"],
+            json!({ "kind": "decides", "option": "approve" })
+        );
+        a.unattended = Some(apb_engine::next_action::UnattendedOutcome::FailsRun {
+            code: apb_engine::run_config::HITL_REQUIRED.into(),
+        });
+        assert_eq!(
+            render(&a, ActionCaller::Supervisor)["unattended"],
+            json!({ "kind": "fails_run", "code": "hitl_required" })
+        );
     }
 
     #[test]

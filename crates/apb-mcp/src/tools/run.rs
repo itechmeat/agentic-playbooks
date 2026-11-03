@@ -43,6 +43,8 @@ pub struct StartArgs {
     pub notify: Option<apb_core::notify::NotifyRequest>,
     /// The launch check's grant from the permit, recorded by the engine.
     pub launch: Option<apb_engine::gate::launch::LaunchGrant>,
+    /// The run is unattended (checked first by `apb_engine::gate::check_unattended`).
+    pub unattended: bool,
 }
 
 /// The engine options of an MCP start in `mode`. Fail-fast on a busy
@@ -69,6 +71,7 @@ pub fn start_options(a: StartArgs, mode: RunMode) -> RunOptions {
         estimate: a.estimate,
         notify: a.notify,
         launch: a.launch,
+        unattended: a.unattended,
         ..RunOptions::default()
     }
 }
@@ -195,6 +198,11 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
     }
     if !execution.is_null() {
         out["execution"] = execution;
+    }
+    // The run is unattended (its manifest's write-once record): absent for
+    // an attended run.
+    if apb_engine::run_view::run_unattended(&dir) {
+        out["unattended"] = json!(true);
     }
     if let Some(p) = progress.filter(|p| !p.pending_tasks.is_empty()) {
         out["pending_tasks"] = json!(p.pending_tasks);
@@ -376,7 +384,7 @@ fn with_truncated(mut list: Value, left_out: usize) -> Value {
 
 /// The fields a run view carries only when they apply: the token usage its
 /// attempts reported, what each isolated attempt's isolation held and did
-/// not, the attempts that lost part of their output, the decision-model
+/// not, each read-only check, the attempts that lost part of their output, the decision-model
 /// totals, and the note about events a newer apb wrote that this binary
 /// skipped. Shared by `run_status` and `run_report`.
 fn add_journal_extras(out: &mut Value, view: &apb_engine::run_view::RunView) {
@@ -396,6 +404,11 @@ fn add_journal_extras(out: &mut Value, view: &apb_engine::run_view::RunView) {
     let isolation = view.isolation();
     if !isolation.is_empty() {
         out["isolation"] = json!(isolation);
+    }
+    // Each read-only check (tier, coverage) and the changes that failed it.
+    let read_only = view.read_only();
+    if !read_only.is_empty() {
+        out["read_only"] = json!(read_only);
     }
     let losses = view.output_losses();
     if !losses.is_empty() {

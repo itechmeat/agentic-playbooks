@@ -99,7 +99,11 @@ pub(crate) fn execute(
             output: "cancelled".to_string(),
             events: Vec::new(),
         }),
-        batch::End::Halted => Ok(AttemptOutcome::Halted { events: Vec::new() }),
+        // The visit stays open like a halted one; the drive reads the
+        // gate's refusal and ends the run.
+        batch::End::Halted | batch::End::Exhausted => {
+            Ok(AttemptOutcome::Halted { events: Vec::new() })
+        }
         batch::End::Pause(pause) => Ok(AttemptOutcome::EnginePaused {
             pause,
             events: Vec::new(),

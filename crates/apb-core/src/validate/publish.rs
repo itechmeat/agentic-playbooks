@@ -1,5 +1,5 @@
 //! Rules for a `publish` node and `publish_only` (see [`crate::publish`]):
-//! V116-V120.
+//! V116-V120, and V140 (a publish `from` a read-only node).
 
 use super::node_io::value_ref_ok;
 use super::templates::template_refs;
@@ -32,7 +32,8 @@ pub(crate) fn check_publish(playbook: &Playbook, r: &mut ValidationReport) {
 }
 
 /// V116 (error): `from` names an `agent_task` or `script` node, not a list
-/// node, from which the publish node is reachable.
+/// node, from which the publish node is reachable. V140 (warning): `from`
+/// names a read-only node.
 fn check_from(playbook: &Playbook, id: &str, from: &str, r: &mut ValidationReport) {
     let Some(source) = playbook.node(from) else {
         r.error(
@@ -56,6 +57,15 @@ fn check_from(playbook: &Playbook, id: &str, from: &str, r: &mut ValidationRepor
             "V116",
             Some(id),
             format!("`from` names `{from}`, a list node; its items commit separately, so there is no one commit to publish"),
+        );
+    }
+    // V140: a read-only node leaves the tree as it found it, so it commits
+    // nothing of its own; the push carries only what earlier nodes did.
+    if source.read_only {
+        r.warn(
+            "V140",
+            Some(id),
+            format!("`from` names `{from}`, a read-only node; it commits nothing, so the publish pushes only what earlier nodes committed"),
         );
     }
     if !crate::graphutil::reachable(playbook, &[from]).contains(id) {

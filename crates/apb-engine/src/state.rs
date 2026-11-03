@@ -747,7 +747,12 @@ impl RunState {
                 // reports about the tree and the run's goal, no state effect.
                 EventPayload::ArtifactsCommitted { .. }
                 | EventPayload::GoalChecked { .. }
-                | EventPayload::ProtectedPathsModified { .. } => {}
+                | EventPayload::ProtectedPathsModified { .. }
+                // Explains the `node_finished { failed }` that follows; the
+                // failure itself is folded there.
+                | EventPayload::ReadOnlyViolated { .. }
+                // A read-only attempt's tier: shown, never folded.
+                | EventPayload::ReadOnlyChecked { .. } => {}
                 // The baseline snapshots, their comparisons and an attempt's
                 // notes are reports; `crate::baseline::BaselineState` folds
                 // the baseline for the drive.

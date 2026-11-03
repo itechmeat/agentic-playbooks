@@ -38,6 +38,7 @@ fn start_args(notify: serde_json::Value) -> PlaybookRunArgs {
         notify: Some(serde_json::from_value::<NotifyArg>(notify).unwrap()),
         launch_version: None,
         launch_choice: None,
+        unattended: None,
         confirm_launch: None,
     }
 }

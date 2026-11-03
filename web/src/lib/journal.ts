@@ -125,11 +125,22 @@ function eventNote(e: WfEvent): string | undefined {
     case 'baseline_observed':
     case 'baseline_compared':
     case 'attempt_notes':
+    case 'read_only_violated':
       return outcomeEventNote(e)
     case 'output_fields_missing':
       return Array.isArray(r.fields) ? `missing fields: ${r.fields.join(', ')}` : undefined
     case 'attempt_started':
       return typeof r.transcript === 'string' ? `transcript: ${r.transcript}` : undefined
+    case 'read_only_checked': {
+      const check = r.check as Record<string, unknown> | undefined
+      return check && typeof check.tier === 'string' ? `read-only ${check.tier}` : undefined
+    }
+    // A gate the unattended run decided with its declared option: never a
+    // person's consent.
+    case 'review_decided':
+      return r.decided_by === 'unattended'
+        ? `${String(r.decision ?? '')}: decided by the unattended run, not a person`
+        : undefined
     case 'agent_env_applied':
       return agentEnvNote(r)
     case 'tool_exposure_mismatch':

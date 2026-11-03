@@ -30,6 +30,17 @@ pub struct ReviewEntry {
     /// every `human_review` decision and in old channels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
+    /// Who decided when it was not a person: `unattended` for the gate's
+    /// declared outcome in an unattended run, stamped by the engine alone
+    /// ([`post_unattended_decision`]); no decision surface can set it.
+    /// `None` for a person's decision and in old channels; a value this
+    /// binary does not know reads as `unknown`, never as a person.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::event::lenient_decided_by"
+    )]
+    pub by: Option<crate::event::DecidedBy>,
 }
 
 /// Rejects a decision that names something other than a currently pending gate
@@ -282,6 +293,36 @@ pub fn post_decision_to(
     nonce: Option<String>,
     request: Option<u64>,
 ) -> Result<u64, EngineError> {
+    append_decision(run_dir, cmd, nonce, request, None)
+}
+
+/// Queues the declared `unattended: { decide }` outcome of a `human_review`
+/// gate in an unattended run, stamped `by: unattended`, for the request the
+/// journal holds at seq `request`. The engine's own path, never a decision
+/// surface's: the same lock and checks as a person's decision bound to a
+/// request, so a decision already queued for it (a person's, or this one
+/// posted before a crash) wins and this one is refused `AlreadyAnswered`.
+pub(crate) fn post_unattended_decision(
+    run_dir: &Path,
+    cmd: ReviewCommand,
+    request: u64,
+) -> Result<u64, EngineError> {
+    append_decision(
+        run_dir,
+        cmd,
+        None,
+        Some(request),
+        Some(crate::event::DecidedBy::Unattended),
+    )
+}
+
+fn append_decision(
+    run_dir: &Path,
+    cmd: ReviewCommand,
+    nonce: Option<String>,
+    request: Option<u64>,
+    by: Option<crate::event::DecidedBy>,
+) -> Result<u64, EngineError> {
     crate::driver::ensure_run_dir(run_dir)?;
     // The check and the append under one lock: two posters (a person and
     // the engine's automatic decision, issue #165 Part 14.4) that both pass
@@ -295,7 +336,12 @@ pub fn post_decision_to(
 
     let seq = read_reviews_after(run_dir, None)?.len() as u64;
 
-    let entry = ReviewEntry { seq, cmd, nonce };
+    let entry = ReviewEntry {
+        seq,
+        cmd,
+        nonce,
+        by,
+    };
     let line = serde_json::to_string(&entry).map_err(|e| EngineError::Yaml(e.to_string()))?;
 
     let path = run_dir.join("reviews.jsonl");

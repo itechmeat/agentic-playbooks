@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 
 pub(crate) use apb_engine::next_action::command::{RequestArg, render};
 use apb_engine::next_action::start::{Remedy, StartAction, StartActionCode};
-use apb_engine::next_action::{ActionCode, AutoOutcome, AutoProgress, RunActions};
+use apb_engine::next_action::{
+    ActionCode, AutoOutcome, AutoProgress, RunActions, UnattendedOutcome,
+};
 
 use crate::util::{sanitize_command, sanitize_for_terminal};
 
@@ -37,6 +39,9 @@ pub(crate) fn lines(actions: &RunActions) -> Vec<String> {
         }
         if let Some(auto) = &a.auto {
             out.push(format!("  {}", auto_line(auto)));
+        }
+        if let Some(u) = &a.unattended {
+            out.push(format!("  {}", unattended_line(u)));
         }
     }
     if actions.children_truncated {
@@ -128,16 +133,21 @@ pub(crate) fn primary_hint(actions: &RunActions) -> Option<String> {
     ))
 }
 
-/// What a wait does by itself.
-fn auto_line(auto: &AutoProgress) -> String {
-    let what = match auto.outcome() {
+/// What happens when a wait runs out by itself.
+fn auto_what(outcome: AutoOutcome) -> &'static str {
+    match outcome {
         AutoOutcome::AnsweredDefault => "its default answer is posted",
         AutoOutcome::TimerElapses => "the timer elapses",
         AutoOutcome::AttemptFails => "the attempt fails",
         AutoOutcome::WaitTimesOut => "the wait times out and fails",
         AutoOutcome::ResumeAttempt => "apb tries to resume the run",
         AutoOutcome::RetryAttempt => "the node's retry starts",
-    };
+    }
+}
+
+/// What a wait does by itself.
+fn auto_line(auto: &AutoProgress) -> String {
+    let what = auto_what(auto.outcome());
     match auto {
         AutoProgress::At { at_ms, assured, .. } => format!(
             "at {}{}: {what}",
@@ -157,6 +167,28 @@ fn auto_line(auto: &AutoProgress) -> String {
             duration_words(*remaining_ms)
         ),
     }
+}
+
+/// What an unattended run does at this wait.
+fn unattended_line(u: &UnattendedOutcome) -> String {
+    let what = match u {
+        UnattendedOutcome::Proceeds { auto } => {
+            format!("goes on by itself ({})", auto_what(*auto))
+        }
+        UnattendedOutcome::Decides { option } => format!(
+            "decides `{}` at once",
+            sanitize_for_terminal(option, TEXT_MAX)
+        ),
+        UnattendedOutcome::AnswersDefault => "posts the default answer at once".into(),
+        UnattendedOutcome::FailsRun { code } => {
+            format!("fails the run ({})", sanitize_for_terminal(code, TEXT_MAX))
+        }
+        UnattendedOutcome::RefusedAtStart { code } => format!(
+            "is refused at start ({})",
+            sanitize_for_terminal(code, TEXT_MAX)
+        ),
+    };
+    format!("unattended: {what}")
 }
 
 /// `1h 2m`, `3m 4s`, `5s`.
@@ -208,6 +240,7 @@ mod tests {
             not_ready: None,
             auto: None,
             command: None,
+            unattended: None,
             reason: String::new(),
         }
     }
@@ -653,6 +686,62 @@ mod tests {
             assured: false,
         };
         assert!(auto_line(&at).contains("(not assured): apb tries to resume the run"));
+    }
+
+    /// Every action line set says what an unattended run does at the
+    /// wait, under the action it belongs to, with a decided option
+    /// sanitized like any journal text.
+    #[test]
+    fn next_action_lines_say_what_an_unattended_run_does() {
+        let with = |code, u: UnattendedOutcome| {
+            let mut a = action(code, "r-1", Some("gate"), Vec::new());
+            a.reason = "decide the gate".into();
+            a.unattended = Some(u);
+            a
+        };
+        let actions = RunActions {
+            observed_at_ms: 0,
+            status: apb_engine::state::RunStatus::Running,
+            stop: apb_engine::next_action::StopVerdict::NeedsInput,
+            actions: vec![
+                with(
+                    ActionCode::DecideReview,
+                    UnattendedOutcome::FailsRun {
+                        code: "hitl_required".into(),
+                    },
+                ),
+                with(
+                    ActionCode::DecideReview,
+                    UnattendedOutcome::Decides {
+                        option: "app\u{1b}[2Jrove".into(),
+                    },
+                ),
+                with(
+                    ActionCode::AnswerQuestion,
+                    UnattendedOutcome::AnswersDefault,
+                ),
+                with(
+                    ActionCode::RetryNow,
+                    UnattendedOutcome::Proceeds {
+                        auto: AutoOutcome::RetryAttempt,
+                    },
+                ),
+            ],
+            primary: Some(0),
+            children_truncated: false,
+        };
+        let out = lines(&actions);
+        let unattended: Vec<&String> = out.iter().filter(|l| l.contains("unattended:")).collect();
+        assert_eq!(
+            unattended,
+            [
+                "  unattended: fails the run (hitl_required)",
+                "  unattended: decides `app [2Jrove` at once",
+                "  unattended: posts the default answer at once",
+                "  unattended: goes on by itself (the node's retry starts)",
+            ],
+            "{out:#?}"
+        );
     }
 
     #[test]

@@ -45,6 +45,9 @@ pub(super) enum End {
     Pause(PauseRequest),
     /// The run was stopped.
     Cancelled,
+    /// An unattended run's budget refused the next batch: no item is
+    /// admitted, and the drive ends the run `budget_exhausted`.
+    Exhausted,
 }
 
 /// What one item's execution came to, sent from a worker.
@@ -77,16 +80,18 @@ pub(super) fn run_batches(run: &ListRun<'_, '_, '_>) -> Result<End, EngineError>
         }
         let take = queue.len().min(size);
         // A batch the budget refuses never starts: its items stay pending.
-        if let Some(gate) = run.budget
-            && let Admission::Pause(p) = gate.admit_batch(
+        if let Some(gate) = run.budget {
+            match gate.admit_batch(
                 run.ctx.run_dir,
                 run.ctx.journal,
                 run.node,
                 batch_no + 1,
                 take,
-            )?
-        {
-            return Ok(End::Pause(p));
+            )? {
+                Admission::Go => {}
+                Admission::Pause(p) => return Ok(End::Pause(p)),
+                Admission::Exhausted => return Ok(End::Exhausted),
+            }
         }
         let ids: Vec<String> = queue.drain(..take).collect();
         batch_no += 1;

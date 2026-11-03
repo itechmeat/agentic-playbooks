@@ -3,6 +3,9 @@ use crate::content::sha256_hex;
 use crate::validate::build_globset;
 use std::path::Path;
 
+pub mod tree_state;
+pub use tree_state::{ChangeKind, TreeChange, TreeLimit, TreeLimits, TreeState};
+
 /// Errors from [`files_fingerprint`]. `git_fingerprint` never returns an
 /// error: any git failure (not a repo, no HEAD yet, git missing) collapses
 /// to `None`, per the node-cache spec.

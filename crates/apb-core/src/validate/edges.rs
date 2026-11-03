@@ -257,6 +257,18 @@ pub(crate) fn check_judge_values(playbook: &Playbook, r: &mut ValidationReport) 
     }
 }
 
+/// Whether edge `e` out of a `human_review` gate can be taken for decision
+/// `option`, the fallback rule aside: an edge without a condition always,
+/// a `review_status` edge when it names `option`, and an edge with any other
+/// condition because it may match. Shared by V136 and the unattended rules.
+pub(super) fn review_takes(e: &Edge, option: &str) -> bool {
+    match &e.condition {
+        None => true,
+        Some(EdgeCondition::ReviewStatus { equals }) => equals == option,
+        Some(_) => true,
+    }
+}
+
 /// V136 (warning): a `human_review` option that only bounded edges route.
 /// Once their cap is spent the decision has no edge, and the run fails at
 /// the review (the person decided, and nothing follows). A fallback edge out
@@ -277,22 +289,16 @@ pub(crate) fn check_review_caps(playbook: &Playbook, r: &mut ValidationReport) {
         if out.iter().any(|e| e.fallback) {
             continue;
         }
-        // Whether `e` can be taken for `option`.
-        let takes = |e: &Edge, option: &str| match &e.condition {
-            None => true,
-            Some(EdgeCondition::ReviewStatus { equals }) => equals == option,
-            Some(_) => true,
-        };
         for option in &crate::schema::effective_review_options(options) {
             let bounded: Vec<&Edge> = out
                 .iter()
                 .copied()
-                .filter(|e| e.max_traversals.is_some() && takes(e, option))
+                .filter(|e| e.max_traversals.is_some() && review_takes(e, option))
                 .collect();
             if bounded.is_empty()
                 || out
                     .iter()
-                    .any(|e| e.max_traversals.is_none() && takes(e, option))
+                    .any(|e| e.max_traversals.is_none() && review_takes(e, option))
             {
                 continue;
             }

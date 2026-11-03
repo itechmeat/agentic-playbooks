@@ -39,6 +39,7 @@ fn fold_records_review_decision() {
                 decision: "approved".into(),
                 note: "ok".into(),
                 plan_digest: None,
+                decided_by: None,
             },
         ),
         ev(

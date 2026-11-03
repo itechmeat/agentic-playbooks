@@ -116,6 +116,9 @@ pub enum GateDecision {
     Waived,
     /// The node ran on that one-time allowance.
     AdmittedWaived,
+    /// An unattended run fails before the node instead of pausing
+    /// (`budget_exhausted`): nobody is there to change the budget.
+    Failed,
     /// A decision a newer apb wrote.
     Unknown,
 }
@@ -161,6 +164,7 @@ impl GateDecision {
             GateDecision::Continued => "continued",
             GateDecision::Waived => "waived",
             GateDecision::AdmittedWaived => "admitted_waived",
+            GateDecision::Failed => "failed",
             GateDecision::Unknown => "unknown",
         }
     }
@@ -182,7 +186,10 @@ macro_rules! lenient_names {
     };
 }
 
-lenient_names!(GateDecision, [Paused, Continued, Waived, AdmittedWaived]);
+lenient_names!(
+    GateDecision,
+    [Paused, Continued, Waived, AdmittedWaived, Failed]
+);
 lenient_names!(
     GateBasis,
     [Median, Exhausted, NoEstimate, UnknownSpend, Operator]

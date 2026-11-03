@@ -803,3 +803,157 @@ fn the_exit_codes_are_the_documented_ones() {
     assert_eq!(WaitReason::Timeout.exit(RunStatus::Running).code(), 5);
     assert_eq!(WaitExit::Error.code(), 2);
 }
+
+// --- what an unattended run does at each wait ---------------------------------
+
+/// The `unattended` outcome of the first action with `code` on run `id`.
+fn unattended_of(fx: &Fx, id: &str, code: ActionCode) -> Option<UnattendedOutcome> {
+    fx.observe(id)
+        .actions
+        .into_iter()
+        .find(|a| a.code == code)
+        .unwrap_or_else(|| panic!("run `{id}` offers no {code:?}"))
+        .unattended
+}
+
+fn fails(code: &str) -> Option<UnattendedOutcome> {
+    Some(UnattendedOutcome::FailsRun { code: code.into() })
+}
+
+fn proceeds(auto: AutoOutcome) -> Option<UnattendedOutcome> {
+    Some(UnattendedOutcome::Proceeds { auto })
+}
+
+/// Every row of the unattended table, on attended runs: what the mode would
+/// do at each wait.
+#[test]
+fn every_wait_says_what_an_unattended_run_does_there() {
+    use crate::run_config::{BUDGET_EXHAUSTED, HITL_REQUIRED, UNATTENDED_UNSUPPORTED};
+    let fx = Fx::new();
+    fx.run("q").question("ask");
+    assert_eq!(
+        unattended_of(&fx, "q", ActionCode::AnswerQuestion),
+        Some(UnattendedOutcome::AnswersDefault)
+    );
+    fx.run("qn").question("ask_nodef");
+    assert_eq!(
+        unattended_of(&fx, "qn", ActionCode::AnswerQuestion),
+        fails(HITL_REQUIRED)
+    );
+
+    fx.run("g").review();
+    assert_eq!(
+        unattended_of(&fx, "g", ActionCode::DecideReview),
+        fails(HITL_REQUIRED)
+    );
+    // A declared decision: the run decides it when nothing after the gate
+    // refuses it, and fails as the run would when the unpinned
+    // sub-playbook `kid` lies in its reach.
+    let declared = PLAYBOOK.replace(
+        "options: [approved, rejected] }",
+        "options: [approved, rejected], unattended: { decide: approved } }",
+    );
+    let mut r = fx.run("gd");
+    std::fs::write(
+        r.dir.join("playbook.yaml"),
+        declared.replace("{ from: work, to: kid }", "{ from: work, to: f }"),
+    )
+    .unwrap();
+    r.review();
+    assert_eq!(
+        unattended_of(&fx, "gd", ActionCode::DecideReview),
+        Some(UnattendedOutcome::Decides {
+            option: "approved".into()
+        })
+    );
+    let mut r = fx.run("gk");
+    std::fs::write(r.dir.join("playbook.yaml"), &declared).unwrap();
+    r.review();
+    assert_eq!(
+        unattended_of(&fx, "gk", ActionCode::DecideReview),
+        fails(HITL_REQUIRED)
+    );
+
+    fx.run("t").wait_node("timer", "timer");
+    assert_eq!(
+        unattended_of(&fx, "t", ActionCode::WaitAgain),
+        proceeds(AutoOutcome::TimerElapses)
+    );
+    fx.run("h").wait_node("hook", "webhook");
+    assert_eq!(
+        unattended_of(&fx, "h", ActionCode::WaitAgain),
+        proceeds(AutoOutcome::WaitTimesOut)
+    );
+
+    fx.run("d").deferred(600_000);
+    assert_eq!(
+        unattended_of(&fx, "d", ActionCode::RetryNow),
+        proceeds(AutoOutcome::RetryAttempt)
+    );
+
+    let mut r = fx.run("s");
+    r.started("work");
+    r.ev(
+        json!({"type": "wake_raised", "trigger": "node_failed", "node": "work", "detail": "boom"}),
+    );
+    assert_eq!(
+        unattended_of(&fx, "s", ActionCode::SupervisorRetryNode),
+        Some(UnattendedOutcome::RefusedAtStart {
+            code: UNATTENDED_UNSUPPORTED.into()
+        })
+    );
+
+    let mut r = fx.run("b");
+    let reason = format!(
+        "{}nothing left before `work`)",
+        crate::pause::cause::BUDGET_PREFIX
+    );
+    r.log
+        .append(crate::pause::budget::budget_pause(reason).to_event())
+        .unwrap();
+    assert_eq!(
+        unattended_of(&fx, "b", ActionCode::ResumeWithBudget),
+        fails(BUDGET_EXHAUSTED)
+    );
+
+    let mut r = fx.run("quota");
+    let quota = crate::pause::PauseRequest {
+        reason: Some("quota (claude/opus)".into()),
+        by: Some(crate::pause::PauseBy::Engine),
+        mode: crate::pause::PauseMode::Drain,
+        until: Some(now() + 600_000),
+        keep_lock: false,
+    };
+    r.log.append(quota.to_event()).unwrap();
+    assert_eq!(
+        unattended_of(&fx, "quota", ActionCode::ResumeRun),
+        proceeds(AutoOutcome::ResumeAttempt)
+    );
+    let mut r = fx.run("ht");
+    r.started("work");
+    let record = crate::host_task::TaskRecord {
+        task_id: "work-1".into(),
+        node: "work".into(),
+        attempt: 1,
+        workdir: ".".into(),
+        skills: vec![],
+        outputs: None,
+        deadline_ms: None,
+        model_hint: None,
+        hint_source: None,
+        fallback_of: None,
+        env: Default::default(),
+        requested_ts: now(),
+    };
+    crate::host_task::write_task(&r.dir, &record, "do it", None).unwrap();
+    r.ev(json!({"type": "host_task_requested", "task_id": "work-1", "node": "work", "attempt": 1}));
+    assert_eq!(
+        unattended_of(&fx, "ht", ActionCode::SubmitHostTask),
+        Some(UnattendedOutcome::RefusedAtStart {
+            code: UNATTENDED_UNSUPPORTED.into()
+        })
+    );
+    // An operator's pause is no wait of the run.
+    fx.run("op").pause(Some(now() + 600_000));
+    assert_eq!(unattended_of(&fx, "op", ActionCode::ResumeRun), None);
+}

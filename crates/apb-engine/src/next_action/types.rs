@@ -263,6 +263,31 @@ pub struct NextAction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub command: Option<String>,
+    /// What an unattended run does at this wait, shown on every run,
+    /// attended or not, so a CI author sees what the mode would do. Absent
+    /// where it does not apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub unattended: Option<UnattendedOutcome>,
+}
+
+/// What an unattended run does at a wait ([`NextAction::unattended`]).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UnattendedOutcome {
+    /// The wait ends by itself as in an attended run.
+    Proceeds { auto: AutoOutcome },
+    /// The gate is decided at once with its declared option.
+    Decides { option: String },
+    /// The question is answered at once with its default.
+    AnswersDefault,
+    /// The run fails at once with this run error code
+    /// (`hitl_required`, `budget_exhausted`).
+    FailsRun { code: String },
+    /// An unattended start is refused before the run exists
+    /// (`unattended_unsupported`).
+    RefusedAtStart { code: String },
 }
 
 /// Everything a run is ready for at one observation.

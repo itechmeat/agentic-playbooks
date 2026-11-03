@@ -168,6 +168,8 @@ pub(super) struct AttemptInput<'a> {
     pub settings: Option<&'a Path>,
     /// The step runs in the host agent (the host fallback).
     pub host: bool,
+    /// The node is `read_only`: a sandbox binds its tree read-only.
+    pub read_only: bool,
 }
 
 /// Decides where attempt `input` runs, laying down its directory, its skill
@@ -185,6 +187,17 @@ pub(super) fn place(iso: &NodeIsolation, input: &AttemptInput) -> Result<Placed,
         })));
     };
     let spec = iso.spec.expect("an isolated node has a spec");
+    // A writable extra path inside a read-only tree would be covered by the
+    // tree's read-only bind in a sandbox and fail the after-check without
+    // one: the author asked for two things that cannot both hold, so the
+    // attempt is refused at every isolation level, sandbox or not, rather
+    // than run either way.
+    if input.read_only
+        && let Some(why) = crate::sandbox::writable_inside_tree(spec, input.node_dir)
+    {
+        let reason = contract::Reason::new(contract::ReasonCode::SandboxSetup, why);
+        return Ok(Placed::Refused(unavailable(&[reason])));
+    }
     // A host step runs in the host agent, outside anything apb starts.
     let contract = if input.host && contract.allowed() {
         contract::without_sandbox(spec.level, vec![host_step()])
@@ -237,6 +250,7 @@ pub(super) fn place(iso: &NodeIsolation, input: &AttemptInput) -> Result<Placed,
         login_from_env,
         run_files: input.settings.map(Path::to_path_buf).into_iter().collect(),
         skills: Some(attempt_box.join(".agents/skills")),
+        read_only_tree: input.read_only,
     });
     let plan = match built {
         Ok(plan) => plan,

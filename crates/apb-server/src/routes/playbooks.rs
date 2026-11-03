@@ -221,6 +221,15 @@ pub(crate) struct RunBody {
     launch_version: Option<String>,
     #[serde(default)]
     launch_choice: Option<String>,
+    /// Start the run unattended (a CI job posting here): every wait the
+    /// playbook gives no unattended outcome fails the run with
+    /// `hitl_required`, a budget pause fails it with `budget_exhausted`.
+    /// It grants nothing: trust, the irreversible confirmation and the
+    /// launch policy are checked as for any start. A dashboard start runs
+    /// the profiles' CLIs and is never supervised, so nothing here conflicts
+    /// with the mode; the check is the one every surface makes.
+    #[serde(default)]
+    unattended: bool,
 }
 
 /// The launch context of a click in the dashboard: a person's with keys;
@@ -307,7 +316,29 @@ pub(crate) async fn run_playbook_handler(
         body.launch_version.clone(),
         body.launch_choice.as_deref(),
     );
+    // The unattended start check every surface makes (the run gate's own):
+    // a dashboard start is never supervised and asks for no execution, so
+    // only a host execution the project resolves to refuses it.
+    let unattended_start = apb_engine::gate::UnattendedStart {
+        unattended: body.unattended,
+        mode: apb_engine::RunMode::Autonomous,
+        execution: &apb_core::execution::ExecutionRequest::default(),
+    };
+    if let Err(refusal) = apb_engine::gate::check_unattended(&root, &unattended_start) {
+        let wref = apb_core::scope::PlaybookRef {
+            origin: apb_core::scope::Origin::Project { workspace_id: None },
+            id: id.clone(),
+            version: None,
+        };
+        let of = apb_engine::next_action::start::StartOf::of(&wref);
+        return (
+            StatusCode::CONFLICT,
+            Json(apb_mcp::tools::actions::refusal_with_actions(of, refusal)),
+        )
+            .into_response();
+    }
     let mut opts = apb_engine::RunOptions {
+        unattended: body.unattended,
         instruction: body.instruction,
         params: body.params,
         continued_from: body.continued_from,

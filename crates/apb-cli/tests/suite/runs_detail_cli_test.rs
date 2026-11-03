@@ -504,3 +504,68 @@ fn the_route_block_neutralizes_control_characters_from_the_journal() {
     assert!(!stdout.contains('\u{1b}'), "{stdout:?}");
     assert!(!stdout.lines().any(|l| l.starts_with("forged")), "{stdout}");
 }
+
+// --- read-only node: one line per checked attempt ---
+
+/// `apb runs <id>` prints one line per read-only check: an agent attempt's
+/// tier from its start with the violation that failed it, a partial
+/// before-state with its limit, and a script's violation (no start of its
+/// own); `--json` carries the same rows.
+#[test]
+fn runs_with_an_id_prints_one_line_per_read_only_check() {
+    let dir = project();
+    let run = dir.path().join(".apb/runs/ro-1");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(
+        run.join("events.jsonl"),
+        concat!(
+            r#"{"seq":0,"ts":1790000000000,"type":"run_started","playbook":"demo","version":"1.0.0"}"#,
+            "\n",
+            r#"{"seq":1,"ts":1790000000001,"type":"read_only_checked","node":"look","attempt":1,"check":{"tier":"enforced"}}"#,
+            "\n",
+            r#"{"seq":2,"ts":1790000000002,"type":"read_only_checked","node":"scan","attempt":1,"check":{"tier":"detected_partial","entries":20000,"bytes":4096,"partial":"entries"}}"#,
+            "\n",
+            r#"{"seq":3,"ts":1790000000003,"type":"read_only_violated","node":"scan","attempt":1,"tier":"detected_partial","changes":[{"path":"notes.md","change":"modified"}],"evidence":"read_only/scan/1.json"}"#,
+            "\n",
+            r#"{"seq":4,"ts":1790000000004,"type":"node_finished","node":"scan","status":"failed","attempt":1,"output":"","artifacts":[]}"#,
+            "\n",
+            r#"{"seq":5,"ts":1790000000005,"type":"read_only_violated","node":"sh","attempt":1,"changes":[{"path":".env","change":"added"}]}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let out = apb()
+        .args(["runs", "ro-1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    for line in [
+        "  read-only node `look` attempt 1: enforced (the sandbox binds the tree read-only)",
+        "  read-only node `scan` attempt 1: detected_partial (checked after the attempt over 20000 entries, 4096 bytes; the entries limit stopped it short, so a change past it goes unseen); changed the tree (read_only_dirty), 1 path: notes.md modified; evidence read_only/scan/1.json",
+        "  read-only node `sh` attempt 1: detected (checked after the attempt); changed the tree (read_only_dirty), 1 path: .env added",
+    ] {
+        assert!(
+            text.contains(&format!("{line}\n")),
+            "missing {line:?} in\n{text}"
+        );
+    }
+    let json = apb()
+        .args(["runs", "ro-1", "--json"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    let rows = v["read_only"].as_array().expect("read_only rows");
+    assert_eq!(rows.len(), 3, "{v}");
+    assert_eq!(rows[0]["tier"], "enforced");
+    assert_eq!(rows[1]["partial"], "entries");
+    assert_eq!(rows[1]["violated"]["evidence"], "read_only/scan/1.json");
+    assert_eq!(rows[2]["violated"]["changes"][0]["path"], ".env");
+}

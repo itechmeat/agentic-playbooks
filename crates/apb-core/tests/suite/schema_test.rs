@@ -237,3 +237,101 @@ fn human_review_without_prompt_is_none() {
         other => panic!("expected human_review, got {other:?}"),
     }
 }
+
+const READ_ONLY_UNATTENDED_WF: &str = r#"
+schema: 2
+id: ro
+name: Read only and unattended
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: start, type: start }
+  - { id: look, type: script, script: run.sh, runner: sh, read_only: true }
+  - { id: gate, type: human_review, options: [approve, reject], unattended: { decide: approve, note: "ci run" } }
+  - { id: gate2, type: human_review, options: [approve, reject], unattended: fail }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: look }
+  - { from: look, to: gate }
+  - { from: gate, to: gate2 }
+  - { from: gate2, to: done }
+"#;
+
+/// `read_only` and `unattended` sit on the node (next to `auto_decide`),
+/// parse in both shapes, round-trip, and are left out of the YAML when
+/// absent, so a playbook without them re-serializes as before.
+#[test]
+fn read_only_and_unattended_parse_round_trip_and_omit_when_absent() {
+    use apb_core::schema::{UnattendedDecide, UnattendedReview};
+    let playbook = Playbook::from_yaml(READ_ONLY_UNATTENDED_WF).unwrap();
+    assert!(playbook.node("look").unwrap().read_only);
+    assert!(!playbook.node("gate").unwrap().read_only);
+    let decide = UnattendedReview::Decide(UnattendedDecide {
+        decide: "approve".into(),
+        note: Some("ci run".into()),
+    });
+    assert_eq!(playbook.node("gate").unwrap().unattended, Some(decide));
+    assert_eq!(
+        playbook.node("gate2").unwrap().unattended,
+        Some(UnattendedReview::Fail)
+    );
+    assert_eq!(playbook.node("look").unwrap().unattended, None);
+
+    let yaml = yaml_serde::to_string(&playbook).unwrap();
+    let reparsed = Playbook::from_yaml(&yaml).unwrap();
+    for id in ["look", "gate", "gate2", "done"] {
+        let (a, b) = (playbook.node(id).unwrap(), reparsed.node(id).unwrap());
+        assert_eq!(
+            (a.read_only, &a.unattended),
+            (b.read_only, &b.unattended),
+            "{id}"
+        );
+    }
+    let json = serde_json::to_value(&playbook).unwrap();
+    let node = |id: &str| {
+        json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(node("gate2")["unattended"], "fail");
+    assert_eq!(
+        node("gate")["unattended"],
+        serde_json::json!({ "decide": "approve", "note": "ci run" })
+    );
+    let done = node("done");
+    assert!(
+        done.get("read_only").is_none() && done.get("unattended").is_none(),
+        "{done}"
+    );
+
+    let plain = Playbook::from_yaml(HUMAN_REVIEW_NO_PROMPT_WF).unwrap();
+    let yaml = yaml_serde::to_string(&plain).unwrap();
+    assert!(
+        !yaml.contains("read_only") && !yaml.contains("unattended"),
+        "{yaml}"
+    );
+}
+
+/// An `unattended` value outside the two shapes is refused with a message
+/// that names the accepted forms, never dropped: a typo must not turn a
+/// gate the author meant to decide into one that fails, or the reverse.
+#[test]
+fn unattended_refuses_other_shapes() {
+    for bad in [
+        "unattended: approve",
+        "unattended: { decide: approve, nte: x }",
+        "unattended: { note: x }",
+        "unattended: [fail]",
+    ] {
+        let yaml = READ_ONLY_UNATTENDED_WF.replace("unattended: fail", bad);
+        let err = Playbook::from_yaml(&yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("unattended") || err.contains("decide"),
+            "{bad}: {err}"
+        );
+    }
+}

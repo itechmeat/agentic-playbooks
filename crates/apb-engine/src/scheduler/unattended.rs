@@ -1,0 +1,146 @@
+//! Unattended mode in the drive: every wait without a declared outcome ends
+//! the run `failed` at once, through the unhandled-failure stop, so no
+//! failure route is taken and no route leads into another wait.
+//!
+//! The mode is read from the run's write-once manifest ([`mode`]); the run
+//! config only carries it for a run without one, so a rewrite of `run.yaml`
+//! (an older apb, a resume) never turns the run attended.
+//!
+//! What each wait does:
+//! - `human_review` without `unattended: { decide }`, a `publish` consent
+//!   and a question without `default_answer` fail `hitl_required`;
+//! - a `human_review` with `decide` is decided at once (after
+//!   [`crate::gate::unattended::run_decide_refusal`] passes), the decision
+//!   stamped `decided_by: unattended`, never a person's consent; a request
+//!   left open by a drive that stopped before its decision is decided on
+//!   resume, and a decision that cannot be recorded fails the run
+//!   (`super::review_gate::post_unattended`), so the gate never waits;
+//! - a question with `default_answer` is answered at once, `answered_by:
+//!   unattended`;
+//! - a budget refusal fails `budget_exhausted` instead of pausing (the
+//!   gate records it, [`super::budget_gate::DriveGate::exhausted`]);
+//! - a deferred retry never releases the driver
+//!   ([`super::deferred::may_release`]);
+//! - a sub-playbook child inherits the mode (prepare reads the parent's
+//!   manifest) and its `hitl_required` or `budget_exhausted` stops the
+//!   parent the same way ([`child_stop`]).
+
+use std::path::Path;
+
+use apb_core::schema::{NodeKind, Playbook};
+
+use super::journal::{node_finished_count, node_started_count};
+use crate::error::EngineError;
+use crate::event::{EventLog, EventPayload, read_all};
+use crate::run_config::{BUDGET_EXHAUSTED, HITL_REQUIRED, RunConfig};
+use crate::state::NodeStatus;
+
+/// The `answered_by` of a question an unattended run answered with its
+/// default.
+pub(crate) const ANSWERED_BY: &str = "unattended";
+
+/// Whether the run at `run_dir` is unattended: its manifest's record, or
+/// the run config's copy for a run without a manifest.
+pub(crate) fn mode(run_dir: &Path, cfg: &RunConfig) -> bool {
+    match crate::manifest::read(run_dir) {
+        Ok(Some(m)) => m.unattended,
+        _ => cfg.unattended,
+    }
+}
+
+/// The run error reason of a wait of `kind` at `node` without an
+/// unattended outcome.
+pub(crate) fn hitl(kind: &str, node: &str) -> String {
+    format!("{HITL_REQUIRED}: {kind} `{node}` has no unattended outcome")
+}
+
+/// Closes a visit `node` left open (a question, a list visit) as failed
+/// with `reason`, before the unhandled-failure stop ends the run there.
+pub(crate) fn close_open(
+    log: &mut EventLog,
+    run_dir: &Path,
+    node: &str,
+    reason: &str,
+) -> Result<(), EngineError> {
+    let events = read_all(run_dir)?;
+    if node_started_count(&events, node) > node_finished_count(&events, node) {
+        log.append(EventPayload::NodeFinished {
+            node: node.to_string(),
+            status: NodeStatus::Failed.as_str().into(),
+            attempt: 1,
+            output: reason.to_string(),
+            artifacts: Vec::new(),
+        })?;
+    }
+    Ok(())
+}
+
+/// What an unattended run does at the `human_review` gate `gate`.
+pub(crate) enum Review {
+    /// Post this decision and note.
+    Decide { option: String, note: String },
+    /// Fail the run with this reason.
+    Fail(String),
+}
+
+/// The unattended outcome of the gate `gate`: its declared `decide`, when
+/// the recheck over what the run would reach before the next gate passes;
+/// else a `hitl_required` failure.
+pub(crate) fn review(root: &Path, run_dir: &Path, playbook: &Playbook, gate: &str) -> Review {
+    let Some(decide) = playbook
+        .node(gate)
+        .and_then(|n| n.unattended.as_ref())
+        .and_then(|u| u.decide())
+    else {
+        return Review::Fail(hitl("human_review", gate));
+    };
+    let refusal =
+        crate::gate::unattended::run_decide_refusal(root, run_dir, playbook, gate, &decide.decide);
+    match refusal {
+        Some(why) => Review::Fail(format!(
+            "{HITL_REQUIRED}: human_review `{gate}` cannot decide `{}` unattended: {why}",
+            decide.decide
+        )),
+        None => Review::Decide {
+            option: decide.decide.clone(),
+            note: decide.note.clone().unwrap_or_default(),
+        },
+    }
+}
+
+/// The question `node` asked, in an unattended run: its `default_answer`
+/// to post now, or the `hitl_required` failure without one.
+pub(crate) fn question(playbook: &Playbook, node: &str) -> Result<String, String> {
+    match playbook.node(node).map(|n| &n.kind) {
+        Some(NodeKind::AgentTask {
+            default_answer: Some(answer),
+            ..
+        }) => Ok(answer.clone()),
+        _ => Err(hitl("question", node)),
+    }
+}
+
+/// The reason the parent stops with when the sub-playbook child that node
+/// `node` ran last failed for want of a person or of budget:
+/// `<code>: via child <run>: <the child's reason>`. `None` for any other
+/// failure, which takes the parent's failure route as before.
+pub(crate) fn child_stop(root: &Path, run_dir: &Path, node: &str) -> Option<String> {
+    let events = read_all(run_dir).ok()?;
+    let child = events.iter().rev().find_map(|e| match &e.payload {
+        EventPayload::ChildRunStarted { node_id, run_id } if node_id == node => {
+            Some(run_id.clone())
+        }
+        _ => None,
+    })?;
+    let child_events = read_all(&root.join(".apb/runs").join(&child)).ok()?;
+    let reason = child_events.iter().rev().find_map(|e| match &e.payload {
+        EventPayload::RunError { reason, .. } => Some(reason.clone()),
+        _ => None,
+    })?;
+    [HITL_REQUIRED, BUDGET_EXHAUSTED]
+        .into_iter()
+        .find_map(|code| {
+            let rest = reason.strip_prefix(code)?.strip_prefix(": ")?;
+            Some(format!("{code}: via child {child}: {rest}"))
+        })
+}

@@ -3,7 +3,16 @@
 // rendering, the line the CLI prints, carried in `command`), what a wait
 // does by itself, and the lines of a refused start.
 import { ApiError } from './api/http'
-import type { ActionCode, AutoOutcome, AutoProgress, NextAction, Remedy, RunActions, StartAction } from './api.gen'
+import type {
+  ActionCode,
+  AutoOutcome,
+  AutoProgress,
+  NextAction,
+  Remedy,
+  RunActions,
+  StartAction,
+  UnattendedOutcome,
+} from './api.gen'
 
 /** The codes the page has a button for. */
 export const EXECUTABLE: readonly ActionCode[] = [
@@ -95,6 +104,29 @@ export function autoLine(auto: AutoProgress, fmt: (ms: number) => string = local
   }
   const clock = auto.outcome === 'retry_attempt' ? 'delay' : 'timer'
   return `${clock} frozen while paused, ${durationWords(auto.remaining_ms)} left: then ${what}`
+}
+
+/** What an unattended run does at this wait, the line the CLI prints too. */
+export function unattendedLine(u: UnattendedOutcome): string {
+  switch (u.kind) {
+    case 'proceeds':
+      return `unattended: goes on by itself (${OUTCOME[u.auto] ?? u.auto})`
+    case 'decides':
+      return `unattended: decides \`${u.option}\` at once`
+    case 'answers_default':
+      return 'unattended: posts the default answer at once'
+    case 'fails_run':
+      return `unattended: fails the run (${u.code})`
+    case 'refused_at_start':
+      return `unattended: is refused at start (${u.code})`
+    default:
+      return 'unattended: unknown outcome (newer apb)'
+  }
+}
+
+/** Whether an unattended run fails, or is refused, at this wait. */
+export function unattendedStops(u: UnattendedOutcome): boolean {
+  return u.kind === 'fails_run' || u.kind === 'refused_at_start'
 }
 
 /** A time in the viewer's locale, date included (tooltips, full times). */

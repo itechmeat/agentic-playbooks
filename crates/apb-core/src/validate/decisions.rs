@@ -91,7 +91,8 @@ pub fn granted<'a>(
 /// later correction, strongest evidence first: its own declared or implied
 /// (a publish node) `irreversible` or `secrets` effects, a granted connector function flagged
 /// `irreversible`, then the name heuristic ([`ships`]) as the fallback.
-fn shipping_reason(
+/// Shared with the unattended `decide` rule (V142).
+pub(super) fn shipping_reason(
     n: &crate::schema::Node,
     connectors: &BTreeMap<String, ConnectorFacts>,
 ) -> Option<String> {
@@ -200,8 +201,25 @@ fn unknown_connector_effects(
     connectors: &BTreeMap<String, ConnectorFacts>,
     missing_is_unknown: bool,
 ) -> Vec<String> {
+    unknown_connector_effects_in(
+        playbook,
+        downstream_nodes(playbook, node),
+        connectors,
+        missing_is_unknown,
+    )
+}
+
+/// [`unknown_connector_effects`] over the nodes `ids` rather than every node
+/// downstream of a gate. Shared with the unattended `decide` rule, whose
+/// walk follows the chosen option's edges only.
+pub(super) fn unknown_connector_effects_in(
+    playbook: &Playbook,
+    ids: BTreeSet<String>,
+    connectors: &BTreeMap<String, ConnectorFacts>,
+    missing_is_unknown: bool,
+) -> Vec<String> {
     let mut out = Vec::new();
-    for id in downstream_nodes(playbook, node) {
+    for id in ids {
         let Some(n) = playbook.node(&id) else {
             continue;
         };
