@@ -26,7 +26,7 @@ use apb_core::connector::template::{
     Namespace, RenderCtx, placeholders, render_raw, resolve_optional_arg, single_args_placeholder,
 };
 use apb_core::secret::{Redaction, Secret};
-use mail_parser::{MessageParser, MimeHeaders};
+use mail_parser::MessageParser;
 use serde_json::{Map, Value, json};
 
 use crate::connector::result::{CallError, CallErrorCode, CallOk, redact_message};
@@ -1029,8 +1029,8 @@ fn fetch_body_json(uid: u32, raw: &[u8], seen: bool) -> Value {
             .map(|part| {
                 json!({
                     "filename": part.attachment_name(),
-                    "mime": mime_of(part),
-                    "size": part.len(),
+                    "mime": mime_of(&part),
+                    "size": part_size(&part),
                 })
             })
             .collect();
@@ -1068,17 +1068,30 @@ fn mime_of(part: &mail_parser::MessagePart) -> String {
     }
 }
 
+/// The size of an attachment part: the length of its text after charset
+/// conversion for a text part, 0 for a multipart, otherwise the length of its
+/// transfer-decoded body.
+fn part_size(part: &mail_parser::MessagePart) -> usize {
+    if part.is_multipart() {
+        0
+    } else if let Some(text) = part.text() {
+        text.len()
+    } else {
+        part.decoded_len()
+    }
+}
+
 /// The first address of a mail-parser address header, as its email string.
-fn mail_address_first(addr: &mail_parser::Address) -> Option<String> {
+fn mail_address_first(addr: mail_parser::AddressList) -> Option<String> {
     addr.first()
-        .and_then(|a| a.address.as_ref())
+        .and_then(|a| a.address())
         .map(|c| c.to_string())
 }
 
 /// All addresses of a mail-parser address header joined by `, `.
-fn mail_address_join(addr: &mail_parser::Address) -> String {
-    addr.iter()
-        .filter_map(|a| a.address.as_ref().map(|c| c.to_string()))
+fn mail_address_join(addr: mail_parser::AddressList) -> String {
+    addr.mailboxes()
+        .filter_map(|a| a.address().map(|c| c.to_string()))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -1152,6 +1165,48 @@ mod tests {
         assert_eq!(body["truncated"], json!(true));
         assert_eq!(body["seen"], json!(true));
         assert_eq!(body["text"].as_str().unwrap().len(), BODY_PART_CAP);
+    }
+
+    #[test]
+    fn fetch_body_json_reads_addresses_and_attachments() {
+        // Groups are flattened into the address lists; an attachment reports
+        // its name, its MIME type and the length of its decoded body.
+        let raw = concat!(
+            "From: Ann <ann@x.org>\r\n",
+            "To: bob@x.org, team: cy@x.org, dee@x.org;\r\n",
+            "Cc: eve@x.org\r\n",
+            "Subject: Files\r\n",
+            "Content-Type: multipart/mixed; boundary=\"b1\"\r\n",
+            "\r\n",
+            "--b1\r\n",
+            "Content-Type: text/plain\r\n",
+            "\r\n",
+            "body text\r\n",
+            "--b1\r\n",
+            "Content-Type: application/pdf; name=\"a.pdf\"\r\n",
+            "Content-Disposition: attachment; filename=\"a.pdf\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "aGVsbG8=\r\n",
+            "--b1\r\n",
+            "Content-Type: text/plain; name=\"n.txt\"\r\n",
+            "Content-Disposition: attachment; filename=\"n.txt\"\r\n",
+            "\r\n",
+            "hi there\r\n",
+            "--b1--\r\n",
+        );
+        let body = fetch_body_json(3, raw.as_bytes(), false);
+        assert_eq!(body["from"], json!("ann@x.org"));
+        assert_eq!(body["to"], json!("bob@x.org, cy@x.org, dee@x.org"));
+        assert_eq!(body["cc"], json!("eve@x.org"));
+        assert_eq!(body["subject"], json!("Files"));
+        assert_eq!(
+            body["attachments"],
+            json!([
+                { "filename": "a.pdf", "mime": "application/pdf", "size": 5 },
+                { "filename": "n.txt", "mime": "text/plain", "size": 8 },
+            ])
+        );
     }
 
     #[test]
