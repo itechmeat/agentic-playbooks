@@ -54,6 +54,6 @@ imap = { version = "2.4", default-features = false }
 # the search-result decoder needs this direct dependency (version matched to
 # imap 2.4's transitive pin).
 imap-proto = "0.17"
-mail-parser = "0.11"
+mail-parser = "1.0"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7"
