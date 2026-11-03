@@ -4,6 +4,10 @@
 
 The MCP server (started with `apb mcp`) identifies itself as `agentic-playbooks` to MCP clients. The binary name and all CLI commands use `apb`.
 
+## Agent setup
+
+An agent installing apb for a person follows [docs/AGENT-SETUP.md](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/AGENT-SETUP.md) (also served by the MCP tool `setup_howto`): install, `apb doctor --json`, `apb setup plan --json` (read only, prints a digest), at most five questions to the person, `apb setup apply --plan <digest>`, verify, report; `apb setup remove` undoes it. Setup installs the default playbooks (`apb-*` ids, adapt them by forking under your own ids) and the process skills `apb-usage`, `apb-brainstorm`, `apb-delivery` and `apb-review`, writes role profiles for the detected agents and registers the MCP server in the detected hosts and the end-of-turn save check `apb hook stop` as a Claude Code Stop hook (`APB_SAVE_NUDGE=off` silences it). A copy of a default an agent saves is approved as locally authored, never with the shipped trust or upgrades; verify defaults with `apb adopt <id> --scope global`. A changed default is replaced only on request (`apb setup plan --replace-modified <name>`), and `apb setup remove` gives the person's copy back. Inside a run step setup only reads (`apb setup plan`); apply and remove are refused there. Setup installs no third-party tool: a review helper already installed on the machine becomes a required review step, the others are only suggested, and it only reports the work trackers it sees.
+
 ## Install
 
 Prebuilt binaries: macOS (Apple silicon, Intel) and Linux x86_64 (glibc 2.35+ or a static musl build). No Windows or Linux ARM binaries. apb drives coding agent CLIs you install separately (Claude Code, Codex, OpenCode, Cursor Agent, Grok, Hermes, Qoder, Antigravity, Pi, ZCode).
@@ -90,7 +94,9 @@ Run `apb init` in each project where you want to use playbooks. The MCP server d
 ## CLI commands
 
 ```text
-apb init            create the .apb structure
+apb init            create the .apb structure (--standing-block yes|no, --subscriptions SPEC: answers without a terminal; --feedback-loop yes only by the person at a terminal, refused with 3 otherwise; --feedback-loop no anywhere; --json)
+apb setup           plan [--json] [--project DIR] [--replace-modified [NAME,...]] (read only, with a digest; also manual host steps, trackers and review helpers, required when installed); apply --plan DIGEST with the same options (exit 0 done, 1 failure, 2 plan changed, 3 refused, also inside a run step or for a bare --replace-modified without a terminal); remove
+apb hook stop       Claude Code's Stop hook (registered by apb setup apply, action register_hook): reads the hook JSON on stdin, prints {"decision":"block",...} once per session when the turn looked like a repeatable process and no playbook tool was used, else nothing; always exits 0; APB_SAVE_NUDGE=off silences it, APB_SAVE_NUDGE_MIN_STEPS and APB_SAVE_NUDGE_MIN_KINDS set its bounds (8, 3)
 apb list            playbooks and versions
 apb validate        validate playbooks, the profiles and scripts they reference, profile models, requires and connectors
 apb run <id>        run a playbook (--confirm-irreversible: consent without a terminal; --confirm-launch: a person's confirmation of a playbook that asks before an agent launches it; --remember: keep its params and instruction for this project; --notify / --no-notify: tell a person about its reviews, questions, pauses and end)
@@ -112,15 +118,15 @@ apb trash           list deleted playbooks, restore one with its versions
 apb trust           list approvals (trust.json), revoke by digest or id, approve a version (--digest for imported scripts)
 apb profile         manage agent profiles
 apb connector       list or manage connectors
-apb detect          detect installed coding agents
+apb detect          detect installed coding agents (--json)
 apb adopt           will it fit here: adoption readiness report for a playbook (--scope project|global)
 apb memory          show or clear the remembered run input of a playbook in this project
 apb make-global     make a project playbook available in every project (--variant trash|retire|keep, --dry-run)
 apb launch floor <id>  print a playbook's launch floor (--global); --lower-to <policy> lowers it, a person at an interactive terminal only
-apb subscriptions   view or declare agent subscriptions
+apb subscriptions   view or declare agent subscriptions (--json)
 apb suggestions     inspect and undo recorded suggestion decisions
 apb migrate         migrate schema 1 playbooks to schema 2
-apb doctor          diagnose environment, or one run with --run
+apb doctor          diagnose environment, the defaults and the reviewer's agent, or one run with --run (--json)
 apb cache           inspect and manage the node result cache
 apb decide          ask the configured decision providers a bounded question (host tasks, scripts)
 apb decisions       decision-model report, stored thresholds, replay

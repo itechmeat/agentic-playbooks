@@ -23,11 +23,34 @@ Decision-model catalog ranking (`playbook_catalog` with a `query`, see `docs/DEC
 
 ## Standing instruction in CLAUDE.md / AGENTS.md
 
-`apb init` offers (a consent question in the interactive questionnaire) to append a standing playbook section to the project's `CLAUDE.md` and `AGENTS.md`. The write is idempotent (marker `## apb playbooks`), coexists with the feedback-loop section, and a non-TTY `apb init` never writes it. This is the guaranteed delivery path: memory files survive tool-search deferral, skill competition and instruction truncation, and in controlled runs this block is what makes the proactive save offer fire on a first-time task that is recurring by nature.
+`apb init` offers (a consent question in the interactive questionnaire) to append a standing playbook section to the project's `CLAUDE.md` and `AGENTS.md`. The write is idempotent (marker `## apb playbooks`) and coexists with the feedback-loop section. Without a terminal `apb init` asks nothing and writes nothing unless a flag answers: `apb init --standing-block yes` writes exactly this block, and `apb setup apply --project <dir>` writes it too. An agent that sets up a project without a terminal passes one of them. This is the guaranteed delivery path: memory files survive tool-search deferral, skill competition and instruction truncation, and in controlled runs this block is what makes the proactive save offer fire on a first-time task that is recurring by nature.
 
 The canonical text lives in `crates/apb-cli/assets/playbook-instructions.md` and is what init writes. For a host without `apb init`, or for an agent's global config, paste that file's content verbatim; do not fork the wording, so there is a single text to keep current.
 
+The block also says that the server's tools may be deferred by the host and have to be loaded (a tool search) before the first `playbook_catalog` call. Tier 0 does not carry that sentence: it is 1948 bytes of its 1950-byte budget, so there is no room.
+
 The block intentionally duplicates the proactive duties from tier 0 and nothing else: the catalog check before acting, the offer-to-save after, the semantic check against `suppressed_suggestions` before offering, and how a decline is recorded with `suggestion_dismiss` (kind soft by default, kind hard only for an explicit never-again). Run policy, gates and authoring rules stay in the server instructions, so the memory-file section does not go stale when those evolve.
+
+## End-of-turn check (Claude Code Stop hook)
+
+Tier 0 and the standing block both say when to offer saving a process, but a rule the model holds is not a moment that prompts it. Measured on one development machine over several hundred Claude Code sessions with the server registered, the catalog was called in a handful of sessions and the save offer was never made: the duty sits "after finishing the work", nothing at the end of a turn brings it up, and the server's tools are deferred, so the first call also needs a tool search. The standing block was in no project, because the agents that set projects up ran `apb init` without a terminal.
+
+The third channel is a deterministic end-of-turn check: `apb hook stop`, registered as a Claude Code Stop hook by `apb setup apply` (action `register_hook` in the user settings, `~/.claude/settings.json` or `$CLAUDE_CONFIG_DIR/settings.json`; `apb setup remove` takes it back byte for byte). Claude Code runs it whenever the agent ends a turn. It reads the hook's stdin and the tail of the session transcript (at most 4 MiB; a link or a FIFO is not read), decides on this machine unless the person turned on the model signal below, and either prints nothing or `{"decision":"block","reason":...}`, which makes the agent continue with the reason as its next instruction. It always exits 0 and prints nothing on any error, so it never breaks the host.
+
+It reminds only when all of these hold:
+
+- the turn is not already a continuation forced by a Stop hook (`stop_hook_active`), and this session was not reminded before (one reminder per session, kept as a hashed session id in `<config_dir>/hooks/save-nudge.json` for 30 days);
+- no apb playbook tool (`playbook_catalog`, `playbook_run`, `playbook_capture`, `suggestion_dismiss`, or `apb run`) was called in the transcript tail;
+- the last task, the steps since the last request the person typed, acted (an edit, a command that changes something, an MCP, web or sub-agent call), and either it has at least 8 steps of at least 3 kinds (step tokens of `docs/DISCOVER.md`; the kind of `git:commit` is `git`, of `sh:cargo` is `cargo`), or a decision model judges the last request recurring or repeatable by nature;
+- the process is not a run step (`APB_RUN_ID`, `APB_HOST_TASK`), and `APB_SAVE_NUDGE` is not `off`.
+
+No signal depends on the language the person writes in: there is no word list. The structural signal reads only the steps. The model signal is off by default: it sends the last request the person typed to the configured decision provider, so only the person turns it on (`docs/DECISIONS.md`, use `save_nudge`; `apb setup plan` lists it under `needs_person` as `save_nudge_model`). Turned on, it is asked only when the structural signal is missing and the task acted: one yes or no question about the request, redacted, at most 2000 characters, at most 100 requests a day, the providers sharing at most 4 seconds, an answer cached per session and request, and any failure read as no signal. In `shadow` mode the answer is only logged and never reminds. Without it, the structural signal and the host agent's own judgement decide. Whatever the signal, the reminder asks the host agent itself to judge first whether the task is repeatable or recurring by nature, then to load the tools if needed, call `playbook_catalog`, compare `suppressed_suggestions`, and offer once with `playbook_capture` or record a decline with `suggestion_dismiss`. The hook does not read `suppressed_suggestions` itself: a record covers a process by the meaning of its synopsis, which only a model can judge, and reading the store prunes it, which a hook on every turn must not do.
+
+Bounds are configurable per process: `APB_SAVE_NUDGE_MIN_STEPS` (default 8) and `APB_SAVE_NUDGE_MIN_KINDS` (default 3); Claude Code's `env` settings key sets them for every session. `APB_SAVE_NUDGE=off` silences the check while it stays registered; `apb setup remove` unregisters it, also after Claude Code rewrote the settings file, as long as apb's group is unchanged. The hook runs `apb` from PATH, so run `apb setup remove` before uninstalling apb: otherwise Claude Code reports a failing hook at the end of every turn until the group is deleted by hand.
+
+Codex and OpenCode get no hook: the standing block in `AGENTS.md` is their channel. A hook for another host is one `StopHookHost` in its agent module (`apb_core::agents`).
+
+What is not measured yet: whether a Claude Code session acts on the reminder as intended in real use (a catalog call and one offer), and how often the structural bounds remind after work nobody would repeat.
 
 ## Node output and host Stop hooks (`outputs.extract`)
 

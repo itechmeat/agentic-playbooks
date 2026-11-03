@@ -109,6 +109,8 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "projects_list",
         "playbook_howto",
         "playbook_interview",
+        "setup_howto",
+        "setup_plan",
         "run_progress_report",
         "profile_list",
         "connectors_list",

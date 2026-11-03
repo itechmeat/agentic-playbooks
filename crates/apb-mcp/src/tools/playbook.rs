@@ -84,6 +84,24 @@ pub fn playbook_howto() -> Result<Value, ToolError> {
     Ok(json!({ "howto": include_str!("../../../../docs/HOWTO-authoring.md") }))
 }
 
+/// Tier 2: the installing agent's procedure, `docs/AGENT-SETUP.md`.
+pub fn setup_howto() -> Result<Value, ToolError> {
+    Ok(json!({ "howto": crate::setup::HOWTO }))
+}
+
+/// The setup plan of this machine (and of the project at `root` when
+/// `project`), read only: the same JSON as `apb setup plan --json`. Allowed
+/// in a run step, which may read the plan but never apply it.
+pub fn setup_plan(root: &Path, project: bool) -> Result<Value, ToolError> {
+    let plan = crate::setup::plan(
+        root,
+        project.then_some(root),
+        &crate::setup::ReplaceModified::None,
+    )
+    .map_err(ToolError::Engine)?;
+    serde_json::to_value(plan).map_err(|e| ToolError::Engine(e.to_string()))
+}
+
 /// Tier 2 (spec 2026-08-15): the guided-interview guide. Pulled only when
 /// the user wants a playbook built from a process they describe.
 pub fn playbook_interview() -> Result<Value, ToolError> {

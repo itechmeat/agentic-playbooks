@@ -37,6 +37,18 @@ pub const LOCAL_ENTRIES: &[&str] = &[
     "problems/",
 ];
 
+/// The projects `dir` lies in, nearest first: `dir` itself and every
+/// ancestor that holds a `.apb` folder. A process started in a subfolder of
+/// a project (an agent session after `cd crates/x`) belongs to them all, so
+/// a caller that narrows by project narrows by each.
+pub fn enclosing_roots(dir: &Path) -> Vec<std::path::PathBuf> {
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    dir.ancestors()
+        .filter(|d| d.join(".apb").is_dir())
+        .map(Path::to_path_buf)
+        .collect()
+}
+
 /// The workspace id recorded in `<root>/.apb/workspace.local`, read only when
 /// that file is a regular file (not followed through a symlink): a checkout
 /// whose identity file is a link to another project's would otherwise claim

@@ -24,6 +24,7 @@ mod doctor;
 mod eval;
 // --- end 0.24.0 eval suites ---
 mod grade;
+mod hook;
 mod import_preview;
 mod intent;
 mod interrupt;
@@ -48,6 +49,7 @@ mod run_mode;
 mod selfupdate;
 mod serve;
 mod server;
+mod setup;
 // --- 0.23.0 stats (C3) ---
 mod stats;
 // --- end of 0.23.0 stats ---
@@ -97,8 +99,38 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create empty .apb structure
-    Init,
+    /// Create empty .apb structure. At a terminal without flags it asks
+    /// about the standing blocks and subscriptions; the flags answer
+    /// without a terminal (a missing flag is never a yes)
+    Init {
+        /// Write the standing playbook instruction into CLAUDE.md and AGENTS.md
+        #[arg(long, value_name = "yes|no", value_parser = ["yes", "no"])]
+        standing_block: Option<String>,
+        /// Write the feedback-loop block (agents may report apb defects as
+        /// issues): only on the person's own answer, so `yes` asks again at
+        /// a terminal and is refused (exit 3) without one or inside a run
+        /// step; `no` works anywhere
+        #[arg(long, value_name = "yes|no", value_parser = ["yes", "no"])]
+        feedback_loop: Option<String>,
+        /// Declare a subscription, as `apb subscriptions --set` (repeatable)
+        #[arg(long = "subscriptions", value_name = "AGENT[:PLAN[:COVERAGE]]")]
+        subscriptions: Vec<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Host hooks: commands an agent host runs on its own events, not
+    /// meant to be typed by people
+    Hook {
+        #[command(subcommand)]
+        event: hook::HookEvent,
+    },
+    /// Agent-first setup: plan (read only), apply a plan by its digest,
+    /// remove what setup did
+    Setup {
+        #[command(subcommand)]
+        action: setup::SetupAction,
+    },
     /// List or manage agent profiles (spec 2026-07-12)
     Profile {
         #[command(subcommand)]
@@ -121,6 +153,9 @@ enum Command {
     Detect {
         #[arg(long)]
         refresh: bool,
+        /// Machine-readable output only (no survey hint)
+        #[arg(long)]
+        json: bool,
     },
     /// Will it fit here: the readiness report of a playbook (or of every
     /// project and global playbook) for a run in this project, in four
@@ -170,6 +205,9 @@ enum Command {
         /// Declare a subscription: agent[:plan[:coverage]] (repeatable)
         #[arg(long = "set", value_name = "AGENT[:PLAN[:COVERAGE]]")]
         set: Vec<String>,
+        /// Machine-readable output, never a survey
+        #[arg(long)]
+        json: bool,
     },
     /// Inspect and undo the suggestion decisions the agent recorded
     /// (spec 2026-07-29)
@@ -204,6 +242,10 @@ enum Command {
         /// The model for --probe-agent (default: the first the catalog lists).
         #[arg(long, requires = "probe_agent")]
         model: Option<String>,
+        /// Machine-readable output: `{ ok, checks: [{ status, subject,
+        /// detail }] }`
+        #[arg(long, conflicts_with = "probe_agent")]
+        json: bool,
     },
     /// Export a playbook version (YAML, layout and scripts) to a single bundle file
     Export {
@@ -775,6 +817,12 @@ enum Command {
         #[arg(long)]
         attempt: u32,
     },
+    /// Brings the default playbooks and skills setup installed in line with
+    /// this binary. `apb self-update` runs it in the updated binary, so the
+    /// new content comes from the new build. Hidden: an internal re-exec
+    /// target.
+    #[command(hide = true, name = "__reconcile-defaults")]
+    ReconcileDefaults,
 }
 
 /// `apb launch` subcommands.
@@ -814,6 +862,10 @@ fn registers_workspace(command: Option<&Command>) -> bool {
                 | Command::DriveRun { .. }
                 | Command::PauseWaker { .. }
                 | Command::AskServer { .. }
+                | Command::ReconcileDefaults
+                | Command::Setup {
+                    action: setup::SetupAction::Plan { .. }
+                }
         )
     )
 }
@@ -834,6 +886,11 @@ fn main() -> ExitCode {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
     let cli = Cli::parse();
+    // A host hook answers before anything touches the working directory,
+    // the config or the registry, and never fails its host.
+    if let Some(Command::Hook { event }) = &cli.command {
+        return hook::run(event);
+    }
     let root = std::env::current_dir().expect("cwd");
     // A read-only server enters read-only mode before anything else runs:
     // no workspace registration, no installation key, nothing written.
@@ -858,7 +915,22 @@ fn main() -> ExitCode {
         let _ = apb_core::run_origin::ensure_key();
     }
     match cli.command {
-        Some(Command::Init) => run_init(&root),
+        Some(Command::Init {
+            standing_block,
+            feedback_loop,
+            subscriptions,
+            json,
+        }) => run_init(
+            &root,
+            &crate::manage::InitFlags {
+                standing_block: standing_block.map(|v| v == "yes"),
+                feedback_loop: feedback_loop.map(|v| v == "yes"),
+                subscriptions,
+                json,
+            },
+        ),
+        Some(Command::Setup { action }) => setup::setup_cmd(&root, action),
+        Some(Command::Hook { .. }) => unreachable!("a hook returns before the workspace setup"),
         Some(Command::List) => run_list(&root),
         Some(Command::Validate { name }) => run_validate(&root, name),
         Some(Command::Doctor {
@@ -866,6 +938,7 @@ fn main() -> ExitCode {
             agents,
             probe_agent,
             model,
+            json,
         }) => doctor::doctor_cmd(
             &root,
             doctor::DoctorArgs {
@@ -873,6 +946,7 @@ fn main() -> ExitCode {
                 agents,
                 probe_agent,
                 model,
+                json,
             },
         ),
         Some(Command::Export { name, version, out }) => {
@@ -1110,7 +1184,7 @@ fn main() -> ExitCode {
         ),
         // --- end 0.24.0 eval suites ---
         Some(Command::Migrate { apply }) => migrate_cmd(&root, apply),
-        Some(Command::Detect { refresh }) => detect_cmd(refresh),
+        Some(Command::Detect { refresh, json }) => detect_cmd(refresh, json),
         Some(Command::Adopt { name, scope }) => adopt_cmd(&root, name.as_deref(), scope.as_deref()),
         Some(Command::Memory { cmd }) => memory::memory_cmd(&root, cmd),
         Some(Command::MakeGlobal {
@@ -1129,7 +1203,9 @@ fn main() -> ExitCode {
                 json,
             },
         ),
-        Some(Command::Subscriptions { decline, set }) => subscriptions_cmd(set, decline),
+        Some(Command::Subscriptions { decline, set, json }) => {
+            subscriptions_cmd(set, decline, json)
+        }
         Some(Command::Suggestions { action }) => suggestions_cmd(&root, action),
         Some(Command::DriveSupervised {
             name,
@@ -1226,6 +1302,7 @@ fn main() -> ExitCode {
             },
         ),
         Some(Command::AskServer { run, node, attempt }) => ask_server_cmd(&run, &node, attempt),
+        Some(Command::ReconcileDefaults) => selfupdate::reconcile_defaults_cmd(),
         None => match resolve_bind(None) {
             Ok(addr) => dashboard(addr, resolve_port(None), false),
             Err(e) => {
@@ -1243,6 +1320,19 @@ mod tests {
     fn registers(args: &[&str]) -> bool {
         let cli = Cli::try_parse_from(args).expect("args parse");
         registers_workspace(cli.command.as_ref())
+    }
+
+    /// E3: an agent installing apb for a person reads llms.txt first; its
+    /// first link is the setup procedure.
+    #[test]
+    fn llms_txt_links_the_agent_setup_procedure_first() {
+        let llms = include_str!("../../../llms.txt");
+        let first = llms
+            .split("](")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .expect("llms.txt has a link");
+        assert!(first.ends_with("docs/AGENT-SETUP.md"), "{first}");
     }
 
     /// F18: llms.txt is what an agent reads to learn the CLI; its command

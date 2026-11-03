@@ -61,11 +61,15 @@ pub(crate) fn migrate_cmd(root: &Path, apply: bool) -> ExitCode {
     }
 }
 
-pub(crate) fn detect_cmd(refresh: bool) -> ExitCode {
+/// `apb detect`: the detection JSON (`{ agents, options_by_agent }`); with
+/// `json` nothing else is printed, not even the survey hint.
+pub(crate) fn detect_cmd(refresh: bool, json: bool) -> ExitCode {
     match apb_mcp::advisory_tools::agents_detect(refresh) {
         Ok(v) => {
             print_json(&v);
-            offer_onboarding_if_tty();
+            if !json {
+                offer_onboarding_if_tty();
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -89,7 +93,7 @@ pub(crate) fn adopt_cmd(root: &Path, id: Option<&str>, scope: Option<&str>) -> E
     }
 }
 
-pub(crate) fn subscriptions_cmd(set: Vec<String>, decline: bool) -> ExitCode {
+pub(crate) fn subscriptions_cmd(set: Vec<String>, decline: bool, json: bool) -> ExitCode {
     use apb_core::models_table::{self, OnboardingState};
     use std::io::IsTerminal;
 
@@ -104,6 +108,9 @@ pub(crate) fn subscriptions_cmd(set: Vec<String>, decline: bool) -> ExitCode {
                 ExitCode::from(2)
             }
         };
+    }
+    if json && set.is_empty() {
+        return subscriptions_json();
     }
     if !set.is_empty() {
         let subs: Vec<_> = match set.iter().map(|s| parse_subscription(s)).collect() {
@@ -170,7 +177,163 @@ pub(crate) fn subscriptions_cmd(set: Vec<String>, decline: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-pub(crate) fn run_init(root: &Path) -> ExitCode {
+/// `apb subscriptions --json`: `{ subscriptions, onboarding }`, never a
+/// survey.
+fn subscriptions_json() -> ExitCode {
+    use apb_core::models_table::{self, OnboardingState};
+    let table = match models_table::load_merged() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("models table error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let onboarding = match models_table::onboarding::read() {
+        Ok(OnboardingState::Uninitialized) => "uninitialized",
+        Ok(_) => "done",
+        Err(_) => "unreadable",
+    };
+    print_json(&serde_json::json!({
+        "subscriptions": table.subscriptions,
+        "onboarding": onboarding,
+    }));
+    ExitCode::SUCCESS
+}
+
+/// The answers `apb init` takes as flags, for a run without a terminal.
+pub(crate) struct InitFlags {
+    pub standing_block: Option<bool>,
+    pub feedback_loop: Option<bool>,
+    pub subscriptions: Vec<String>,
+    pub json: bool,
+}
+
+impl InitFlags {
+    /// Any answer given as a flag: then no question is asked.
+    fn answered(&self) -> bool {
+        self.standing_block.is_some()
+            || self.feedback_loop.is_some()
+            || !self.subscriptions.is_empty()
+    }
+}
+
+/// One answered block: the answer and what happened per file.
+fn block_answer(
+    root: &Path,
+    answer: Option<bool>,
+    feedback: bool,
+) -> Result<serde_json::Value, String> {
+    let Some(yes) = answer else {
+        return Ok(serde_json::Value::Null);
+    };
+    if !yes {
+        return Ok(serde_json::json!({ "answer": "no", "files": [] }));
+    }
+    let files: Vec<serde_json::Value> = crate::onboarding::write_block_by_flag(root, feedback)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(file, action)| {
+            let action = match action {
+                apb_mcp::setup::standing::BlockAction::Created => "created",
+                apb_mcp::setup::standing::BlockAction::Appended => "appended",
+                apb_mcp::setup::standing::BlockAction::AlreadyConfigured => "already_configured",
+            };
+            serde_json::json!({ "file": file, "action": action })
+        })
+        .collect();
+    Ok(serde_json::json!({ "answer": "yes", "files": files }))
+}
+
+/// The flag answers of `apb init`, applied in the questionnaire's order.
+fn apply_init_flags(root: &Path, flags: &InitFlags) -> Result<serde_json::Value, String> {
+    let standing = block_answer(root, flags.standing_block, false)?;
+    let feedback = block_answer(root, flags.feedback_loop, true)?;
+    let subscriptions = if flags.subscriptions.is_empty() {
+        serde_json::Value::Null
+    } else {
+        let subs = flags
+            .subscriptions
+            .iter()
+            .map(|s| parse_subscription(s))
+            .collect::<Result<Vec<_>, _>>()?;
+        apb_mcp::advisory_tools::subscriptions_set(subs, false).map_err(|e| e.to_string())?
+    };
+    Ok(serde_json::json!({
+        "initialized": root.join(".apb"),
+        "standing_block": standing,
+        "feedback_loop": feedback,
+        "subscriptions": subscriptions,
+    }))
+}
+
+/// The exit code of an `apb init` a person's decision is missing from.
+const INIT_REFUSED: u8 = 3;
+
+/// `--feedback-loop yes` is a person's answer: refused inside a run step
+/// and without a terminal, and asked once more at a terminal. `Ok(false)`
+/// when the person declines there.
+fn feedback_consent() -> Result<bool, String> {
+    if let Some(from) = apb_core::step_env::StepCaller::from_env().describe() {
+        return Err(format!(
+            "--feedback-loop yes is refused {from}: the feedback-loop block lets agents file issues about apb, and only the person turns it on, at a terminal"
+        ));
+    }
+    if !crate::launch::at_terminal() {
+        return Err(
+            "--feedback-loop yes needs the person at a terminal: the feedback-loop block lets agents file issues about apb, so the person runs apb init there and answers the question (--feedback-loop no works anywhere)"
+                .to_string(),
+        );
+    }
+    crate::onboarding::confirm_feedback().map_err(|e| e.to_string())
+}
+
+pub(crate) fn run_init(root: &Path, flags: &InitFlags) -> ExitCode {
+    let declined;
+    let flags = match flags.feedback_loop {
+        Some(true) => match feedback_consent() {
+            Ok(true) => flags,
+            Ok(false) => {
+                declined = InitFlags {
+                    feedback_loop: Some(false),
+                    subscriptions: flags.subscriptions.clone(),
+                    ..*flags
+                };
+                &declined
+            }
+            Err(why) => {
+                if flags.json {
+                    print_json(&serde_json::json!({
+                        "refused": "feedback_loop_needs_person",
+                        "message": why,
+                    }));
+                } else {
+                    eprintln!("init refused: {why}");
+                }
+                return ExitCode::from(INIT_REFUSED);
+            }
+        },
+        _ => flags,
+    };
+    if flags.answered() || flags.json {
+        if let Err(e) = init_project(root) {
+            eprintln!("init failed: {e}");
+            return ExitCode::from(2);
+        }
+        return match apply_init_flags(root, flags) {
+            Ok(v) if flags.json => {
+                print_json(&v);
+                ExitCode::SUCCESS
+            }
+            Ok(_) => {
+                println!("initialized {}", root.join(".apb").display());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("init failed: {e}");
+                ExitCode::from(2)
+            }
+        };
+    }
     match init_project(root) {
         Ok(()) => {
             println!("initialized {}", root.join(".apb").display());

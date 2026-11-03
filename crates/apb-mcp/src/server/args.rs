@@ -822,6 +822,14 @@ pub struct AgentsDetectArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetupPlanArgs {
+    /// Also plan this project's standing playbook instruction
+    /// (CLAUDE.md and AGENTS.md). Default false.
+    #[serde(default)]
+    pub project: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct AdoptReportArgs {
     /// A specific playbook; None - every project and global playbook.
     #[serde(default)]

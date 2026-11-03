@@ -35,19 +35,66 @@ pub(crate) struct DoctorArgs {
     pub agents: bool,
     pub probe_agent: Option<String>,
     pub model: Option<String>,
+    /// `{ ok, checks: [{ status, subject, detail }] }` instead of lines.
+    pub json: bool,
 }
 
 pub(crate) fn doctor_cmd(root: &Path, args: DoctorArgs) -> ExitCode {
     if let Some(agent) = &args.probe_agent {
         return doctor_probe(root, agent, args.model.as_deref());
     }
+    let mut out = Out::new(args.json);
     if let Some(run_id) = &args.run {
-        return doctor_run(root, run_id);
+        return doctor_run(root, run_id, out);
     }
     if args.agents {
-        return finish(print_report(&apb_core::doctor::diagnose_agents()));
+        let blocking = print_report(&mut out, &apb_core::doctor::diagnose_agents());
+        return out.finish(blocking);
     }
-    doctor_env(root)
+    doctor_env(root, out)
+}
+
+/// Where the checks go: one line each, or collected for `--json`.
+struct Out {
+    json: bool,
+    checks: Vec<serde_json::Value>,
+}
+
+impl Out {
+    fn new(json: bool) -> Self {
+        Self {
+            json,
+            checks: Vec::new(),
+        }
+    }
+
+    fn line(&mut self, status: &str, subject: &str, detail: &str) {
+        if self.json {
+            self.checks.push(serde_json::json!({
+                "status": status,
+                "subject": subject,
+                "detail": detail,
+            }));
+        } else {
+            line(status, subject, detail);
+        }
+    }
+
+    /// Prints the JSON report, if asked for, and the exit code.
+    fn finish(self, blocking: bool) -> ExitCode {
+        if self.json {
+            crate::util::print_json(&serde_json::json!({
+                "ok": !blocking,
+                "checks": self.checks,
+            }));
+            return if blocking {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            };
+        }
+        finish(blocking)
+    }
 }
 
 /// The marker of a level, padded so the subjects line up.
@@ -65,14 +112,14 @@ fn line(status: &str, subject: &str, detail: &str) {
 }
 
 /// Prints an environment report; whether it holds a blocking problem.
-fn print_report(report: &DoctorReport) -> bool {
+fn print_report(out: &mut Out, report: &DoctorReport) -> bool {
     for c in &report.checks {
         let status = match c.status {
             CheckStatus::Ok => OK,
             CheckStatus::Warn => WARN,
             CheckStatus::Fail => FAIL,
         };
-        line(status, &c.name, &c.detail);
+        out.line(status, &c.name, &c.detail);
     }
     report.has_failure()
 }
@@ -86,29 +133,32 @@ fn finish(blocking: bool) -> ExitCode {
     }
 }
 
-fn doctor_env(root: &Path) -> ExitCode {
-    let blocking = print_report(&apb_core::doctor::diagnose(root));
+fn doctor_env(root: &Path, mut out: Out) -> ExitCode {
+    let blocking = print_report(&mut out, &apb_core::doctor::diagnose(root));
     // The isolation sandbox: not blocking, only `isolation: full` needs it.
     let host = apb_engine::sandbox::probe::host_facts();
     let (ok, detail) = apb_engine::sandbox::probe::doctor_line(&host);
     // The detail carries bwrap's own output and paths: never raw control
     // sequences on the operator's terminal.
-    line(
+    out.line(
         if ok { OK } else { WARN },
         "sandbox",
         &sanitize_for_terminal(&detail, SANDBOX_LINE_MAX),
     );
     match crate::dashboard_check::dashboard_version_line() {
-        Some(Ok(detail)) => line(OK, "dashboard", &detail),
-        Some(Err(detail)) => line(WARN, "dashboard", &detail),
+        Some(Ok(detail)) => out.line(OK, "dashboard", &detail),
+        Some(Err(detail)) => out.line(WARN, "dashboard", &detail),
         None => {}
     }
-    finish(blocking)
+    for (warn, subject, detail) in apb_mcp::setup::doctor_lines(root) {
+        out.line(if warn { WARN } else { OK }, subject, &detail);
+    }
+    out.finish(blocking)
 }
 
 /// The per-run doctor. Read-only: it names problems and repairs nothing, so
 /// the repair verbs (`apb stop`, resume) stay explicit operator decisions.
-fn doctor_run(root: &Path, run_id: &str) -> ExitCode {
+fn doctor_run(root: &Path, run_id: &str, mut out: Out) -> ExitCode {
     use apb_engine::run_doctor::{diagnose_run, has_failure};
     let checks = match diagnose_run(root, run_id) {
         Ok(c) => c,
@@ -118,10 +168,10 @@ fn doctor_run(root: &Path, run_id: &str) -> ExitCode {
         }
     };
     for c in &checks {
-        line(c.status, &c.subject, &c.detail);
+        out.line(c.status, &c.subject, &c.detail);
     }
-    print_pending_question_check(root, run_id);
-    finish(has_failure(&checks))
+    print_pending_question_check(root, run_id, &mut out);
+    out.finish(has_failure(&checks))
 }
 
 /// Flags a pending interactive question on the run, if any
@@ -134,7 +184,7 @@ fn doctor_run(root: &Path, run_id: &str) -> ExitCode {
 /// question is a normal wait state, not a blocking problem, so it never
 /// affects this command's exit code. A best-effort read: an unreadable
 /// events.jsonl simply omits the line rather than failing the whole report.
-fn print_pending_question_check(root: &Path, run_id: &str) {
+fn print_pending_question_check(root: &Path, run_id: &str, out: &mut Out) {
     let run_dir = root.join(".apb/runs").join(run_id);
     let Ok(events) = apb_engine::run_view::read_events(&run_dir) else {
         return;
@@ -142,7 +192,7 @@ fn print_pending_question_check(root: &Path, run_id: &str) {
     if let Some(pq) =
         apb_engine::progress::from_run_dir(&run_dir, &events).and_then(|p| p.pending_question)
     {
-        line(
+        out.line(
             WARN,
             "pending question",
             &format!(

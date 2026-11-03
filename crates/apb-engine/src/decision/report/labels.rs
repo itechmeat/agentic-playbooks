@@ -640,6 +640,10 @@ impl PendingLabeller {
                 "problem_recheck",
                 "pending: the problem reported again after the recheck, or a person's decision on it",
             ),
+            "save_nudge" => (
+                "save_nudge",
+                "pending: the host agent's own offer, a save or a decline in the same session",
+            ),
             _ => ("unknown", "no labeller for this use"),
         };
         PendingLabeller { use_site, source }

@@ -118,7 +118,11 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   to the installation by a MAC for a global playbook), the credential-shape
   detector of values and param names (`token_shape.rs`), a run's sensitive
   params (`run_params.rs`: `sensitive`, the one rule remembered input and
-  run redaction share, and `redacted`), the process-wide read-only mode of
+  run redaction share, and `redacted`), the end-of-turn save check of
+  `apb hook stop` (`save_nudge/`: the language-independent rule over the
+  last task in `mod`, `task` the session tail read by the discovery
+  decoder, `state` once per session and the cached model answers under
+  the config dir), the process-wide read-only mode of
   `apb mcp --read-only` and the guard every write and program start checks
   (`process_mode.rs`), run quality
   (`quality/`: `criteria` the `quality:` block, the built-in criteria and
@@ -154,7 +158,15 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   local check of an installed CLI (version against the verified one, the
   built-in form's flags in its help), `exposure.rs` the tools an agent
   reports against the ones an attempt was handed, `sandbox.rs` what an agent
-  needs inside the sandbox (its login, files to bind or copy); `claude/`, `codex/`, `opencode/`
+  needs inside the sandbox (its login, files to bind or copy), `mcp_host.rs`
+  the `McpHost` an agent CLI that is an MCP host gives (`Agent::mcp_host`:
+  its config path, whether a server is registered, its CLI's register and
+  remove commands or a byte-exact insert and removal, each agent's own in
+  its `mcp` module), `hook_host.rs` the `StopHookHost` an agent CLI with an
+  end-of-turn hook gives (`Agent::stop_hook`: its settings path, the
+  byte-exact insert and removal of apb's hook, the event it hands the hook
+  and the answer that keeps the turn going; claude's in `claude/hooks.rs`);
+  `claude/`, `codex/`, `opencode/`
   and `zcode/` hold their readers and helpers, the other agents one file each;
   `apb_core::zcode` re-exports `agents/zcode`), free agent detection over the
   agent registry (`detect.rs`), curated models table
@@ -407,7 +419,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   module per use: completion check, retry advice, supervisor wake triage,
   review recommendation, tier routing, `bounded` the shared ask over whole
   views the model grader and the recheck use, the judge node and edge answers
-  (`scheduler/judge` runs them), and `report/`: the labellers, statistics
+  (`scheduler/judge` runs them), `save_nudge` the save check's one yes or
+  no question whether a request is recurring, and `report/`: the labellers, statistics
   and replay behind `apb decisions`; see `docs/DECISIONS.md`).
 - `apb-mcp` - rmcp stdio MCP server (`server/`, with `read_only` the
   allowlist of `apb mcp --read-only` and the tables every tool is classified
@@ -430,13 +443,43 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   API and the CLI); `promote/` is `playbook_make_global` (the
   plan and its blockers in `plan`, the apply in `mod`); `catalog_rank` is the
   opt-in decision-model ranking behind `playbook_catalog(query)`, asked through the engine's standalone decider
-  (`decision/standalone.rs`).
+  (`decision/standalone.rs`). `setup/` is agent-first setup (`plan` the
+  read-only plan with its digest over the actions and their observed
+  state, `apply` the run of exactly that plan under the setup lock,
+  `remove` the undo (a replaced default given back to the person's copy),
+  `record` the setup record, host config backups under `<config_dir>/setup`
+  and the setup lock with its lifetime, `hosts` the MCP registration of
+  every agent that is an MCP host (a symlinked config edited in place with
+  its mode, written only while it still holds what was read, a host CLI
+  stopped after its time limit, a shape apb cannot edit safely a `manual`
+  step), `hook` the end-of-turn save check registered the same way in
+  every agent with a Stop hook (`register_hook`), `standing` the
+  project's standing playbook block shared with `apb init` (every target
+  read before the first write, earlier writes put back on a failure; a
+  link inside the project written through, a link out of it refused), `observe` the
+  work trackers and optional review helpers the plan reports for
+  information only, `doctor` the defaults and reviewer lines of `apb
+  doctor`, `upgrade` the reconcile of the installed defaults once setup
+  was applied, run at `apb mcp` start and by `apb self-update`); apply and
+  remove are refused inside a run step (`step_refusal`), the read-only
+  plan is not, and a changed default
+  is replaced only through the plan's `--replace-modified` actions; the MCP tools `setup_plan` and `setup_howto`
+  (`docs/AGENT-SETUP.md`) sit over it, applying is CLI only.
 - `apb-cli` - package name `apb` (bin `apb`, `main.rs`); thin dispatch over
   core/engine/mcp. `apb init` runs a short interactive questionnaire in a
   terminal (feedback-loop consent into CLAUDE.md/AGENTS.md, agent
-  subscriptions survey); non-TTY runs skip it. `apb self-update` updates
-  installer-based installs in place. `doctor.rs` is `apb doctor` (the
-  environment, `--agents`, `--run <id>`, `--probe-agent <id>`). `apb intent list|resolve` shows a run's
+  subscriptions survey); non-TTY runs skip it, and its flags
+  (`--standing-block`, `--feedback-loop`, `--subscriptions`, `--json`)
+  answer without a terminal, except `--feedback-loop yes`, which only a
+  person gives at a terminal (refused with 3 otherwise and inside a run
+  step). `setup.rs` is `apb setup plan|apply|remove`
+  over `apb_mcp::setup`. `hook.rs` is `apb hook stop`, Claude Code's Stop
+  hook over `apb_core::save_nudge`, which prints the host's answer or
+  nothing and always exits 0. `apb self-update` updates
+  installer-based installs in place, then runs the hidden `apb
+  __reconcile-defaults` in the updated binary. `doctor.rs` is `apb doctor` (the
+  environment with the defaults and reviewer lines, `--agents`, `--run
+  <id>`, `--probe-agent <id>`, `--json`). `apb intent list|resolve` shows a run's
   send intents and records a person's decision on an unknown one. `budget.rs`
   holds the budget flags of `apb run` and `apb resume`, the estimate printing
   and the terminal question of `on_no_estimate: ask`. `memory.rs` is `apb

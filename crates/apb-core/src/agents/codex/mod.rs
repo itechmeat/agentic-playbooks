@@ -3,6 +3,7 @@
 
 pub mod actions;
 pub mod home;
+pub mod mcp;
 pub mod output;
 mod toml;
 
@@ -44,6 +45,10 @@ pub struct Codex;
 impl Agent for Codex {
     fn descriptor(&self) -> &'static Descriptor {
         &DESCRIPTOR
+    }
+
+    fn mcp_host(&self) -> Option<&'static dyn super::McpHost> {
+        Some(&mcp::CodexMcp)
     }
 
     fn models(&self) -> &'static dyn super::ModelPolicy {

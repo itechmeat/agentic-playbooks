@@ -65,7 +65,7 @@ uses:                   # absent = off
     mode: shadow
     thresholds: { final_result: 0.15 }   # the default, see below
 privacy:
-  send: [prompts, outputs]   # `diffs` is opt-in
+  send: [prompts, outputs]   # `diffs` and `requests` are opt-in
   redact: true
   max_state_bytes: 24000
   debug_state: false
@@ -592,7 +592,7 @@ itself), and `apb decisions thresholds set` refuses the use.
 
 ## Daily-capped uses outside a run
 
-Four uses ask outside any run, so no run budget applies: each is capped per
+Five uses ask outside any run, so no run budget applies: each is capped per
 project and UTC day instead (`uses.<name>.max_requests_per_day`), and each
 request is logged as one line of `<root>/.apb/decisions.jsonl` under the
 log's lock, as for catalog ranking above. One table holds the defaults:
@@ -603,6 +603,39 @@ log's lock, as for catalog ranking above. One table holds the defaults:
 | `host_task` | 200 | `apb decide` and `decision_ask` outside a run |
 | `grade` | 50 | the model grader: `apb grade --model`, `--backfill --model`, MCP `run_grade { grader: model }`, the dashboard's Grade by model |
 | `problem_recheck` | 50 | a known problem's recheck after its source changed: at a run's start (at most two per start), `apb problems <id> recheck --model`, MCP `known_problem_recheck { by: model }`, the dashboard's Recheck by model |
+| `save_nudge` | 100 | the end-of-turn save check `apb hook stop`; logged and capped machine-wide in `<config_dir>/hooks/.apb/decisions.jsonl` rather than per project |
+
+## End-of-turn save check (`save_nudge`)
+
+Off by default, even with a provider configured: the question carries the
+last request a person typed in a host session, so that text leaves the
+machine only when the person turns the use on. That takes three settings in
+`decisions.yaml`: `uses.save_nudge: { mode: advise }`, a ceiling `mode` of
+at least `advise`, and `requests` in `privacy.send` (the class of a
+person's own requests, apart from the rendered node prompts of `prompts`).
+`apb setup plan` lists it under `needs_person` (`save_nudge_model`) with
+this data flow. Without it the check uses the structural signal and the
+host agent's own judgement only.
+
+The Claude Code Stop hook `apb hook stop` (docs/HOST-INTEGRATION.md,
+"End-of-turn check") asks it only when the turn's last task acted but
+missed the structural signal (fewer than the minimum steps or step kinds):
+one `noul` question, `recurring`, whether the last request the person typed
+is a process they are likely to repeat or recurring by nature. Every
+project the session's folder lies in narrows the settings (the folder and
+each ancestor holding `.apb/`), so a project that opted out of decision
+models is never asked about, from any of its subfolders. The request is
+redacted per `privacy.redact` (on by default) for the nearest of those
+projects, then clipped to 2000 characters and to `privacy.max_state_bytes`,
+in whatever language it was written; there is no word list. In `shadow` the
+answer is only logged; from `advise` up a yes adds the reminder, which is
+advice the host agent judges again, never an action. `p` at or above
+`uses.save_nudge.thresholds.recurring` (default 0.7) is a yes. The
+providers of the chain share at most 4 seconds whatever `timeout_ms` says
+(each gets its part), plus at most about 2 seconds of waiting for the log's
+lock; the answer is cached per session and request, at most 100 requests a
+day are sent, and every failure is read as no signal. A small, fast
+decision model is enough.
 
 ## Model grader (`grade`)
 

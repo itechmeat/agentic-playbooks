@@ -46,6 +46,8 @@ mod discover_cli_test;
 mod doctor_agents_cli_test;
 #[path = "suite/grade_cli_test.rs"]
 mod grade_cli_test;
+#[path = "suite/hook_cli_test.rs"]
+mod hook_cli_test;
 #[cfg(unix)]
 #[path = "suite/host_mode_cli_test.rs"]
 mod host_mode_cli_test;
@@ -122,6 +124,9 @@ mod sandbox_exec_test;
 mod secret_runs;
 #[path = "suite/server_key_cli_test.rs"]
 mod server_key_cli_test;
+#[cfg(unix)]
+#[path = "suite/setup_cli_test.rs"]
+mod setup_cli_test;
 #[path = "suite/stats_cli_test.rs"]
 mod stats_cli_test;
 // --- 0.24.0 eval suites ---

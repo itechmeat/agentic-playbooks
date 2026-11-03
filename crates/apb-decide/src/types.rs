@@ -26,6 +26,9 @@ pub enum UseSite {
     Grade,
     /// Whether a known problem still holds after its source changed.
     ProblemRecheck,
+    /// Whether the request a host session just finished is a process a
+    /// person repeats (the end-of-turn save check, `apb hook stop`).
+    SaveNudge,
 }
 
 impl UseSite {
@@ -43,6 +46,7 @@ impl UseSite {
             UseSite::HostTask => "host_task",
             UseSite::Grade => "grade",
             UseSite::ProblemRecheck => "problem_recheck",
+            UseSite::SaveNudge => "save_nudge",
         }
     }
 }

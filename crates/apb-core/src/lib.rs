@@ -60,6 +60,7 @@ pub mod run_notes;
 pub mod run_origin;
 pub mod run_outputs;
 pub mod run_params;
+pub mod save_nudge;
 pub mod schema;
 pub mod schema_migrate;
 pub mod scope;
