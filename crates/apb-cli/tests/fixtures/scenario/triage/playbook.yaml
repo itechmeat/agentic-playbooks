@@ -1,0 +1,33 @@
+schema: 2
+id: triage
+name: Document triage
+version: 1.0.0
+description: Three judges in a row sort a document; each falls back to `unclear` when no answer comes.
+nodes:
+  - { id: start, type: start }
+  - id: kind
+    type: judge
+    state: { doc: "{{run.instruction}}" }
+    questions:
+      verdict: { type: choice, instructions: "Is `doc` an invoice?", criteria: { yes: it is an invoice, no: it is not, unclear: cannot tell } }
+    on_unavailable: { default: { verdict: unclear } }
+  - id: urgent
+    type: judge
+    state: { doc: "{{run.instruction}}" }
+    questions:
+      verdict: { type: choice, instructions: "Is `doc` urgent?", criteria: { yes: due this week, no: not urgent, unclear: cannot tell } }
+    on_unavailable: { default: { verdict: unclear } }
+  - id: owner
+    type: judge
+    state: { doc: "{{run.instruction}}" }
+    questions:
+      verdict: { type: choice, instructions: "Does `doc` name its owner?", criteria: { yes: an owner is named, no: no owner, unclear: cannot tell } }
+    on_unavailable: { default: { verdict: unclear } }
+  - { id: filed, type: finish, outcome: success }
+  - { id: unsure, type: finish, outcome: success }
+edges:
+  - { from: start, to: kind }
+  - { from: kind, to: urgent }
+  - { from: urgent, to: owner }
+  - { id: owner-unclear, from: owner, to: unsure, condition: { type: output_field, node: owner, field: verdict, equals: unclear } }
+  - { from: owner, to: filed, fallback: true }

@@ -119,7 +119,10 @@ pub(crate) fn resolve_from_node(
     state: &RunState,
     cfg: &RunConfig,
 ) -> Result<Option<(PathBuf, String)>, EngineError> {
-    if state.worktree.is_some() {
+    // A scenario run works in its own `work/` directory: no tree, no lock.
+    if state.worktree.is_some()
+        || crate::scenario::session::skips(run_dir, crate::scenario::BoundaryKind::Worktree)
+    {
         return Ok(None);
     }
     let (Some(template), Some(node)) = (

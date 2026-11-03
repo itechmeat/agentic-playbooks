@@ -362,6 +362,9 @@ mod protect_test;
 mod read_only_test;
 #[path = "suite/save_nudge_test.rs"]
 mod save_nudge_test;
+#[cfg(unix)]
+#[path = "suite/scenario_parity_test.rs"]
+mod scenario_parity_test;
 // Unix-only: `runner: sh` scripts and shell hooks in the bare remote.
 #[cfg(unix)]
 #[path = "suite/publish_test.rs"]

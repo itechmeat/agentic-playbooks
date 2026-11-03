@@ -246,6 +246,70 @@ pub struct RunExecutionManifest {
     /// mode from here. Absent (false) for every other run.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unattended: bool,
+    /// What kind of run this is: absent for a production run, `scenario`
+    /// for a scenario run, `eval` for an `apb eval` repetition. Only
+    /// production runs count as history (stats, estimates, quality
+    /// comparison, candidate trials, the retro). Written once at start.
+    /// Unrelated to the HMAC origin stamp of [`apb_core::run_origin`].
+    ///
+    /// Read leniently: an origin a newer apb wrote reads as
+    /// [`RunOrigin::Unknown`], which is not production either.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_origin"
+    )]
+    pub origin: Option<RunOrigin>,
+}
+
+/// What kind of run a manifest belongs to. Absent ([`None`]) reads as
+/// [`RunOrigin::Production`]; a production run never writes the field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunOrigin {
+    Production,
+    /// A scenario run: the drive with every outside answer scripted.
+    Scenario {
+        level: apb_core::scenario::ScenarioLevel,
+        /// The scenario's name (its file stem).
+        scenario: String,
+        scenario_digest: String,
+    },
+    /// A repetition of `apb eval`.
+    Eval,
+    /// An origin this apb does not know (a newer apb wrote it).
+    #[serde(other)]
+    Unknown,
+}
+
+impl RunOrigin {
+    /// Whether a run of this origin counts as history.
+    pub fn is_production(&self) -> bool {
+        matches!(self, RunOrigin::Production)
+    }
+
+    /// The origin of a run from the [`read`] of its manifest: no manifest
+    /// (an older run's layout) or no `origin` in it is a production run,
+    /// and a manifest that does not read is [`RunOrigin::Unknown`], which
+    /// counts as no history: a run whose kind cannot be told never becomes
+    /// evidence.
+    pub fn of_read(read: &Result<Option<RunExecutionManifest>, EngineError>) -> RunOrigin {
+        match read {
+            Ok(Some(m)) => m.origin(),
+            Ok(None) => RunOrigin::Production,
+            Err(_) => RunOrigin::Unknown,
+        }
+    }
+}
+
+/// An origin that does not read (a newer apb's shape) is
+/// [`RunOrigin::Unknown`], never production.
+fn lenient_origin<'de, D>(d: D) -> Result<Option<RunOrigin>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<yaml_serde::Value>::deserialize(d)?;
+    Ok(v.map(|v| yaml_serde::from_value(v).unwrap_or(RunOrigin::Unknown)))
 }
 
 /// A launch record that does not read (a newer apb's shape) is absent.
@@ -362,6 +426,12 @@ impl RunExecutionManifest {
             && self.secret_params.is_empty()
             && self.launch.is_none()
             && !self.unattended
+            && self.origin.is_none()
+    }
+
+    /// The run's origin; absent is production.
+    pub fn origin(&self) -> RunOrigin {
+        self.origin.clone().unwrap_or(RunOrigin::Production)
     }
 
     /// Each bound node's profile and bundle digests (the supervisor's
@@ -566,6 +636,54 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), &m).unwrap();
         assert!(read(dir.path()).unwrap().unwrap().unattended);
+    }
+
+    /// The origin is absent from a production manifest (older manifests
+    /// and every production run read and write as before), a scenario
+    /// origin round trips and alone makes the manifest worth writing, and
+    /// an origin a newer apb wrote reads as unknown, never production.
+    #[test]
+    fn the_run_origin_keeps_production_manifests_and_never_reads_a_newer_one_as_production() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            manifest_path(dir.path()),
+            "profiles: []\nnode_bindings: {}\n",
+        )
+        .unwrap();
+        let old = read(dir.path()).unwrap().unwrap();
+        assert_eq!(old.origin(), RunOrigin::Production);
+        assert!(old.is_empty());
+        assert!(!yaml_serde::to_string(&old).unwrap().contains("origin"));
+
+        let m = RunExecutionManifest {
+            origin: Some(RunOrigin::Scenario {
+                level: apb_core::scenario::ScenarioLevel::Quick,
+                scenario: "green".into(),
+                scenario_digest: "sha256:s".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(!m.is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), &m).unwrap();
+        let back = read(dir.path()).unwrap().unwrap();
+        assert_eq!(back.origin, m.origin);
+        assert!(!back.origin().is_production());
+
+        for newer in [
+            "origin:\n  kind: replay\n  source: x\n",
+            "origin:\n  kind: scenario\n  level: deep2\n  scenario: g\n  scenario_digest: d\n",
+            "origin: 7\n",
+        ] {
+            std::fs::write(
+                manifest_path(dir.path()),
+                format!("profiles: []\nnode_bindings: {{}}\n{newer}"),
+            )
+            .unwrap();
+            let m = read(dir.path()).unwrap().unwrap();
+            assert_eq!(m.origin(), RunOrigin::Unknown, "{newer}");
+            assert!(!m.origin().is_production());
+        }
     }
 
     #[test]

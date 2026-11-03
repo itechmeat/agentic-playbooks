@@ -1,0 +1,18 @@
+schema: 1
+id: reject
+title: The gate is green at once and the person rejects the push
+instruction: the parser
+answers:
+  work:
+    - { visit: 1, attempts: [ { status: succeeded, output: "fixed" } ] }
+  gate:
+    - { visit: 1, script: { exit: 0, stdout: "QA green" } }
+  triage:
+    - { visit: 1, judge: { verdict: { value: green, p: 0.95 } } }
+  approve:
+    - { visit: 1, review: { decision: reject } }
+expect:
+  run: { outcome: [failed] }
+  finish: failed
+  route: { path: [start, work, gate, triage, approve, failed] }
+  edges: { taken: { "id:rejected": 1 }, not_taken: ["id:again"] }

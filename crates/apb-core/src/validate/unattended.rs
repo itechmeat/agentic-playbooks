@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::decisions::{shipping_reason, unknown_connector_effects_in};
-use super::edges::review_takes;
+use super::review::review_takes;
 use super::*;
 use crate::connector::resolve::ConnectorFacts;
 use crate::schema::{BranchFailurePolicy, Edge, Effect, Node, effective_review_options};

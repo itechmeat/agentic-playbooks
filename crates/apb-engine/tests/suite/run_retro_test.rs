@@ -413,3 +413,97 @@ fn the_span_a_run_sat_failed_before_a_resume_is_left_out() {
     let report = run_retro::build(&RetroRun::load(&dir).unwrap(), &[], 0);
     assert_eq!(report.duration_ms, Some(8_000));
 }
+
+/// A scenario run and an eval run of the same version, newer than every
+/// production run, never take a place in the baseline nor move its medians.
+#[test]
+fn a_scenario_or_eval_run_is_never_part_of_the_baseline() {
+    use apb_engine::manifest::{RunExecutionManifest, RunOrigin};
+    let root = tempfile::tempdir().unwrap();
+    let dir = host_run(root.path());
+    let not_production = |id: &str, start: u128, origin: RunOrigin| {
+        let run = earlier_run(root.path(), id, "1.0.0", start, 900_000, 800_000, 9_000);
+        let m = RunExecutionManifest {
+            origin: Some(origin),
+            ..Default::default()
+        };
+        apb_engine::manifest::write(&run_dir(root.path(), id), &m).unwrap();
+        // Read back from disk, as the retro reads its history.
+        let again = StatsRun::load(&run_dir(root.path(), id)).unwrap();
+        assert_eq!(again.events.len(), run.events.len());
+        again
+    };
+    let history = vec![
+        earlier_run(root.path(), "e1", "1.0.0", 10, 50_000, 20_000, 100),
+        earlier_run(root.path(), "e2", "1.0.0", 20, 80_000, 40_000, 300),
+        not_production(
+            "s1",
+            30,
+            RunOrigin::Scenario {
+                level: apb_core::scenario::ScenarioLevel::Quick,
+                scenario: "green".into(),
+                scenario_digest: "sha256:s".into(),
+            },
+        ),
+        not_production("v1", 40, RunOrigin::Eval),
+    ];
+    let run = RetroRun::load(&dir).unwrap();
+    let report = run_retro::build(&run, &history, 3);
+    let b = report.baseline.expect("two earlier production runs");
+    assert_eq!(b.run_ids, ["e2", "e1"]);
+    // The same report as over the production runs alone.
+    let alone = run_retro::build(&run, &history[..2], 3);
+    let a = alone.baseline.unwrap();
+    assert_eq!(
+        (b.median_tokens, b.median_duration_ms, b.median_cost_usd),
+        (a.median_tokens, a.median_duration_ms, a.median_cost_usd)
+    );
+    assert_eq!(
+        report.nodes[0].baseline_median_ms,
+        alone.nodes[0].baseline_median_ms
+    );
+}
+
+/// A run `apb eval` starts (its `RunConfig.eval` set) carries `origin:
+/// eval` on its manifest, and the one history filter leaves it out while
+/// it keeps a plain run of the same playbook.
+#[test]
+fn an_eval_run_carries_origin_eval_and_is_no_history() {
+    use apb_engine::manifest::RunOrigin;
+    use apb_engine::scheduler::{RunOptions, run};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    apb_core::registry::init_project(root).unwrap();
+    let v = root.join(".apb/playbooks/ev/1.0.0");
+    fs::create_dir_all(v.join("scripts")).unwrap();
+    fs::write(
+        v.join("playbook.yaml"),
+        "schema: 2\nid: ev\nname: ev\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: script, script: scripts/w.sh, runner: sh }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n",
+    )
+    .unwrap();
+    fs::write(v.join("scripts/w.sh"), "echo ok\n").unwrap();
+    fs::write(root.join(".apb/playbooks/ev/current"), "1.0.0").unwrap();
+    let eval = run(
+        root,
+        "ev",
+        None,
+        RunOptions {
+            eval: Some(apb_engine::run_config::EvalRunSettings::default()),
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    let plain = run(root, "ev", None, RunOptions::default()).unwrap();
+    let origin = |id: &str| {
+        apb_engine::manifest::read(&run_dir(root, id))
+            .unwrap()
+            .and_then(|m| m.origin)
+    };
+    assert_eq!(origin(&eval.run_id), Some(RunOrigin::Eval));
+    assert_eq!(origin(&plain.run_id), None);
+    let counts = |id: &str| {
+        apb_engine::run_history::counts_as_history(&StatsRun::load(&run_dir(root, id)).unwrap())
+    };
+    assert!(!counts(&eval.run_id), "an eval run counted as history");
+    assert!(counts(&plain.run_id));
+}

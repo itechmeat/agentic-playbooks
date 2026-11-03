@@ -61,6 +61,11 @@
 //! `node_finished` is skipped and routed the same (D13). The new-binary
 //! part of each runs without the old binaries.
 //!
+//! Row S1 covers scenario runs: a quick scenario run the new binary plays
+//! (`apb eval --level quick`) lives under `.apb/scenario-runs/` with
+//! `origin: scenario` in its manifest; neither old binary lists it, shows
+//! it or resumes it.
+//!
 //! Rows 3 and 4 run with a real notification subscription the new writer
 //! takes at start: a filtered end-of-run notice (`finished:failed`) and the
 //! `host_task` transition, sent through a connector of the case's config
@@ -2866,4 +2871,75 @@ fn d13_read_only_violation_old_binaries_skip_it_and_route_the_same() {
         );
         case.stop(&reader, &run);
     }
+}
+
+/// Row S1's playbook and scenario: one script node, answered by the
+/// scenario, so the scenario run ends at once.
+const SCENARIO_PLAYBOOK: &str = "schema: 2\nid: corpus-scenario\nname: corpus scenario\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: script, script: scripts/work.sh, runner: sh }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n";
+const SCENARIO: &str = "schema: 1\nid: green\nanswers:\n  work:\n    - { visit: 1, script: { exit: 0, stdout: ok } }\n";
+
+/// Row S1: a quick scenario run of the new binary is invisible to both
+/// released binaries: `apb runs` lists no run, and `apb runs <id>` and
+/// `apb resume <id>` do not find it. The new binary's own `apb runs` is the
+/// control: it does not list it either, while the scenario run is on disk
+/// with `origin: scenario`.
+#[test]
+fn rows1_new_scenario_run_old_binaries_do_not_see_it() {
+    let case = Case::new("row S1");
+    let pb = case.root().join(".apb/playbooks/corpus-scenario");
+    fs::create_dir_all(pb.join("1.0.0/scripts")).unwrap();
+    fs::create_dir_all(pb.join("evals/scenarios")).unwrap();
+    fs::write(pb.join("1.0.0/playbook.yaml"), SCENARIO_PLAYBOOK).unwrap();
+    fs::write(pb.join("1.0.0/scripts/work.sh"), "exit 99\n").unwrap();
+    fs::write(pb.join("current"), "1.0.0").unwrap();
+    fs::write(pb.join("evals/scenarios/green.yaml"), SCENARIO).unwrap();
+    apb_core::registry::init_project(&case.root()).unwrap();
+
+    let played = case.run(
+        &new_binary(),
+        &[
+            "eval",
+            "corpus-scenario",
+            "--level",
+            "quick",
+            "--scenario",
+            "green",
+            "--json",
+        ],
+    );
+    assert!(played.ok(), "row S1: the scenario plays: {played:?}");
+    let report: Value = serde_json::from_str(&played.stdout).unwrap();
+    let run = report["reports"][0]["run_id"].as_str().unwrap().to_string();
+    let mut readers = Vec::new();
+    if let Some((beta1, v025)) = old_readers(&case) {
+        readers.extend([beta1, v025]);
+    }
+    readers.push(new_binary());
+    for bin in &readers {
+        let listed = case.run(bin, &["runs"]);
+        assert!(
+            !listed.stdout.contains(&run),
+            "row S1: {} runs lists the scenario run: {listed:?}",
+            label(bin)
+        );
+        for args in [vec!["runs", run.as_str()], vec!["resume", run.as_str()]] {
+            let ran = case.run(bin, &args);
+            assert!(
+                !ran.ok() && ran.stderr.contains("not found"),
+                "row S1: {} {args:?} found the scenario run: {ran:?}",
+                label(bin)
+            );
+        }
+    }
+    let manifest = fs::read_to_string(
+        case.root()
+            .join(".apb/scenario-runs")
+            .join(&run)
+            .join("manifest.yaml"),
+    )
+    .unwrap();
+    // The playbook id holds the word too: read the field, not the text.
+    let m: Value = yaml_serde::from_str(&manifest).unwrap();
+    assert_eq!(m["origin"]["kind"], "scenario", "row S1: {manifest}");
+    assert_eq!(m["origin"]["scenario"], "green", "row S1: {manifest}");
 }

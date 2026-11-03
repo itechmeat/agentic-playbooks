@@ -38,6 +38,7 @@ fn run(
         grades: Vec::new(),
         definitions: snapshot.map(known).unwrap_or_default(),
         diagnostics: Vec::new(),
+        origin: crate::manifest::RunOrigin::Production,
     }
 }
 
@@ -1131,5 +1132,41 @@ fn unknown_membership_shows_for_a_node_that_also_executed() {
         text.lines()
             .any(|l| l.contains("node work: executed") && l.contains("membership unknown in 1")),
         "{text}"
+    );
+}
+
+/// A scenario run, an eval run and a run of an origin this apb does not
+/// know are never history: only the production run is counted, so none of
+/// them can move a success rate, a median or a quality comparison.
+#[test]
+fn only_production_runs_count_in_the_statistics() {
+    use crate::manifest::RunOrigin;
+    let with = |id: &str, tokens: u64, origin: RunOrigin| {
+        let mut r = bind(one_visit(id, "1.0.0", tokens), "aaa");
+        r.origin = origin;
+        r
+    };
+    let runs = vec![
+        with("prod", 100, RunOrigin::Production),
+        with(
+            "scenario",
+            9_000,
+            RunOrigin::Scenario {
+                level: apb_core::scenario::ScenarioLevel::Quick,
+                scenario: "green".into(),
+                scenario_digest: "sha256:s".into(),
+            },
+        ),
+        with("eval", 9_000, RunOrigin::Eval),
+        with("newer", 9_000, RunOrigin::Unknown),
+    ];
+    let report = build(&runs, &StatsFilter::default());
+    assert_eq!(report.versions.len(), 1);
+    let v = &report.versions[0];
+    assert_eq!(v.runs, 1, "only the production run counts");
+    assert_eq!(v.spend.runs_with_usage, 1);
+    assert_eq!(
+        v.spend,
+        build(&runs[..1], &StatsFilter::default()).versions[0].spend
     );
 }

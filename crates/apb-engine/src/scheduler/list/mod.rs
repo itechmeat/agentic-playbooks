@@ -41,7 +41,7 @@ pub(crate) fn execute(
     let spec = node
         .list()
         .ok_or_else(|| EngineError::Invalid(format!("node `{node_id}` is not a list node")))?;
-    let loaded = match source::load(ctx.playbook, ctx.state, spec) {
+    let loaded = match source::load(ctx.playbook, ctx.state, spec, ctx.run_dir, node_id) {
         Ok(l) => l,
         Err(why) => {
             return Ok(AttemptOutcome::Finished {

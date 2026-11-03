@@ -18,9 +18,10 @@ const WORKSPACE_FILE: &str = "workspace.local";
 /// `<root>/.apb/.gitignore`: the workspace id, run directories (event logs,
 /// node outputs and per-attempt agent transcripts, which can hold whatever
 /// the agent saw), the node result cache, soft-deleted playbooks, schema
-/// migration backups, the workdir lock and the log of decisions asked outside
-/// a run (`decisions.jsonl`). The one list `ensure_local_ignored`
-/// writes; a new runtime path under `.apb/` belongs here.
+/// migration backups, the workdir lock, the log of decisions asked outside
+/// a run (`decisions.jsonl`) and scenario runs. The one list
+/// `ensure_local_ignored` writes; a new runtime path under `.apb/` belongs
+/// here.
 pub const LOCAL_ENTRIES: &[&str] = &[
     WORKSPACE_FILE,
     "runs/",
@@ -35,6 +36,8 @@ pub const LOCAL_ENTRIES: &[&str] = &[
     "memory/",
     // Known problems of the playbooks' tools, signed by this installation.
     "problems/",
+    // Scenario runs and their results index: never history, never shared.
+    "scenario-runs/",
 ];
 
 /// The projects `dir` lies in, nearest first: `dir` itself and every
@@ -233,6 +236,7 @@ mod tests {
             "trash/",
             "backup-*/",
             "workdir.lock",
+            "scenario-runs/",
         ] {
             assert!(LOCAL_ENTRIES.contains(&entry), "{entry} missing");
         }

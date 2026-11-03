@@ -43,6 +43,7 @@ use std::time::{Duration, Instant};
 use apb_core::eval::{self as core_eval, LoadedCase, LoadedSuite};
 use apb_core::overrides::{EphemeralExecutor, NodeOverride, RunOverrides};
 use apb_core::registry::Registry;
+use apb_core::scenario::ScenarioLevel;
 use apb_core::schema::{NodeKind, Playbook};
 use apb_engine::eval::checks::{self, CheckInput, RepUsage};
 use apb_engine::eval::store::{self, CaseResult, ConfigKey, EvalResult, Repetition};
@@ -50,6 +51,29 @@ use apb_engine::run_wait::WaitReason;
 use serde_json::json;
 
 use crate::util::print_json;
+
+/// The `--level` of `apb eval`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum EvalLevel {
+    /// The eval cases as real runs (paid).
+    #[default]
+    Deep,
+    /// Scenario runs, every answer scripted: no program, no request.
+    Quick,
+    /// Quick plus this machine's decision providers, capped.
+    Smoke,
+}
+
+impl EvalLevel {
+    /// The scenario level, `None` for deep.
+    pub(crate) fn scenario(self) -> Option<ScenarioLevel> {
+        match self {
+            EvalLevel::Deep => None,
+            EvalLevel::Quick => Some(ScenarioLevel::Quick),
+            EvalLevel::Smoke => Some(ScenarioLevel::Smoke),
+        }
+    }
+}
 
 /// What `apb eval` was asked.
 pub(crate) struct EvalArgs {
@@ -74,6 +98,46 @@ pub(crate) struct EvalArgs {
     pub launch: crate::launch::LaunchFlags,
     /// The grant the launch check gave, handed to every case.
     pub launch_grant: Option<apb_engine::gate::launch::HandoffGrant>,
+    /// `deep` (the eval cases) or a scenario level.
+    pub level: EvalLevel,
+    /// Scenario runs: only these scenarios.
+    pub scenarios: Vec<String>,
+    /// List the scenarios with their latest results instead of running.
+    pub list_scenarios: bool,
+    /// Smoke: the decision request cap per scenario.
+    pub max_decision_requests: Option<u32>,
+    /// Play a scenario that does not fit the version.
+    pub allow_stale: bool,
+}
+
+/// The flag of `args` that does not belong to its level, if any.
+pub(crate) fn misplaced_flag(args: &EvalArgs) -> Option<&'static str> {
+    if args.level.scenario().is_none() {
+        return [
+            (!args.scenarios.is_empty(), "--scenario"),
+            (
+                args.max_decision_requests.is_some(),
+                "--max-decision-requests",
+            ),
+            (args.allow_stale, "--allow-stale"),
+        ]
+        .into_iter()
+        .find_map(|(set, flag)| set.then_some(flag));
+    }
+    [
+        (!args.cases.is_empty(), "--case"),
+        (!args.tags.is_empty(), "--tag"),
+        (args.repeat.is_some(), "--repeat"),
+        (args.overrides.is_some(), "--overrides"),
+        (!args.profile_overrides.is_empty(), "--profile-override"),
+        (args.model.is_some(), "--model"),
+        (args.max_usd.is_some(), "--max-usd"),
+        (args.compare, "--compare"),
+        (args.dry_run, "--dry-run"),
+        (args.draft, "--draft"),
+    ]
+    .into_iter()
+    .find_map(|(set, flag)| set.then_some(flag))
 }
 
 /// Printed once per invocation: the honest boundary of an eval run.
@@ -197,8 +261,8 @@ fn selected<'a>(
 }
 
 /// Asks once on a terminal; refuses elsewhere unless `--yes`.
-fn confirm(args: &EvalArgs, question: &str) -> bool {
-    if args.yes {
+pub(crate) fn confirm(yes: bool, question: &str) -> bool {
+    if yes {
         return true;
     }
     if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
@@ -1047,8 +1111,8 @@ fn kill_pid(pid: u32) {
 
 /// SIGKILL to a process group; the group form negates, so it needs `> 1`
 /// (`-1` would be every process this user may signal).
-#[cfg(target_os = "linux")]
-fn kill_group(pgid: u32) {
+#[cfg(unix)]
+pub(crate) fn kill_group(pgid: u32) {
     if pgid <= 1 {
         return;
     }
@@ -1609,11 +1673,12 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
         }
     }
     if !core_eval::has_suite(&playbook_dir) {
-        return fail(
-            args.json,
-            "no_suite",
-            format!("`{}` has no evals/ directory", args.id),
-        );
+        let what = if core_eval::suite_dir(&playbook_dir).is_dir() {
+            "no eval case (scenarios run with --level quick or smoke)"
+        } else {
+            "no evals/ directory"
+        };
+        return fail(args.json, "no_suite", format!("`{}` has {what}", args.id));
     }
     // The launch policy, once, before anything is copied or asked.
     let launch_grant = if args.dry_run {
@@ -1865,7 +1930,7 @@ fn run_eval(
     } else {
         "the suite's scripts and its env overlay are not approved on this machine; approve them and start?".to_string()
     };
-    if !confirm(args, &question) {
+    if !confirm(args.yes, &question) {
         return fail(
             args.json,
             "not_confirmed",

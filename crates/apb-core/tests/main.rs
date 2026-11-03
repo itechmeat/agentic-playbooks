@@ -93,6 +93,8 @@ mod quality_test;
 mod registry_test;
 #[path = "suite/run_memory_test.rs"]
 mod run_memory_test;
+#[path = "suite/scenario_test.rs"]
+mod scenario_test;
 #[path = "suite/schema_migrate_config_test.rs"]
 mod schema_migrate_config_test;
 #[path = "suite/schema_migrate_test.rs"]
@@ -141,6 +143,8 @@ mod validate_references_test;
 mod validate_retry_test;
 #[path = "suite/validate_review_cap_test.rs"]
 mod validate_review_cap_test;
+#[path = "suite/validate_review_test.rs"]
+mod validate_review_test;
 #[path = "suite/validate_semantics_test.rs"]
 mod validate_semantics_test;
 #[path = "suite/validate_structure_test.rs"]

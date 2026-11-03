@@ -132,7 +132,9 @@ pub(crate) fn child_stop(root: &Path, run_dir: &Path, node: &str) -> Option<Stri
         }
         _ => None,
     })?;
-    let child_events = read_all(&root.join(".apb/runs").join(&child)).ok()?;
+    // A child lives next to its parent.
+    let _ = root;
+    let child_events = read_all(&crate::run_config::sibling_run(run_dir, &child)).ok()?;
     let reason = child_events.iter().rev().find_map(|e| match &e.payload {
         EventPayload::RunError { reason, .. } => Some(reason.clone()),
         _ => None,

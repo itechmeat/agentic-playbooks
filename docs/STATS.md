@@ -6,6 +6,11 @@ every figure comes from the `.apb/runs/<id>/events.jsonl` journals (and each
 run's playbook snapshot, for `expected_duration`). Like
 `apb decisions report`, it reads only runs apb created on this machine; a
 run directory that came with a repository is skipped and counted on stderr.
+Only production runs count: a run whose manifest names another `origin`
+(a scenario or eval run, or an origin this apb does not know) is left out,
+and so is a run whose manifest cannot be read; a run with no manifest or
+no `origin` is a production run (see "Scenario runs are not history" in
+`docs/EVALS.md`). The run estimate below reads the same runs.
 
 ```
 apb stats [--playbook ID] [--since 30d|2026-09-20] [--compare VERSION] [--all-projects] [--json]

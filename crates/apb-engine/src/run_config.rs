@@ -365,6 +365,16 @@ pub fn copy_scripts(version_dir: &Path, run_dir: &Path) -> Result<(), EngineErro
     Ok(apb_core::fsutil::copy_tree(&src, &run_dir.join("scripts"))?)
 }
 
+/// The run directory of run `run_id` next to the run in `run_dir`: a child
+/// run lives next to its parent (`.apb/runs/` for a run, `.apb/scenario-runs/`
+/// for a scenario run).
+pub fn sibling_run(run_dir: &Path, run_id: &str) -> PathBuf {
+    run_dir
+        .parent()
+        .map(|p| p.join(run_id))
+        .unwrap_or_else(|| PathBuf::from(run_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -31,7 +31,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
-  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and a review decision only bounded edges route V136, `retry` for `retry_delay` V126-V130, `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`); `nodes` also holds V68, ids that start with `@`
+  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130, `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`); `nodes` also holds V68, ids that start with `@`
   are the engine's, and V101, `audience` on a finish without a prompt), the
   "Notify me" settings (`notify/`: the machine target, the project's
   narrowing, a run's request, the outcome classes and the journal names of
@@ -124,7 +124,11 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   decoder, `state` once per session and the cached model answers under
   the config dir), the process-wide read-only mode of
   `apb mcp --read-only` and the guard every write and program start checks
-  (`process_mode.rs`), run quality
+  (`process_mode.rs`; its scenario mode, entered once by a scenario run
+  process, refuses a program start and a connector call at every level, a
+  decision request at quick, and a write outside its write root, each as
+  `scenario_guard: <operation>`, and keeps what it refused in
+  `scenario_refusals`), run quality
   (`quality/`: `criteria` the `quality:` block, the built-in criteria and
   their digests, `grade` the grade a grader stores, `compare` the comparable
   key and the deterministic comparison of a candidate with `current`), known
@@ -186,7 +190,15 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   (`agent_output.rs`), the execution mode resolution (`execution.rs`: the
   `execution` config section, `cli` or `host` per run, the fallback rule),
   the eval case and suite format with its V80-V83 checks, digests and the
-  machine's suite approvals (`eval.rs`), the decision-model config (`decisions.rs`: the
+  machine's suite approvals (`eval.rs`; `has_suite` is `suite.yaml` or a
+  case file, so `evals/scenarios/` alone is no suite), scenario files
+  (`scenario/`: `format` the types of
+  `evals/scenarios/<name>.yaml`, `mod` the loader of named regular files
+  below the playbook, the digest and `staleness`, `validate` V146-V151 and
+  `validate_all` behind `apb validate`), the judge node digest
+  (`judge::node_digest`, `j1:` over state, questions, thresholds and
+  `on_unavailable`) and `validate::asks_decision_models`, the
+  decision-model config (`decisions.rs`: the
   machine's `decisions.yaml`, project narrowing, the doctor line), the
   doctor's free per-provider request (`decision_probe.rs`), the
   measured-threshold store (`decision_thresholds.rs`), one decoder per agent
@@ -319,7 +331,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   streams as plain text; `candidate/`: the gate's choice and
   the trial view in `mod`, `settle` by successes, `quality` by quality with
   `resettle` after a stored grade and a person's decision; `run_history.rs`
-  the earlier runs of a playbook the estimate and the comparison share),
+  the earlier runs of a playbook the estimate and the comparison share,
+  with `counts_as_history` the one filter: only production runs count),
   the redactor every text that
   leaves the machine goes through (`redact.rs`, over
   `apb_core::scrub::Scrubber`), the run-scoped redactor of a run's secret
@@ -346,7 +359,34 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   section and the supervisor line),
   the tree-scoped busy lock (`workdir.rs`), attempt failure
   classification and the bounded infrastructure backoff (`failure_class.rs`),
-  the immutable write-once run manifest (`manifest.rs`), the diagnostics sidecar (`diagnostics/`: `writer` the one
+  the immutable write-once run manifest (`manifest.rs`, with `RunOrigin`:
+  production, scenario, eval or unknown, absent read as production, and
+  `RunOrigin::of_read`, where a manifest that does not read is unknown and
+  so no history), scenario runs (`scenario/`: `BoundaryKind` the closed
+  list of boundaries a scenario answers, `BoundaryKey`, `Session`, `at` and
+  `RunsDir`, `guard::enter` the scenario mode plus the decision client's
+  request ban at quick, `book` the answer book: attempts counted per visit
+  and item, `usage` with the used, default, missing and extra answers,
+  `session` the session registry by run directory, the resolution of every
+  boundary kind and `child_prep` a nested child's scenario through the
+  core loader, `decide` the scripted decision provider of a quick run,
+  `adapter` the scripted agent behind the real attempt loop, `bind` the
+  drive adapter (`drive`, `DriveRequest`, `Drive`, the book's use as the
+  report's boundaries and keys), `report` the report built from the run
+  with every expectation a named check and the trace, `store` `enter` over
+  `guard::enter`, `DRIVE`, `execute`, `report.json`, the results index
+  `index/<playbook>.jsonl` and its retention; the entry is
+  `scheduler::run_scenario` over `prepare::Placement`, a child run lives
+  next to its parent through `run_config::sibling_run`, and
+  `DecisionRunner::for_scenario` is a quick run's decision runner), one
+  judge evaluation (`judge_eval/`: `mod` the evaluation the judge node
+  runs through, `evaluate_given` over given answers, `as_configured` what
+  the node applies, `node_digest` over `apb_core::judge::node_digest`;
+  `inputs` the inputs from a run's state, the one template render every
+  prompt and judge state goes through, and `unfilled`, the references that
+  rendered empty), the
+  command runner of scripts, checks and project commands (`proc.rs`,
+  `run_capture_in` the program-start guard site), the diagnostics sidecar (`diagnostics/`: `writer` the one
   writer that never fails a run, scrubs before it clips and drops a record
   rather than wait on its lock, `reader` the
   tolerant reader, `index` the dedup keys, `route` the `route_evaluated`
@@ -496,6 +536,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `launch.rs` the `--confirm-launch` flags of `apb run`, `apb resume` and
   `apb eval`, the terminal question and `apb launch floor`,
   `pipe.rs` the panic hook that ends the binary quietly on a closed stdout.
+  `eval.rs` is `apb eval` and holds `EvalLevel` (`deep`, `quick`, `smoke`);
+  `scenario.rs` is `apb eval --level quick|smoke` (the version's validator
+  errors refused first, the smoke checks, one bounded `apb __scenario-run`
+  child per scenario) and `apb eval --scenarios`.
 - `apb-server` - axum web API: a thin router in `lib.rs`, one module per
   resource in `routes/` (`estimate` for the estimate route and the run and
   resume budgets, `fit` for the fit report, `graph` for the editor's

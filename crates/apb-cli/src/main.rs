@@ -43,6 +43,7 @@ mod report;
 mod run;
 mod run_items;
 mod run_outputs;
+mod scenario;
 // --- 0.24.0 run execution mode lines ---
 mod run_mode;
 // --- end 0.24.0 run execution mode lines ---
@@ -608,6 +609,32 @@ enum Command {
         json: bool,
         #[command(flatten)]
         launch: launch::LaunchFlags,
+        /// deep: the eval cases as real runs (default); quick: the
+        /// scenarios with every answer scripted, nothing started or sent;
+        /// smoke: quick plus this machine's decision providers, capped
+        #[arg(long, value_enum, default_value_t = eval::EvalLevel::Deep)]
+        level: eval::EvalLevel,
+        /// Only these scenarios (repeatable; quick and smoke)
+        #[arg(long = "scenario", value_name = "NAME")]
+        scenarios: Vec<String>,
+        /// List the scenarios with their latest result per level (takes
+        /// --version and --json only: it runs nothing)
+        #[arg(
+            long = "scenarios",
+            conflicts_with_all = [
+                "cases", "tags", "repeat", "overrides", "profile_overrides", "model",
+                "max_usd", "compare", "dry_run", "draft", "yes", "level", "scenarios",
+                "max_decision_requests", "allow_stale", "confirm_launch",
+                "launch_version", "launch_choice",
+            ]
+        )]
+        list_scenarios: bool,
+        /// Smoke: decision requests per scenario (default 20, at most 200)
+        #[arg(long)]
+        max_decision_requests: Option<u32>,
+        /// Play a scenario whose versions or digest pin exclude this version
+        #[arg(long)]
+        allow_stale: bool,
     },
     // --- end 0.24.0 eval suites ---
     /// Inspect and manage the project-local node result cache
@@ -803,6 +830,30 @@ enum Command {
         #[arg(long)]
         notify: bool,
     },
+    /// One scenario run (`apb eval --level quick|smoke`), in scenario
+    /// mode: writes only below `.apb/scenario-runs/`, starts no program and
+    /// prints its report. Spawned by `apb eval`. Hidden: an internal re-exec
+    /// target.
+    #[command(hide = true, name = "__scenario-run")]
+    ScenarioRun {
+        /// Project root (absolute).
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        playbook: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        scenario: String,
+        #[arg(long, value_enum)]
+        level: eval::EvalLevel,
+        #[arg(long)]
+        scenario_digest: String,
+        #[arg(long)]
+        playbook_digest: String,
+        #[arg(long)]
+        max_decision_requests: Option<u32>,
+    },
     /// The live-question sidecar (spec 2026-07-20-interactive-nodes, Task 10):
     /// a stdio MCP server exposing one `ask_user` tool, injected into the
     /// coding agent that runs a live interactive `agent_task` node. Resolves
@@ -861,6 +912,7 @@ fn registers_workspace(command: Option<&Command>) -> bool {
             Command::DriveSupervised { .. }
                 | Command::DriveRun { .. }
                 | Command::PauseWaker { .. }
+                | Command::ScenarioRun { .. }
                 | Command::AskServer { .. }
                 | Command::ReconcileDefaults
                 | Command::Setup {
@@ -1161,7 +1213,12 @@ fn main() -> ExitCode {
             yes,
             json,
             launch,
-        }) => eval::eval_cmd(
+            level,
+            scenarios,
+            list_scenarios,
+            max_decision_requests,
+            allow_stale,
+        }) => scenario::eval_entry(
             &root,
             eval::EvalArgs {
                 id,
@@ -1180,6 +1237,11 @@ fn main() -> ExitCode {
                 json,
                 launch,
                 launch_grant: None,
+                level,
+                scenarios,
+                list_scenarios,
+                max_decision_requests,
+                allow_stale,
             },
         ),
         // --- end 0.24.0 eval suites ---
@@ -1301,6 +1363,31 @@ fn main() -> ExitCode {
                 (s, None) => crate::run::WakerFor::Pause(s.unwrap_or_default()),
             },
         ),
+        Some(Command::ScenarioRun {
+            root: run_root,
+            playbook,
+            version,
+            scenario: name,
+            level,
+            scenario_digest,
+            playbook_digest,
+            max_decision_requests,
+        }) => match level.scenario() {
+            Some(level) => scenario::child_cmd(scenario::ChildArgs {
+                root: run_root,
+                playbook,
+                version,
+                scenario: name,
+                level,
+                max_decision_requests,
+                scenario_digest,
+                playbook_digest,
+            }),
+            None => {
+                eprintln!("__scenario-run: deep is not a scenario level");
+                ExitCode::from(2)
+            }
+        },
         Some(Command::AskServer { run, node, attempt }) => ask_server_cmd(&run, &node, attempt),
         Some(Command::ReconcileDefaults) => selfupdate::reconcile_defaults_cmd(),
         None => match resolve_bind(None) {

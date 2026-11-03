@@ -135,9 +135,9 @@ type PsRun<'a> = &'a dyn Fn(u32) -> Option<PsOutput>;
 /// Runs the real `ps` named by `program`. Split from `run_ps` so a test can
 /// point it at a stub binary that reproduces a reduced `ps`.
 fn run_ps_program(program: &str, pid: u32) -> Option<PsOutput> {
-    // A read-only process starts no program: the probe could not ask,
-    // which is `Unknown`.
-    if crate::read_only::active() {
+    // A read-only or scenario process starts no program: the probe could
+    // not ask, which is `Unknown`.
+    if apb_core::process_mode::guard_program_start().is_err() {
         return None;
     }
     let out = Command::new(program)
@@ -812,6 +812,21 @@ pub fn reported_node_statuses(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A scenario process starts no program: the process probe could not
+    // ask, which reads as no answer, and the stub `ps` never runs.
+    #[cfg(unix)]
+    apb_core::scenario_test! {
+        fn a_scenario_process_probes_no_process() at Quick, root => {
+            use std::os::unix::fs::PermissionsExt as _;
+            let ps = root.join("ps");
+            let ran = root.join("ps.ran");
+            std::fs::write(&ps, format!("#!/bin/sh\n: > '{}'\necho 'S sleep'\n", ran.display())).unwrap();
+            std::fs::set_permissions(&ps, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(run_ps_program(ps.to_str().unwrap(), std::process::id()).is_none());
+            assert!(!ran.exists(), "ps ran");
+        }
+    }
 
     fn ev(seq: u64, ts: u128, payload: EventPayload) -> Event {
         Event { seq, ts, payload }

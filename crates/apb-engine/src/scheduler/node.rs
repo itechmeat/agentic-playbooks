@@ -28,28 +28,8 @@ pub(crate) fn render_node_prompt(
     prompt: &str,
     budget: &apb_core::schema::ContextBudget,
 ) -> Result<String, EngineError> {
-    let context = build_context_for_render(
-        run_dir,
-        &read_all(run_dir)?,
-        cfg.instruction.as_deref(),
-        budget,
-    )?;
-    let hooks = crate::hooks::read_hooks(run_dir)?.paths(run_id);
-    Ok(render(
-        prompt,
-        &cfg.params,
-        cfg.instruction.as_deref(),
-        &state.outputs,
-        &state.reviews,
-        &state.rejected_outputs,
-        &hooks,
-        &context,
-        &crate::context::OutputClip {
-            run_dir,
-            max_bytes: budget.output_max_bytes,
-            retro: Some(crate::run_retro::text::prompt_text),
-        },
-    ))
+    let inputs = crate::judge_eval::JudgeInputs::from_state(run_dir, run_id, state, cfg, budget)?;
+    Ok(inputs.render(prompt, run_dir, budget.output_max_bytes))
 }
 
 /// A single execution of a node. Returns an [`AttemptOutcome`]: `Finished`
@@ -246,6 +226,7 @@ fn success_check_rejection(
     attempt_workdir: &Path,
     sandbox: Option<&crate::sandbox::SandboxPlan>,
     output: &str,
+    key: &crate::exec_key::ExecKey,
 ) -> Result<Option<Rejection>, EngineError> {
     // A protected file the attempt changed (C6) rejects the report before
     // any check runs: the check would judge a tree the engine just restored.
@@ -260,6 +241,20 @@ fn success_check_rejection(
         // check would validate a directory the agent never wrote to. A
         // sandboxed attempt's check runs inside the same sandbox.
         Some(apb_core::schema::SuccessCheck::Script(check)) => {
+            // A scenario run's check is the attempt's scripted verdict.
+            if let crate::scenario::Resolution::Answer(crate::scenario::Answer::Check(c)) =
+                crate::scenario::session::at_run(
+                    run_dir,
+                    crate::scenario::BoundaryKind::SuccessCheck,
+                    &crate::scenario::BoundaryKey {
+                        item: key.item.map(str::to_string),
+                        ..crate::scenario::session::node_key(key.node)
+                    },
+                )
+            {
+                return Ok((c == apb_core::scenario::CheckAnswer::Reject)
+                    .then(|| Rejection::retry(format!("success_check `{check}` failed"))));
+            }
             let r = crate::script::run_check(run_dir, attempt_workdir, check, sandbox)?;
             if let Some(v) = sandbox.and_then(crate::sandbox::SandboxPlan::check_git) {
                 return Ok(Some(Rejection {
@@ -303,10 +298,8 @@ fn completion_check(
     prompt: &str,
     output: &str,
     retry_left: bool,
+    item: Option<&str>,
 ) -> Result<crate::decision::completion::Verdict, EngineError> {
-    let Some(runner) = decisions else {
-        return Ok(Default::default());
-    };
     if node.completion_check == Some(apb_core::schema::CompletionCheckSetting::Off)
         || matches!(
             node.success_check,
@@ -315,6 +308,26 @@ fn completion_check(
     {
         return Ok(Default::default());
     }
+    // A scenario run's completion check is the attempt's scripted verdict.
+    if let crate::scenario::Resolution::Answer(crate::scenario::Answer::Check(c)) =
+        crate::scenario::session::at_run(
+            run_dir,
+            crate::scenario::BoundaryKind::CompletionCheck,
+            &crate::scenario::BoundaryKey {
+                item: item.map(str::to_string),
+                ..crate::scenario::session::node_key(&node.id)
+            },
+        )
+    {
+        return Ok(crate::decision::completion::Verdict {
+            reject: (c == apb_core::scenario::CheckAnswer::Reject)
+                .then(|| "the scenario's completion check rejects the attempt".to_string()),
+            ..Default::default()
+        });
+    }
+    let Some(runner) = decisions else {
+        return Ok(Default::default());
+    };
     let verdict = crate::decision::completion::check(
         runner,
         journal,
@@ -834,14 +847,21 @@ fn execute_node_kind(
                 (None, Some(p), _) => p.clone(),
                 // A list item: the template its list rendered once.
                 (None, None, Some(i)) => i.template.clone(),
-                (None, None, None) => render_node_prompt(
-                    run_dir,
-                    run_id,
-                    state,
-                    cfg,
-                    prompt,
-                    &playbook.context_budget(node_id),
-                )?,
+                (None, None, None) => {
+                    let budget = playbook.context_budget(node_id);
+                    let inputs = crate::judge_eval::JudgeInputs::from_state(
+                        run_dir, run_id, state, cfg, &budget,
+                    )?;
+                    // A scenario run names every reference that rendered
+                    // empty (diagnostics only).
+                    crate::scenario::session::note_empty_references(
+                        run_dir,
+                        node_id,
+                        "prompt",
+                        || inputs.unfilled(prompt, run_dir),
+                    );
+                    inputs.render(prompt, run_dir, budget.output_max_bytes)
+                }
             };
             // Issue #45 finding 2 + issue #56 finding 4: deliver the run
             // instruction, every applied supervisor note, and the precedence
@@ -1092,8 +1112,11 @@ fn execute_node_kind(
             // never embedded into the prompt (only names).
             // The node's isolation on this machine, decided before anything
             // is spawned and again before every attempt (`node/sandbox.rs`).
+            // A scenario run's scripted agent: nothing is spawned, so there
+            // is nothing to isolate, no live channel and no tree to check.
+            let scripted = crate::scenario::session::is_scenario(run_dir);
             let iso = sandbox::NodeIsolation::new(
-                isolation.as_ref(),
+                isolation.as_ref().filter(|_| !scripted),
                 steps.iter().filter(|s| !s.host).map(|s| s.agent.as_str()),
                 host_mode,
                 // The run's own flag, or a parent's it is held to.
@@ -1110,7 +1133,11 @@ fn execute_node_kind(
             // A sandboxed agent gets no live ask sidecar: it could forge
             // answers through it. It asks through its reply instead (the
             // reprompt path).
-            let live = if iso.sandboxed() { None } else { live };
+            let live = if iso.sandboxed() || scripted {
+                None
+            } else {
+                live
+            };
             let skills_mode = if isolated { "materialized" } else { "advisory" };
             // The blocks below are the node's standing contracts (skills,
             // connector grants, the question protocol, the status file). A
@@ -1589,11 +1616,18 @@ fn execute_node_kind(
                     // tree's state is taken now and compared once the
                     // process ended (`node/read_only.rs`). Taken before
                     // `attempt_started`, which records the tier.
-                    let read_only_before = (node.read_only && place.sandbox.is_none())
-                        .then(|| read_only::Before::take(node_id, attempt, &node_dir));
+                    // A scenario run takes no tree state: its check is scripted.
+                    let scripted_check = node.read_only
+                        && crate::scenario::session::skips(
+                            run_dir,
+                            crate::scenario::BoundaryKind::ReadOnlyCheck,
+                        );
+                    let read_only_before =
+                        (node.read_only && place.sandbox.is_none() && !scripted_check)
+                            .then(|| read_only::Before::take(node_id, attempt, &node_dir));
                     let attempt_read_only = match &read_only_before {
                         Some(before) => Some(before.record()),
-                        None if node.read_only => Some(read_only::enforced()),
+                        None if node.read_only && !scripted_check => Some(read_only::enforced()),
                         None => None,
                     };
                     // The invocation form of this attempt: the resume form for a
@@ -1645,6 +1679,12 @@ fn execute_node_kind(
                             closed: Some(&host_closed),
                             question_timeout: *question_timeout_seconds,
                             default_answer: default_answer.clone(),
+                        })
+                    } else if scripted {
+                        Box::new(crate::scenario::adapter::ScenarioAdapter {
+                            run_dir,
+                            node: node_id,
+                            item: key.item,
                         })
                     } else {
                         let adapter: Box<dyn crate::adapter::AgentAdapter> = match &base_spec {
@@ -1822,14 +1862,16 @@ fn execute_node_kind(
                         std::cell::Cell::new(None);
                     let spawn_err: std::cell::RefCell<Option<EngineError>> =
                         std::cell::RefCell::new(None);
-                    let attempt_model = Some(step.model.clone());
+                    let attempt_model = (!scripted).then(|| step.model.clone());
                     let attempt_transcript = Some(super::transcript::relative(&key.stem(attempt)));
                     let attempt_dir = Some(attempt_workdir.display().to_string());
                     let attempt_exec = Some(crate::execution_identity::ExecStep {
                         binding: binding_digest.clone(),
                         step: idx as u32,
                         source: step.exec_source.clone(),
-                        executed_by: if step.host {
+                        executed_by: if scripted {
+                            crate::scenario::session::SCENARIO_AGENT
+                        } else if step.host {
                             crate::execution_identity::EXECUTED_BY_HOST
                         } else {
                             crate::execution_identity::EXECUTED_BY_CLI
@@ -2026,6 +2068,11 @@ fn execute_node_kind(
                     if let Some(e) = control_err.borrow_mut().take() {
                         return Err(e);
                     }
+                    // A scenario that has no answer for this attempt stops
+                    // the run under `on_missing: error`.
+                    if let Some(e) = crate::scenario::session::halt_error(run_dir) {
+                        return Err(e);
+                    }
                     // Host fallback (0.23.0): whether this CLI attempt failed
                     // before any model turn - the process never started (a
                     // missing binary) or the agent is not logged in. An
@@ -2091,6 +2138,17 @@ fn execute_node_kind(
                     // put back whatever the check met.
                     let read_only_violation = match read_only_before {
                         Some(before) => before.finish(run_dir, workdir, journal),
+                        None if scripted_check => {
+                            let dirty = crate::scenario::session::of(run_dir)
+                                .map(|s| {
+                                    s.read_only_dirty(&crate::scenario::BoundaryKey {
+                                        item: key.item.map(str::to_string),
+                                        ..crate::scenario::session::node_key(node_id)
+                                    })
+                                })
+                                .unwrap_or_default();
+                            read_only::scripted(journal, node_id, attempt, &dirty)
+                        }
                         None => Ok(None),
                     };
                     // --- 0.23.0 protected paths (C6): undo and name any change
@@ -2446,6 +2504,7 @@ fn execute_node_kind(
                                     &attempt_workdir,
                                     place.sandbox.as_deref(),
                                     &report.output,
+                                    &key,
                                 )?;
                                 match rejection {
                                     // Rejected: this is an attempt FAILURE, not a
@@ -2500,6 +2559,7 @@ fn execute_node_kind(
                                                 &task_prompt,
                                                 &report.output,
                                                 try_i < retries,
+                                                key.item,
                                             )?
                                         };
                                         let duration_ms = duration_ms
@@ -2705,6 +2765,7 @@ fn execute_node_kind(
                                         &attempt_workdir,
                                         place.sandbox.as_deref(),
                                         &output,
+                                        &key,
                                     )? {
                                         None => {
                                             let check = if item.is_some_and(|i| i.checked) {
@@ -2719,6 +2780,7 @@ fn execute_node_kind(
                                                     &task_prompt,
                                                     &output,
                                                     try_i < retries,
+                                                    key.item,
                                                 )?
                                             };
                                             let duration_ms = duration_ms
@@ -2991,7 +3053,12 @@ fn execute_node_kind(
                                 // check (top of the next iteration) owns the
                                 // decision, exactly as it does for a cancel that
                                 // arrives between attempts.
-                                crate::failure_class::wait_backoff(wait, cancel);
+                                if !crate::scenario::session::skips(
+                                    run_dir,
+                                    crate::scenario::BoundaryKind::InfraBackoff,
+                                ) {
+                                    crate::failure_class::wait_backoff(wait, cancel);
+                                }
                                 infra_retry = true;
                             } else if failure_kind.is_some_and(FailureKind::is_non_transient) {
                                 // Non-transient (auth, budget): no further attempt
@@ -3167,6 +3234,40 @@ fn execute_node_kind(
             env.extend(overlay.iter().map(|(k, v)| (k.as_str(), v.clone())));
             // A script has no sandbox: a read-only script is always the
             // detected tier, checked around its one run.
+            // A scenario run's script is its scripted result: nothing runs.
+            let script_key = crate::scenario::BoundaryKey {
+                item: key.item.map(str::to_string),
+                ..crate::scenario::session::node_key(node_id)
+            };
+            match crate::scenario::session::at_run(
+                run_dir,
+                crate::scenario::BoundaryKind::Script,
+                &script_key,
+            ) {
+                crate::scenario::Resolution::Answer(crate::scenario::Answer::Script(a)) => {
+                    return Ok(AttemptOutcome::Finished {
+                        status: match a.exit {
+                            0 => NodeStatus::Succeeded,
+                            _ => NodeStatus::Failed,
+                        },
+                        output: a.stdout,
+                        events,
+                    });
+                }
+                crate::scenario::Resolution::Missing => {
+                    crate::scenario::session::on_missing(
+                        run_dir,
+                        crate::scenario::BoundaryKind::Script,
+                        &script_key,
+                    )?;
+                    return Ok(AttemptOutcome::Finished {
+                        status: NodeStatus::Failed,
+                        output: format!("scenario has no answer for script `{node_id}`"),
+                        events,
+                    });
+                }
+                _ => {}
+            }
             let read_only_before = node
                 .read_only
                 .then(|| read_only::Before::take(node_id, 1, workdir));
@@ -3633,9 +3734,8 @@ pub(crate) fn latest_child_run(events: &[Event], node_id: &str) -> Option<String
 /// silent reattach) and cannot fake success (no empty-log Running/Succeeded).
 /// `read_all` already returns Ok(empty) for a genuinely absent log, so only a
 /// real IO/parse fault surfaces here.
-pub(crate) fn run_is_terminal(root: &Path, run_id: &str) -> Result<bool, EngineError> {
-    let dir = root.join(".apb/runs").join(run_id);
-    let events = read_all(&dir)?;
+pub(crate) fn run_is_terminal(dir: &Path) -> Result<bool, EngineError> {
+    let events = read_all(dir)?;
     Ok(matches!(
         RunState::fold(&events).run_status,
         RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
@@ -3677,18 +3777,17 @@ fn child_run_options(
 /// run `child_run` when it has none, so a reattached child (started by an
 /// older apb) spawns exactly the descendants its parent's gate verified.
 fn install_child_pins(
-    root: &Path,
+    child_dir: &Path,
     child_run: &str,
     pin: &crate::run_config::ChildExpectation,
 ) -> Result<(), String> {
-    let child_dir = root.join(".apb/runs").join(child_run);
-    let mut cfg = crate::run_config::read_run_config(&child_dir)
+    let mut cfg = crate::run_config::read_run_config(child_dir)
         .map_err(|e| format!("child run `{child_run}`: its configuration does not read: {e}"))?;
     if cfg.expected_children.is_some() {
         return Ok(());
     }
     cfg.expected_children = Some(pin.children.clone());
-    crate::run_config::write_run_config(&child_dir, &cfg)
+    crate::run_config::write_run_config(child_dir, &cfg)
         .map_err(|e| format!("child run `{child_run}`: cannot pin its children: {e}"))
 }
 
@@ -3734,6 +3833,7 @@ pub(crate) fn run_playbook_node(
     node_id: &str,
     child_ref: &apb_core::schema::QualifiedPlaybookRef,
     node_instruction: Option<&str>,
+    scenario_child: Option<&str>,
 ) -> Result<(NodeStatus, String), EngineError> {
     // Depth backstop.
     if cfg.depth + 1 > MAX_SUBPLAYBOOK_DEPTH {
@@ -3757,7 +3857,7 @@ pub(crate) fn run_playbook_node(
     // ChildRunStarted is written only much later), so reading once is sound.
     let events = read_all(run_dir)?;
     if let Some(existing) = latest_child_run(&events, node_id)
-        && !run_is_terminal(root, &existing)?
+        && !run_is_terminal(&crate::run_config::sibling_run(run_dir, &existing))?
     {
         // A child without an authorization of its own continues only when it
         // is exactly the verified pin of this node (launch policy, design
@@ -3770,7 +3870,11 @@ pub(crate) fn run_playbook_node(
         // under this node's verified pin: its descendants are the pinned ones
         // from here on, never resolved live again.
         if let Some(p) = pin
-            && let Err(why) = install_child_pins(root, &existing, p)
+            && let Err(why) = install_child_pins(
+                &crate::run_config::sibling_run(run_dir, &existing),
+                &existing,
+                p,
+            )
         {
             return Ok((NodeStatus::Failed, why));
         }
@@ -3785,7 +3889,7 @@ pub(crate) fn run_playbook_node(
         // Nested resume can also mirror wakes onto the parent log.
         log.resync_seq()?;
         return Ok(map_child_outcome(
-            root,
+            &crate::run_config::sibling_run(run_dir, &existing),
             &existing,
             res.outcome,
             child_output_of(playbook, node_id),
@@ -3902,8 +4006,9 @@ pub(crate) fn run_playbook_node(
         }
     };
 
-    let predecessor_child =
-        latest_child_run(&events, node_id).filter(|id| run_is_terminal(root, id).unwrap_or(false));
+    let predecessor_child = latest_child_run(&events, node_id).filter(|id| {
+        run_is_terminal(&crate::run_config::sibling_run(run_dir, id)).unwrap_or(false)
+    });
 
     let mut opts = child_run_options(
         pin,
@@ -3952,7 +4057,39 @@ pub(crate) fn run_playbook_node(
     // its own `RunError` + `run_finished(failed)`, so returning `Ok` here just
     // lets the PARENT record the same reason against this node instead of
     // aborting the parent's own drive loop with nothing to explain why.
-    let mut cp = match prepare_run_target(&t, &resolved.id, Some(&resolved.version), opts) {
+    // A child lives next to its parent; a nested scenario child runs its own
+    // scenario at its parent's level.
+    let child_scenario = match scenario_child {
+        Some(name) => match crate::scenario::session::child_prep(
+            run_dir,
+            &resolved.definition_parent,
+            &resolved.id,
+            name,
+        ) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                return Ok((
+                    NodeStatus::Failed,
+                    format!("sub-playbook `{}` (node `{node_id}`): {e}", child_ref.id),
+                ));
+            }
+        },
+        None => None,
+    };
+    let place = super::prepare::Placement {
+        runs: run_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| crate::scenario::RunsDir::Production.under(root)),
+        scenario: child_scenario.as_ref(),
+    };
+    let mut cp = match super::prepare::prepare_placed(
+        &t,
+        &resolved.id,
+        Some(&resolved.version),
+        opts,
+        &place,
+    ) {
         Ok(p) => p,
         Err(e) => {
             return Ok((
@@ -3981,8 +4118,13 @@ pub(crate) fn run_playbook_node(
     // Child may have mirrored wakes onto this parent log while we held it open
     // (issue #45 finding 8). Re-sync next_seq before any further parent appends.
     log.resync_seq()?;
+    // A nested scenario child's session ends with its drive; what it used
+    // stays in its own diagnostics.
+    if child_scenario.is_some() {
+        crate::scenario::session::unregister(&cp.run_dir);
+    }
     Ok(map_child_outcome(
-        root,
+        &cp.run_dir,
         &child_run_id,
         res.outcome,
         child_output_of(playbook, node_id),
@@ -4012,36 +4154,31 @@ fn child_output_of(playbook: &Playbook, node_id: &str) -> apb_core::run_outputs:
 /// outputs as one compact JSON object ([`crate::run_outputs::child_object`])
 /// instead of the answer text.
 fn map_child_outcome(
-    root: &Path,
+    dir: &Path,
     child_run_id: &str,
     outcome: RunStatus,
     output: apb_core::run_outputs::ChildOutput,
 ) -> (NodeStatus, String) {
     match outcome {
-        RunStatus::Succeeded => {
-            let dir = root.join(".apb/runs").join(child_run_id);
-            match read_all(&dir) {
-                Ok(events) => {
-                    let text = match output {
-                        apb_core::run_outputs::ChildOutput::Answer => {
-                            crate::progress::run_answer(&dir, &events).unwrap_or_default()
-                        }
-                        apb_core::run_outputs::ChildOutput::Outputs => {
-                            crate::run_outputs::child_object(&crate::run_outputs::of_run(
-                                &dir, &events,
-                            ))
-                        }
-                    };
-                    (NodeStatus::Succeeded, text)
-                }
-                Err(e) => (
-                    NodeStatus::Failed,
-                    format!(
-                        "sub-playbook child run `{child_run_id}` succeeded but its events could not be read: {e}"
-                    ),
-                ),
+        RunStatus::Succeeded => match read_all(dir) {
+            Ok(events) => {
+                let text = match output {
+                    apb_core::run_outputs::ChildOutput::Answer => {
+                        crate::progress::run_answer(dir, &events).unwrap_or_default()
+                    }
+                    apb_core::run_outputs::ChildOutput::Outputs => {
+                        crate::run_outputs::child_object(&crate::run_outputs::of_run(dir, &events))
+                    }
+                };
+                (NodeStatus::Succeeded, text)
             }
-        }
+            Err(e) => (
+                NodeStatus::Failed,
+                format!(
+                    "sub-playbook child run `{child_run_id}` succeeded but its events could not be read: {e}"
+                ),
+            ),
+        },
         other => (
             NodeStatus::Failed,
             format!(

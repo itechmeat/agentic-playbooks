@@ -565,9 +565,8 @@ fn unattended_start(root: &Path, opts: &mut RunOptions) -> Result<(), EngineErro
 /// longer wait on each other) used to share one directory, and the loser's
 /// start-up failure landed in the winner's journal. A taken id moves on to the
 /// next millisecond value instead.
-fn allocate_run(root: &Path, id: &str) -> Result<(String, PathBuf, EventLog), EngineError> {
-    let runs = root.join(".apb/runs");
-    std::fs::create_dir_all(&runs)?;
+fn allocate_run(runs: &Path, id: &str) -> Result<(String, PathBuf, EventLog), EngineError> {
+    std::fs::create_dir_all(runs)?;
     let mut ms = apb_core::clock::now_ms();
     for _ in 0..1000 {
         let run_id = format!("{id}-{ms}");
@@ -586,13 +585,97 @@ fn allocate_run(root: &Path, id: &str) -> Result<(String, PathBuf, EventLog), En
     )))
 }
 
+/// Runs scenario `prep` of playbook `id` (its version `version`, else
+/// `current`) of the project at `root` to its end, in this process: the
+/// ordinary drive under `.apb/scenario-runs/`, every boundary answered by
+/// the scenario's session. Returns the run and how the scenario was used.
+/// The caller enters the scenario process mode first (`apb __scenario-run`).
+pub fn run_scenario(
+    root: &Path,
+    id: &str,
+    version: Option<&str>,
+    prep: &crate::scenario::session::ScenarioPrep,
+) -> Result<crate::scenario::session::ScenarioRun, EngineError> {
+    let t = PrepareTarget {
+        definition_parent: root.join(".apb"),
+        execution_root: root.to_path_buf(),
+        origin_label: "project",
+    };
+    let place = Placement {
+        runs: crate::scenario::RunsDir::Scenario.under(root),
+        scenario: Some(prep),
+    };
+    let mut p = prepare_placed(&t, id, version, RunOptions::default(), &place)?;
+    let run_dir = p.run_dir.clone();
+    let run_id = p.run_id.clone();
+    let outcome = drive(
+        p.playbook.clone(),
+        &p.run_dir,
+        root,
+        &mut p.log,
+        &p.cfg,
+        p.start_node.clone(),
+        StartMode::Rerun,
+        p.run_id.clone(),
+        p.mode,
+        &mut p.guard,
+    );
+    if outcome.is_err() {
+        let _ = p.log.append(EventPayload::RunFinished {
+            outcome: "failed".into(),
+        });
+    }
+    let session = crate::scenario::session::unregister(&run_dir);
+    let outcome = outcome?;
+    Ok(crate::scenario::session::ScenarioRun::of(
+        run_id,
+        run_dir,
+        outcome.outcome,
+        session.as_deref(),
+    ))
+}
+
+/// Where a run is placed: the directory its run directory is allocated in
+/// (a project's `.apb/runs`, `.apb/scenario-runs`, or for a child run the
+/// directory of its parent's), and the script of a scenario run.
+pub(crate) struct Placement<'a> {
+    pub(crate) runs: PathBuf,
+    pub(crate) scenario: Option<&'a crate::scenario::session::ScenarioPrep>,
+}
+
 pub(crate) fn prepare_run_target(
     t: &PrepareTarget,
     id: &str,
     version: Option<&str>,
+    opts: RunOptions,
+) -> Result<Prepared, EngineError> {
+    let place = Placement {
+        runs: crate::scenario::RunsDir::Production.under(&t.execution_root),
+        scenario: None,
+    };
+    prepare_placed(t, id, version, opts, &place)
+}
+
+/// [`prepare_run_target`] at `place`. A scenario run executes nothing
+/// outside its run directory: it takes no lock and no working tree, runs
+/// no launch, consent, notification, isolation or import check (nothing it
+/// runs could act), recalls no remembered input, and binds every agent
+/// node to the scripted agent.
+pub(crate) fn prepare_placed(
+    t: &PrepareTarget,
+    id: &str,
+    version: Option<&str>,
     mut opts: RunOptions,
+    place: &Placement,
 ) -> Result<Prepared, EngineError> {
     let root = t.execution_root.as_path();
+    let scenario = place.scenario;
+    if let Some(sp) = scenario {
+        opts.unattended = sp.scenario.unattended || opts.unattended;
+        opts.cache = CacheRunMode::Off;
+        opts.params = sp.scenario.params.clone();
+        opts.instruction = sp.scenario.instruction.clone();
+    }
     unattended_start(root, &mut opts)?;
     let reg = Registry::open_dir(&t.definition_parent)?;
     let loaded = reg.load(id, version)?;
@@ -611,16 +694,28 @@ pub(crate) fn prepare_run_target(
     // trial, a sub-playbook child): the gate's own check, so the rule has
     // one copy.
     let playbook_dir = t.definition_parent.join("playbooks").join(id);
-    crate::gate::check_import_approval(&playbook_dir, id, &loaded.version, &digest).map_err(
-        |refusal| {
-            EngineError::Invalid(format!(
-                "playbook `{id}` {}: {} (digest {digest})",
-                loaded.version,
-                refusal["detail"].as_str().unwrap_or_default()
-            ))
-        },
-    )?;
+    // A scenario run executes none of the imported scripts.
+    if scenario.is_none() {
+        crate::gate::check_import_approval(&playbook_dir, id, &loaded.version, &digest).map_err(
+            |refusal| {
+                EngineError::Invalid(format!(
+                    "playbook `{id}` {}: {} (digest {digest})",
+                    loaded.version,
+                    refusal["detail"].as_str().unwrap_or_default()
+                ))
+            },
+        )?;
+    }
     let mut playbook = loaded.playbook.clone();
+    // A scenario never needs a real secret: a declared secret param holds a
+    // placeholder (the scenario may not set one).
+    if scenario.is_some() {
+        for p in playbook.params.iter().filter(|p| p.secret) {
+            opts.params
+                .entry(p.name.clone())
+                .or_insert_with(|| crate::scenario::session::SECRET_PLACEHOLDER.to_string());
+        }
+    }
 
     // The global config is needed to resolve profile invocations (agents, program).
     // A broken config is a start-up error, not a silent default.
@@ -632,8 +727,20 @@ pub(crate) fn prepare_run_target(
         .map_err(EngineError::Invalid)?;
     // Host execution mode (0.23.0): resolved once, before anything is
     // written, so a refusal leaves no run behind. The manifest keeps it.
-    let execution =
-        apb_core::execution::resolve_for(root, &opts.execution).map_err(EngineError::Invalid)?;
+    // A scenario run's executor is the scripted agent: neither host nor
+    // supervised.
+    let execution = match scenario {
+        Some(_) => apb_core::execution::ResolvedExecution {
+            mode: apb_core::execution::ExecutionMode::Cli,
+            source: apb_core::execution::ExecutionSource::Default,
+            fallback_to_host: false,
+            client: None,
+            notes: Vec::new(),
+        },
+        None => {
+            apb_core::execution::resolve_for(root, &opts.execution).map_err(EngineError::Invalid)?
+        }
+    };
     if execution.mode == apb_core::execution::ExecutionMode::Host
         && opts.mode.expects_supervisor_agent()
     {
@@ -706,7 +813,8 @@ pub(crate) fn prepare_run_target(
         execution.mode == apb_core::execution::ExecutionMode::Host,
     );
     let refused = crate::gate::isolation::refused(&contracts);
-    if !refused.is_empty() {
+    // A scenario run spawns nothing to isolate: not evaluated.
+    if !refused.is_empty() && scenario.is_none() {
         return Err(EngineError::Invalid(format!(
             "{}: {}",
             apb_core::isolation::contract::UNAVAILABLE,
@@ -722,13 +830,16 @@ pub(crate) fn prepare_run_target(
     } else {
         apb_core::scope::Origin::Project { workspace_id: None }
     };
-    let consent = check_consent(
-        root,
-        &playbook,
-        &consent_origin,
-        opts.expected_children.as_ref(),
-        opts.consent.as_ref(),
-    )?;
+    let consent = match scenario {
+        Some(_) => None,
+        None => check_consent(
+            root,
+            &playbook,
+            &consent_origin,
+            opts.expected_children.as_ref(),
+            opts.consent.as_ref(),
+        )?,
+    };
     // --- end 0.24.0 irreversible consent ---
 
     // The launch authorization, checked again against the policy state of
@@ -743,21 +854,24 @@ pub(crate) fn prepare_run_target(
             .map(Path::to_path_buf)
             .unwrap_or_else(|| root.to_path_buf()),
     };
-    check_launch(
-        &owner,
-        &playbook,
-        &consent_origin,
-        opts.expected_children.as_ref(),
-        opts.launch.as_ref(),
-        opts.parent_run.is_some(),
-    )?;
+    if scenario.is_none() {
+        check_launch(
+            &owner,
+            &playbook,
+            &consent_origin,
+            opts.expected_children.as_ref(),
+            opts.launch.as_ref(),
+            opts.parent_run.is_some(),
+        )?;
+    }
 
     // The notification subscription: a child inherits its parent's, a
     // top-level run checks its own request against the configs and pins the
     // target. A person's request that cannot be honoured refuses the start
     // before anything is written; the run journals the subscription below.
     let notify_set = match &opts.parent_run {
-        Some(parent) => crate::notify::start::inherited(&root.join(".apb/runs").join(parent)),
+        _ if scenario.is_some() => None,
+        Some(parent) => crate::notify::start::inherited(&place.runs.join(parent)),
         None => {
             let playbook_key = apb_core::policy_file::PlaybookKey {
                 id,
@@ -810,7 +924,18 @@ pub(crate) fn prepare_run_target(
     // when it still fits the params (not for a child); the instruction
     // likewise, then the definition's legacy draft. A real IO error fails the start rather than
     // starting with different input; nothing has been written yet.
-    let recall = recall_input(root, t.origin_label, id, &reg, &playbook.params, &opts)?;
+    let recall = match scenario {
+        // A scenario's input is its own: nothing remembered applies.
+        Some(_) => apb_core::run_memory::Recall {
+            instruction: None,
+            instruction_source: apb_core::run_memory::InstructionSource::None,
+            values: Vec::new(),
+            missing: Vec::new(),
+            schema_changed: false,
+            diagnostics: Vec::new(),
+        },
+        None => recall_input(root, t.origin_label, id, &reg, &playbook.params, &opts)?,
+    };
     let applied = apb_core::run_memory::apply(&opts.params, opts.instruction.clone(), &recall);
     let remembered = applied.remembered;
     let mut params = applied.params;
@@ -827,10 +952,14 @@ pub(crate) fn prepare_run_target(
     // Resolved before the lock, because the tree is what the lock covers, and
     // before anything is written, so a tree that does not exist refuses the
     // start without leaving a run behind.
-    let worktree =
-        super::worktree::resolve_at_start(&playbook, root, opts.worktree.as_deref(), &params)?;
+    let worktree = match scenario {
+        Some(_) => None,
+        None => {
+            super::worktree::resolve_at_start(&playbook, root, opts.worktree.as_deref(), &params)?
+        }
+    };
 
-    let is_write = playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
+    let is_write = scenario.is_none() && playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
     let mut queued_workdir = None;
     let mut queued_reason = String::new();
     let guard = if is_write {
@@ -853,7 +982,20 @@ pub(crate) fn prepare_run_target(
     if let Some(ref pred) = opts.continued_from {
         crate::run_lineage::validate_continued_from(root, pred, id)?;
     }
-    let (run_id, run_dir, mut log) = allocate_run(root, id)?;
+    let (run_id, run_dir, mut log) = allocate_run(&place.runs, id)?;
+    // A scenario run's session answers every boundary from here on.
+    if let Some(sp) = scenario {
+        crate::scenario::session::register(
+            &run_dir,
+            std::sync::Arc::new(crate::scenario::session::ScenarioSession::new(
+                sp, &playbook, &run_dir,
+            )),
+        );
+        apb_core::fsutil::create_dir_under(
+            &run_dir,
+            &run_dir.join(crate::scenario::session::WORK_DIR),
+        )?;
+    }
     let run_dir_owned = run_dir.clone();
     let run_id_owned = run_id.clone();
     let unstarted = Unstarted {
@@ -866,7 +1008,9 @@ pub(crate) fn prepare_run_target(
     // through here, and nothing but the event log is in the run yet: make sure
     // `.apb/.gitignore` covers the run directory before any node output or
     // agent transcript lands in it. Best-effort.
-    apb_core::workspace::ensure_local_ignored(root);
+    if scenario.is_none() {
+        apb_core::workspace::ensure_local_ignored(root);
+    }
     // The run snapshot = the effective playbook. Without overrides we write the raw yaml
     // (preserving formatting/comments); with overrides we serialize the
     // effective playbook, so the snapshot honestly reflects what actually ran.
@@ -1000,22 +1144,25 @@ pub(crate) fn prepare_run_target(
     // gated sub-playbook child with a missing/drifted connector permit, or a
     // profile bundle mismatch, is refused (issue #42 finding 3b) - the run
     // directory and its journal already exist at this point, hence `prep_try`.
-    let mut manifest = prep_try_unstarted(
-        &mut log,
-        &unstarted,
-        build_run_manifest(
-            &playbook,
-            root,
-            origin,
-            &global,
-            &run_dir,
-            opts.expected_profile_bundles.as_ref(),
-            &opts.expected_connectors,
-            &opts.expected_connector_accounts,
-            opts.overrides.as_ref(),
-            opts.mode.expects_supervisor_agent(),
-        ),
-    )?;
+    let mut manifest = match scenario {
+        Some(_) => scripted_manifest(&playbook),
+        None => prep_try_unstarted(
+            &mut log,
+            &unstarted,
+            build_run_manifest(
+                &playbook,
+                root,
+                origin,
+                &global,
+                &run_dir,
+                opts.expected_profile_bundles.as_ref(),
+                &opts.expected_connectors,
+                &opts.expected_connector_accounts,
+                opts.overrides.as_ref(),
+                opts.mode.expects_supervisor_agent(),
+            ),
+        )?,
+    };
     let profiles_prov: Vec<ProfileProvenance> = manifest
         .profiles
         .iter()
@@ -1026,10 +1173,14 @@ pub(crate) fn prepare_run_target(
         })
         .collect();
     // Decision models (issue #165): snapshot the effective settings for a
-    // run that has agent nodes, the only place a use asks today. Nothing at
-    // all without `decisions.yaml`, so such a manifest is unchanged. A file
-    // that does not load leaves the layer off; it never fails the run.
-    if !manifest.profiles.is_empty() {
+    // run that has agent nodes (whose uses ask about attempts) or that asks
+    // the models itself (a judge node, a judge edge, a list's judge check, a
+    // review that decides on its own). Nothing at all without
+    // `decisions.yaml`, so such a manifest is unchanged. A file that does
+    // not load leaves the layer off; it never fails the run.
+    if let Some(sp) = scenario {
+        manifest.decisions = decision_settings(root, sp);
+    } else if !manifest.profiles.is_empty() || apb_core::validate::asks_decision_models(&playbook) {
         manifest.decisions = crate::decision::snapshot(root);
     }
     // Host execution mode (0.23.0): absent for cli, so a CLI run's manifest
@@ -1044,7 +1195,8 @@ pub(crate) fn prepare_run_target(
         .clone()
         .filter(|_| opts.depth == 0 && opts.parent_run.is_none());
     manifest.unattended = opts.unattended;
-    manifest.candidate_trial = opts.depth == 0
+    manifest.candidate_trial = scenario.is_none()
+        && opts.depth == 0
         && opts.parent_run.is_none()
         && opts.eval.is_none()
         && crate::candidate::is_trial_start(
@@ -1063,7 +1215,20 @@ pub(crate) fn prepare_run_target(
     // either before this check (and refuses the start) or after the record.
     // The check above refused early, before anything was written; script
     // copies and profile materialization ran since.
-    let floor_hold = if opts.parent_run.is_none() {
+    // A scenario run and a repetition of `apb eval` are no history; every
+    // other run leaves `origin` out (production).
+    manifest.origin = match scenario {
+        Some(sp) => Some(crate::manifest::RunOrigin::Scenario {
+            level: sp.level,
+            scenario: sp.scenario.id.clone(),
+            scenario_digest: sp.scenario_digest.clone(),
+        }),
+        None => opts
+            .eval
+            .is_some()
+            .then_some(crate::manifest::RunOrigin::Eval),
+    };
+    let floor_hold = if opts.parent_run.is_none() && scenario.is_none() {
         prep_try_unstarted(
             &mut log,
             &unstarted,
@@ -1072,18 +1237,20 @@ pub(crate) fn prepare_run_target(
     } else {
         None
     };
-    manifest.launch = prep_try_unstarted(
-        &mut log,
-        &unstarted,
-        check_launch(
-            &owner,
-            &playbook,
-            &consent_origin,
-            opts.expected_children.as_ref(),
-            opts.launch.as_ref(),
-            opts.parent_run.is_some(),
-        ),
-    )?;
+    if scenario.is_none() {
+        manifest.launch = prep_try_unstarted(
+            &mut log,
+            &unstarted,
+            check_launch(
+                &owner,
+                &playbook,
+                &consent_origin,
+                opts.expected_children.as_ref(),
+                opts.launch.as_ref(),
+                opts.parent_run.is_some(),
+            ),
+        )?;
+    }
     if !manifest.is_empty() {
         prep_try_unstarted(
             &mut log,
@@ -1121,16 +1288,19 @@ pub(crate) fn prepare_run_target(
     // The known problems this run shows its agents, rechecked where their
     // source changed, journaled once (only for a playbook whose
     // `known_problems:` block shows anything).
-    if let Some(shown) = crate::known_problems::at_start(
-        root,
-        apb_core::scope::Scope::parse(t.origin_label).unwrap_or(apb_core::scope::Scope::Project),
-        &playbook,
-        &manifest,
-    ) {
+    if scenario.is_none()
+        && let Some(shown) = crate::known_problems::at_start(
+            root,
+            apb_core::scope::Scope::parse(t.origin_label)
+                .unwrap_or(apb_core::scope::Scope::Project),
+            &playbook,
+            &manifest,
+        )
+    {
         log.append(shown)?;
     }
     // The estimate snapshot and the budget in force (not for a child).
-    if opts.parent_run.is_none() && opts.depth == 0 {
+    if opts.parent_run.is_none() && opts.depth == 0 && scenario.is_none() {
         let recorded = budget_gate::record_start(
             &mut log,
             &budget_gate::StartRecord {
@@ -1283,3 +1453,101 @@ fn check_consent(
     }
 }
 // --- end 0.24.0 irreversible consent ---
+
+/// The manifest of a scenario run: every node that binds a profile is
+/// bound to the scripted agent (one chain step, nothing to start), so the
+/// drive's attempt loop runs as for a real agent.
+pub(super) fn scripted_manifest(playbook: &Playbook) -> crate::manifest::RunExecutionManifest {
+    let mut manifest = crate::manifest::RunExecutionManifest::default();
+    let has_profile = playbook
+        .nodes
+        .iter()
+        .any(|n| n.kind.effective_profile_ref(&playbook.defaults).is_some());
+    if !has_profile {
+        return manifest;
+    }
+    let spec: apb_core::config::InvocationDef =
+        serde_json::from_value(serde_json::json!({ "argv": ["{prompt}"] }))
+            .expect("the scripted invocation form parses");
+    let profile = crate::manifest::ManifestProfile {
+        scope: crate::scenario::session::SCENARIO_AGENT.into(),
+        name: crate::scenario::session::SCENARIO_AGENT.into(),
+        profile_digest: String::new(),
+        bundle_digest: String::new(),
+        soul: String::new(),
+        soul_requirement: Default::default(),
+        skills: Vec::new(),
+        chain: vec![crate::invocation::ResolvedInvocation {
+            agent_id: crate::scenario::session::SCENARIO_AGENT.into(),
+            model: String::new(),
+            spec,
+            soul_delivery: Default::default(),
+            canonical_executable: std::path::PathBuf::new(),
+            executable_fingerprint: String::new(),
+        }],
+        ephemeral: false,
+        hermetic: false,
+        zcode_mode: None,
+        process_env: None,
+        tiers: Vec::new(),
+        routed_tier: None,
+        cascade: 0,
+    };
+    let key = profile.key();
+    manifest.profiles.push(profile);
+    for n in &playbook.nodes {
+        if n.kind.effective_profile_ref(&playbook.defaults).is_some() {
+            manifest.node_bindings.insert(n.id.clone(), key.clone());
+        }
+    }
+    manifest
+}
+
+/// The decision settings a scenario run starts with. Quick: the judge uses
+/// at the scenario's modes (default `enforce`), answered by the scenario's
+/// provider, every other use off. Smoke: this machine's settings, the
+/// request budget lowered to the cap (never raised), every engine aid use
+/// off; nothing when the machine has none.
+pub(super) fn decision_settings(
+    root: &Path,
+    prep: &crate::scenario::session::ScenarioPrep,
+) -> Option<apb_core::decisions::EffectiveDecisions> {
+    use apb_core::decisions::{DecisionMode, EffectiveDecisions};
+    let judge_uses = ["judge_node", "judge_edge"];
+    match prep.level {
+        apb_core::scenario::ScenarioLevel::Quick => {
+            let modes = &prep.scenario.decisions;
+            let mut uses = std::collections::BTreeMap::new();
+            for (name, mode) in [
+                ("judge_node", modes.judge_node),
+                ("judge_edge", modes.judge_edge),
+            ] {
+                let mode = mode.unwrap_or(DecisionMode::Enforce);
+                uses.insert(
+                    name.to_string(),
+                    serde_json::from_value(serde_json::json!({ "mode": mode.as_str() }))
+                        .expect("a use with a mode parses"),
+                );
+            }
+            Some(EffectiveDecisions {
+                mode: DecisionMode::Enforce,
+                timeout_ms: 3000,
+                providers: Vec::new(),
+                budget: Default::default(),
+                privacy: Default::default(),
+                uses,
+            })
+        }
+        apb_core::scenario::ScenarioLevel::Smoke => {
+            let mut settings = crate::decision::snapshot(root)?;
+            settings
+                .uses
+                .retain(|k, _| judge_uses.contains(&k.as_str()));
+            let cap = prep
+                .max_requests
+                .min(crate::scenario::session::SMOKE_MAX_REQUESTS);
+            settings.budget.max_requests_per_run = settings.budget.max_requests_per_run.min(cap);
+            Some(settings)
+        }
+    }
+}

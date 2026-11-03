@@ -52,6 +52,38 @@ pub(crate) mod status {
     pub const ERROR: &str = "error";
 }
 
+/// A scenario run's script criterion at `index`: its scripted result, the
+/// script never runs.
+fn scripted(
+    run_dir: &Path,
+    index: usize,
+    path: &str,
+) -> Result<(&'static str, Option<String>), EngineError> {
+    let key = crate::scenario::BoundaryKey {
+        part: Some(index.to_string()),
+        ..Default::default()
+    };
+    let kind = crate::scenario::BoundaryKind::GoalScript;
+    Ok(
+        match crate::scenario::session::at_run(run_dir, kind, &key) {
+            crate::scenario::Resolution::Answer(crate::scenario::Answer::Goal(
+                apb_core::scenario::GoalAnswer::Pass,
+            )) => (status::PASSED, None),
+            crate::scenario::Resolution::Answer(_) => (
+                status::FAILED,
+                Some(format!("`{path}` exited non-zero (scenario)")),
+            ),
+            _ => {
+                crate::scenario::session::on_missing(run_dir, kind, &key)?;
+                (
+                    status::ERROR,
+                    Some(format!("scenario has no answer for goal criterion {index}")),
+                )
+            }
+        },
+    )
+}
+
 fn check_name(c: &GoalCheck) -> &'static str {
     match c {
         GoalCheck::Manual => "manual",
@@ -125,6 +157,9 @@ pub(crate) fn check(
             }
             GoalCheck::List { node } => list_status(&events, node),
             GoalCheck::Script { .. } if tampered.is_some() => (status::ERROR, tampered.clone()),
+            GoalCheck::Script { path } if crate::scenario::session::is_scenario(run_dir) => {
+                scripted(run_dir, index, path)?
+            }
             GoalCheck::Script { path } => {
                 let mut env = crate::script::run_env(run_dir, None);
                 env.extend(spawn_env.iter().map(|(k, v)| (k.as_str(), v.clone())));

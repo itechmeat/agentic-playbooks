@@ -1,0 +1,38 @@
+schema: 1
+id: green
+title: The agent retries after a delay, the gate is red once and the loop repairs it, lint fails once and is fixed
+instruction: the parser
+answers:
+  work:
+    - visit: 1
+      attempts:
+        - { status: failed, failure_kind: infrastructure, output: "spawn failed" }
+        - { status: failed, output: "tests still fail" }
+        - { status: succeeded, output: "first try" }
+    - { visit: 2, attempts: [ { status: succeeded, output: "fixed" } ] }
+  gate:
+    - { visit: 1, script: { exit: 0, stdout: "QA red" } }
+    - { visit: 2, script: { exit: 0, stdout: "QA green" } }
+  triage:
+    - { visit: 1, judge: { verdict: { value: red, p: 0.9 } } }
+    - { visit: 2, judge: { verdict: { value: green, p: 0.9 } } }
+  approve:
+    - { visit: 1, review: { decision: approve } }
+  ship:
+    - { visit: 1, publish: { decision: publish } }
+  lint:
+    - { visit: 1, script: { exit: 1, stdout: "2 findings" } }
+  lintfix:
+    - { visit: 1, attempts: [ { status: succeeded, output: "lint fixed" } ] }
+  docs:
+    - { visit: 1, playbook: { scenario: kid-green } }
+  summary:
+    - { visit: 1, attempts: [ { status: succeeded, output: "all done" } ] }
+expect:
+  run: { outcome: [succeeded] }
+  finish: done
+  route: { visits: [work, gate, triage, approve, ship, summary, done], in_order: true, not_visits: [failed] }
+  visits: { work: 2, gate: 2, triage: 2, approve: 1, lint: 1, lintfix: 1, summary: 1 }
+  edges: { taken: { "id:again": 1, "id:lint-clean": 0 }, not_taken: ["id:rejected"] }
+  joins: { dead: { summary: [lint] } }
+  outputs: [ { node: summary, matches: "all done" } ]

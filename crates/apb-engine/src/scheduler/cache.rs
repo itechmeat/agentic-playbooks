@@ -565,6 +565,13 @@ pub(crate) fn probe(
     cfg: &RunConfig,
     probe_ctx: ProbeContext<'_>,
 ) -> Result<CacheProbe, EngineError> {
+    // A scenario run neither reads nor fills the cache.
+    if crate::scenario::session::skips(run_dir, crate::scenario::BoundaryKind::NodeCache) {
+        return Ok(CacheProbe::Miss {
+            ctx: None,
+            events: Vec::new(),
+        });
+    }
     // Agent-task key parts come from the run's own immutable manifest snapshot
     // (bundle digest + primary agent/model + the node's connector digests). A
     // script node leaves all of these empty.

@@ -122,7 +122,10 @@ impl Snapshot {
         root: &Path,
         globs: &[String],
     ) -> Result<Option<Self>, EngineError> {
-        if globs.is_empty() {
+        // A scenario run has no tree to protect: nothing ran in it.
+        if globs.is_empty()
+            || crate::scenario::session::skips(run_dir, crate::scenario::BoundaryKind::Protect)
+        {
             return Ok(None);
         }
         let ignored = apb_core::fingerprint::ignored_paths(root);

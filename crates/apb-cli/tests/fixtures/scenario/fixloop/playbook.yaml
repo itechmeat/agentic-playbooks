@@ -1,0 +1,40 @@
+schema: 2
+id: fixloop
+name: Fix loop
+version: 1.0.0
+description: An agent fixes, a script gate and a judge decide whether to loop, a person approves the push, then lint, docs and a summary run before the end.
+defaults: { profile: main }
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: agent_task, prompt: "Fix {{run.instruction}}", max_retries: 1, retry_delay: { initial: 2h } }
+  - { id: gate, type: script, script: scripts/gate.sh, runner: sh }
+  - id: triage
+    type: judge
+    state: { out: "{{nodes.gate.output}}" }
+    questions:
+      verdict: { type: choice, instructions: "Is `out` green?", criteria: { green: every check passes, red: a check fails } }
+    on_unavailable: fail
+  - { id: approve, type: human_review }
+  - { id: ship, type: publish, from: work, remote: origin, branch: apb/fix }
+  - { id: lint, type: script, script: scripts/lint.sh, runner: sh }
+  - { id: lintfix, type: agent_task, prompt: "Fix the lint findings: {{nodes.lint.output}}" }
+  - { id: docs, type: playbook, playbook: kid }
+  - { id: summary, type: agent_task, prompt: "Summarize {{nodes.work.output}}", read_only: true }
+  - { id: done, type: finish, outcome: success }
+  - { id: failed, type: finish, outcome: failure }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: gate, condition: { type: node_status, node: work, equals: success } }
+  - { from: work, to: failed, condition: { type: node_status, node: work, equals: failure } }
+  - { from: gate, to: triage }
+  - { id: again, from: triage, to: work, condition: { type: output_field, node: triage, field: verdict, equals: red }, max_traversals: 2 }
+  - { from: triage, to: approve, fallback: true }
+  - { from: approve, to: ship, condition: { type: review_status, equals: approve } }
+  - { id: rejected, from: approve, to: failed, fallback: true }
+  - { from: ship, to: lint }
+  - { from: ship, to: docs }
+  - { id: lint-clean, from: lint, to: summary, condition: { type: node_status, node: lint, equals: success } }
+  - { from: lint, to: lintfix, condition: { type: node_status, node: lint, equals: failure } }
+  - { from: lintfix, to: summary }
+  - { from: docs, to: summary }
+  - { from: summary, to: done }

@@ -614,6 +614,48 @@ fn push(
     Ok(PublishStep::Finished(status, out))
 }
 
+/// A scenario run's publish node: the scripted consent and push result,
+/// journaled like a person's decision; nothing is planned or pushed. `None`
+/// for a real run.
+pub(super) fn scripted(
+    run_dir: &Path,
+    log: &mut EventLog,
+    node: &str,
+) -> Result<Option<(NodeStatus, String)>, EngineError> {
+    use crate::scenario::{Answer, BoundaryKind, Resolution};
+    let key = crate::scenario::session::node_key(node);
+    let answer = match crate::scenario::session::at_run(run_dir, BoundaryKind::Publish, &key) {
+        Resolution::Real => return Ok(None),
+        Resolution::Answer(Answer::Publish(a)) => a,
+        _ => {
+            // A consent that never comes cannot fail like a push: the
+            // scenario is invalid whatever `on_missing` says.
+            crate::scenario::session::on_missing(run_dir, BoundaryKind::Publish, &key)?;
+            return Err(EngineError::Invalid(format!(
+                "{}: scenario has no answer for publish `{node}`",
+                crate::scenario::session::MISSING_ANSWER
+            )));
+        }
+    };
+    start_visit(run_dir, log, node)?;
+    log.append(EventPayload::review_decided(
+        node,
+        answer.decision.clone(),
+        String::new(),
+        None,
+    ))?;
+    Ok(Some(match answer.decision.as_str() {
+        OPTION_SKIP => (NodeStatus::Succeeded, output::SKIPPED.into()),
+        _ => match answer.status {
+            Some(apb_core::scenario::ScriptedStatus::Failed) => (
+                NodeStatus::Failed,
+                format!("{}: the push failed (scenario)", output::NOT_SENT),
+            ),
+            _ => (NodeStatus::Succeeded, output::PUBLISHED.into()),
+        },
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

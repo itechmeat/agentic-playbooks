@@ -88,12 +88,20 @@ is not what the playbook needs.
     <case>.yaml             one case per file, id = file stem
     scripts/                case check scripts
     fixtures/               fixture directories
+    scenarios/              scenario files (see Scenario runs below)
 ```
 
 The registry only lists `major.minor.patch` directories as versions, so
 `evals/` is never a version, and editing a case never changes a version's
 trust digest. One suite applies across versions; a case can narrow itself
 with `versions`. Only project playbooks can be evaluated in this release.
+
+A playbook has a suite when `evals/` holds `suite.yaml` or a case file
+directly. A directory holding only `scenarios/` is no suite: `apb validate`
+checks no case for it and raises no V81, so a playbook an eval cannot run
+(a publish node, a connector, a sub-playbook) may still carry scenarios.
+The suite digest covers the whole `evals/` tree, `scenarios/` included, so
+editing a scenario asks for a new suite approval before the next `apb eval`.
 
 ## A case
 
@@ -228,6 +236,11 @@ apb eval <id> [--case NAME ...] [--tag TAG ...] [--version X.Y.Z]
               [--max-usd X] [--draft] [--dry-run] [--yes] [--json]
 apb eval <id> --compare [--json]
 ```
+
+This is `--level deep`, the default. `--level quick` and `--level smoke`
+play the playbook's scenarios instead (see "Scenario runs" below); a flag
+of another level is refused, never ignored. A playbook whose `evals/`
+holds only scenarios has no eval case, and `apb eval <id>` says so.
 
 - `--model claude:claude-haiku-5-5` puts one ephemeral executor on
   every agent node; `--profile-override review=reviewer` swaps one node's
@@ -373,6 +386,403 @@ does); `result` has `eval_id`, `playbook`, `version`, `started_at_ms`,
 - **V82** (warning): a `human_review` or interactive node; the run is stopped
   when it waits there.
 - **V83** (warning): no case applies to the version.
+
+## Scenario runs
+
+A scenario drives a playbook through the real engine with every answer
+that comes from outside apb scripted: an agent attempt, a script, a
+review, a judge, a wait, a child playbook, a publish consent. It checks
+the playbook's routing (edges, joins, retries, fallbacks, run outputs)
+without starting a program, calling a connector or touching the project
+tree. `apb eval <id> --level quick` or `--level smoke` plays a playbook's
+scenarios.
+
+### Levels
+
+| Level | What reaches outside apb |
+|-------|--------------------------|
+| `quick` | nothing: no program starts, no connector is called, no decision provider is asked, and files are written only below the scenario run's directory |
+| `smoke` | `quick`, except that this machine's decision providers may be asked |
+| deep | `apb eval` itself (above): real agents in a scratch repository |
+
+Scenario runs live under `.apb/scenario-runs/`, never under `.apb/runs/`;
+`.apb/.gitignore` ignores it with the other machine-local entries.
+
+### Running a scenario
+
+```
+apb eval <id> --level quick|smoke [--scenario NAME ...] [--version X.Y.Z]
+              [--allow-stale] [--yes] [--json]
+              [--max-decision-requests N]      # smoke only
+apb eval <id> --scenarios [--version X.Y.Z] [--json]
+```
+
+- `--scenario NAME` (repeatable) plays only the named scenarios; without
+  it every scenario of the playbook plays, one after another.
+- `--scenarios` lists the playbook's scenarios with the latest result per
+  level, whether that result is for the current scenario and version or
+  older, and whether the scenario is stale now. It runs nothing.
+- `--max-decision-requests N` is the smoke cap per scenario: 20 by default,
+  1 to 200. It counts HTTP requests to the providers, strictly, across the
+  scenario's whole run tree: a nested child scenario takes from its
+  parent's count, never a cap of its own. It is refused at `quick`, which
+  sends no request.
+- `--allow-stale` plays a stale scenario (see "Staleness and the digest");
+  without it a stale scenario is reported `stale` and nothing of it runs.
+
+Before any scenario plays, the command refuses (exit 2) a version with a
+validator error (`invalid_playbook`, naming the codes), a scenario name
+outside the grammar or a file that does not load, a playbook with no
+scenario, and any scenario error against the version (V146 to V150, all
+listed). A quick run needs no trust and no confirmation: it executes
+nothing and sends nothing. A smoke run sends template text to this
+machine's decision providers at their cost, so it also needs:
+
+- the version approved by its digest (`apb trust approve`), and an
+  approved import when the version was imported with scripts
+  (`untrusted`, `imported_scripts_require_approval`);
+- a person's go-ahead: a terminal question that names the cap and the
+  number of scenarios, or `--yes` (`needs_confirmation` without either);
+- a caller that is not a run step: inside an agent attempt or a host task
+  a smoke run is refused (`refused_in_run_step`).
+
+Each scenario plays in its own child process, `apb __scenario-run` (hidden),
+which enters scenario mode before anything else and refuses to play a
+scenario or a version whose digest differs from the one the command
+checked (`invalid`). The command waits 60 s for a quick scenario and 300 s
+for a smoke one; when the time runs out, or the command is interrupted, it
+kills the child's process group and the scenario is `incomplete`.
+
+A scenario's verdict is `passed`, `failed` (the run ended and an
+expectation did not hold), `invalid` (a boundary had no answer under
+`on_missing: error`, or the scenario or version changed after the check),
+`stale` or `incomplete` (the run did not end). The exit code is 0 when
+every scenario passed, 1 when one failed, 2 for a refusal before any run,
+and 3 when one was invalid, stale or incomplete (3 wins over 1). `--json`
+prints every report.
+
+### The report
+
+A report is built only from what the run left: its journal, its execution
+index, its diagnostics sidecar and the drive's record of the answers. Every
+expectation is a named check (`run.outcome`, `finish`, `visits[<node>]`,
+`joins.dead[<node>]`, `templates_empty`, `unused_answers` and so on) with
+what it expected and what it found. Beside the checks the report carries
+the trace: each node execution with its visit and its attempts and where
+each answer came from, the routes, the edges taken by address (one per
+source execution and edge, so a bounded edge's hop counts once), the dead
+join inputs, the template references that rendered empty, the answers
+used, taken by default, missing and never used, each boundary's count, and
+at smoke the decision requests sent and their cost.
+
+### Where results are kept
+
+```
+.apb/scenario-runs/<run id>/              the run: journal, manifest, work/
+.apb/scenario-runs/<run id>/report.json   its report
+.apb/scenario-runs/index/<playbook>.jsonl one line per finished scenario run
+```
+
+An index line names the scenario and its digest, the level, the version
+and its digest, the verdict, the run id, the time, and at smoke the
+decision requests and the cost. `--scenarios` reads it. Retention runs
+with every new line, under the index lock: the newest 20 run directories
+per playbook, scenario and level are kept, with the child runs they
+started, and the index keeps at most 1000 lines per playbook, never
+dropping the line of a kept run.
+
+### How a scenario run is driven
+
+A scenario run is an ordinary drive of the engine: the same routing,
+joins, retries, fallbacks, failure classification, checks and journal as a
+real run. What differs is the preparation and who answers at each
+boundary.
+
+- Preparation reads nothing a scenario cannot act on and takes nothing the
+  project holds: no import approval, isolation contract, consent, launch
+  check, notification, remembered input, working tree, busy lock, known
+  problems, budget, estimate or node cache. The params are the scenario's,
+  and a param the playbook declares `secret` holds a placeholder.
+- The run lives in `.apb/scenario-runs/<run id>/`; its working directory is
+  the empty `work/` inside it. A child playbook's run lives next to its
+  parent's, so a nested scenario child is under `.apb/scenario-runs/` too.
+- Every node that binds a profile runs the scripted agent: its attempts are
+  journaled with agent `scenario`, no model, and `executed_by: scenario`.
+  No local profile and no agent CLI is needed.
+- The manifest records `origin: scenario` with the level, the scenario's
+  name and its digest.
+- No grade, candidate settlement or known problem is recorded when the run
+  ends: a scenario run is no evidence.
+
+What each level does at a boundary that would wait or ask:
+
+- A quota failure pauses the run as in a real one, and the pause is due at
+  once: the journal holds `run_paused` and then `run_resumed`, both by the
+  engine, and the node runs again. The engine's own limit still applies:
+  six quota pauses of a node without a success fail it. A budget pause
+  cannot occur, since a scenario run has no budget.
+- A delayed retry (`retry_delay`) is journaled as `retry_deferred` with its
+  delay and is due at once; no waker is started. A wait takes its scripted
+  end at once, and a question's scripted timeout is due at once.
+- A `read_only` node is not checked against the tree: no tree state is
+  taken and no `read_only_checked` is journaled. A scripted `read_only: {
+  dirty: [...] }` journals the real `read_only_violated` and fails the node
+  with no retry.
+- A review or publish with no answer makes the scenario `invalid`, whatever
+  `on_missing` says: a real review cannot fail. A missing wait under
+  `on_missing: fail` times the wait out, a missing child fails the node,
+  and a missing judge answer reads `unavailable`.
+- At `quick` a judge is answered from the scenario by the `scenario`
+  provider (`calibrated: false`), so an option the question does not offer
+  reads `invalid` as it would from a provider. A judge with `on_unavailable:
+  emulate` goes on to its profile, which is a scripted attempt whose output
+  is the answer; no `llm_emulation` provider is modelled. The engine's own
+  decision uses are off.
+- At `smoke` a judge asks this machine's configured providers. Only the
+  judge uses are kept, and the run's `budget.max_requests_per_run` is
+  lowered to the scenario's request cap (20 unless the run asks for fewer
+  or more, at most 200). The cap is strict per HTTP request: before an ask,
+  the run reserves the most requests it can send (every provider on its
+  route, each with the decision client's retries, 3 per provider today),
+  and an ask that would not fit journals `budget` and the judge takes its
+  `on_unavailable`. A reservation is given back only when nothing went out
+  (the first provider on the route answered from the run's cache, no
+  provider is configured, or the guard refused the ask); the client does
+  not report how many requests an ask sent (retries, and providers tried
+  before the one that answered, even when that one answered from the
+  cache), so any other ask keeps its whole reservation. A cap
+  below one ask's worst case therefore allows no ask. A nested child
+  scenario shares its parent's count, so the cap holds for the run and
+  every child together. The engine's own decision uses stay off.
+- A list item's `script` or `connector` check is not run: the item takes
+  the `check` of its scripted attempt (`pass` accepts it, `reject` sends it
+  round again, no `check` passes). An `output` check reads the scripted
+  output as a real run does, and a `judge` check takes the visit's `judge`
+  answer.
+- `visit: default` and an item answer keyed `"*"` are never reported as
+  unused, whether or not a boundary took them.
+- Under `on_missing: error` the first missing answer stops the run at the
+  next check (after the attempt, and at the top of the drive loop); the run
+  ends `failed` and the scenario's verdict is `invalid`.
+
+Each answer used and each template reference that rendered empty is a
+record in the run's diagnostics sidecar (`diagnostics.jsonl` in the
+scenario run's directory), never an event of the journal:
+
+- `scenario_answer`: one use of a boundary, with `boundary` (its kind),
+  `key` (node, visit, attempt or item), `use` (`used`, or `missing`
+  when the scenario had no answer) and `from` (the answer it took).
+- `template_empty`: one template reference of a node that rendered as
+  nothing, with `node`, `visit`, `template` (which template of the node),
+  `reference` and `why` (`never ran`, `field absent`, `not JSON` or
+  `empty`). A real run writes none.
+
+### Where a scenario lives
+
+```
+.apb/playbooks/<id>/evals/scenarios/<name>.yaml
+```
+
+The name is `[a-z0-9][a-z0-9-]*`, at most 64 characters, and the file's
+`id` must equal it. A name outside that grammar never becomes a path. apb
+reads only regular files below the playbook directory (no symbolic link,
+no special file), at most 1 MiB each, as UTF-8 text. Like an eval case, a
+scenario is outside every version, so editing one never changes a
+version's trust digest.
+
+### The file
+
+```yaml
+schema: 1
+id: green-after-one-fix
+title: the check fails once, the fix loop repairs it
+versions: ">=1.4.0"            # optional, the eval case syntax
+playbook_digest: sha256:...    # optional pin
+instruction: "Prepare the branch"
+params: { kind: feature }
+unattended: false
+on_missing: error              # error (default) or fail
+on_extra: error                # error (default) or warn
+decisions: { judge_node: enforce, judge_edge: shadow }
+answers:
+  intake:
+    - visit: 1
+      attempts:
+        - { status: succeeded, output: "branch feat/x", check: pass }
+  qa:
+    - { visit: 1, script: { exit: 1, stdout: "red" } }
+    - { visit: default, script: { exit: 0 } }
+  approve:
+    - { visit: 1, review: { decision: approve, note: "ok" } }
+baseline: skip
+goal: { "0": pass }
+expect:
+  run: { outcome: [succeeded] }
+  finish: done
+  route: { path: [start, intake, qa, fix, qa, approve, done] }
+  visits: { qa: 2 }
+  edges: { taken: { "id:retry": 1 }, not_taken: ["id:reject"] }
+  joins: { dead: { merge: [skipped_branch] } }
+  outputs: [ { node: intake, matches: "feat/x" } ]
+  run_outputs: { pr_url: { state: value } }
+  templates_empty: report
+```
+
+Every top-level key is optional except `schema` (always 1) and `id`, and
+an unknown key at any level is an error, so a typo is never a silently
+ignored answer.
+
+- `params`: run params. A param the playbook declares `secret` may not be
+  set (V149).
+- `unattended`: run the scenario as an unattended run.
+- `on_missing`: what a boundary with no answer does. `error` stops the
+  scenario and its verdict is `invalid`; `fail` fails that boundary the way
+  the real one fails and goes on.
+- `on_extra`: what answers nobody used do. `error` makes the verdict
+  `failed`; `warn` only lists them.
+- `decisions`: the modes of the judge node and judge edge uses in a quick
+  run (`off`, `shadow`, `advise`, `enforce`); absent means `enforce`.
+- `baseline`: `skip` (every source unknown) or `{ before: {...}, after:
+  {...} }` observations per check id.
+- `goal`: script goal criteria by their index in the playbook's `goal:`
+  list, `pass` or `fail`; marker and list criteria are evaluated for real.
+
+### Answers
+
+`answers` maps a node id to one entry per visit. `visit` is the 1-based
+execution of the node, or `default` for any execution with no numbered
+entry (a `default` entry is never reported as unused). Each entry carries
+exactly one answer kind, the one the node takes, except for two nodes that
+cross two boundaries: a list whose item check is a `judge` takes `items`
+and `judge` (the check's `verdict` question), and a judge with
+`on_unavailable: emulate` takes `judge` and `attempts` (its profile's
+attempts after the judge is unavailable):
+
+| Node | Answer |
+|------|--------|
+| `agent_task`, `prompt`, a `finish` with a prompt | `attempts`: a list of attempts, each with `status` (`succeeded` or `failed`), `failure_kind` (`transient`, also written `infrastructure`, `quota`, `auth`, `budget`, `agent`), `output`, `outputs` (the declared fields), `check` (`pass` or `reject`, the success or completion check), `question` (`{ text, answer }` or `{ text, timeout: true }`) with `then` (the attempt after the answer) and `read_only` (`{ dirty: [paths] }`) |
+| any node with `list:` | `items` by item id (`"*"` for every item not listed), each a list of attempts or one attempt; `source` lists the items when the list reads an external source |
+| `script` | `script`: `{ exit, stdout, stderr }` |
+| `human_review` | `review`: `{ decision, note }` |
+| `judge` | `judge`: one answer per question (`value`: a choice's option, a score's level by name, a yes or no question's `true` or `false`; `p`, its probability, which for a yes or no question wins over `value`; `confidence`), or `{ unavailable: <kind> }` with `unavailable`, `rate_limited`, `invalid`, `auth`, `budget` or `timeout` |
+| `playbook` | `playbook`: `{ scenario: <name> }`, a nested scenario of the child at the same level, or the child's result `{ status, output }` |
+| `wait` | `wait`: exactly one of `elapsed: true`, `signal: <value>` and `timed_out: true`; nothing sleeps |
+| `publish` | `publish`: `{ decision, status }`; nothing is pushed |
+| `start`, `condition`, a `finish` without a prompt | none |
+
+`judge_edges` rides along with any kind (or alone): answers for the judge
+edges out of the node, keyed by edge address (`id:<id>` or
+`e:<from>><to>#<n>`, see "Edge ids and edge addresses" in
+`docs/HOWTO-authoring.md`).
+
+### Expectations
+
+`expect` says what the run must show. `run` and `outputs` are the eval
+case's `run` and `outputs` checks. `finish` names the finish node the run
+ends at. `route` takes the eval route words (`visits`, `in_order`,
+`not_visits`) plus `path`, the exact sequence of node executions in
+settlement order. `visits` is an exact count per node. `edges.taken`
+counts traversals per edge address and `edges.not_taken` lists edges never
+taken. `joins.dead` lists, per join node, the inputs expected dead.
+`run_outputs` names a run output's expected `state` (`value`, `null` or
+`missing`). `templates_empty` says what a template reference that rendered
+empty does to the verdict: `error` (default), `report` or `ignore`.
+
+### Staleness and the digest
+
+A scenario is stale for a version outside its `versions` range, or for a
+version whose playbook digest differs from its `playbook_digest` pin. A
+stale scenario runs only when the person asks for it.
+
+The scenario digest is `sha256:` over the canonical JSON of the parsed
+file (fields in declaration order, every map key sorted, defaults written
+out). Comments, key order, quoting and spelling out a default do not change
+it; any answer, expectation, param or mode does.
+
+### The scenario guard
+
+A scenario run is driven by a process in scenario mode, entered once
+before anything else runs and never left. From then on these operations
+are refused at every level with the error `scenario_guard: <operation>`:
+
+- `program start`: an agent, a script, a success check, a project command,
+  git, an agent detection probe, a secret helper, the sandbox probe, the
+  process probe, a host fact of the desktop history sync, a detached
+  driver or waker;
+- `connector call`;
+- `write to <path>`: a file write through apb's state writers anywhere but
+  below the scenario run's directory, or through a symbolic link below it.
+
+At `quick` a decision request is refused too (`decision request`), and the
+decision client sends no request at all. A boundary the scenario did not
+script therefore fails with the guard's refusal instead of acting. Every
+guard also refuses in a read-only process (`apb mcp --read-only`), and a
+read-only process cannot enter scenario mode.
+
+The process keeps the operations it refused, each once in the order first
+refused, even where the caller goes on without the result (a memo it could not store, a probe that
+reads as unknown). A scenario run whose boundaries are all scripted
+reaches no guard at all, so a refusal names a site that acted for real
+where it should have taken the scenario's answer: a scenario during whose
+run a guard refused anything is `invalid`, its reason naming the refused
+operations.
+
+Agent detection in a scenario process probes nothing: it reuses the
+detection memo, and without one every agent reads `installed: false` with
+the note `not probed: scenario run`.
+
+### Scenario runs are not history
+
+A run manifest records the run's `origin`: a production run leaves it
+out, a scenario run writes `scenario` (with its level, scenario name and
+digest), and every repetition of `apb eval` writes `eval` (its child runs
+live in the repetition's scratch project and never reach the project's
+history). Only production runs
+count as history: statistics (`apb stats`), the run estimate, the quality
+comparison of a candidate, candidate trials and a retrospective's baseline
+never read a scenario run, an eval run or a run whose origin this apb does
+not know. A run with no manifest or no `origin` in it (every run before
+this release) is a production run; a run whose manifest cannot be read
+counts as no history.
+
+### Validation codes
+
+`apb validate` checks every scenario file of the playbook; an error fails
+the validation. A scenario whose `versions` exclude the version is not
+held to it, but its file problems still are.
+
+- **V146** (error): the file on its own: it does not parse or cannot be
+  read, an unknown field, `schema` is not 1, `id` is not the file name or
+  outside the name grammar, `versions` is malformed, a visit carries no
+  answer or more than one kind (besides the two pairs a node can take:
+  `items` with `judge`, `judge` with `attempts`), a wait answer names not
+  exactly one of `elapsed`, `signal` and `timed_out`, an attempt's `then`
+  has no `question`, a question is both answered and timed out (or
+  neither), a succeeded attempt names a failure kind, a goal key is not
+  an index.
+- **V147** (error): an answer key: an unknown node; an answer kind the
+  node does not take (`items` on a node without `list:` among them;
+  `judge` on a list node needs a judge item check, `attempts` on a judge
+  needs `on_unavailable: emulate`);
+  a visit that is not positive or is numbered twice; more than one
+  `visit: default`; a goal index that is not a script criterion; a
+  baseline answer for a check the playbook does not have.
+- **V148** (error): an answer value: a review or publish decision that is
+  not an option; a judge question the node (or a list's judge check) does
+  not ask, a choice or level that is not one of its options, a yes or no
+  value that is not `true` or `false`, a probability or confidence
+  outside 0 to 1; a judge edge address that does not resolve or is not a
+  judge edge of that node; a nested scenario name outside the grammar; a scripted child
+  output that is not a JSON object where the node hands its parent the
+  child's outputs.
+- **V149** (error): a param the playbook declares `secret` is set.
+- **V150** (error): an expectation names an unknown node, edge address or
+  run output, a finish that is not a finish node, a join input that does
+  not feed that join, a run outcome or output state apb does not write, or
+  a regex that does not compile.
+- **V151** (warning): a visit answers more attempts than the node's
+  `max_retries` allows (infrastructure and quota failures, which retry out
+  of their own budget, are not counted).
 
 ## The repository's own suite
 

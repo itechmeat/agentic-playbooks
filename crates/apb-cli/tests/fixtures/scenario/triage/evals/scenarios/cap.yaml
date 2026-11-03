@@ -1,0 +1,8 @@
+schema: 1
+id: cap
+title: Every judge asks this machine's providers; the cap stops the third
+instruction: "Invoice 42, due Friday, owner: accounts"
+expect:
+  run: { outcome: [succeeded] }
+  finish: unsure
+  edges: { taken: { "id:owner-unclear": 1 } }

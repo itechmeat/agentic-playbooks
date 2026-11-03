@@ -1,0 +1,15 @@
+schema: 1
+id: red
+title: The agent fails twice and the failure route ends the run
+instruction: the parser
+answers:
+  work:
+    - visit: 1
+      attempts:
+        - { status: failed, output: "cannot reproduce" }
+        - { status: failed, output: "still cannot reproduce" }
+expect:
+  run: { outcome: [failed] }
+  finish: failed
+  route: { path: [start, work, failed] }
+  visits: { work: 1 }

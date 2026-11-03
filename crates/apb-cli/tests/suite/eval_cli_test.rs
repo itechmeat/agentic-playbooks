@@ -1116,6 +1116,137 @@ fn v82_is_a_warning_in_apb_validate() {
         .stdout(predicate::str::contains("rev: OK"));
 }
 
+/// `apb validate` checks the scenario files under `evals/scenarios/`: an
+/// answer for a node the playbook does not have is an error (V147) that
+/// fails the validation, and a file that does not parse is one too (V146).
+#[test]
+fn apb_validate_fails_on_a_scenario_error() {
+    let env = setup(PLAYBOOK);
+    let scenarios = env
+        .project
+        .path()
+        .join(".apb/playbooks/rev/evals/scenarios");
+    let validate = || {
+        apb()
+            .args(["validate", "rev"])
+            .current_dir(env.project.path())
+            .env("APB_CONFIG_DIR", env.cfg.path())
+            .assert()
+    };
+    write(
+        &scenarios.join("green.yaml"),
+        "schema: 1\nid: green\nanswers:\n  review:\n    - { visit: 1, attempts: [ { status: succeeded, output: REPORT-OK } ] }\n",
+    );
+    validate()
+        .success()
+        .stdout(predicate::str::contains("rev: OK"));
+
+    write(
+        &scenarios.join("ghost.yaml"),
+        "schema: 1\nid: ghost\nanswers:\n  nowhere:\n    - { visit: 1, attempts: [ { status: succeeded } ] }\n",
+    );
+    validate()
+        .code(1)
+        .stdout(predicate::str::contains("rev: error V147"))
+        .stdout(predicate::str::contains("nowhere"))
+        .stdout(predicate::str::contains("rev: OK").not());
+
+    fs::remove_file(scenarios.join("ghost.yaml")).unwrap();
+    write(
+        &scenarios.join("broken.yaml"),
+        "schema: 1\nid: broken\nanwsers: {}\n",
+    );
+    validate()
+        .code(1)
+        .stdout(predicate::str::contains("rev: error V146"))
+        .stdout(predicate::str::contains("rev: OK").not());
+}
+
+/// A14: an `apb eval` repetition records `origin: eval` in its manifest, and
+/// no history surface counts it. The stored run directory is copied into
+/// the project's runs so `apb stats` reads it there; the same run with the
+/// origin removed from its manifest counts, so the skip comes from the
+/// origin alone.
+#[test]
+fn an_eval_run_records_origin_eval_and_stats_skip_it() {
+    let env = setup(PLAYBOOK);
+    let (code, v) = env.eval_json(&[]);
+    assert_eq!(code, 0, "{v:#}");
+    let rep = &v["result"]["cases"][0]["repetitions"][0];
+    let run_dir = PathBuf::from(rep["run_dir"].as_str().expect("run_dir"));
+    let manifest = fs::read_to_string(run_dir.join("manifest.yaml")).expect("manifest.yaml");
+    let m: serde_json::Value = yaml_serde::from_str(&manifest).unwrap();
+    assert_eq!(m["origin"]["kind"], "eval", "{manifest}");
+
+    let stats = |project: &Path| -> Value {
+        let out = apb()
+            .args(["stats", "--json"])
+            .current_dir(project)
+            .env("APB_CONFIG_DIR", env.cfg.path())
+            .env("APB_NO_REGISTRY", "1")
+            .output()
+            .unwrap();
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "not json ({e}): {}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
+    };
+    let copy_run = |project: &Path, manifest_body: &str| {
+        let dst = project.join(".apb/runs").join(run_dir.file_name().unwrap());
+        for rel in listing(&run_dir) {
+            let src = run_dir.join(&rel);
+            if src.is_file() && !src.is_symlink() {
+                let to = dst.join(&rel);
+                fs::create_dir_all(to.parent().unwrap()).unwrap();
+                fs::copy(&src, &to).unwrap();
+            }
+        }
+        write(&dst.join("manifest.yaml"), manifest_body);
+        // The origin stamp covers the manifest: re-stamp with this
+        // installation's key, so `apb stats` reads the copy as a run
+        // created here and the origin alone decides.
+        let id = run_dir.file_name().unwrap().to_string_lossy();
+        apb_core::run_origin::stamp_in(env.cfg.path(), &dst, &id).unwrap();
+    };
+
+    // The project the case belongs to, which registers the playbook the
+    // run names.
+    let project = env.project.path();
+    copy_run(project, &manifest);
+    let s = stats(project);
+    assert_eq!(s["runs"], 0, "an eval run counted as history: {s:#}");
+
+    let mut without = m.clone();
+    without.as_object_mut().unwrap().remove("origin");
+    copy_run(project, &yaml_serde::to_string(&without).unwrap());
+    let s = stats(project);
+    assert_eq!(s["runs"], 1, "the control run was not read: {s:#}");
+}
+
+/// A playbook whose `evals/` holds only scenario files has no eval case:
+/// the refusal says so and points at the scenario levels, while a playbook
+/// with no `evals/` at all is told that instead.
+#[test]
+fn a_playbook_with_only_scenarios_has_no_eval_case() {
+    let env = setup(PLAYBOOK);
+    let ev = env.project.path().join(".apb/playbooks/rev/evals");
+    fs::remove_dir_all(&ev).unwrap();
+    env.eval(&["rev", "--yes"])
+        .code(2)
+        .stderr(predicate::str::contains("`rev` has no evals/ directory"));
+    write(
+        &ev.join("scenarios/green.yaml"),
+        "schema: 1\nid: green\nanswers:\n  review:\n    - { visit: 1, attempts: [ { status: succeeded, output: REPORT-OK } ] }\n",
+    );
+    env.eval(&["rev", "--yes"]).code(2).stderr(
+        predicate::str::contains("`rev` has no eval case")
+            .and(predicate::str::contains("--level quick or smoke")),
+    );
+}
+
 /// E7: the negative controls of the repository's review scripts. Each
 /// script runs with `sh` in a scratch git tree over a written report and
 /// must both pass and fail on the inputs its comment promises.

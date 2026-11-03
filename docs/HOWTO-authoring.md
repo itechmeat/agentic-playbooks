@@ -2749,6 +2749,8 @@ The validator checks edges as individual things too:
 | V124 | warning | such a node has two edges without `max_traversals` with the same target, condition and fallback flag; only the first can ever be taken (plain fan-out edges and bounded edges are not checked) |
 | V125 | warning | an `output_field` edge compares a judge node's field with a value it never writes: a choice question writes one of its options, a noul question `true` or `false`, a score question with bands a band name and one without bands nothing under its own name (only `<id>_score`), and `decided_by` is `default`, `unavailable`, `<provider>/<model>` or `emulated:<provider>` |
 | V136 | warning | a `human_review` decision is routed only by bounded edges, and the review has no fallback edge and no unbounded edge that decision can take: once the cap is spent the decision has no edge and the run fails at the review; put the cap on the edge into the review instead, or add a fallback edge |
+| V144 | warning | a `review_status` edge that can never match: its source is not a `human_review` (only a review has a decision), or its value is not one of the source's effective options |
+| V145 | warning | a `human_review` option no edge can carry: no `review_status` edge with that value, no unconditional edge, no edge with another condition that may match, and no fallback edge; a person who picks it ends the run at the review. Add a `review_status: <option>` edge or a fallback edge |
 
 ## expected_duration (progress estimates)
 

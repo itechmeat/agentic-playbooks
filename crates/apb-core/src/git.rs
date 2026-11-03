@@ -105,11 +105,11 @@ pub fn base() -> Command {
 /// `git --no-pager` without any of apb's own `GIT_*` variables and without
 /// settings: the start of [`base`] and of [`transport::command`].
 fn bare_git() -> Command {
-    // A read-only process starts no program: the command it would run is
-    // one that does not exist, so every caller's spawn fails before git
-    // runs. [`Repo::locate`] refuses earlier, with the reason.
-    let program = if crate::process_mode::is_read_only() {
-        READ_ONLY_GIT
+    // A read-only or scenario process starts no program: the command it
+    // would run is one that does not exist, so every caller's spawn fails
+    // before git runs. [`Repo::locate`] refuses earlier, with the reason.
+    let program = if crate::process_mode::guard_program_start().is_err() {
+        NO_GIT
     } else {
         "git"
     };
@@ -121,9 +121,9 @@ fn bare_git() -> Command {
     cmd
 }
 
-/// What a read-only process runs in place of git: an empty program name,
-/// which no file system can hold, so the spawn always fails.
-const READ_ONLY_GIT: &str = "";
+/// What a read-only or scenario process runs in place of git: an empty
+/// program name, which no file system can hold, so the spawn always fails.
+const NO_GIT: &str = "";
 
 /// Why a directory is not a repository apb runs git in.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -144,6 +144,9 @@ pub enum RepoError {
     /// This process is read-only and runs no git (`apb mcp --read-only`).
     #[error("read-only server")]
     ReadOnly,
+    /// This process is a scenario process and starts no program.
+    #[error("scenario_guard: program start")]
+    ScenarioGuard,
 }
 
 /// The installed git's version (`2.53.0`), read once per process; `None`
@@ -189,6 +192,9 @@ impl Repo {
     pub fn locate(dir: &Path) -> Result<Repo, RepoError> {
         if crate::process_mode::is_read_only() {
             return Err(RepoError::ReadOnly);
+        }
+        if crate::process_mode::guard_program_start().is_err() {
+            return Err(RepoError::ScenarioGuard);
         }
         match git_version() {
             None => return Err(RepoError::NotARepository),
@@ -468,5 +474,19 @@ mod tests {
         assert!(check_common(c, Path::new("/evil")).is_err());
         assert!(check_common(Path::new("/r/.git/worktrees/w"), Path::new("/evil")).is_err());
         assert!(check_common(Path::new("/r/.git/modules/m"), c).is_err());
+    }
+
+    crate::scenario_test! {
+        fn no_git_command_runs_in_a_scenario_process() at Quick, _root => {
+            let here = std::env::current_dir().unwrap();
+            let e = Repo::locate(&here).unwrap_err();
+            assert_eq!(e, RepoError::ScenarioGuard);
+            assert_eq!(
+                e.to_string(),
+                format!("{}: program start", crate::process_mode::SCENARIO_REFUSAL)
+            );
+            assert_eq!(read(&here, &["status"]), None);
+            assert!(base().arg("--version").output().is_err(), "git started");
+        }
     }
 }

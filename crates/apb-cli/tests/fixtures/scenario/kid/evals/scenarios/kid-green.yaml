@@ -1,0 +1,5 @@
+schema: 1
+id: kid-green
+answers:
+  build:
+    - { visit: 1, script: { exit: 0, stdout: "docs ok" } }

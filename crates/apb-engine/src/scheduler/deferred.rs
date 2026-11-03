@@ -363,11 +363,26 @@ pub(crate) fn try_release(
 /// ran out.
 pub(crate) fn held_now(run_dir: &std::path::Path) -> Result<BTreeMap<String, u64>, EngineError> {
     let events = read_all(run_dir)?;
-    Ok(held(
+    Ok(held_in(
+        run_dir,
         &RunState::fold(&events),
         &events,
         apb_core::clock::now_ms(),
     ))
+}
+
+/// [`held`] for the run in `run_dir`: a scenario run's delays are due at
+/// once (journaled as in a run, nothing waits, nothing is released).
+pub(crate) fn held_in(
+    run_dir: &std::path::Path,
+    state: &RunState,
+    events: &[Event],
+    now_ms: u128,
+) -> BTreeMap<String, u64> {
+    if crate::scenario::session::skips(run_dir, crate::scenario::BoundaryKind::RetryDelay) {
+        return BTreeMap::new();
+    }
+    held(state, events, now_ms)
 }
 
 /// Writes off every deferred retry still open as cancelled, before the run

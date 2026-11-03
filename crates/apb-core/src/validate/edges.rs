@@ -1,8 +1,8 @@
 //! Rules about edges as individual, addressable things: authored edge ids
 //! (V121), the traversal count two edges with the same ends share (V122),
 //! the order of a one-of source's edges (V123, V124), and the values an
-//! `output_field` edge on a judge node can ever see (V125), and a review
-//! option that only a bounded edge routes (V136).
+//! `output_field` edge on a judge node can ever see (V125). The routes out
+//! of a review (V136, V144, V145) are in `review.rs`.
 //!
 //! A "one-of" source is one whose routing picks a single edge: it has a
 //! conditional or fallback outgoing edge and no unconditional, non-fallback
@@ -251,65 +251,6 @@ pub(crate) fn check_judge_values(playbook: &Playbook, r: &mut ValidationReport) 
                 format!(
                     "edge `{}` -> `{}` compares field `{field}` of judge node `{node}` with `{equals}`, a value it never writes (it writes {expected}), so the edge never matches",
                     e.from, e.to
-                ),
-            );
-        }
-    }
-}
-
-/// Whether edge `e` out of a `human_review` gate can be taken for decision
-/// `option`, the fallback rule aside: an edge without a condition always,
-/// a `review_status` edge when it names `option`, and an edge with any other
-/// condition because it may match. Shared by V136 and the unattended rules.
-pub(super) fn review_takes(e: &Edge, option: &str) -> bool {
-    match &e.condition {
-        None => true,
-        Some(EdgeCondition::ReviewStatus { equals }) => equals == option,
-        Some(_) => true,
-    }
-}
-
-/// V136 (warning): a `human_review` option that only bounded edges route.
-/// Once their cap is spent the decision has no edge, and the run fails at
-/// the review (the person decided, and nothing follows). A fallback edge out
-/// of the review, or an unbounded edge that the option can take, is a way
-/// out; an unbounded edge with a condition other than `review_status` may
-/// match too and counts as one. The usual fix is to put the cap on the edge
-/// that leads back into the review, so the review itself always routes.
-pub(crate) fn check_review_caps(playbook: &Playbook, r: &mut ValidationReport) {
-    for node in &playbook.nodes {
-        let NodeKind::HumanReview { options, .. } = &node.kind else {
-            continue;
-        };
-        let out: Vec<&Edge> = playbook
-            .edges
-            .iter()
-            .filter(|e| e.from == node.id)
-            .collect();
-        if out.iter().any(|e| e.fallback) {
-            continue;
-        }
-        for option in &crate::schema::effective_review_options(options) {
-            let bounded: Vec<&Edge> = out
-                .iter()
-                .copied()
-                .filter(|e| e.max_traversals.is_some() && review_takes(e, option))
-                .collect();
-            if bounded.is_empty()
-                || out
-                    .iter()
-                    .any(|e| e.max_traversals.is_none() && review_takes(e, option))
-            {
-                continue;
-            }
-            r.warn_edges(
-                playbook,
-                "V136",
-                Some(&node.id),
-                &bounded,
-                format!(
-                    "human_review `{}`: decision `{option}` is routed only by a bounded edge; once its cap is spent the decision has no edge and the run fails at the review. Put the cap on the edge into the review instead, or add a fallback edge",
-                    node.id
                 ),
             );
         }
