@@ -19,7 +19,10 @@ use std::time::Duration;
 /// Spawns `apb mcp` in `dir` with extra env and completes the MCP handshake
 /// (initialize, then notifications/initialized). Response lines arrive on the
 /// returned channel, so every wait can be bounded.
-fn start_mcp(dir: &Path, env: &[(&str, &str)]) -> (Child, ChildStdin, mpsc::Receiver<String>) {
+pub(crate) fn start_mcp(
+    dir: &Path,
+    env: &[(&str, &str)],
+) -> (Child, ChildStdin, mpsc::Receiver<String>) {
     let mut cmd = crate::common::apb_std();
     cmd.arg("mcp")
         .current_dir(dir)
@@ -74,7 +77,12 @@ fn start_mcp(dir: &Path, env: &[(&str, &str)]) -> (Child, ChildStdin, mpsc::Rece
 }
 
 /// Sends one JSON-RPC request and returns the response line with that id.
-fn request(stdin: &mut ChildStdin, rx: &mpsc::Receiver<String>, id: u32, body: &str) -> String {
+pub(crate) fn request(
+    stdin: &mut ChildStdin,
+    rx: &mpsc::Receiver<String>,
+    id: u32,
+    body: &str,
+) -> String {
     writeln!(stdin, r#"{{"jsonrpc":"2.0","id":{id},{body}}}"#).unwrap();
     stdin.flush().unwrap();
     let tag = format!("\"id\":{id}");

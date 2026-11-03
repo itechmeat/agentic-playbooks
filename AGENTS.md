@@ -31,7 +31,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
-  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130, `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves` or a `requires_approval` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`); `nodes` also holds V68, ids that start with `@`
+  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130, `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`); `nodes` also holds V68, ids that start with `@`
   are the engine's, and V101, `audience` on a finish without a prompt), the
   "Notify me" settings (`notify/`: the machine target, the project's
   narrowing, a run's request, the outcome classes and the journal names of
@@ -185,11 +185,15 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   edge in one definition with its rank and check order (`edge_address.rs`,
   shared with the dashboard's port through
   `tests/fixtures/edge_addresses.json`), content/bundle digests
-  (`content.rs`), result snapshots (`result_store.rs`: the layout of
+  (`content.rs`), record packages (`records.rs`: the JSON Lines header
+  and records of a `format: records` entry, `parse` with its first
+  problem, the record id grammar and its percent-encoding), result
+  snapshots (`result_store.rs`: the layout of
   `runs/<id>/results/` and apb's own run storage names, the limits, the
   canonical manifest with its `SnapshotSubject` and id, the `ResultStamp` a
   settlement event carries, the omission and incomplete reasons, the
-  citation grammar `r:<id>/<entry>[#[a,b)]` with `EntryId`, the
+  citation grammar `r:<id>/<entry>[@<record>][#[a,b)]` with `EntryId`,
+  `records_invalid` on an entry declared a package that does not parse, the
   secret-shaped names, and `ResultTxn`, the staging transaction under the
   run's results lock with its run reservation), the sealed type of every resolved secret with its
   constant-time comparison and labelled redaction (`secret.rs`), trust store
@@ -313,9 +317,19 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   surface answers through (`result_view.rs`: rows by node, execution and
   item, every manifest and object re-hashed on every read, text through the
   run redactor, `compare_live` a word only, `verified_manifest` and
-  `live_state` for an approval) and their cleanup
+  `live_state` for an approval, `stored_entries` for an evidence session)
+  and their cleanup
   (`result_clean.rs`: dead transactions resolved by the journal, only what
   no stamp and no open transaction names removed, `survey` writing nothing),
+  evidence for node outputs (`evidence/`: `sources` the latest stamped
+  snapshots of the `from` nodes bound and built into views of records,
+  `session` the per-attempt session file under `runs/<id>/evidence/`, its
+  open before the attempt, its bind to `attempt_started`, its reads
+  through `citation::reader` and its close, `check` the claims of a
+  succeeded attempt with their verdicts and flags, `rows` in `mod` what
+  every surface shows with the fixed wording; the attempt loop opens and
+  closes it in `scheduler/node.rs`, and `on_invalid: fail` rejects as
+  `check_rejected` in `success_check_rejection`),
   the approval of an exact snapshot set (`approval.rs`: `ReviewBinding`
   with its `BoundSnapshot`s and `BindingMissing` nodes, the binding nonce
   over run, gate, visit and every bound snapshot, `ApprovalRefusal` with
@@ -378,7 +392,13 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   self-contained HTML page (`report_html/`), run quality (`grade/`:
   `sources` every view of a run a grader reads, `reader` the bounded,
   redacting, traced reader, `evidence` the one validator every grader's
-  output goes through, `rules/` the rules grader of the built-ins, `model`
+  output goes through, over `citation/`, generic over the view kind and
+  shared with evidence sessions: `views` the views a citation points into
+  (a `ViewSet` may mark records not citable and names its scope in a
+  problem) and the `ReadState` that proves a record was read whole,
+  `rules` the structural rules of one citation, `reader` the bounded
+  reader both read through, `check` in `mod` the one entry with the
+  absence rule; `rules/` the rules grader of the built-ins, `model`
   the decision-model grader of the playbook's own criteria, `session`
   a host's grading session, `store` the write-once grade files;
   `transcript/` the attempt transcript adapter, claude's session and
@@ -574,7 +594,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `problems` for a
   playbook's known problems, a person's decision, a recheck and a scan,
   `results` for a run's result snapshots (`run_results`, `run_result_read`,
-  the raw and live reads and `apb results clean`),
+  the raw and live reads and `apb results clean`), `evidence` for
+  `run_evidence_read` and `apb evidence read` (a session found by id, a
+  step reading only its own run's),
   and `discover` for history discovery, its stored results, a save
   through `capture::capture_draft` and a decline, all shared with the HTTP
   API and the CLI); `promote/` is `playbook_make_global` (the
@@ -635,7 +657,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   judge eval|examples|save-example|values`, `demo.rs` is `apb demo`
   (`--run` starts the real `apb run demo-report --detach`), `problems.rs` is `apb
   problems`, `discover.rs` is `apb discover`, `results.rs` is `apb results`
-  (`show`, `clean`) and the results lines of `apb runs <id>`, `actions.rs` prints next
+  (`show`, `clean`, the evidence claims) and the results lines of `apb runs <id>`,
+  `evidence.rs` is `apb evidence read`, `actions.rs` prints next
   actions and start actions (`apb runs <id>`, `apb wait`, `--follow-auto`),
   `launch.rs` the `--confirm-launch` flags of `apb run`, `apb resume` and
   `apb eval`, the terminal question and `apb launch floor`,
@@ -751,6 +774,24 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `artifacts_committed.attempts` records each attempt's head, so commit
   rows say which attempt made a commit. All new fields are
   `serde(default)` and display or storage only.
+- **Evidence for node outputs** (spec
+  `docs/superpowers/specs/2026-11-03-evidence-citations-design.md`): an
+  `agent_task` with `evidence: { from, kinds?, claims?, on_invalid?,
+  budget_chars? }` gets one reading session per attempt, opened before
+  the attempt over the latest stamped snapshots of its `from` nodes, named
+  in a `## evidence` prompt section and `APB_EVIDENCE_SESSION`, read with
+  `apb evidence read` or MCP `run_evidence_read` (removed in read-only
+  mode) and closed when the attempt ends. A `format: records` entry is a
+  package served record by record (`r:<snapshot>/<entry>@<id>`). The
+  claims of a succeeded attempt (`outputs.claims`) are checked by the
+  grader's citation rules: `structurally_valid`, `unsupported`,
+  `absence_ok`, `not_enough_data`, with flags worth a look; `on_invalid:
+  fail` fails the attempt as `check_rejected` and the retry is told the
+  problems. The session file keeps references and counts only; a record
+  the run redactor changes is served redacted and never citable. Surfaces
+  say "Structurally valid ... Whether it supports the claim was not
+  checked.", never "confirmed". A run using it carries a run guard naming
+  `evidence`.
 - **Approvals and person-only gates** (spec
   `docs/superpowers/specs/2026-11-03-approvals-design.md`): a
   `human_review` with `approves: { results }` binds its request to the

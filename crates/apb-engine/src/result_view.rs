@@ -619,6 +619,39 @@ pub(crate) fn verified_manifest(
     Ok(m)
 }
 
+/// One entry of a stamped snapshot as an evidence session reads it: its id
+/// as shown ([`shown_ids`]), the stored entry and its stored text,
+/// re-verified on this read. The text is not redacted here: a session
+/// compares it with what the run redactor makes of it.
+pub(crate) struct StoredEntry {
+    pub id: EntryId,
+    pub path_redacted: bool,
+    pub entry: SnapshotEntry,
+    pub text: String,
+}
+
+/// The manifest of a stamped snapshot and every entry it stores, each
+/// object re-hashed. `Corrupt` when any of them does not verify.
+pub(crate) fn stored_entries(
+    run_dir: &Path,
+    snapshot_id: &str,
+    redactor: &RunRedactor,
+) -> Result<(SnapshotManifest, Vec<StoredEntry>), ResultReadError> {
+    let (b, _, m) = stamped_manifest(run_dir, snapshot_id)?;
+    let mut out = Vec::new();
+    for (e, shown) in m.entries.iter().zip(shown_ids(&m, redactor)) {
+        let text = read_object(&b, e)?.ok_or(ResultReadError::Corrupt)?;
+        let id = shown.id.ok_or(ResultReadError::Corrupt)?;
+        out.push(StoredEntry {
+            id,
+            path_redacted: shown.path_redacted,
+            entry: e.clone(),
+            text,
+        });
+    }
+    Ok((m, out))
+}
+
 /// The entry a reader names by its shown id ([`shown_ids`]), with whether
 /// its path is redacted on read.
 fn find_entry<'m>(

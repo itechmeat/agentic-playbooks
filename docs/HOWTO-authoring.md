@@ -786,6 +786,42 @@ Limits, reasons, citations, verification and cleanup:
 | V153 | error | a `results` path breaks the grammar: empty, absolute or holding a NUL; `**`; an empty, `.` or `..` segment; `*` or `?` outside the last segment; `[`, `]`, `{`, `}` or `\`; a `workspace` path under `.git` or `.apb`; a `run` path naming apb's own storage (`results`, `definitions`, `bindings`, `diagnostics.jsonl`, `evidence`) |
 | V154 | error | more than 32 `results` entries on one node |
 
+### Evidence for an agent's output (evidence:)
+
+An `agent_task` can read the latest result snapshots of earlier nodes
+through a reading session the engine opens for every attempt, and back its
+output with claims that cite what it read:
+
+```yaml
+- id: summarize
+  type: agent_task
+  prompt: "Summarize this week's mail for the team."
+  evidence:
+    from: [collect_mail]          # nodes whose latest snapshots it reads
+    kinds: [mail]                 # optional: the view kinds it may cite
+    claims: required              # or optional (default)
+    on_invalid: fail              # or mark (default)
+    budget_chars: 50000           # optional: what the reader may return
+```
+
+- The prompt gets a `## evidence` section naming the session (also in
+  `APB_EVIDENCE_SESSION`); the agent reads with `apb evidence read --session
+  <id> <op>` or the MCP tool `run_evidence_read` (host tasks).
+- A `from` node is snapshotted even without its own `results:` (output and
+  fields). A file it declares `format: records` is a package of records the
+  session serves one by one (see `docs/RESULTS.md`).
+- The agent writes `outputs.claims` in its status file; each claim is
+  checked at the end of a succeeded attempt: `structurally_valid`,
+  `unsupported`, `absence_ok` or `not_enough_data`. `on_invalid: fail`
+  fails the attempt (`check_rejected`) and the retry is told the problems.
+- "Structurally valid" means the cited record exists, was returned whole to
+  this attempt, is of an allowed kind and the span lies inside it. Whether
+  it supports the claim is not checked.
+
+| Code | Severity | What it means |
+|------|----------|---------------|
+| V159 | error | `evidence` on a node other than an `agent_task`; a `from` list that is empty, names an unknown node, a node that settles no result (anything but an `agent_task`, a `script` or a `finish` with a prompt) or a node that does not reach this one; a `kinds` entry that is not a slug; or `evidence` with `isolation: full` (the reader needs the run directory) |
+
 ### Run outputs (outputs:)
 
 A playbook can declare the named values a run hands to whoever started it,

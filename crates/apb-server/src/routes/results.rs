@@ -73,6 +73,7 @@ pub(crate) async fn get_result_entry_handler(
         let reference = Citation {
             snapshot_id,
             entry,
+            record: None,
             range: None,
         }
         .to_string();

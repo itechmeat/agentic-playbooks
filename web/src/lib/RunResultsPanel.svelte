@@ -7,11 +7,13 @@
   // (a `<pre>`, never rendered markup), up to the display cap at a time;
   // "Download" links the whole entry; "Compare with live" answers for a
   // workspace file in one word, never with live content. Artifact refs
-  // recorded without stored bytes are listed apart. Absent for a run with
-  // neither.
+  // recorded without stored bytes are listed apart, and so are the claims
+  // each evidence session checked (`EvidenceClaims`). Absent for a run with
+  // none of these.
   import * as Card from '$lib/components/ui/card'
   import * as Dialog from '$lib/components/ui/dialog'
   import { Button } from '$lib/components/ui/button'
+  import EvidenceClaims from './EvidenceClaims.svelte'
   import { compareResultLive, fetchResultEntry, refusalText, resultRawUrl } from './api'
   import {
     DISPLAY_CAP,
@@ -31,10 +33,12 @@
     type EntryContent,
     type EntryView,
     type ResultRow,
-    type ResultsView,
+    type ResultsAnswer,
   } from './results'
 
-  let { runId, view = null, workspace = '' }: { runId: string; view?: ResultsView | null; workspace?: string } = $props()
+  let { runId, view = null, workspace = '' }: { runId: string; view?: ResultsAnswer | null; workspace?: string } = $props()
+
+  const evidence = $derived(view?.evidence ?? [])
 
   const groups = $derived(groupResults(view?.rows ?? []))
   const legacy = $derived(legacyLines(view?.legacy ?? []))
@@ -102,7 +106,7 @@
   const rowHead = (row: ResultRow, ordinal: number) => (row.item ? `#${ordinal} · item ${row.item.id}` : `#${ordinal}`)
 </script>
 
-{#if groups.length || legacy.length || notStored.length}
+{#if groups.length || legacy.length || notStored.length || evidence.length}
   <Card.Root data-testid="run-results">
     <Card.Header>
       <Card.Title>Results</Card.Title>
@@ -209,6 +213,10 @@
               {/each}
             </ul>
           </section>
+        {/if}
+
+        {#if evidence.length}
+          <EvidenceClaims rows={evidence} />
         {/if}
 
         {#if legacy.length}

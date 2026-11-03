@@ -418,6 +418,37 @@ pub struct RunResultReadArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunEvidenceReadArgs {
+    /// The evidence session the step's prompt names (APB_EVIDENCE_SESSION).
+    pub session: String,
+    /// outline | children | read | page | search.
+    pub op: String,
+    /// read: the record reference (`r:<snapshot_id>/<entry>`, or
+    /// `r:<snapshot_id>/<entry>@<record id>` for a package record).
+    #[serde(default, rename = "ref")]
+    pub r#ref: Option<String>,
+    /// read: a character span `[from, to]` of the record instead of all of
+    /// it (a span is not a full read).
+    #[serde(default)]
+    pub span: Option<[u64; 2]>,
+    /// children, page: the view; search: only this view.
+    #[serde(default)]
+    pub view: Option<String>,
+    /// children, page: the first record index (default 0).
+    #[serde(default)]
+    pub from: Option<u64>,
+    /// children, page: how many records (at most 200).
+    #[serde(default)]
+    pub count: Option<u64>,
+    /// search: the phrase to find.
+    #[serde(default)]
+    pub phrase: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunRetroContextArgs {
     pub run_id: String,
     /// Compare with the median of this many earlier finished runs of the same

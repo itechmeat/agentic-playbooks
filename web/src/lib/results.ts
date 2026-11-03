@@ -26,7 +26,14 @@ import type {
   SnapshotProvenance,
   Verified,
 } from './api.gen'
-import { RESULT_DISPLAY_CAP, RESULT_INCOMPLETE_REASONS, RESULT_OMISSION_REASONS, RESULT_OUTPUT_OMITTED } from './consts.gen'
+import type { ClaimRow, EvidenceFlag, EvidenceRow, EvidenceVerdict, ViewSummary } from './api.gen'
+import {
+  COLLECTOR_COMPLETE_WORDING,
+  RESULT_DISPLAY_CAP,
+  RESULT_INCOMPLETE_REASONS,
+  RESULT_OMISSION_REASONS,
+  RESULT_OUTPUT_OMITTED,
+} from './consts.gen'
 
 // Every reason this apb writes is a name the generated unions know; a
 // newer apb's name reads as `unknown` there.
@@ -250,4 +257,74 @@ export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`
   return `${(n / (1024 * 1024)).toFixed(1)} MiB`
+}
+
+// ---- evidence claims ------------------------------------------------------
+
+export type { CitedFragment, ClaimRow, EvidenceFlag, EvidenceRow, EvidenceVerdict, ViewSummary } from './api.gen'
+export { COLLECTOR_COMPLETE_WORDING, FLAGS_WORDING, STRUCTURALLY_VALID_WORDING, UNSUPPORTED_WORDING } from './consts.gen'
+
+/** `GET /api/runs/{id}/results` as served: the snapshot view and the
+ * claims each evidence session checked. */
+export interface ResultsAnswer extends ResultsView {
+  evidence?: EvidenceRow[]
+}
+
+const VERDICT_LABELS: Record<EvidenceVerdict, string> = {
+  structurally_valid: 'Structurally valid',
+  unsupported: 'Not supported',
+  absence_ok: 'Absence',
+  not_enough_data: 'Not enough data',
+}
+
+/** A claim's verdict as a short badge. */
+export function verdictLabel(v: EvidenceVerdict): string {
+  return VERDICT_LABELS[v] ?? v
+}
+
+/** The tone of a verdict badge: an unsupported claim is shown as one that
+ * is not a fact, never as a confirmed one. */
+export function verdictTone(v: EvidenceVerdict): 'ok' | 'bad' | 'warn' {
+  if (v === 'unsupported') return 'bad'
+  if (v === 'not_enough_data') return 'warn'
+  return 'ok'
+}
+
+const FLAG_LABELS: Record<EvidenceFlag, string> = {
+  whole_record: 'cites a whole record, no span',
+  short_span: 'short span',
+  self_citation: "cites this node's own earlier result",
+  shared_record: 'record cited by many claims',
+  no_shared_words: 'no word shared with the fragment',
+}
+
+/** A flag of a weak but valid citation, in words. */
+export function flagLabel(f: EvidenceFlag): string {
+  return FLAG_LABELS[f] ?? f
+}
+
+/** The collector's own statement about a package view, in words; none
+ * for a view that is not a package. */
+export function collectorLine(v: ViewSummary): string | null {
+  if (v.collector_complete === undefined) return null
+  const said = v.collector_complete
+    ? COLLECTOR_COMPLETE_WORDING
+    : 'the collector says the package is not complete'
+  return `${v.id}: ${said}; ${v.complete ? 'complete' : 'incomplete'} as stored`
+}
+
+/** The head line of one attempt's evidence. */
+export function evidenceHead(r: EvidenceRow): string {
+  const item = r.item ? ` · item ${r.item}` : ''
+  return `${r.node}${item} · attempt ${r.attempt_number}`
+}
+
+/** How much of its budget the attempt read. */
+export function budgetLine(r: EvidenceRow): string {
+  return `read ${r.read_chars} of ${r.budget_chars} characters`
+}
+
+/** Claims in the order a person reads them: unsupported first. */
+export function claimsInOrder(claims: ClaimRow[]): ClaimRow[] {
+  return [...claims].sort((a, b) => Number(b.verdict === 'unsupported') - Number(a.verdict === 'unsupported'))
 }

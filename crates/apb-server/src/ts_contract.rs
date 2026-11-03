@@ -227,6 +227,12 @@ fn render_types() -> String {
         apb_engine::result_view::ResultsView::decl(&cfg),
         apb_engine::result_view::EntryContent::decl(&cfg),
         apb_engine::result_view::LiveComparison::decl(&cfg),
+        apb_engine::evidence::Verdict::decl(&cfg),
+        apb_engine::evidence::Flag::decl(&cfg),
+        apb_engine::evidence::CitedFragment::decl(&cfg),
+        apb_engine::evidence::ViewSummary::decl(&cfg),
+        apb_engine::evidence::ClaimRow::decl(&cfg),
+        apb_engine::evidence::EvidenceRow::decl(&cfg),
         apb_engine::run_outcome::commits::CommitAttempt::decl(&cfg),
         apb_core::run_outputs::Pick::decl(&cfg),
         apb_engine::run_outputs::OutputState::decl(&cfg),
@@ -648,6 +654,30 @@ fn render_check_consts(out: &mut String) {
     out.push_str(&format!(
         "\n/** The keyless demo's playbook id. */\nexport const DEMO_ID = '{}'\n",
         apb_core::demo::DEMO_ID
+    ));
+    evidence_consts(out);
+}
+
+/// The fixed wording every surface shows next to an evidence claim.
+fn evidence_consts(out: &mut String) {
+    use apb_engine::evidence::{
+        COLLECTOR_COMPLETE_WORDING, FLAGS_WORDING, STRUCTURALLY_VALID_WORDING, UNSUPPORTED_WORDING,
+    };
+    out.push_str(&format!(
+        "\n/** What a structurally valid evidence claim says, on every surface. */\nexport const STRUCTURALLY_VALID_WORDING = {}\n",
+        serde_json::to_string(STRUCTURALLY_VALID_WORDING).unwrap_or_default()
+    ));
+    out.push_str(&format!(
+        "\n/** What an unsupported evidence claim says, on every surface. */\nexport const UNSUPPORTED_WORDING = {}\n",
+        serde_json::to_string(UNSUPPORTED_WORDING).unwrap_or_default()
+    ));
+    out.push_str(&format!(
+        "\n/** The heading of a claim's flags. */\nexport const FLAGS_WORDING = {}\n",
+        serde_json::to_string(FLAGS_WORDING).unwrap_or_default()
+    ));
+    out.push_str(&format!(
+        "\n/** How a package's own completeness statement is shown. */\nexport const COLLECTOR_COMPLETE_WORDING = {}\n",
+        serde_json::to_string(COLLECTOR_COMPLETE_WORDING).unwrap_or_default()
     ));
 }
 

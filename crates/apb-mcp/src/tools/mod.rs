@@ -8,6 +8,7 @@ pub mod candidate;
 pub mod capture;
 pub mod decision;
 pub mod discover;
+pub mod evidence;
 pub mod grade;
 pub mod intent;
 pub mod judge;

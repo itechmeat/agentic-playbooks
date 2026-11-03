@@ -349,8 +349,8 @@ pub fn start_session(
     }
     let redactor = Redactor::default();
     let mut reader = Reader::new(
-        sources,
-        &redactor,
+        &sources.views,
+        (!sources.is_redacted()).then_some(&redactor),
         ReadState::new(budget_chars.unwrap_or(DEFAULT_BUDGET_CHARS)),
     );
     let outline = reader.outline();
@@ -380,7 +380,11 @@ pub fn read(run_dir: &Path, session: &str, req: &ReadRequest) -> Result<ReadResp
     let run = open_run(run_dir)?;
     // The sources are redacted already: the reader shows them as they are.
     let redactor = Redactor::default();
-    let mut reader = Reader::new(&run.sources, &redactor, std::mem::take(&mut file.state));
+    let mut reader = Reader::new(
+        &run.sources.views,
+        (!run.sources.is_redacted()).then_some(&redactor),
+        std::mem::take(&mut file.state),
+    );
     let answer = reader.handle(req);
     file.state = reader.state;
     save(run_dir, &file)?;

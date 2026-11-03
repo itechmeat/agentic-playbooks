@@ -69,6 +69,7 @@ pub mod project_checks;
 pub mod projects;
 pub mod publish;
 pub mod quality;
+pub mod records;
 pub mod registry;
 pub mod result_store;
 pub mod run_memory;

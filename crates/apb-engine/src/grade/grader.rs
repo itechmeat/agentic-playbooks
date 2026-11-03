@@ -68,7 +68,7 @@ pub(crate) fn assemble(
         grader,
         created_at,
         criteria,
-        reading: state.trace(sources),
+        reading: state.trace(&sources.views),
         skills,
         mac: None,
     };
@@ -91,7 +91,7 @@ pub(crate) fn run_grader(grader: &dyn Grader, sources: &RunSources) -> Grade {
         .into_iter()
         .filter(|d| grader.grades(d))
         .collect();
-    let budget = sources.views.iter().map(|v| v.chars()).sum();
+    let budget = sources.views.all().iter().map(|v| v.chars()).sum();
     // Every grading view, a grade's `why` and the reader go through the
     // run's redactor: its own and its ancestors' secret values included.
     let redactor = crate::run_redact::RunRedactor::for_run_dir(&sources.run_dir);
@@ -103,7 +103,8 @@ pub(crate) fn run_grader(grader: &dyn Grader, sources: &RunSources) -> Grade {
     // from the run's own ordinary param that a child declared secret), and
     // the stored grades `apb stats` and the candidate views show are not
     // redacted again.
-    let mut reader = Reader::new(sources, redactor.known_values(), ReadState::new(budget));
+    let shown = (!sources.is_redacted()).then_some(redactor.known_values());
+    let mut reader = Reader::new(&sources.views, shown, ReadState::new(budget));
     let proposals = grader.propose(sources, &defs, &mut reader);
     let state = reader.state;
     let round = Round::of(&proposals, &state);

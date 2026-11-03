@@ -142,5 +142,17 @@ export const SCENARIO_MAX_DECISION_REQUESTS = 200
 /** The keyless demo's playbook id. */
 export const DEMO_ID = 'demo-report'
 
+/** What a structurally valid evidence claim says, on every surface. */
+export const STRUCTURALLY_VALID_WORDING = "Structurally valid: the cited record exists, was returned whole to this attempt, is of an allowed kind, and the span lies inside it. Whether it supports the claim was not checked."
+
+/** What an unsupported evidence claim says, on every surface. */
+export const UNSUPPORTED_WORDING = "Not supported by a cited record (not shown as a fact)."
+
+/** The heading of a claim's flags. */
+export const FLAGS_WORDING = "Worth a look"
+
+/** How a package's own completeness statement is shown. */
+export const COLLECTOR_COMPLETE_WORDING = "the collector says the package is complete"
+
 /** Starter document for a new playbook. */
 export const NEW_PLAYBOOK_TEMPLATE = "schema: 2\nid: new-playbook\nname: New Playbook\nversion: 0.1.0\n\nnodes:\n  - id: start\n    type: start\n    title: Start\n  - id: done\n    type: finish\n    outcome: success\n\nedges:\n  - { from: start, to: done }\n"

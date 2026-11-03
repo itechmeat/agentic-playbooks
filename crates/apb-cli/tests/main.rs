@@ -80,6 +80,10 @@ mod http_service;
 mod ingest_cli_test;
 #[path = "suite/intent_cli_test.rs"]
 mod intent_cli_test;
+// Unix-only: reads a private file's permission bits (`PermissionsExt`).
+#[cfg(unix)]
+#[path = "suite/evidence_cli_test.rs"]
+mod evidence_cli_test;
 // Unix-only: kills run drivers by process group.
 #[cfg(unix)]
 #[path = "suite/journal_corpus_test.rs"]

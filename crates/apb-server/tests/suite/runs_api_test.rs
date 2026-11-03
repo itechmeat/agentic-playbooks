@@ -2250,6 +2250,7 @@ mod results_routes {
                     digest,
                     redacted: false,
                     format: Default::default(),
+                    records_invalid: None,
                 }],
                 omitted: Vec::new(),
                 incomplete: None,
@@ -2273,6 +2274,60 @@ mod results_routes {
         .unwrap();
         txn.end().unwrap();
         (dir, id)
+    }
+
+    /// The results route carries the claims an evidence session checked,
+    /// with the fixed wording, the flags and the cited fragment, as MCP
+    /// `run_results` and `apb results` do.
+    #[tokio::test]
+    async fn the_results_route_shows_checked_claims_with_their_fragment() {
+        let (dir, id) = seed();
+        let run = dir.path().join(".apb/runs").join(RUN);
+        let spec = apb_core::schema::Evidence {
+            from: vec!["work".into()],
+            kinds: None,
+            claims: Default::default(),
+            on_invalid: Default::default(),
+            budget_chars: None,
+        };
+        let s = apb_engine::evidence::session::open(
+            &run,
+            &apb_engine::evidence::session::Opening {
+                run_id: RUN,
+                node: "sum",
+                item: None,
+                attempt_number: 1,
+                stem: "sum-1".into(),
+                spec: &spec,
+            },
+        )
+        .unwrap();
+        let r = format!("r:{id}/{ENTRY}");
+        let read: apb_engine::grade::reader::ReadRequest =
+            serde_json::from_value(serde_json::json!({"op": "read", "ref": r})).unwrap();
+        apb_engine::evidence::session::read(&run, &s, &read, &Default::default()).unwrap();
+        fs::create_dir_all(run.join("agent-status")).unwrap();
+        fs::write(
+            run.join("agent-status/sum-1.json"),
+            serde_json::json!({"status": "success", "outputs": {"claims": [
+                {"id": "c1", "text": "The page holds a script tag.", "cites": [{"ref": r, "span": [0, 8]}]}
+            ]}})
+            .to_string(),
+        )
+        .unwrap();
+        apb_engine::evidence::check::at_success(&run, &s, &spec).unwrap();
+        let app = build_router(AppState::new(dir.path().to_path_buf()));
+        let (status, listed) = get_json(app, &format!("/api/runs/{RUN}/results")).await;
+        assert_eq!(status, StatusCode::OK);
+        let claim = &listed["evidence"][0]["claims"][0];
+        assert_eq!(claim["verdict"], "structurally_valid", "{listed}");
+        assert_eq!(
+            claim["wording"],
+            apb_engine::evidence::STRUCTURALLY_VALID_WORDING
+        );
+        assert_eq!(claim["flags"], serde_json::json!(["short_span"]));
+        assert_eq!(claim["cites"][0]["fragment"], "<script>");
+        assert_eq!(claim["text"], "The page holds a script tag.");
     }
 
     async fn get_raw(app: axum::Router, uri: &str) -> axum::response::Response {

@@ -237,6 +237,7 @@ mod results {
                     digest,
                     redacted: *redacted,
                     format: Default::default(),
+                    records_invalid: None,
                 });
             }
             let id = txn

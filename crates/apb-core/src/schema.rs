@@ -1464,8 +1464,55 @@ pub struct Node {
     /// and runs the node without the check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires_approval: Option<RequiresApproval>,
+    /// An `agent_task` that reads earlier nodes' result snapshots through
+    /// the engine's reader and backs its output with citations (see
+    /// [`Evidence`]). Additive to schema 2; an older apb drops it, which is
+    /// why a run using it carries a run guard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<Evidence>,
     #[serde(flatten)]
     pub kind: NodeKind,
+}
+
+/// An `agent_task`'s `evidence:` block: the nodes whose latest result
+/// snapshots each attempt reads through an engine reading session, the
+/// view kinds it may cite, and what an invalid claim does.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Evidence {
+    pub from: Vec<String>,
+    /// The view kinds the session serves and a claim may cite (`output`,
+    /// `fields`, `file`, `records` or a record kind); absent: all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub claims: ClaimsRequirement,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub on_invalid: OnInvalidClaims,
+    /// The characters the reader returns per attempt; absent: the
+    /// reader's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_chars: Option<u64>,
+}
+
+/// Whether an attempt with `evidence` must write claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimsRequirement {
+    Required,
+    #[default]
+    Optional,
+}
+
+/// What a claim that is not structurally valid does to its attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnInvalidClaims {
+    /// The node keeps its status; the claims are marked.
+    #[default]
+    Mark,
+    /// The attempt fails (`check_rejected`) and retries with the problems.
+    Fail,
 }
 
 /// A `human_review` gate's `approves:` block: the nodes whose latest result
