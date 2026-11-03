@@ -16,13 +16,7 @@ fn unlimited_outputs() -> OutputClip<'static> {
 fn finished(seq: u64, node: &str, output: &str) -> Event {
     ev(
         seq,
-        EventPayload::NodeFinished {
-            node: node.into(),
-            status: "succeeded".into(),
-            attempt: 1,
-            output: output.into(),
-            artifacts: Vec::new(),
-        },
+        EventPayload::node_finished(node, "succeeded", 1, output),
     )
 }
 
@@ -83,23 +77,11 @@ fn builds_context_sections_in_seq_order() {
     let events = vec![
         ev(
             0,
-            EventPayload::NodeFinished {
-                node: "lint".into(),
-                status: "failed".into(),
-                attempt: 1,
-                output: "2 errors".into(),
-                artifacts: Vec::new(),
-            },
+            EventPayload::node_finished("lint", "failed", 1, "2 errors"),
         ),
         ev(
             1,
-            EventPayload::NodeFinished {
-                node: "fix".into(),
-                status: "succeeded".into(),
-                attempt: 1,
-                output: "patched".into(),
-                artifacts: Vec::new(),
-            },
+            EventPayload::node_finished("fix", "succeeded", 1, "patched"),
         ),
     ];
     let ctx = build_context(&events);
@@ -157,13 +139,7 @@ fn renders_all_template_refs() {
 fn build_context_for_render_leads_with_run_instruction_when_present() {
     let events = vec![ev(
         0,
-        EventPayload::NodeFinished {
-            node: "lint".into(),
-            status: "succeeded".into(),
-            attempt: 1,
-            output: "ok".into(),
-            artifacts: Vec::new(),
-        },
+        EventPayload::node_finished("lint", "succeeded", 1, "ok"),
     )];
     let run_dir = tempfile::tempdir().unwrap();
     let rendered = build_context_for_render(

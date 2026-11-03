@@ -28,7 +28,13 @@ commits: Array<CommittedArtifact>,
 /**
  * Commits past the listed ones.
  */
-omitted: number, };
+omitted: number, 
+/**
+ * For each listed commit, in the same order, the attempt that made it
+ * when the heads its attempts left tell; empty when no head was
+ * recorded (an older event, a node without attempts).
+ */
+by_attempt?: Array<CommitAttempt | null>, };
 
 export type RunInboxGap = { 
 /**
@@ -1544,6 +1550,158 @@ item?: ResultItem, settlement_seq: number, part: ResultPart,
  * prompt, a sub-playbook node, a cache hit).
  */
 produced_by_attempt?: number, };
+
+export type ResultScope = "workspace" | "run";
+
+export type ResultFormat = "text" | "records";
+
+export type EntryPart = "output" | "fields" | "file";
+
+export type OmissionReason = "binary_not_supported" | "hard_link" | "link" | "match_limit" | "non_utf8_path" | "not_found" | "not_regular_file" | "read_limit" | "scenario_run" | "scrub_unavailable" | "secret_shaped" | "storage_limit" | "too_large" | "unreadable" | "unknown";
+
+export type IncompleteReason = "enumeration_limit" | "match_limit" | "read_limit" | "storage_limit" | "unknown";
+
+export type OutputOmitted = "run_limit" | "snapshot_limit" | "scrub_unavailable" | "unknown";
+
+export type OmittedItem = { part?: EntryPart, scope?: ResultScope, path?: string, reason: OmissionReason, };
+
+export type OmittedMore = { more: number, reasons: { [key in OmissionReason]?: number }, };
+
+export type SnapshotOmission = OmittedItem | OmittedMore;
+
+export type SnapshotSubject = { node: string, execution: number, 
+/**
+ * The seq of the list visit's `list_started`, for an item snapshot.
+ */
+visit_seq?: number, item?: string, 
+/**
+ * The attempt id (the seq of its `attempt_started`); absent for work
+ * that spawned no attempt.
+ */
+attempt?: number, };
+
+export type SnapshotProvenance = { 
+/**
+ * The node was a cache hit: the bytes are the restored ones.
+ */
+cache_hit: boolean, 
+/**
+ * `HEAD` of the tree at capture; absent off git.
+ */
+head?: string, 
+/**
+ * The seq of the execution's `artifacts_committed`, when it committed.
+ */
+commits_seq?: number, };
+
+export type SnapshotEntry = { part: EntryPart, 
+/**
+ * For a file entry.
+ */
+scope?: ResultScope, 
+/**
+ * For a file entry: relative to its scope root, `/`-separated, scrubbed.
+ */
+path?: string, 
+/**
+ * Bytes of the stored (scrubbed) text.
+ */
+size: number, 
+/**
+ * `sha256:<hex>` of the stored bytes.
+ */
+digest: string, 
+/**
+ * The secret scrub changed the text; nothing of the original is kept.
+ */
+redacted: boolean, format: ResultFormat, };
+
+export type ResultStamp = { snapshot_id: string, entries: number, bytes: number, omitted?: number, incomplete?: boolean, };
+
+export type Verified = "ok" | "missing" | "corrupt";
+
+export type EntryView = { 
+/**
+ * `output`, `fields` or `file:<scope>:<percent-encoded path>`, built
+ * from the path as shown.
+ */
+entry: string, part: EntryPart, scope?: ResultScope, path?: string, 
+/**
+ * The size and digest of the text as served: the stored ones unless
+ * the run redactor changes the text now. Absent when the object is
+ * missing or no longer matches: nothing verifies the stored ones, and
+ * next to a secret known only now they would confirm a guess.
+ */
+size?: number, digest?: string, redacted: boolean, 
+/**
+ * The run redactor changes this entry's text or path now: a secret
+ * became known after capture.
+ */
+redacted_on_read?: boolean, format: ResultFormat, };
+
+export type ResultRow = { execution: ExecutionRef, item?: ResultItem, 
+/**
+ * The seq of the `node_finished` or `list_item_settled` carrying the
+ * stamp.
+ */
+settlement_seq: number, produced_by_attempt?: number, 
+/**
+ * That attempt's number, as its `attempt_started` counts it (the
+ * number people read; the id above is a journal seq).
+ */
+attempt_number?: number, 
+/**
+ * The settlement's status (`succeeded`, `failed`, `timed_out`) or an
+ * item's state.
+ */
+status: string, snapshot_id: string, entries: Array<EntryView>, omitted: Array<SnapshotOmission>, incomplete?: IncompleteReason, output_omitted?: OutputOmitted, provenance: SnapshotProvenance, verified: Verified, };
+
+export type LegacyRefRow = { execution: ExecutionRef, settlement_seq: number, scope: string, path: string, digest: string, };
+
+export type NotStoredRow = { node: string, 
+/**
+ * The execution ordinal, 1-based.
+ */
+execution: number, item?: string, 
+/**
+ * `snapshot not stored: <why>`, scrubbed and clipped at capture.
+ */
+reason: string, };
+
+export type ResultsView = { rows: Array<ResultRow>, legacy: Array<LegacyRefRow>, 
+/**
+ * Settlements of declared results whose snapshot was not stored (the
+ * `result_capture_failed` diagnostics), so a missing row says why.
+ */
+not_stored: Array<NotStoredRow>, };
+
+export type EntryContent = { text: string, 
+/**
+ * The digest of the whole text as served, `sha256:<hex>`: the stored
+ * one unless the text was redacted on read.
+ */
+digest: string, 
+/**
+ * The byte length of the whole text as served; a reader pages
+ * against it.
+ */
+size: number, 
+/**
+ * The byte range `[a, b)` of the served text this answer holds.
+ */
+range: [number, number], redacted_at_capture: boolean, redacted_on_read: boolean, };
+
+export type LiveComparison = "same" | "differs" | "missing" | "unreadable" | "not_comparable";
+
+export type CommitAttempt = { 
+/**
+ * The attempt id (the seq of its `attempt_started`).
+ */
+id: number, 
+/**
+ * The attempt's number, as its `attempt_started` counts it.
+ */
+number: number, };
 
 export type Pick = "last" | "first" | "all";
 

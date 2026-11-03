@@ -1132,13 +1132,7 @@ mod tests {
             ev(
                 1,
                 200,
-                EventPayload::NodeFinished {
-                    node: "a".into(),
-                    status: "succeeded".into(),
-                    attempt: 1,
-                    output: String::new(),
-                    artifacts: Vec::new(),
-                },
+                EventPayload::node_finished("a", "succeeded", 1, String::new()),
             ),
         ];
         assert!(open_attempts(&events).is_empty());
@@ -1310,13 +1304,7 @@ mod tests {
             ev(
                 1,
                 2_000,
-                EventPayload::NodeFinished {
-                    node: "a".into(),
-                    status: "succeeded".into(),
-                    attempt: 1,
-                    output: String::new(),
-                    artifacts: Vec::new(),
-                },
+                EventPayload::node_finished("a", "succeeded", 1, String::new()),
             ),
         ];
         assert!(lost_nodes(&events).is_empty());

@@ -30,23 +30,11 @@ fn folds_finished_run() {
         ),
         ev(
             1,
-            EventPayload::NodeFinished {
-                node: "start".into(),
-                status: "succeeded".into(),
-                attempt: 1,
-                output: String::new(),
-                artifacts: Vec::new(),
-            },
+            EventPayload::node_finished("start", "succeeded", 1, String::new()),
         ),
         ev(
             2,
-            EventPayload::NodeFinished {
-                node: "ping".into(),
-                status: "succeeded".into(),
-                attempt: 1,
-                output: "pong".into(),
-                artifacts: Vec::new(),
-            },
+            EventPayload::node_finished("ping", "succeeded", 1, "pong"),
         ),
         ev(
             3,
@@ -339,16 +327,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
 fn folds_run_error_into_failure_reason() {
     let events = vec![
         ev(0, run_started("w")),
-        ev(
-            1,
-            EventPayload::NodeFinished {
-                node: "work".into(),
-                status: "failed".into(),
-                attempt: 1,
-                output: "boom".into(),
-                artifacts: Vec::new(),
-            },
-        ),
+        ev(1, EventPayload::node_finished("work", "failed", 1, "boom")),
         ev(
             2,
             EventPayload::RunError {
@@ -521,13 +500,7 @@ fn revival_journal() -> Vec<EventPayload> {
                 node: node.into(),
                 attempt: 1,
             },
-            EventPayload::NodeFinished {
-                node: node.into(),
-                status: status.into(),
-                attempt: 1,
-                output: format!("{node} out"),
-                artifacts: Vec::new(),
-            },
+            EventPayload::node_finished(node, status, 1, format!("{node} out")),
         ]
     };
     let hop = |from: &str, to: &str, uncounted: bool| EventPayload::EdgeTraversed {
@@ -553,13 +526,7 @@ fn revival_journal() -> Vec<EventPayload> {
         sources: vec!["c2".into()],
         reason: "test".into(),
     });
-    e.push(EventPayload::NodeFinished {
-        node: "j".into(),
-        status: "succeeded".into(),
-        attempt: 1,
-        output: "j out".into(),
-        artifacts: Vec::new(),
-    });
+    e.push(EventPayload::node_finished("j", "succeeded", 1, "j out"));
     e.push(hop("j", "done", true));
     for n in ["b", "c"] {
         e.push(EventPayload::BranchFailed {
@@ -634,13 +601,12 @@ fn a_revived_node_leaves_the_revival_when_it_starts_or_finishes_again() {
     assert!(!s.journaled_hops.contains(&("c".into(), "c2".into())));
     assert!(s.revived.contains("j"));
     // A finish node without a prompt journals only its finish.
-    all.push(EventPayload::NodeFinished {
-        node: "done".into(),
-        status: "succeeded".into(),
-        attempt: 1,
-        output: String::new(),
-        artifacts: Vec::new(),
-    });
+    all.push(EventPayload::node_finished(
+        "done",
+        "succeeded",
+        1,
+        String::new(),
+    ));
     assert!(!fold_of(&all).revived.contains("done"));
 }
 
@@ -721,13 +687,7 @@ fn a_loop_round_reads_only_the_latest_execution() {
         node: node.into(),
         attempt: 1,
     };
-    let finished = |node: &str| EventPayload::NodeFinished {
-        node: node.into(),
-        status: "succeeded".into(),
-        attempt: 1,
-        output: String::new(),
-        artifacts: Vec::new(),
-    };
+    let finished = |node: &str| EventPayload::node_finished(node, "succeeded", 1, String::new());
     let hop = |from: &str, to: &str| EventPayload::EdgeTraversed {
         from: from.into(),
         to: to.into(),
@@ -772,13 +732,7 @@ fn a_join_running_again_or_revived_consumed_nothing() {
         node: node.into(),
         attempt: 1,
     };
-    let finished = |node: &str| EventPayload::NodeFinished {
-        node: node.into(),
-        status: "succeeded".into(),
-        attempt: 1,
-        output: String::new(),
-        artifacts: Vec::new(),
-    };
+    let finished = |node: &str| EventPayload::node_finished(node, "succeeded", 1, String::new());
     let base = vec![started("a"), finished("a"), started("j"), finished("j")];
     assert!(RunState::fold(&numbered(&base)).join_consumed("a", "j"));
 

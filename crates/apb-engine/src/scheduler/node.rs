@@ -1911,6 +1911,7 @@ fn execute_node_kind(
                         }) {
                             Ok(seq) => {
                                 started_seq.set(seq);
+                                super::provenance::attempt_started(run_dir, node_id, seq);
                                 if let Err(e) = read_only::journal_check(
                                     journal,
                                     node_id,
@@ -2370,6 +2371,7 @@ fn execute_node_kind(
                             isolation: place.record.clone(),
                             exec: attempt_exec.clone(),
                         })?);
+                        super::provenance::attempt_started(run_dir, node_id, started_seq.get());
                         read_only::journal_check(
                             journal,
                             node_id,
@@ -4636,13 +4638,12 @@ pub(crate) fn advance_frontier(
                         node: other.clone(),
                         attempt: 1,
                     })?;
-                    log.append(EventPayload::NodeFinished {
-                        node: other.clone(),
-                        status: "cancelled".into(),
-                        attempt: 1,
-                        output: "cancelled".into(),
-                        artifacts: Vec::new(),
-                    })?;
+                    log.append(EventPayload::node_finished(
+                        other.clone(),
+                        "cancelled",
+                        1,
+                        "cancelled",
+                    ))?;
                     raced_out.push(other);
                 }
             }

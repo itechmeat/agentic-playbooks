@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { DecisionAnswer, JudgeOutcome, RecordedValue, SandboxEvaluation } from './api.gen'
-  import { evaluateJudge, fetchJudgeRunValues } from './api'
+  import { evaluateJudge, fetchJudgeRunValues, refusalText } from './api'
+  import { authState } from './auth.svelte'
   import { Button } from '$lib/components/ui/button'
   import { judgeInputsOf, judgeSlots, slotValuesOf } from './judgefields'
 
@@ -42,12 +43,30 @@
   })
   const slots = $derived(judgeSlots(node.state))
 
+  // A live ask spends this machine's decision requests, so a dashboard
+  // without keys (anything on this machine reaches it) refuses it: once
+  // the status read answered, it is not offered there.
+  const authSnapshot = authState()
+  const keyless = $derived(authSnapshot.checked && !authSnapshot.required)
+  $effect(() => {
+    if (keyless && source === 'ask') source = 'given'
+  })
+
+  // A number as recorded (a 32-bit float reads 0.8999999761581421) shown
+  // as a person would write it: at most six significant digits.
+  const shown = (n: number) => String(Number(n.toPrecision(6)))
+  const shownOf = (x: unknown) => (typeof x === 'number' ? shown(x) : String(x))
+
   let values = $state<Record<string, string>>({})
   let source = $state<'given' | 'ask'>('given')
   let emulate = $state(false)
   // Given answers per question: the value (choice, score) or `p` (noul),
   // and the confidence.
   let given = $state<Record<string, { value: string; p: string; confidence: string }>>({})
+  // The answers a run recorded, in full. A field shows them rounded; until
+  // the person edits it, the full value is what is evaluated, so unchanged
+  // recorded answers route as they did.
+  let exact = $state<Record<string, { value?: unknown; p?: unknown; confidence?: unknown }>>({})
   let result = $state<SandboxEvaluation | null>(null)
   let error = $state<string | null>(null)
   let busy = $state(false)
@@ -63,6 +82,7 @@
     void nodeId
     values = {}
     given = {}
+    exact = {}
     result = null
     error = null
     recorded = []
@@ -74,8 +94,18 @@
 
   const NO_ANSWER = { value: '', p: '', confidence: '' }
   const answerOf = (name: string) => given[name] ?? NO_ANSWER
+  // A person's edit: from now on the field holds what they typed, even
+  // when they type the shown text of the recorded value back.
   function setAnswer(name: string, field: 'value' | 'p' | 'confidence', v: string) {
     given[name] = { ...answerOf(name), [field]: v }
+    if (exact[name]?.[field] !== undefined) exact[name] = { ...exact[name], [field]: undefined }
+  }
+
+  // What a field evaluates as: the recorded value in full while the field
+  // still holds it as filled and was never edited, else what was typed.
+  function full(name: string, field: 'value' | 'p' | 'confidence', typed: string): unknown {
+    const r = exact[name]?.[field]
+    return r !== undefined && r !== null && shownOf(r) === typed ? r : typed
   }
 
   function answers(): Record<string, DecisionAnswer> {
@@ -85,9 +115,12 @@
       if (!a) continue
       const one: DecisionAnswer = {}
       if (q.type === 'noul') {
-        if (a.p !== '') one.p = Number(a.p)
-      } else if (a.value !== '') one.value = q.type === 'score' ? Number(a.value) : a.value
-      if (a.confidence !== '') one.confidence = Number(a.confidence)
+        if (a.p !== '') one.p = Number(full(q.name, 'p', a.p))
+      } else if (a.value !== '') {
+        const v = full(q.name, 'value', a.value)
+        one.value = q.type === 'score' ? Number(v) : String(v)
+      }
+      if (a.confidence !== '') one.confidence = Number(full(q.name, 'confidence', a.confidence))
       if (Object.keys(one).length) out[q.name] = one
     }
     return out
@@ -104,7 +137,7 @@
           : { ...(version ? { version } : {}), inputs, emulate }
       result = await evaluateJudge(id, node.id, req, workspace)
     } catch (e) {
-      error = String(e)
+      error = refusalText(e)
     } finally {
       busy = false
     }
@@ -123,19 +156,22 @@
       // The answers go with the inputs they were given for: an execution
       // without observed answers leaves none.
       const g: typeof given = {}
+      const e: typeof exact = {}
       if (v.observed) {
         for (const [name, a] of Object.entries(v.observed.answers)) {
+          e[name] = { value: a.value, p: a.p, confidence: a.confidence }
           g[name] = {
-            value: a.value === undefined || a.value === null ? '' : String(a.value),
-            p: a.p === undefined ? '' : String(a.p),
-            confidence: a.confidence === undefined ? '' : String(a.confidence),
+            value: a.value === undefined || a.value === null ? '' : shownOf(a.value),
+            p: a.p === undefined || a.p === null ? '' : shown(a.p),
+            confidence: a.confidence === undefined || a.confidence === null ? '' : shown(a.confidence),
           }
         }
         source = 'given'
       }
       given = g
+      exact = e
     } catch (e) {
-      error = String(e)
+      error = refusalText(e)
     } finally {
       busy = false
     }
@@ -158,7 +194,7 @@
   function outcomeText(o: JudgeOutcome): string {
     const out = (v: Record<string, unknown>) =>
       Object.entries(v)
-        .map(([k, x]) => `${k} ${typeof x === 'string' ? x : JSON.stringify(x)}`)
+        .map(([k, x]) => `${k} ${typeof x === 'string' ? x : typeof x === 'number' ? shown(x) : JSON.stringify(x)}`)
         .join(', ')
     if (o.kind === 'output') return out(o.output)
     if (o.kind === 'fallback') return `fallback (${o.reason}): ${out(o.output)}`
@@ -225,7 +261,7 @@
               onchange={(e) => (placeTarget[i] = e.currentTarget.value)}
               data-testid={`sandbox-place-target-${i}`}
             >
-              {#each slots as s (s.key)}<option value={s.key}>{s.key}</option>{/each}
+              {#each slots as s (s.key)}<option value={s.key}>{s.refs.join(', ')}</option>{/each}
             </select>
             <Button variant="outline" size="xs" onclick={() => place(i)} data-testid={`sandbox-place-${i}`}>Use</Button>
           </li>
@@ -251,11 +287,18 @@
         type="radio"
         name="sandbox-source"
         checked={source === 'ask'}
+        disabled={keyless}
         onchange={() => (source = 'ask')}
         data-testid="sandbox-source-ask"
       />
       Ask this machine's decision models (counts toward the sandbox's daily cap)
     </label>
+    {#if keyless}
+      <p class="muted" data-testid="sandbox-ask-keyless">
+        A dashboard without keys does not ask decision models: give the answers here, or run
+        <span class="mono">apb judge eval</span> in a terminal.
+      </p>
+    {/if}
     {#if source === 'ask'}
       <label class="choice">
         <input

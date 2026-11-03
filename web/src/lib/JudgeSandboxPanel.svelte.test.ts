@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushSync, mount, tick, unmount } from 'svelte'
 import JudgeSandboxPanel from './JudgeSandboxPanel.svelte'
 import type { RunValues, SandboxEvaluation } from './api.gen'
+import { auth } from './auth.svelte'
 
 // The panel evaluates over HTTP (`POST .../judge/{node}/evaluate`, `GET
 // /api/runs/{run}/judge/{node}/values`): the test stubs `fetch` and checks
@@ -12,6 +13,7 @@ const fetchMock = vi.fn<typeof fetch>()
 let app: ReturnType<typeof mount> | null = null
 beforeEach(() => vi.stubGlobal('fetch', fetchMock))
 afterEach(() => {
+  auth.set({ required: false, authenticated: true, checked: false })
   if (app) unmount(app)
   app = null
   document.body.innerHTML = ''
@@ -76,6 +78,10 @@ function type(el: HTMLElement | null, value: string, event = 'input') {
   flushSync()
 }
 
+// The text of each input's label, in order.
+const slotLabels = () =>
+  [...document.querySelectorAll('[data-testid^="sandbox-slot-"] > .mono')].map((e) => e.textContent)
+
 function render() {
   app = mount(JudgeSandboxPanel, { target: document.body, props: { id: 'p', workspace: 'w1', node } })
   flushSync()
@@ -139,7 +145,125 @@ describe('JudgeSandboxPanel', () => {
     await settle()
     expect(sent()).not.toHaveProperty('answers')
     expect(sent().emulate).toBe(true)
-    expect(q('sandbox-error')!.textContent).toContain('refused by a dashboard without keys')
+    // The server's sentence, without the request's address.
+    expect(q('sandbox-error')!.textContent).toBe('a live ask is refused by a dashboard without keys')
+  })
+
+  it('offers the live ask only with keys: a dashboard without keys points to the command line', () => {
+    auth.set({ required: false, authenticated: true, checked: true })
+    render()
+    expect((q('sandbox-source-ask') as HTMLInputElement).disabled).toBe(true)
+    expect(q('sandbox-ask-keyless')!.textContent).toContain('apb judge eval')
+    auth.set({ required: true, authenticated: true, checked: true })
+    flushSync()
+    expect((q('sandbox-source-ask') as HTMLInputElement).disabled).toBe(false)
+    expect(q('sandbox-ask-keyless')).toBeNull()
+  })
+
+  it('names a place target as the input it fills is labelled', async () => {
+    render()
+    const labels = slotLabels()
+    const values: RunValues = {
+      run_id: 'r1',
+      node: 'check',
+      execution: 1,
+      inputs: { params: {}, instruction: 'x', outputs: {}, reviews: {}, rejected_outputs: {}, hooks: {}, context: '' },
+      recorded: [{ label: 'outputs.check', text: 'done' }],
+    }
+    type(q('sandbox-run-id'), 'r1')
+    fetchMock.mockResolvedValueOnce(json(values))
+    q('sandbox-fill')!.click()
+    await settle()
+    const options = [...(q('sandbox-place-target-0') as HTMLSelectElement).options].map((o) => o.textContent)
+    expect(options).toEqual(labels)
+    expect(labels).toEqual(['run.instruction', 'nodes.clarify.review_note'])
+  })
+
+  it('shows the numbers a run recorded rounded, never as float noise', async () => {
+    render()
+    const values: RunValues = {
+      run_id: 'r1',
+      node: 'check',
+      execution: 1,
+      inputs: { params: {}, instruction: 'x', outputs: {}, reviews: {}, rejected_outputs: {}, hooks: {}, context: '' },
+      recorded: [],
+      observed: {
+        provider: 'fake',
+        model: 'fake-1',
+        answers: { sufficient: { value: 'unclear', confidence: 0.8999999761581421 }, risky: { p: 0.30000001192092896 } },
+      },
+    }
+    type(q('sandbox-run-id'), 'r1')
+    fetchMock.mockResolvedValueOnce(json(values))
+    q('sandbox-fill')!.click()
+    await settle()
+    expect((q('sandbox-confidence-sufficient') as HTMLInputElement).value).toBe('0.9')
+    expect((q('sandbox-p-risky') as HTMLInputElement).value).toBe('0.3')
+    const noisy = {
+      ...evaluation,
+      evaluation: {
+        ...evaluation.evaluation,
+        at_enforce: { kind: 'output' as const, output: { sufficient: 'unclear', sufficient_p: 0.8999999761581421 } },
+      },
+    }
+    fetchMock.mockResolvedValueOnce(json(noisy))
+    q('sandbox-evaluate')!.click()
+    await settle()
+    expect(q('sandbox-result')!.textContent).toContain('sufficient_p 0.9')
+    expect(q('sandbox-result')!.textContent).not.toContain('0.89999')
+  })
+
+  it('evaluates unchanged recorded answers with their full values and typed ones as typed', async () => {
+    const scored = {
+      id: 'check',
+      state: { task: '{{run.instruction}}' },
+      questions: {
+        effort: { type: 'score', instructions: 'How much?', levels: ['small', 'medium', 'large'] },
+        risky: { type: 'noul', instructions: 'Risky?' },
+      },
+    }
+    app = mount(JudgeSandboxPanel, { target: document.body, props: { id: 'p', workspace: 'w1', node: scored } })
+    flushSync()
+    const values: RunValues = {
+      run_id: 'r1',
+      node: 'check',
+      execution: 1,
+      inputs: { params: {}, instruction: 'x', outputs: {}, reviews: {}, rejected_outputs: {}, hooks: {}, context: '' },
+      recorded: [],
+      observed: {
+        provider: 'fake',
+        model: 'fake-1',
+        answers: { effort: { value: 1.234567, confidence: 0.8999999761581421 }, risky: { p: 0.30000001192092896 } },
+      },
+    }
+    type(q('sandbox-run-id'), 'r1')
+    fetchMock.mockResolvedValueOnce(json(values))
+    q('sandbox-fill')!.click()
+    await settle()
+    // Shown rounded, evaluated in full: a band boundary at 1.234568 routes
+    // as the run did.
+    expect((q('sandbox-confidence-effort') as HTMLInputElement).value).toBe('0.9')
+    fetchMock.mockResolvedValueOnce(json(evaluation))
+    q('sandbox-evaluate')!.click()
+    await settle()
+    expect(sent().answers).toEqual({
+      effort: { value: 1.234567, confidence: 0.8999999761581421 },
+      risky: { p: 0.30000001192092896 },
+    })
+    // A typed change is evaluated as typed.
+    type(q('sandbox-confidence-effort'), '0.5')
+    fetchMock.mockResolvedValueOnce(json(evaluation))
+    q('sandbox-evaluate')!.click()
+    await settle()
+    expect(sent().answers.effort).toEqual({ value: 1.234567, confidence: 0.5 })
+    // Typed back to the shown text, it is what the person typed now, not
+    // the recorded value: a threshold between them routes as typed.
+    type(q('sandbox-p-risky'), '0.2')
+    type(q('sandbox-p-risky'), '0.3')
+    fetchMock.mockResolvedValueOnce(json(evaluation))
+    q('sandbox-evaluate')!.click()
+    await settle()
+    expect(sent().answers.risky).toEqual({ p: 0.3 })
   })
 
   it('fills the inputs from a judge execution of a run and places a recorded value', async () => {

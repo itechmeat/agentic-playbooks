@@ -1764,6 +1764,9 @@ fn run_detail_text(
             sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
         );
     }
+    for line in crate::results::run_lines(&run_dir, run_id) {
+        say!("  {}", sanitize_for_terminal(&line, QUESTION_TEXT_MAX * 2));
+    }
     // Each publish node: target, plan, consent, push and result
     // (`apb publish show` prints the full plan).
     for p in view.publish() {

@@ -395,13 +395,12 @@ pub(crate) fn cancel_open(log: &mut EventLog) -> Result<(), EngineError> {
     };
     let state = RunState::fold(&read_all(&run_dir)?);
     for (node, d) in &state.deferred {
-        log.append(EventPayload::NodeFinished {
-            node: node.clone(),
-            status: NodeStatus::Cancelled.as_str().into(),
-            attempt: d.attempt.max(1),
-            output: "cancelled".into(),
-            artifacts: Vec::new(),
-        })?;
+        log.append(EventPayload::node_finished(
+            node.clone(),
+            NodeStatus::Cancelled.as_str(),
+            d.attempt.max(1),
+            "cancelled",
+        ))?;
     }
     Ok(())
 }

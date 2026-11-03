@@ -175,13 +175,7 @@ impl Run {
 
     fn finish_node(&self, status: &str) {
         self.finish_attempt(status);
-        self.journal(EventPayload::NodeFinished {
-            node: NODE.into(),
-            status: status.into(),
-            attempt: 1,
-            output: String::new(),
-            artifacts: Vec::new(),
-        });
+        self.journal(EventPayload::node_finished(NODE, status, 1, String::new()));
     }
 
     fn call_as(

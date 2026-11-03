@@ -22,6 +22,7 @@
 //! is scrubbed whole by the run's redactor first and clipped afterwards
 //! ([`writer::Scrub`]).
 
+pub mod capture;
 pub(crate) mod index;
 pub mod mismatch;
 pub mod reader;
@@ -40,4 +41,5 @@ pub const VERSION: u32 = 1;
 /// The longest a sidecar may grow; past it nothing more is written.
 pub const MAX_BYTES: u64 = 8 * 1024 * 1024;
 
+pub use capture::capture_failures;
 pub use reader::{Diagnostic, read};

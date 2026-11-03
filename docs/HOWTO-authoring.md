@@ -747,6 +747,45 @@ fails the node, the same policy as `deliverable_missing`. Validation warns
 source node's `outputs.fields` does not declare. A node that declares nothing is
 not checked.
 
+### Result snapshots (results:)
+
+`results:` keeps a snapshot of what a node produced at every settlement of
+its work: the output text, the declared `outputs.fields` and the files it
+names, as scrubbed text addressed by digest, in the run directory. A loop
+keeps one snapshot per execution, and a snapshot outlives the working tree
+and the cache.
+
+```yaml
+- id: audit
+  type: agent_task
+  prompt: "Write the audit to report.md"
+  results:
+    - path: report.md            # scope: workspace (the run's working tree)
+    - path: "findings/*.md"      # wildcards in the last segment only
+    - path: notes.txt
+      scope: run                 # relative to the run directory
+```
+
+- Allowed on `agent_task`, `script` (list nodes included) and a `finish`
+  with a prompt. `results: []` keeps the output and fields only.
+- Files are kept only on a `succeeded` settlement; the output and fields
+  also on `failed` and `timed_out`. A list item gets its own snapshot of its
+  full output.
+- Binary files, links, FIFOs, hard-linked files and secret-shaped names
+  (`.env*`, `*.pem`, `*.key`, `*.p12`, `id_*`) are omitted with a reason,
+  never opened; limits stop the capture and mark it `incomplete`.
+- Read them with `apb results <run>`, MCP `run_results` and
+  `run_result_read`, or the run page's Results panel.
+
+Limits, reasons, citations, verification and cleanup:
+[docs/RESULTS.md](RESULTS.md).
+
+| Code | Severity | What it means |
+|------|----------|---------------|
+| V152 | error | `results` on a node that settles no work of its own: anything but an `agent_task`, a `script` or a `finish` with a prompt |
+| V153 | error | a `results` path breaks the grammar: empty, absolute or holding a NUL; `**`; an empty, `.` or `..` segment; `*` or `?` outside the last segment; `[`, `]`, `{`, `}` or `\`; a `workspace` path under `.git` or `.apb`; a `run` path naming apb's own storage (`results`, `definitions`, `bindings`, `diagnostics.jsonl`, `evidence`) |
+| V154 | error | more than 32 `results` entries on one node |
+
 ### Run outputs (outputs:)
 
 A playbook can declare the named values a run hands to whoever started it,

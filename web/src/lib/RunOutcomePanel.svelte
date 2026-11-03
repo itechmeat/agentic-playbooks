@@ -10,7 +10,7 @@
   // when there is one, so the page of a run without them is unchanged. The
   // inbox gaps are part of the verdict panel's Not verified list. A commit
   // whose `Apb-Run` trailer does not name this run (`runId`) carries a muted
-  // note saying so.
+  // note saying so, and one whose attempt is known says which attempt made it.
   let {
     goal,
     commits,
@@ -64,6 +64,7 @@
           <span class="sha" title={c.sha}>{c.short}</span>
           <span> {c.subject}</span>
           <span class="muted"> · {c.node}</span>
+          {#if c.attempt !== undefined}<span class="muted">{' · '}</span><span class="muted" data-testid="run-commit-attempt">committed by attempt {c.attempt}</span>{/if}
           {#if c.trailer}<span class="trailer" data-testid="run-commit-trailer">{c.trailer}</span>{/if}
         </div>
       {/each}

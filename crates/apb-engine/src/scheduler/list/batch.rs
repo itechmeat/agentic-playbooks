@@ -370,6 +370,7 @@ fn finished(
         output: kept,
         round: rec.round,
         check: kind,
+        ran: Some((status, output)),
         ..Settlement::default()
     };
     let digest = run.item(id).map(|i| i.digest.as_str());

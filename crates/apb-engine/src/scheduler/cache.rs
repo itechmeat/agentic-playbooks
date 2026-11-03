@@ -854,8 +854,11 @@ fn ran_as_host_fallback(run_dir: &Path, node_id: &str) -> bool {
 /// forward-slash path, content digest) paired with its bytes for storage. The
 /// workspace walk skips `.git` and `.apb` (mirroring the fingerprint walk), so
 /// the run's own state under `.apb` never counts as a declared output; the run
-/// walk skips nothing, so an author who globs a run file (`events.jsonl`, ...)
-/// gets exactly that and nothing is special-cased away. Symlinks are neither
+/// walk skips only apb's own storage at the top of the run directory
+/// ([`apb_core::result_store::INTERNAL_RUN_NAMES`]: result snapshots, stored
+/// definitions, bindings, diagnostics), so an author who globs a run file
+/// (`events.jsonl`, ...) gets exactly that, and neither mechanism captures
+/// the other's storage. Symlinks are neither
 /// followed nor captured, so a matched path can never escape its scope root.
 ///
 /// Returns `Err` if a matched file cannot be read or a matched path escapes
@@ -878,10 +881,10 @@ pub(crate) fn capture_artifacts(
     let set = build_globset(globs).map_err(|g| format!("invalid output glob `{g}`"))?;
 
     let mut out = Vec::new();
-    // Workspace scope skips `.git`/`.apb`; run scope skips nothing.
+    // Workspace scope skips `.git`/`.apb`; run scope skips apb's storage.
     for (root, scope, skip_internal) in [
-        (workdir, ArtifactScope::Workspace, true),
-        (run_dir, ArtifactScope::Run, false),
+        (workdir, ArtifactScope::Workspace, Skip::GitAndApb),
+        (run_dir, ArtifactScope::Run, Skip::RunStorage),
     ] {
         let mut rels = Vec::new();
         walk(root, root, skip_internal, &mut rels)
@@ -913,28 +916,40 @@ pub(crate) fn capture_artifacts(
     Ok(out)
 }
 
+/// What a walk of `outputs.files` leaves out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Skip {
+    /// The workspace: `.git` and `.apb` at any depth.
+    GitAndApb,
+    /// The run directory: apb's own storage at its top.
+    RunStorage,
+}
+
 /// Collects `dir`'s regular files as `root`-relative forward-slash paths.
 ///
 /// Mirrors `fingerprint::walk`: `DirEntry::file_type` (no-follow) decides
 /// recursion, so a symlink is never followed and a symlink cycle cannot cause
 /// unbounded recursion; symlinks themselves are neither recursed nor captured.
-/// When `skip_internal`, the `.git` and `.apb` directories are not descended.
-fn walk(
-    root: &Path,
-    dir: &Path,
-    skip_internal: bool,
-    out: &mut Vec<String>,
-) -> std::io::Result<()> {
+/// `skip` names what is not collected (see [`Skip`]).
+fn walk(root: &Path, dir: &Path, skip: Skip, out: &mut Vec<String>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         let name = entry.file_name();
         let file_type = entry.file_type()?;
+        if skip == Skip::RunStorage
+            && dir == root
+            && name
+                .to_str()
+                .is_some_and(|n| apb_core::result_store::INTERNAL_RUN_NAMES.contains(&n))
+        {
+            continue;
+        }
         if file_type.is_dir() {
-            if skip_internal && (name == ".git" || name == ".apb") {
+            if skip == Skip::GitAndApb && (name == ".git" || name == ".apb") {
                 continue;
             }
-            walk(root, &path, skip_internal, out)?;
+            walk(root, &path, skip, out)?;
         } else if file_type.is_file()
             && let Ok(rel) = path.strip_prefix(root)
         {

@@ -30,6 +30,18 @@ export const NOTIFY_DEFAULT_TRANSITIONS = ['review', 'question', 'paused', 'fini
 /** Every run outcome an end-of-run notice can be narrowed to. */
 export const NOTIFY_OUTCOMES = ['succeeded', 'needs_look', 'failed', 'aborted'] as const
 
+/** Every reason a result snapshot omits a part or a file. */
+export const RESULT_OMISSION_REASONS = ['binary_not_supported', 'hard_link', 'link', 'match_limit', 'non_utf8_path', 'not_found', 'not_regular_file', 'read_limit', 'scenario_run', 'scrub_unavailable', 'secret_shaped', 'storage_limit', 'too_large', 'unreadable'] as const
+
+/** Every limit that can stop a result capture early. */
+export const RESULT_INCOMPLETE_REASONS = ['enumeration_limit', 'match_limit', 'read_limit', 'storage_limit'] as const
+
+/** Every reason a snapshot does not store the output itself. */
+export const RESULT_OUTPUT_OMITTED = ['run_limit', 'snapshot_limit', 'scrub_unavailable'] as const
+
+/** The most bytes of one entry an inline result read returns. */
+export const RESULT_DISPLAY_CAP = 65536
+
 /** Every reason a run output is missing. */
 export const MISSING_REASONS = ['not_run', 'not_succeeded', 'field_absent', 'not_json_object', 'truncated', 'item_not_passed', 'definition_unknown'] as const
 

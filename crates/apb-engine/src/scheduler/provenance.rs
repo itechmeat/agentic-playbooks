@@ -15,6 +15,12 @@
 //! from `APB_RUN_ID` or `{{run.id}}`. The trailer values are read back with
 //! each commit, so the run surfaces can flag a commit without one; apb never
 //! writes or rewrites a trailer itself.
+//!
+//! Per attempt: while a tracker is live for a node, every attempt that
+//! starts reads `HEAD` of the same tree ([`attempt_started`]). The head an
+//! attempt left is the head the next attempt started from, and the last
+//! attempt's is the execution's final `HEAD`; the event names each
+//! attempt's head and the attempt that ended the execution. Display only.
 
 use std::path::{Path, PathBuf};
 
@@ -22,7 +28,53 @@ use apb_core::schema::{NodeKind, Playbook};
 
 use super::journal::Journal;
 use crate::error::EngineError;
-use crate::event::{CommittedArtifact, EventPayload};
+use crate::event::{AttemptHead, CommittedArtifact, EventPayload};
+
+/// The live trackers of this process, by run directory and node: the tree
+/// each reads and the `HEAD` each attempt started from, in attempt order.
+type Live = std::collections::BTreeMap<(PathBuf, String), (PathBuf, Vec<(u64, Option<String>)>)>;
+
+static LIVE: std::sync::Mutex<Live> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn live() -> std::sync::MutexGuard<'static, Live> {
+    LIVE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Records that attempt `attempt` (the seq of its `attempt_started`) of
+/// `node` started: the tree's `HEAD` now is where the previous attempt left
+/// it. Nothing happens unless a tracker is live for the node.
+pub(crate) fn attempt_started(run_dir: &Path, node: &str, attempt: u64) {
+    let key = (run_dir.to_path_buf(), node.to_string());
+    let Some(dir) = live().get(&key).map(|(dir, _)| dir.clone()) else {
+        return;
+    };
+    // Read outside the lock: a git call may take a moment.
+    let at = head(&dir);
+    if let Some((_, starts)) = live().get_mut(&key) {
+        starts.push((attempt, at));
+    }
+}
+
+/// Each attempt's head, from the heads the attempts started from and the
+/// execution's final one. An attempt whose head is unknown is left out.
+fn attempt_heads(mut starts: Vec<(u64, Option<String>)>, after: &str) -> Vec<AttemptHead> {
+    starts.sort_by_key(|(a, _)| *a);
+    let ends = starts
+        .iter()
+        .skip(1)
+        .map(|(_, h)| h.clone())
+        .chain(std::iter::once(Some(after.to_string())));
+    starts
+        .iter()
+        .zip(ends)
+        .filter_map(|((attempt, _), head)| {
+            Some(AttemptHead {
+                attempt: *attempt,
+                head: head?,
+            })
+        })
+        .collect()
+}
 
 /// At most this many commits are listed per event; the rest is counted.
 pub(crate) const MAX_LISTED_COMMITS: usize = 50;
@@ -162,6 +214,14 @@ pub(crate) struct Tracker {
     before: String,
     /// The branch `HEAD` named then (`refs/heads/...`), empty when detached.
     branch: String,
+    /// The run directory it is registered under for [`attempt_started`].
+    run_dir: PathBuf,
+}
+
+impl Drop for Tracker {
+    fn drop(&mut self) {
+        live().remove(&(self.run_dir.clone(), self.node.clone()));
+    }
 }
 
 /// The branch `HEAD` names in `dir`, empty when it is detached.
@@ -195,26 +255,65 @@ impl Tracker {
             return None;
         }
         let mut t = Self::start_here(playbook, node_id, workdir, render)?;
-        if let Ok(parked) = std::fs::read_to_string(parked_path(run_dir, node_id)) {
-            let mut lines = parked.lines();
-            let sha = lines.next().unwrap_or_default().trim();
-            if !sha.is_empty() && sha.chars().all(|c| c.is_ascii_hexdigit()) {
-                t.before = sha.to_string();
-                t.branch = lines.next().unwrap_or_default().trim().to_string();
-            }
-        }
+        t.run_dir = run_dir.to_path_buf();
+        live().insert(
+            (t.run_dir.clone(), t.node.clone()),
+            (t.dir.clone(), Vec::new()),
+        );
+        t.restore_parked();
         Some(t)
     }
 
-    /// Keeps `before` for the answer round of a node that just asked a
-    /// question. Best effort: without it the answer round records only
-    /// its own commits.
+    /// Takes over what [`Tracker::park`] kept for this node: the `HEAD` the
+    /// first round started from, its branch, and the head each attempt of
+    /// the earlier rounds started from, so the answer round's record
+    /// attributes the commits made before the question to their attempts.
+    fn restore_parked(&mut self) {
+        let Ok(parked) = std::fs::read_to_string(parked_path(&self.run_dir, &self.node)) else {
+            return;
+        };
+        let is_sha = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit());
+        let mut lines = parked.lines();
+        let sha = lines.next().unwrap_or_default().trim();
+        if !is_sha(sha) {
+            return;
+        }
+        self.before = sha.to_string();
+        self.branch = lines.next().unwrap_or_default().trim().to_string();
+        // `<attempt>\t<head>` per earlier attempt; an empty head is unknown.
+        let starts: Vec<(u64, Option<String>)> = lines
+            .filter_map(|l| {
+                let (attempt, head) = l.split_once('\t')?;
+                let head = head.trim();
+                Some((
+                    attempt.trim().parse().ok()?,
+                    is_sha(head).then(|| head.to_string()),
+                ))
+            })
+            .collect();
+        if let Some((_, live_starts)) = live().get_mut(&(self.run_dir.clone(), self.node.clone())) {
+            let mut all = starts;
+            all.append(live_starts);
+            *live_starts = all;
+        }
+    }
+
+    /// Keeps `before` and the heads the attempts so far started from for
+    /// the answer round of a node that just asked a question. Best effort:
+    /// without it the answer round records only its own commits.
     pub(crate) fn park(self, run_dir: &Path) {
         let path = parked_path(run_dir, &self.node);
+        let starts = live()
+            .get(&(self.run_dir.clone(), self.node.clone()))
+            .map(|(_, s)| s.clone())
+            .unwrap_or_default();
         if let Some(parent) = path.parent()
             && std::fs::create_dir_all(parent).is_ok()
         {
-            let text = format!("{}\n{}\n", self.before, self.branch);
+            let mut text = format!("{}\n{}\n", self.before, self.branch);
+            for (attempt, head) in starts {
+                text.push_str(&format!("{attempt}\t{}\n", head.unwrap_or_default()));
+            }
             let _ = apb_core::fsutil::atomic_write(&path, text.as_bytes());
         }
     }
@@ -240,6 +339,7 @@ impl Tracker {
             dir,
             before,
             branch,
+            run_dir: PathBuf::new(),
         })
     }
 
@@ -247,6 +347,10 @@ impl Tracker {
     /// failure after the node ran records nothing rather than failing it.
     pub(crate) fn finish(self, run_dir: &Path, journal: &Journal) -> Result<(), EngineError> {
         let _ = std::fs::remove_file(parked_path(run_dir, &self.node));
+        let starts = live()
+            .remove(&(self.run_dir.clone(), self.node.clone()))
+            .map(|(_, starts)| starts)
+            .unwrap_or_default();
         let Some(after) = head(&self.dir) else {
             return Ok(());
         };
@@ -261,13 +365,16 @@ impl Tracker {
             return Ok(());
         }
         let (commits, total) = commits_between(&self.dir, &self.before, &after);
+        let attempts = attempt_heads(starts, &after);
         journal.append(EventPayload::ArtifactsCommitted {
-            node: self.node,
-            before: self.before,
-            after,
+            node: self.node.clone(),
+            before: self.before.clone(),
             omitted: total.saturating_sub(commits.len()),
             commits,
-            branch: (!self.branch.is_empty()).then_some(self.branch),
+            branch: (!self.branch.is_empty()).then(|| self.branch.clone()),
+            attempt: attempts.last().map(|a| a.attempt),
+            attempts,
+            after,
         })
     }
 }
@@ -311,6 +418,102 @@ mod tests {
                 Some(Vec::new())
             ]
         );
+    }
+
+    /// An attempt's head is where the next one started; the last one's is
+    /// the execution's final head; an unknown start leaves out the attempt
+    /// before it.
+    #[test]
+    fn each_attempt_left_the_head_the_next_one_started_from() {
+        let heads = attempt_heads(
+            vec![
+                (30, Some("h2".into())),
+                (10, Some("h0".into())),
+                (20, Some("h1".into())),
+            ],
+            "h3",
+        );
+        let pairs: Vec<(u64, &str)> = heads.iter().map(|h| (h.attempt, h.head.as_str())).collect();
+        assert_eq!(pairs, [(10, "h1"), (20, "h2"), (30, "h3")]);
+        let gap = attempt_heads(vec![(10, Some("h0".into())), (20, None)], "h3");
+        let pairs: Vec<(u64, &str)> = gap.iter().map(|h| (h.attempt, h.head.as_str())).collect();
+        assert_eq!(pairs, [(20, "h3")]);
+        assert!(attempt_heads(Vec::new(), "h3").is_empty());
+    }
+
+    /// A tracker collects the heads of the attempts that start while it is
+    /// live for its node, and only those.
+    #[test]
+    fn a_live_tracker_collects_its_attempts_heads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        git_ok(d, &["init", "-q"]);
+        git_ok(d, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let run = d.join("run");
+        let t = Tracker {
+            node: "impl".into(),
+            dir: d.to_path_buf(),
+            before: head(d).unwrap(),
+            branch: branch(d),
+            run_dir: run.clone(),
+        };
+        live().insert((run.clone(), "impl".into()), (d.to_path_buf(), Vec::new()));
+        attempt_started(&run, "impl", 5);
+        attempt_started(&run, "other", 6);
+        git_ok(d, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        let mid = head(d).unwrap();
+        attempt_started(&run, "impl", 9);
+        let starts = live().get(&(run.clone(), "impl".into())).unwrap().1.clone();
+        assert_eq!(starts.iter().map(|(a, _)| *a).collect::<Vec<_>>(), [5, 9]);
+        assert_eq!(starts[1].1.as_deref(), Some(mid.as_str()));
+        drop(t);
+        assert!(
+            live().get(&(run, "impl".into())).is_none(),
+            "dropped with its tracker"
+        );
+    }
+
+    /// Attempt 1 commits and asks a question; the answer round's attempt
+    /// starts from that commit and finishes. The parked heads come back
+    /// with the round, so the commit stays attempt 1's.
+    #[test]
+    fn a_question_round_keeps_the_heads_of_the_attempts_before_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        git_ok(d, &["init", "-q"]);
+        git_ok(d, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let run = d.join("run-q");
+        let tracker = |run: &Path| {
+            let t = Tracker {
+                node: "ask".into(),
+                dir: d.to_path_buf(),
+                before: head(d).unwrap(),
+                branch: branch(d),
+                run_dir: run.to_path_buf(),
+            };
+            live().insert(
+                (run.to_path_buf(), "ask".into()),
+                (d.to_path_buf(), Vec::new()),
+            );
+            t
+        };
+        let base = head(d).unwrap();
+        let first = tracker(&run);
+        attempt_started(&run, "ask", 5);
+        git_ok(d, &["commit", "-q", "--allow-empty", "-m", "a"]);
+        let a = head(d).unwrap();
+        first.park(&run);
+        let mut answer = tracker(&run);
+        answer.restore_parked();
+        assert_eq!(answer.before, base, "the first round's start");
+        attempt_started(&run, "ask", 9);
+        let starts = live().get(&(run.clone(), "ask".into())).unwrap().1.clone();
+        let pairs: Vec<(u64, String)> = attempt_heads(starts, &a)
+            .into_iter()
+            .map(|h| (h.attempt, h.head))
+            .collect();
+        assert_eq!(pairs, [(5, a.clone()), (9, a)]);
+        drop(answer);
     }
 
     #[test]

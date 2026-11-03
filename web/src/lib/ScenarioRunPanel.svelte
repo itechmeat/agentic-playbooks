@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { AnswerRef, PlaybookScenarios, ScenarioLevel, ScenarioReport, ScenarioVerdict } from './api.gen'
-  import { ApiError, fetchScenarioRun, fetchScenarios, runScenario } from './api'
+  import { ApiError, fetchScenarioRun, fetchScenarios, refusalText, runScenario } from './api'
   import { authState } from './auth.svelte'
   import { SCENARIO_MAX_DECISION_REQUESTS } from './consts.gen'
   import OutcomeTag from '$lib/components/OutcomeTag.svelte'
@@ -25,7 +25,7 @@
     if (keyless && level === 'smoke') level = 'quick'
   })
   // A refusal in the server's own sentence, without the request's address.
-  const why = (e: unknown) => (e instanceof ApiError && typeof e.body?.error === 'string' ? e.body.error : String(e))
+  const why = refusalText
 
   let list = $state<PlaybookScenarios | null>(null)
   let loadError = $state<string | null>(null)
@@ -164,10 +164,11 @@
     <ul class="list">
       {#each list.scenarios as s (s.name)}
         <li data-testid="scenario-row" data-name={s.name}>
-          <div class="row">
-            <span class="mono">{s.name}</span>
-            {#if s.title}<span class="muted">{s.title}</span>{/if}
-            <span class="spacer"></span>
+          <div class="head" data-testid="scenario-head">
+            <div class="what" data-testid="scenario-what">
+              <span class="mono">{s.name}</span>
+              {#if s.title}<span class="muted">{s.title}</span>{/if}
+            </div>
             <Button
               variant="outline"
               size="xs"
@@ -386,6 +387,24 @@
     align-items: center;
     gap: 0.375rem;
   }
+  /* The name and the title wrap inside their own block, so the Run button
+     keeps its place at the end of the first line whatever the title. */
+  .head {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.375rem;
+  }
+  .what {
+    display: flex;
+    flex: 1;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.125rem 0.375rem;
+    min-width: 0;
+  }
+  .head > :global(button) {
+    flex: none;
+  }
   .latest {
     padding-left: 0.75rem;
   }
@@ -396,9 +415,6 @@
   }
   .detail {
     padding-left: 0.75rem;
-  }
-  .spacer {
-    flex: 1;
   }
   .link {
     padding: 0;

@@ -453,6 +453,7 @@ mod tests {
                 carried: false,
                 check: None,
                 digest: None,
+                result: None,
             },
         );
         let events = vec![list_started(1), batch(2, &["a", "b"]), settled];
@@ -461,13 +462,7 @@ mod tests {
         assert!(bind(&events, "n", &naming("b")).may_send, "b still runs");
         let done = ev(
             3,
-            EventPayload::NodeFinished {
-                node: "n".into(),
-                status: "succeeded".into(),
-                attempt: 1,
-                output: String::new(),
-                artifacts: Vec::new(),
-            },
+            EventPayload::node_finished("n", "succeeded", 1, String::new()),
         );
         let finished = vec![list_started(1), batch(2, &["a", "b"]), done];
         assert!(

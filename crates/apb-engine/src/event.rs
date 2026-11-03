@@ -295,6 +295,15 @@ pub enum EventPayload {
         /// no artifacts and deserialize with an empty list.
         #[serde(default)]
         artifacts: Vec<apb_core::cache::ArtifactRef>,
+        /// The result snapshot taken for this settlement (see
+        /// [`apb_core::result_store`]); absent when none was taken. Display
+        /// and storage only, read leniently. Additive.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        result: Option<apb_core::result_store::ResultStamp>,
     },
     RetryStarted {
         node: String,
@@ -1258,6 +1267,20 @@ pub enum EventPayload {
         /// detached HEAD and in old events. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
+        /// The attempt id (the seq of its `attempt_started`) of the attempt
+        /// that ended the execution. Display only. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u64>,
+        /// `HEAD` as each attempt of the execution left it, in attempt
+        /// order: an attempt's commits are the range from the previous
+        /// head (or `before`) to its own. Display only, read leniently.
+        /// Additive.
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "lenient_default"
+        )]
+        attempts: Vec<AttemptHead>,
     },
     /// One goal criterion checked when the run reached a finish node (C1):
     /// `check` is `script`, `marker` or `manual`; `status` is `passed`,
@@ -1783,6 +1806,15 @@ pub enum EventPayload {
         /// visit shows an item what it reported before only then.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         digest: Option<String>,
+        /// The item snapshot taken for this settlement, with the item's
+        /// full output; absent when none was taken. Display and storage
+        /// only, read leniently. Additive.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        result: Option<apb_core::result_store::ResultStamp>,
     },
     /// The known problems shown to the run's agents (see
     /// `crate::known_problems`), worked out once at start: each shown
@@ -1981,6 +2013,38 @@ fn is_zero_u64(n: &u64) -> bool {
 }
 
 impl EventPayload {
+    /// A `node_finished` with no artifacts and no result snapshot: what
+    /// every writer but a settlement of node work journals. Fields added
+    /// later default here, so a construction does not name them.
+    pub fn node_finished(
+        node: impl Into<String>,
+        status: impl Into<String>,
+        attempt: u32,
+        output: impl Into<String>,
+    ) -> Self {
+        Self::node_settled(node, status, attempt, output, Vec::new(), None)
+    }
+
+    /// A `node_finished` of settled node work, with its captured artifacts
+    /// and the result snapshot taken for it.
+    pub fn node_settled(
+        node: impl Into<String>,
+        status: impl Into<String>,
+        attempt: u32,
+        output: impl Into<String>,
+        artifacts: Vec<apb_core::cache::ArtifactRef>,
+        result: Option<apb_core::result_store::ResultStamp>,
+    ) -> Self {
+        EventPayload::NodeFinished {
+            node: node.into(),
+            status: status.into(),
+            attempt,
+            output: output.into(),
+            artifacts,
+            result,
+        }
+    }
+
     /// A `review_decided` as a review channel decision makes it: no
     /// `decided_by`.
     pub fn review_decided(
@@ -2119,6 +2183,15 @@ pub struct PublishCommit {
     pub commit: CommittedArtifact,
     #[serde(default)]
     pub this_run: bool,
+}
+
+/// `HEAD` as one attempt left it, on an [`EventPayload::ArtifactsCommitted`].
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptHead {
+    /// The attempt id (the seq of its `attempt_started`).
+    pub attempt: u64,
+    pub head: String,
 }
 
 /// One commit of an [`EventPayload::ArtifactsCommitted`].
@@ -4216,13 +4289,12 @@ mod deferral_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut log = EventLog::create(dir.path()).unwrap();
         log.append(bare).unwrap();
-        log.append(EventPayload::NodeFinished {
-            node: "x".into(),
-            status: "succeeded".into(),
-            attempt: 1,
-            output: String::new(),
-            artifacts: Vec::new(),
-        })
+        log.append(EventPayload::node_finished(
+            "x",
+            "succeeded",
+            1,
+            String::new(),
+        ))
         .unwrap();
         let events = read_all(dir.path()).unwrap();
         assert_eq!(events.len(), 2, "no guard follows the checkpoint");
@@ -4246,13 +4318,7 @@ mod deferral_tests {
         }
 
         fn finished(node: &str) -> EventPayload {
-            EventPayload::NodeFinished {
-                node: node.into(),
-                status: "succeeded".into(),
-                attempt: 0,
-                output: String::new(),
-                artifacts: Vec::new(),
-            }
+            EventPayload::node_finished(node, "succeeded", 0, String::new())
         }
 
         fn started(node: &str) -> EventPayload {

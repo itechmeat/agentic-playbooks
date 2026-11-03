@@ -42,6 +42,7 @@ mod problems;
 mod profile;
 mod publish;
 mod report;
+mod results;
 mod run;
 mod run_items;
 mod run_outputs;
@@ -308,6 +309,21 @@ enum Command {
         #[arg(long)]
         full: bool,
         /// Machine-readable output (the same objects as MCP pending_tasks)
+        #[arg(long)]
+        json: bool,
+    },
+    /// The result snapshots of a run: list them, show one entry's stored
+    /// text, or clean up what no stamp names
+    #[command(args_conflicts_with_subcommands = true)]
+    Results {
+        #[command(subcommand)]
+        action: Option<results::ResultsAction>,
+        /// The run
+        run_id: Option<String>,
+        /// Only this node's snapshots
+        #[arg(long)]
+        node: Option<String>,
+        /// Print JSON, the same object as MCP run_results
         #[arg(long)]
         json: bool,
     },
@@ -1036,6 +1052,12 @@ fn main() -> ExitCode {
             full,
             json,
         }) => tasks_cmd(&root, action, run_id, full, json),
+        Some(Command::Results {
+            action,
+            run_id,
+            node,
+            json,
+        }) => results::results_cmd(&root, action, run_id, node, json),
         Some(Command::Runs {
             run_id: Some(run_id),
             items: true,

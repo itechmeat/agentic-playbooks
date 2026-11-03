@@ -702,13 +702,7 @@ mod tests {
     fn finished(seq: u64, node: &str, status: &str) -> Event {
         ev(
             seq,
-            EventPayload::NodeFinished {
-                node: node.into(),
-                status: status.into(),
-                attempt: 1,
-                output: String::new(),
-                artifacts: Vec::new(),
-            },
+            EventPayload::node_finished(node, status, 1, String::new()),
         )
     }
 

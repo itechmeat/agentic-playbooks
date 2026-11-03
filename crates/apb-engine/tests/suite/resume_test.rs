@@ -138,13 +138,7 @@ fn attempt_started(node: &str) -> EventPayload {
 }
 
 fn node_finished(node: &str, status: &str) -> EventPayload {
-    EventPayload::NodeFinished {
-        node: node.into(),
-        status: status.into(),
-        attempt: 1,
-        output: String::new(),
-        artifacts: Vec::new(),
-    }
+    EventPayload::node_finished(node, status, 1, String::new())
 }
 
 fn run_started() -> EventPayload {

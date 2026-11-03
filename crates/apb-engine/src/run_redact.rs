@@ -509,6 +509,30 @@ impl RunRedactor {
         self.workspace.scrub_values(text)
     }
 
+    /// The text of a result snapshot as it may be stored: the secret
+    /// values of the workspace and of the run's tree (ancestors included)
+    /// and token-shaped strings replaced, paths and addresses kept
+    /// ([`Scrubber::scrub_secrets`]). Refused when this redactor withholds:
+    /// a value it could not read would be stored, so nothing is.
+    pub fn secret_text(&self, text: &str) -> Result<String, SecretsUnresolved> {
+        if self.withhold {
+            return Err(SecretsUnresolved);
+        }
+        Ok(self.workspace.scrub_secrets(text))
+    }
+
+    /// [`RunRedactor::secret_text`] over a JSON value, in place
+    /// ([`Scrubber::scrub_secrets_json`]): it stays one document, and a
+    /// number that spells a secret value becomes a string. Refused when
+    /// this redactor withholds.
+    pub fn secret_json(&self, value: &mut serde_json::Value) -> Result<(), SecretsUnresolved> {
+        if self.withhold {
+            return Err(SecretsUnresolved);
+        }
+        self.workspace.scrub_secrets_json(value);
+        Ok(())
+    }
+
     /// Every string of a structured answer, in place: the secret values
     /// replaced, paths, addresses, numbers and the shape kept.
     pub fn redact_json(&self, value: &mut serde_json::Value) {
@@ -690,6 +714,31 @@ mod tests {
         let (shown, names) = r.params(&[("note".to_string(), "garden".to_string())].into());
         assert_eq!(shown["note"], "garden");
         assert!(names.is_empty());
+    }
+
+    /// The stored text of a result loses the parent's declared value and
+    /// token shapes, keeps paths; a redactor that withholds stores nothing.
+    #[test]
+    fn secret_text_scrubs_the_tree_and_refuses_when_withholding() {
+        let root = tempfile::tempdir().unwrap();
+        let runs = root.path().join(".apb/runs");
+        write_run(
+            &runs,
+            "parent-1",
+            &[("message", "violet hedgehog")],
+            None,
+            SECRET_SNAPSHOT,
+        );
+        write_run(&runs, "child-1", &[], Some("parent-1"), PLAIN_SNAPSHOT);
+        let mut r = RunRedactor::with_workspace(Vec::new(), root.path(), &runs.join("child-1"));
+        let token = "ghp_0123456789abcdefABCDEF0123456789abcd";
+        assert_eq!(
+            r.secret_text(&format!("violet hedgehog in /x/y.md, {token}"))
+                .unwrap(),
+            "[redacted] in /x/y.md, [redacted-token]"
+        );
+        r.withhold = true;
+        assert_eq!(r.secret_text("plain"), Err(SecretsUnresolved));
     }
 
     // A declaration a patch dropped keeps redacting: the engine's

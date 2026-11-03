@@ -20,4 +20,21 @@ describe('RunOutcomePanel', () => {
     flushSync()
     expect(document.querySelectorAll('[data-testid="run-commit-row"]').length).toBe(2)
   })
+
+  it('says which attempt made a commit', () => {
+    const sha = 'a'.repeat(40)
+    const record = {
+      node: 'fix',
+      before: 'b'.repeat(40),
+      after: sha,
+      commits: [{ sha, subject: 'fix it' }],
+      omitted: 0,
+      by_attempt: [{ id: 9, number: 3 }],
+    }
+    app = mount(RunOutcomePanel, { target: document.body, props: { goal: null, commits: [record] } })
+    flushSync()
+    expect(document.querySelector('[data-testid="run-commit-attempt"]')?.textContent).toBe('committed by attempt 3')
+    // A spaced separator before it, as before the node.
+    expect(document.querySelector('[data-testid="run-commit-row"]')?.textContent).toContain(' · committed by attempt 3')
+  })
 })

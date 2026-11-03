@@ -7,6 +7,7 @@
     fetchProjects,
     fetchRun,
     fetchRunGrades,
+    fetchRunResults,
     fetchRunReport,
     gradeRun,
     reopenRunGrading,
@@ -73,6 +74,8 @@
   import { gradeSkippedText, verdictText } from '../lib/quality'
   import ListProgressPanel from '../lib/ListProgressPanel.svelte'
   import RunOutputsPanel from '../lib/RunOutputsPanel.svelte'
+  import RunResultsPanel from '../lib/RunResultsPanel.svelte'
+  import type { ResultsView } from '../lib/results'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
@@ -110,6 +113,8 @@
   // Run quality: the stored grades, a rules grade in flight, and the journal
   // event a grade's citation opened in the events list.
   let grades = $state<Grade[]>([])
+  // The run's result snapshots; null until read, or when this server has none.
+  let results = $state<ResultsView | null>(null)
   let grading = $state(false)
   let citedSeq = $state<number | null>(null)
 
@@ -457,6 +462,12 @@
     } catch {
       if (seq === routeSeq && !reloadFailed) grades = []
     }
+    try {
+      const r = await fetchRunResults(id, workspace)
+      if (seq === routeSeq) results = r
+    } catch {
+      if (seq === routeSeq && !reloadFailed) results = null
+    }
   }
 
   function retry() {
@@ -483,6 +494,7 @@
     flowNodes = []
     flowEdges = []
     grades = []
+    results = null
     grading = false
     citedSeq = null
     load()
@@ -812,6 +824,7 @@
       <AttemptIsolationPanel rows={detail.isolation} readOnly={detail.read_only} />
       <RunBudgetPanel budget={detail.budget ?? null} estimate={detail.estimate ?? null} />
       <RunOutcomePanel goal={detail.goal} commits={detail.commits} runId={id} />
+      <RunResultsPanel runId={id} view={results} {workspace} />
       <QualityPanel
         {grades}
         events={detail.events}

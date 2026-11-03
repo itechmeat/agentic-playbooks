@@ -985,6 +985,12 @@ pub enum HostDecisions {
     Off,
 }
 
+/// For `skip_serializing_if` on additive values: the default is omitted
+/// from written YAML, so re-saving a playbook does not sprout the key.
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
+}
+
 /// For `skip_serializing_if` on additive boolean flags: a `false` value is
 /// omitted from written YAML, so re-saving an existing playbook does not sprout
 /// the new key.
@@ -1435,8 +1441,28 @@ pub struct Node {
     /// step runs once per item. Additive to schema 2; no migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list: Option<crate::list::ListSpec>,
+    /// The results this node's executions keep as snapshots (see
+    /// [`crate::result_store`]): files by exact path or a glob in the last
+    /// segment, in the working tree or the run directory. An empty list
+    /// keeps the output and fields only. Additive to schema 2; an older apb
+    /// drops it and takes no snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<Vec<ResultDecl>>,
     #[serde(flatten)]
     pub kind: NodeKind,
+}
+
+/// One entry of a node's `results:` list.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResultDecl {
+    /// An exact relative path, or a glob whose `*` and `?` sit in the last
+    /// segment only.
+    pub path: String,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub scope: crate::result_store::ResultScope,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub format: crate::result_store::ResultFormat,
 }
 
 /// A node's `completion_check` setting.

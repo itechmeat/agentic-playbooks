@@ -852,6 +852,60 @@ impl WfMcp {
     }
 
     #[tool(
+        description = "The result snapshots of a run (its nodes' declared results: the output, the declared fields and files, stored at every settlement), oldest first, grouped per execution and list item: each row with its producing attempt, the commit it was taken at, verified (ok, corrupt, missing), the entries (output, fields, file:<scope>:<path>) with size, digest and whether capture redacted them, the omissions with their reason, and incomplete when a limit stopped capture; legacy lists artifact refs recorded without stored bytes. node keeps one node's rows. Every manifest and object is re-hashed on this read and the answer passes the run redactor. Cite an entry as r:<snapshot_id>/<entry> in run_result_read.",
+        annotations(read_only_hint = true)
+    )]
+    pub(crate) async fn run_results(
+        &self,
+        Parameters(RunResultsArgs {
+            run_id,
+            node,
+            workspace,
+        }): Parameters<RunResultsArgs>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        super::quality::off_runtime(move || {
+            tools::results::run_results(&root, &run_id, node.as_deref())
+        })
+        .await
+    }
+
+    #[tool(
+        description = "One entry of a stamped result snapshot, as text: ref is r:<snapshot_id>/<entry> (from run_results), optionally with a byte range #[a,b) of at most 64 KiB; without a range, offset and limit select a window of at most 64 KiB; the next window starts at the end of content.range, and an empty range means the text ended. The snapshot is re-verified first: corrupt and secrets_unresolved are refused. Offsets count in the served text, which the run redactor may have changed (redacted_on_read). compare_live adds live: same, differs, missing, unreadable or not_comparable for a workspace file against the tree now, never live content.",
+        annotations(read_only_hint = true)
+    )]
+    pub(crate) async fn run_result_read(
+        &self,
+        Parameters(RunResultReadArgs {
+            run_id,
+            r#ref,
+            offset,
+            limit,
+            compare_live,
+            workspace,
+        }): Parameters<RunResultReadArgs>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        super::quality::off_runtime(move || {
+            tools::results::run_result_read(
+                &root,
+                &run_id,
+                &r#ref,
+                offset,
+                limit,
+                compare_live.unwrap_or(false),
+            )
+        })
+        .await
+    }
+
+    #[tool(
         description = "Change whether a person hears about a live run: notify true sends its transitions (a review or a question waiting, a pause nobody asked for, the end) through the run's current target, or the machine's notify target; false stops them; { on: [...], finished: [...] } keeps only these of the transitions it notifies about (review, question, paused, finished, host_task, supervisor) and of the outcomes its end-of-run notice covers (succeeded, needs_look, failed, aborted); a field left out keeps the run's. It never sets a target or widens the transitions or the outcomes: the person does that in the dashboard or with apb notify. Call it only when the person asked. The target is checked now (it can carry notifications, the connector and the account are approved) and its digests are pinned: a target that fails is refused with notify_unavailable and nothing changes. A run that has ended is refused with run_ended. Returns the run's notify block.",
         annotations(destructive_hint = true)
     )]

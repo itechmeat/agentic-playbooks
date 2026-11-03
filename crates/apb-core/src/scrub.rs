@@ -176,6 +176,13 @@ impl Scrubber {
         EMAIL.replace_all(&out, "[email]").into_owned()
     }
 
+    /// `text` with the secret values and token-shaped strings replaced,
+    /// paths and e-mail addresses kept: the scrub of a stored result,
+    /// where a path or an address is content of the report.
+    pub fn scrub_secrets(&self, text: &str) -> String {
+        crate::token_shape::redact_tokens(&self.scrub_values(text))
+    }
+
     /// `text` with only the secret values replaced: paths, token shapes
     /// and addresses stay as written, so a structured answer keeps its
     /// paths usable.
@@ -260,6 +267,58 @@ impl Scrubber {
             return;
         }
         self.scrub_json(v, 0);
+    }
+
+    /// [`Scrubber::scrub_secrets`] over a JSON value, in place: the secret
+    /// values as [`Scrubber::scrub_values_json`] replaces them (a number
+    /// that spells one becomes the string `[redacted]`), then the
+    /// token-shaped strings of every key and string. A string or number
+    /// under a key is also checked as the pair `"key":value` it is written
+    /// as, so a value known only by its key name (`"api_key": "..."`) is
+    /// found as in the text; it then becomes the string
+    /// [`crate::token_shape::TOKEN_MARK`]. The value stays one document.
+    pub fn scrub_secrets_json(&self, v: &mut serde_json::Value) {
+        use crate::token_shape::{TOKEN_MARK, redact_tokens};
+        use serde_json::Value;
+        self.scrub_values_json(v);
+        /// Whether `v`, written under the key `k`, reads as a keyed
+        /// credential.
+        fn keyed(k: &str, v: &Value) -> bool {
+            if !matches!(v, Value::String(_) | Value::Number(_)) {
+                return false;
+            }
+            let (Ok(k), Ok(v)) = (serde_json::to_string(k), serde_json::to_string(v)) else {
+                return false;
+            };
+            let pair = format!("{k}:{v}");
+            redact_tokens(&pair) != pair
+        }
+        fn tokens(v: &mut Value) {
+            match v {
+                Value::String(s) => {
+                    let out = redact_tokens(s);
+                    if out != *s {
+                        *s = out;
+                    }
+                }
+                Value::Array(items) => items.iter_mut().for_each(tokens),
+                Value::Object(map) => {
+                    let old = std::mem::take(map);
+                    *map = old
+                        .into_iter()
+                        .map(|(k, mut v)| {
+                            tokens(&mut v);
+                            if keyed(&k, &v) {
+                                v = Value::String(TOKEN_MARK.to_string());
+                            }
+                            (redact_tokens(&k), v)
+                        })
+                        .collect();
+                }
+                _ => {}
+            }
+        }
+        tokens(v);
     }
 
     /// [`Scrubber::scrub_values_json`] of a value met `depth` JSON texts
@@ -406,6 +465,23 @@ impl Scrubber {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stored result loses its secret values and token shapes, and keeps
+    /// its paths and addresses, which are content of the report.
+    #[test]
+    fn scrub_secrets_replaces_values_and_tokens_and_keeps_paths_and_addresses() {
+        let root = tempfile::tempdir().unwrap();
+        let r = Scrubber::new(vec![Secret::new("violet hedgehog")], root.path());
+        let path = format!("{}/notes.txt", root.path().display());
+        let token = "ghp_0123456789abcdefABCDEF0123456789abcd";
+        let out = r.scrub_secrets(&format!(
+            "violet hedgehog at {path} by dev.person@example.org with {token}"
+        ));
+        assert_eq!(
+            out,
+            format!("[redacted] at {path} by dev.person@example.org with [redacted-token]")
+        );
+    }
 
     #[test]
     fn value_scrubbing_replaces_only_the_values_and_keeps_the_shape() {

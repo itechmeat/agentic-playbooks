@@ -383,6 +383,8 @@ mod protect_test;
 #[cfg(unix)]
 #[path = "suite/read_only_test.rs"]
 mod read_only_test;
+#[path = "suite/result_snapshot_test.rs"]
+mod result_snapshot_test;
 #[path = "suite/save_nudge_test.rs"]
 mod save_nudge_test;
 #[cfg(unix)]

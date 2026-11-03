@@ -244,13 +244,12 @@ fn cancel_waiting(
             node: n.clone(),
             attempt: 1,
         })?;
-        log.append(EventPayload::NodeFinished {
-            node: n.clone(),
-            status: NodeStatus::Cancelled.as_str().into(),
-            attempt: 1,
-            output: "cancelled".into(),
-            artifacts: Vec::new(),
-        })?;
+        log.append(EventPayload::node_finished(
+            n.clone(),
+            NodeStatus::Cancelled.as_str(),
+            1,
+            "cancelled",
+        ))?;
         cancel_one(log, f, n)?;
     }
     Ok(cancel)

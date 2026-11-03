@@ -348,13 +348,12 @@ fn run_wait_stops_on_a_dead_driver_between_nodes() {
         attempt: 1,
     })
     .unwrap();
-    log.append(EventPayload::NodeFinished {
-        node: "start".into(),
-        status: "succeeded".into(),
-        attempt: 1,
-        output: String::new(),
-        artifacts: Vec::new(),
-    })
+    log.append(EventPayload::node_finished(
+        "start",
+        "succeeded",
+        1,
+        String::new(),
+    ))
     .unwrap();
     let run_dir = dir.path().join(".apb/runs/orphan");
     fs::write(run_dir.join("driver.pid"), dead_pid().to_string()).unwrap();

@@ -70,6 +70,7 @@ pub mod projects;
 pub mod publish;
 pub mod quality;
 pub mod registry;
+pub mod result_store;
 pub mod run_memory;
 pub mod run_notes;
 pub mod run_origin;

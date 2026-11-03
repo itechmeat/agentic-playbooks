@@ -2,7 +2,9 @@
 //! playbook shipped in the binary that runs on any machine with nothing to
 //! set up. A script node writes `report.md` with `printf`, a person
 //! approves or rejects it at a review gate; no agent, no connector, no
-//! network, no decision model, no key.
+//! decision model, no key. The script reaches nothing outside the demo
+//! directory, though its effects list network and external as any
+//! script's do.
 //!
 //! It lives in `<config dir>/demo/`, a project of its own, with the
 //! playbook `demo-report` 1.0.0 current and one quick scenario (`approve`).
@@ -226,6 +228,22 @@ mod tests {
         let scenarios =
             crate::scenario::parse(SCENARIO, DEMO_SCENARIO).expect("the shipped scenario parses");
         assert!(crate::scenario::applies_to(&scenarios, DEMO_VERSION));
+    }
+
+    /// What the demo says of itself matches the effects every surface
+    /// shows for it: a script node counts as able to reach the network (a
+    /// declaration only widens), so the description never says "no
+    /// network", and it says why the box lists it.
+    #[test]
+    fn the_demo_describes_the_effects_the_surfaces_show() {
+        let p = Playbook::from_yaml(PLAYBOOK).expect("the shipped demo parses");
+        let effects = crate::effects::effective(&p);
+        let text = p.description.to_lowercase();
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if effects.contains(&crate::schema::Effect::Network) {
+            assert!(!text.contains("no network"), "{text}");
+            assert!(text.contains("network and external"), "{text}");
+        }
     }
 
     /// The trust digest of the installed demo, and whether anything

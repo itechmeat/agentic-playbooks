@@ -216,6 +216,22 @@ pub fn build_router(state: AppState) -> Router {
             get(routes::runs::get_run_report_html_handler),
         )
         .route(
+            "/api/runs/{id}/results",
+            get(routes::results::get_results_handler),
+        )
+        .route(
+            "/api/runs/{id}/results/{snapshot}",
+            get(routes::results::get_result_entry_handler),
+        )
+        .route(
+            "/api/runs/{id}/results/{snapshot}/raw",
+            get(routes::results::get_result_raw_handler),
+        )
+        .route(
+            "/api/runs/{id}/results/{snapshot}/live",
+            get(routes::results::get_result_live_handler),
+        )
+        .route(
             "/api/runs/{id}/grades",
             get(routes::quality::get_grades_handler).post(routes::quality::post_grades_handler),
         )

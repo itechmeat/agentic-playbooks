@@ -429,6 +429,8 @@ mod tests {
                 commits: Vec::new(),
                 omitted: 0,
                 branch: Some("refs/heads/main".into()),
+                attempt: None,
+                attempts: Vec::new(),
             },
         };
         let events = [committed(&"a".repeat(40)), committed(&"c".repeat(40))];

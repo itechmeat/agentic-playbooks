@@ -16,6 +16,7 @@ pub mod meta;
 pub mod notify;
 pub mod playbook;
 pub mod problems;
+pub mod results;
 pub mod retro;
 pub mod run;
 pub mod scenario;
