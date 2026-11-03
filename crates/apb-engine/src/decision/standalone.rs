@@ -69,7 +69,10 @@ pub enum StandaloneOutcome {
 /// key or a secret value.
 pub struct StandaloneDecider {
     settings: EffectiveDecisions,
+    /// The project whose content the requests carry: the redactor's root.
     root: PathBuf,
+    /// Where the log and the daily cap live (`<log_root>/.apb/`).
+    log_root: PathBuf,
     chain: OnceLock<(ProviderChain, Vec<apb_core::secret::Secret>)>,
     redactor: OnceLock<redact::Redactor>,
     /// The declared secret values of the run a request speaks about
@@ -109,9 +112,21 @@ impl StandaloneDecider {
 
     /// A decider over explicit settings (already resolved and capped).
     pub fn with_settings(settings: EffectiveDecisions, root: &Path) -> Self {
+        Self::with_settings_logged_in(settings, root, root)
+    }
+
+    /// [`StandaloneDecider::with_settings`] for the content of the project
+    /// at `root`, logged and capped under `log_root` instead (a caller that
+    /// must not create a `.apb` folder in the project).
+    pub fn with_settings_logged_in(
+        settings: EffectiveDecisions,
+        root: &Path,
+        log_root: &Path,
+    ) -> Self {
         StandaloneDecider {
             settings,
             root: root.to_path_buf(),
+            log_root: log_root.to_path_buf(),
             chain: OnceLock::new(),
             redactor: OnceLock::new(),
             run_values: crate::run_redact::RunValues::default(),
@@ -202,7 +217,7 @@ impl StandaloneDecider {
     }
 
     fn log_path(&self) -> PathBuf {
-        self.root.join(".apb").join(DECISIONS_LOG)
+        self.log_root.join(".apb").join(DECISIONS_LOG)
     }
 
     fn daily_cap(&self, site: UseSite) -> u32 {
@@ -309,7 +324,8 @@ impl StandaloneDecider {
         }
     }
 
-    /// Asks one decision over `state` (material class `prompt`): redacted
+    /// Asks one decision over `state` (material class [`apb_core::decisions::send_class`]
+    /// of the use, `prompts` but for the save check): redacted
     /// when `privacy.redact` is on, without the run's secret values either
     /// way ([`StandaloneDecider::for_run`]), refused when over `max_state_bytes`
     /// (the caller clips), logged, capped per day.
@@ -330,7 +346,10 @@ impl StandaloneDecider {
         if mode == DecisionMode::Off {
             return StandaloneOutcome::Skipped { reason: "off" };
         }
-        if !self.settings.sends(SendClass::Prompts) {
+        if !self
+            .settings
+            .sends(apb_core::decisions::send_class(site.as_str()))
+        {
             return StandaloneOutcome::Skipped { reason: "send" };
         }
         // The questions carry text too (a suggestion's synopsis).

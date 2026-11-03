@@ -3,8 +3,14 @@
 //! that came from Homebrew or from source have no receipt, so self-update
 //! deliberately refuses to guess and instead points the user at the right
 //! upgrade path for their install method.
+//!
+//! After an update the new binary brings the default playbooks and skills
+//! setup installed in line with its own embedded content: this process
+//! still runs the old build, so it re-executes the updated file as `apb
+//! __reconcile-defaults` instead of reconciling with its own old copy.
+//! When that cannot start, the next `apb mcp` or dashboard start does it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use axoupdater::{AxoUpdater, AxoupdateError};
@@ -18,6 +24,8 @@ If you built from source, rebuild and reinstall from the repo.";
 pub(crate) struct Outcome {
     pub(crate) code: u8,
     pub(crate) message: String,
+    /// A new build was installed.
+    pub(crate) updated: bool,
 }
 
 /// Runs `apb self-update`. `check` selects the dry-run path (report only,
@@ -29,7 +37,51 @@ pub(crate) fn run_self_update(check: bool) -> ExitCode {
     } else {
         eprintln!("{}", out.message);
     }
+    if out.updated {
+        reconcile_in_new_binary();
+    }
     ExitCode::from(out.code)
+}
+
+/// Runs `apb __reconcile-defaults` in the updated binary. A failure to
+/// start it never fails the update.
+fn reconcile_in_new_binary() {
+    let started = std::env::current_exe().map(updated_binary).and_then(|exe| {
+        std::process::Command::new(exe)
+            .arg(RECONCILE_COMMAND)
+            .status()
+    });
+    if let Err(e) = started {
+        eprintln!(
+            "could not check the default playbooks and skills with the new build ({e}); the next apb mcp or dashboard start does it"
+        );
+    }
+}
+
+/// The hidden command the updated binary runs.
+const RECONCILE_COMMAND: &str = "__reconcile-defaults";
+
+/// The path of the updated binary, from this process's own path. On Linux
+/// the path of a running file that was replaced reads `<path> (deleted)`;
+/// the new file sits at `<path>`.
+fn updated_binary(exe: PathBuf) -> PathBuf {
+    match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(path) => PathBuf::from(path),
+        None => exe,
+    }
+}
+
+/// `apb __reconcile-defaults`: the reconcile of the defaults setup
+/// installed, with its notes on stdout and failures on stderr. Exit 1 when
+/// an item could not be updated.
+pub(crate) fn reconcile_defaults_cmd() -> ExitCode {
+    let notes = apb_mcp::setup::reconcile_if_set_up();
+    apb_core::bundled::print_notes("apb: ", &notes, false);
+    if notes.iter().any(|n| n.failed) {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 /// Testable core of `self-update`. `config_root`, when set, overrides where
@@ -57,10 +109,12 @@ pub(crate) fn self_update_with_config_root(check: bool, config_root: Option<&Pat
             AxoupdateError::NoReceipt { .. } => Outcome {
                 code: 2,
                 message: NO_RECEIPT_GUIDANCE.to_string(),
+                updated: false,
             },
             other => Outcome {
                 code: 2,
                 message: format!("self-update failed: {other}"),
+                updated: false,
             },
         };
     }
@@ -70,14 +124,17 @@ pub(crate) fn self_update_with_config_root(check: bool, config_root: Option<&Pat
             Ok(true) => Outcome {
                 code: 10,
                 message: "update available".to_string(),
+                updated: false,
             },
             Ok(false) => Outcome {
                 code: 0,
                 message: "apb is up to date".to_string(),
+                updated: false,
             },
             Err(e) => Outcome {
                 code: 2,
                 message: format!("self-update check failed: {e}"),
+                updated: false,
             },
         }
     } else {
@@ -85,14 +142,17 @@ pub(crate) fn self_update_with_config_root(check: bool, config_root: Option<&Pat
             Ok(Some(result)) => Outcome {
                 code: 0,
                 message: format!("updated to {}", result.new_version),
+                updated: true,
             },
             Ok(None) => Outcome {
                 code: 0,
                 message: "apb is up to date".to_string(),
+                updated: false,
             },
             Err(e) => Outcome {
                 code: 2,
                 message: format!("self-update failed: {e}"),
+                updated: false,
             },
         }
     }
@@ -144,6 +204,27 @@ mod tests {
         let out = self_update_with_config_root(false, Some(dir.path()));
         assert_eq!(out.code, 2);
         assert!(out.message.contains("brew upgrade") || out.message.contains("source"));
+        assert!(!out.updated, "a failed update reconciles nothing");
+    }
+
+    #[test]
+    fn the_updated_binary_is_the_replaced_path() {
+        assert_eq!(
+            updated_binary(PathBuf::from("/opt/bin/apb (deleted)")),
+            PathBuf::from("/opt/bin/apb")
+        );
+        assert_eq!(
+            updated_binary(PathBuf::from("/opt/bin/apb")),
+            PathBuf::from("/opt/bin/apb")
+        );
+    }
+
+    #[test]
+    fn the_reconcile_command_is_hidden() {
+        use clap::CommandFactory;
+        let cmd = crate::Cli::command();
+        let sub = cmd.find_subcommand(RECONCILE_COMMAND).unwrap();
+        assert!(sub.is_hide_set());
     }
 
     #[test]

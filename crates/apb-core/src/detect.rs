@@ -401,7 +401,9 @@ fn run_probe(
         use std::os::unix::process::CommandExt as _;
         cmd.process_group(0);
     }
-    let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+    // A CLI just installed can still be busy for a moment.
+    let mut child =
+        crate::fsutil::spawn_when_not_busy(&mut cmd).map_err(|e| format!("spawn failed: {e}"))?;
     // stdout/stderr are drained in SEPARATE threads, the result arrives via
     // channels. We NEVER do an unbounded join: if the probe forked a daemon
     // that inherited the pipe, the reader thread would never see EOF - but we

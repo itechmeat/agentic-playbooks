@@ -48,15 +48,25 @@ pub const GRADE_USE: &str = "grade";
 /// The use of the known-problem recheck: whether a problem still holds
 /// after its source changed. Off unless the file sets it.
 pub const PROBLEM_RECHECK_USE: &str = "problem_recheck";
+/// The use of the end-of-turn save check (`apb hook stop`): whether the
+/// request a host session just finished is recurring or repeatable by
+/// nature. It sends the text a person typed, so it is off unless the person
+/// turns it on: `uses.save_nudge: { mode: advise }` and `requests` in
+/// `privacy.send` ([`SendClass::Requests`]). Below `advise` (shadow) the
+/// answer is only logged.
+pub const SAVE_NUDGE_USE: &str = "save_nudge";
+/// The uses a configured provider turns on without a `uses:` entry.
+pub const DEFAULT_ON_USES: [&str; 1] = [HOST_TASK_USE];
 /// The uses that run outside any run budget, with the most requests each may
 /// send per project and UTC day when `uses.<name>.max_requests_per_day` sets
 /// none. A host task's or a script's decisions are capped here too (inside
 /// a run the run's budget applies).
-pub const DAILY_CAPS: [(&str, u32); 4] = [
+pub const DAILY_CAPS: [(&str, u32); 5] = [
     ("catalog_rank", 200),
     (HOST_TASK_USE, 200),
     (GRADE_USE, 50),
     (PROBLEM_RECHECK_USE, 50),
+    (SAVE_NUDGE_USE, 100),
 ];
 
 /// The default daily cap of a daily-capped use; `None` for a use that runs
@@ -69,7 +79,7 @@ pub fn default_daily_cap(use_name: &str) -> Option<u32> {
 }
 
 /// The known use names (`uses.<name>`).
-pub const USE_NAMES: [&str; 11] = [
+pub const USE_NAMES: [&str; 12] = [
     "judge_node",
     "judge_edge",
     "completion_check",
@@ -81,6 +91,7 @@ pub const USE_NAMES: [&str; 11] = [
     "host_task",
     GRADE_USE,
     PROBLEM_RECHECK_USE,
+    SAVE_NUDGE_USE,
 ];
 
 /// A use's mode, ordered from least to most effect.
@@ -222,6 +233,18 @@ pub enum SendClass {
     Outputs,
     /// Diffs (opt-in).
     Diffs,
+    /// The requests a person typed in a host session, which the save check
+    /// ([`SAVE_NUDGE_USE`]) sends (opt-in).
+    Requests,
+}
+
+/// The material class the standalone use `use_name` sends.
+pub fn send_class(use_name: &str) -> SendClass {
+    if use_name == SAVE_NUDGE_USE {
+        SendClass::Requests
+    } else {
+        SendClass::Prompts
+    }
 }
 
 /// Where a provider key comes from. Only the reference is ever stored.
@@ -711,14 +734,15 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
     // Host-task decisions are allowed by default once a provider is
     // configured (issue #193): the asker reads the answer, the engine never
     // acts on it. `uses.host_task: { mode: off }` switches them off.
-    uses.entry(HOST_TASK_USE.to_string())
-        .or_insert_with(|| UseSettings {
+    for name in DEFAULT_ON_USES {
+        uses.entry(name.to_string()).or_insert_with(|| UseSettings {
             mode: DecisionMode::Advise,
             thresholds: BTreeMap::new(),
             max_requests_per_day: None,
             allow_uncalibrated: false,
             max_actions: None,
         });
+    }
     if let Some(cc) = uses.get_mut("completion_check") {
         cc.thresholds
             .entry("final_result".into())
@@ -1298,14 +1322,16 @@ privacy: { send: [prompts, outputs], redact: true, max_state_bytes: 20000, debug
         assert_eq!(eff.privacy, Privacy::default());
         assert_eq!(eff.threshold("completion_check", "final_result"), Some(0.2));
         // A provider alone turns on host-task decisions (issue #193) and
-        // nothing else; switching that use off leaves every use off.
+        // nothing else: the save check sends a person's text and waits for
+        // the person. Switching host tasks off leaves every use off.
         write(
             cfg.path(),
             "providers: [{ id: a, kind: systemone, base_url: 'http://127.0.0.1:1', model: m }]\n",
         );
         let eff = resolve_in(cfg.path(), root.path()).active().unwrap();
-        assert_eq!(eff.uses.keys().collect::<Vec<_>>(), [HOST_TASK_USE]);
+        assert_eq!(eff.uses.keys().collect::<Vec<_>>(), DEFAULT_ON_USES);
         assert_eq!(eff.mode_for(HOST_TASK_USE), DecisionMode::Shadow);
+        assert_eq!(eff.mode_for(SAVE_NUDGE_USE), DecisionMode::Off);
         write(
             cfg.path(),
             "providers: [{ id: a, kind: systemone, base_url: 'http://127.0.0.1:1', model: m }]\nuses: { host_task: { mode: off } }\n",
@@ -1383,7 +1409,7 @@ privacy: { send: [prompts, outputs], redact: true, max_state_bytes: 20000, debug
 
         project(
             root.path(),
-            "decisions: { uses: { completion_check: { mode: off }, host_task: { mode: off } } }\n",
+            "decisions: { uses: { completion_check: { mode: off }, host_task: { mode: off }, save_nudge: { mode: off } } }\n",
         );
         assert_eq!(resolve_in(cfg.path(), root.path()), Resolution::AllOff);
 

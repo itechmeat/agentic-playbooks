@@ -83,6 +83,16 @@ does not install this tool. Version pinning, manual downloads with checksum
 and attestation checks, building from source, and uninstalling:
 [docs/INSTALL.md](docs/INSTALL.md).
 
+To set apb up after installing, run `apb setup plan` to see what it would do
+on this machine (it writes nothing), then `apb setup apply --plan <digest>`:
+it installs the default `apb-*` playbooks and process skills, writes role
+profiles for the agents you have, registers the MCP server in Claude Code,
+Codex and OpenCode, and records all of it so `apb setup remove` undoes it. A
+default you changed is kept and replaced only when you ask
+(`apb setup plan --replace-modified <name>`). A
+coding agent installing apb for you follows
+[docs/AGENT-SETUP.md](docs/AGENT-SETUP.md).
+
 ## Quick start
 
 A playbook that plans a task with an agent, runs a lint script, and lets the
@@ -169,7 +179,8 @@ and templating are in [docs/HOWTO-authoring.md](docs/HOWTO-authoring.md).
 ## Everyday commands
 
 ```text
-apb init            create the .apb structure
+apb init            create the .apb structure (--standing-block, --feedback-loop, --subscriptions answer without a terminal; --json)
+apb setup           plan (read only), apply --plan <digest>, remove: default playbooks, skills, role profiles, MCP registration
 apb list            playbooks and versions
 apb validate        validate playbooks, the profiles and scripts they reference, requires and connectors
 apb run <id>        run a playbook (--param k=v, --overrides, --supervise, --detach, --execution, --confirm-irreversible)
@@ -198,7 +209,7 @@ apb subscriptions   view or declare the agent subscriptions you pay for
 apb connector       list / show / call / approve / doctor / env / init / install / test - connectors to external services
 apb migrate         migrate schema 1 playbooks (executors) to schema 2 (profiles)
 apb adopt           adoption readiness report for a playbook
-apb doctor          diagnose agents, profiles, runners, playbooks (--run <id> one run's health, --agents every installed agent, --probe-agent <id> one paid format check)
+apb doctor          diagnose agents, profiles, runners, playbooks, the defaults (--run <id> one run's health, --agents every installed agent, --probe-agent <id> one paid format check, --json)
 apb export/import   move a playbook version (YAML, layout, scripts) as one bundle file
 apb suggestions     list / allow / reset save-as-playbook suggestion declines
 apb discover        find step sequences your past agent sessions repeat; list / show / save / dismiss

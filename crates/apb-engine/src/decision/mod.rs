@@ -30,6 +30,7 @@ pub mod host_task;
 pub(crate) mod judge;
 mod providers;
 pub mod report;
+pub mod save_nudge;
 pub mod standalone;
 // Engine uses (issue #165 Parts 9-12 and 14), one module each.
 pub(crate) mod retry_advice;
@@ -57,14 +58,15 @@ use providers::Chains;
 pub(crate) fn snapshot(root: &Path) -> Option<EffectiveDecisions> {
     use apb_core::decisions::Resolution;
     match apb_core::decisions::resolve(root) {
-        // Host-task decisions alone (on by default with any provider) need
-        // no snapshot: they read the live file when asked (issue #193), and
-        // a run with every engine use off keeps the manifest it always had.
+        // Host-task decisions (on by default with any provider) and the
+        // save check (a host session's use, never a run's) alone need no
+        // snapshot: they read the live file when asked (issue #193), and a
+        // run with every engine use off keeps the manifest it always had.
         Resolution::Active(eff)
-            if eff
-                .uses
-                .keys()
-                .all(|k| k == apb_core::decisions::HOST_TASK_USE) =>
+            if eff.uses.keys().all(|k| {
+                apb_core::decisions::DEFAULT_ON_USES.contains(&k.as_str())
+                    || k == apb_core::decisions::SAVE_NUDGE_USE
+            }) =>
         {
             None
         }

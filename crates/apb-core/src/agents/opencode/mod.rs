@@ -1,6 +1,7 @@
 //! opencode. An aggregator: it runs models of many providers, listed by
 //! `opencode models`.
 
+pub mod mcp;
 pub mod output;
 
 use std::path::{Path, PathBuf};
@@ -37,6 +38,10 @@ pub struct Opencode;
 impl Agent for Opencode {
     fn descriptor(&self) -> &'static Descriptor {
         &DESCRIPTOR
+    }
+
+    fn mcp_host(&self) -> Option<&'static dyn super::McpHost> {
+        Some(&mcp::OpencodeMcp)
     }
 
     fn setup(&self) -> &'static dyn super::HostSetup {

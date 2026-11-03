@@ -1,6 +1,6 @@
 ## apb playbooks (standing instruction)
 
-This project uses apb playbooks: saved, repeatable processes managed through the agentic-playbooks MCP server. Two duties apply to every task, in addition to whatever skills or tools you use to perform the work itself.
+This project uses apb playbooks: saved, repeatable processes managed through the agentic-playbooks MCP server. Two duties apply to every task, in addition to whatever skills or tools you use to perform the work itself. The server's tools may be deferred by your host: when playbook_catalog is not callable yet, load it first (for example with a tool search for playbook_catalog), then call it.
 
 Before acting on a task that describes a doable action, call playbook_catalog once to check whether a saved playbook already fits. Do not call it for chit-chat or clarifying replies. On a confident match to an active, trusted playbook, name it in one line and use it.
 

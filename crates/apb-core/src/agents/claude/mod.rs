@@ -2,6 +2,8 @@
 //! ask-server, hermetic settings and a session record apb reads.
 
 pub mod actions;
+pub mod hooks;
+pub mod mcp;
 pub mod output;
 pub mod settings;
 pub mod state;
@@ -59,6 +61,14 @@ pub struct Claude;
 impl Agent for Claude {
     fn descriptor(&self) -> &'static Descriptor {
         &DESCRIPTOR
+    }
+
+    fn mcp_host(&self) -> Option<&'static dyn super::McpHost> {
+        Some(&mcp::ClaudeMcp)
+    }
+
+    fn stop_hook(&self) -> Option<&'static dyn super::StopHookHost> {
+        Some(&hooks::ClaudeStopHook)
     }
 
     fn models(&self) -> &'static dyn super::ModelPolicy {

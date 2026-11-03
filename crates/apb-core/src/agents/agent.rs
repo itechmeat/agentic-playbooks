@@ -2,6 +2,8 @@
 //! that describes one agent.
 
 use super::forms::Forms;
+use super::hook_host::StopHookHost;
+use super::mcp_host::McpHost;
 use super::output::OutputFormat;
 use super::policy::{ModelPolicy, OpenModels};
 use super::setup::{HostSetup, NoSetup};
@@ -30,6 +32,18 @@ pub trait Agent: Send + Sync + 'static {
     /// Which models the agent takes.
     fn models(&self) -> &'static dyn ModelPolicy {
         &OpenModels
+    }
+
+    /// How the agent CLI keeps its MCP servers, when it is an MCP host
+    /// `apb setup` registers apb's server in.
+    fn mcp_host(&self) -> Option<&'static dyn McpHost> {
+        None
+    }
+
+    /// How the agent CLI runs a command when its turn ends, when `apb
+    /// setup` registers apb's end-of-turn save check there.
+    fn stop_hook(&self) -> Option<&'static dyn StopHookHost> {
+        None
     }
 
     /// Whether apb can continue the agent's sessions across attempts and

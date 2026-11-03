@@ -2,9 +2,9 @@ use std::io;
 use std::io::IsTerminal;
 use std::path::Path;
 
+use apb_mcp::setup::standing::{self, BlockAction, PLAYBOOK_BLOCK, TARGET_FILES};
+
 const FEEDBACK_BLOCK: &str = include_str!("../assets/feedback-loop.md");
-const PLAYBOOK_BLOCK: &str = include_str!("../assets/playbook-instructions.md");
-const TARGET_FILES: [&str; 2] = ["CLAUDE.md", "AGENTS.md"];
 
 /// One standing-instruction block the questionnaire can append to the host
 /// project's agent instruction files. Every block shares the same consent,
@@ -25,7 +25,7 @@ struct StandingBlock {
 }
 
 const PLAYBOOKS: StandingBlock = StandingBlock {
-    marker: "## apb playbooks",
+    marker: standing::PLAYBOOK_MARKER,
     body: PLAYBOOK_BLOCK,
     section: "apb playbooks",
     subject: "Playbook instructions",
@@ -45,41 +45,23 @@ const FEEDBACK: StandingBlock = StandingBlock {
     skip_note: "Skipped. You can add the section later from the README",
 };
 
-enum BlockAction {
-    Created,
-    Appended,
-    AlreadyConfigured,
-}
-
 /// Appends `block` to every target file, creating a file that does not exist.
 /// Idempotent through the block marker, so several blocks coexist in one file
 /// in any order and a re-run never duplicates one.
 fn apply_block(dir: &Path, block: &StandingBlock) -> io::Result<Vec<(String, BlockAction)>> {
-    let mut out = Vec::new();
-    for name in TARGET_FILES {
-        let path = dir.join(name);
-        let action = if path.exists() {
-            let text = std::fs::read_to_string(&path)?;
-            if text.contains(block.marker) {
-                BlockAction::AlreadyConfigured
-            } else {
-                let sep = if text.ends_with("\n\n") {
-                    ""
-                } else if text.ends_with('\n') {
-                    "\n"
-                } else {
-                    "\n\n"
-                };
-                std::fs::write(&path, format!("{text}{sep}{body}", body = block.body))?;
-                BlockAction::Appended
-            }
-        } else {
-            std::fs::write(&path, block.body)?;
-            BlockAction::Created
-        };
-        out.push((name.to_string(), action));
-    }
-    Ok(out)
+    Ok(standing::apply_block(dir, block.marker, block.body)?
+        .into_iter()
+        .map(|w| (w.name, w.action))
+        .collect())
+}
+
+/// The answer of an `apb init` flag: writes the playbook block
+/// (`feedback: false`) or the feedback-loop block into the target files.
+pub(crate) fn write_block_by_flag(
+    dir: &Path,
+    feedback: bool,
+) -> io::Result<Vec<(String, BlockAction)>> {
+    apply_block(dir, if feedback { &FEEDBACK } else { &PLAYBOOKS })
 }
 
 fn block_fully_configured(dir: &Path, block: &StandingBlock) -> bool {
@@ -88,6 +70,14 @@ fn block_fully_configured(dir: &Path, block: &StandingBlock) -> bool {
             .map(|t| t.contains(block.marker))
             .unwrap_or(false)
     })
+}
+
+/// Asks the person at the terminal the feedback-loop question once more,
+/// for `apb init --feedback-loop yes`: the flag alone is not their answer.
+pub(crate) fn confirm_feedback() -> io::Result<bool> {
+    cliclack::confirm(FEEDBACK.question)
+        .initial_value(false)
+        .interact()
 }
 
 /// Runs the interactive `apb init` questionnaire on a real terminal only.
@@ -445,6 +435,9 @@ mod tests {
             "kind hard",
             "global scope only when",
             "offer a short interview",
+            // Tool search hosts defer the server's tools: the agent loads
+            // them before the first call.
+            "may be deferred by your host",
         ] {
             assert!(
                 PLAYBOOK_BLOCK.contains(phrase),

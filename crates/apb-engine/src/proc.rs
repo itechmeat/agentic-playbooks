@@ -61,7 +61,7 @@ fn group_target(pid: u32) -> Option<i32> {
 ///
 /// Safe to call after the leader has been reaped: a pgid is not recycled while
 /// any process remains in the group, and an empty group is a harmless ESRCH.
-pub(crate) fn kill_process_group(pid: u32) {
+pub fn kill_process_group(pid: u32) {
     #[cfg(unix)]
     signal_process_group(pid, libc::SIGKILL);
     #[cfg(not(unix))]

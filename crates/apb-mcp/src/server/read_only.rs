@@ -31,6 +31,7 @@ pub const READ_ONLY: &[(&str, ReadOnlyUse)] = &[
     ("playbook_validate", ReadOnlyUse::Full),
     ("playbook_howto", ReadOnlyUse::Full),
     ("playbook_interview", ReadOnlyUse::Full),
+    ("setup_howto", ReadOnlyUse::Full),
     ("playbook_adopt_report", ReadOnlyUse::Full),
     ("playbook_trash_list", ReadOnlyUse::Full),
     ("playbook_candidate", ReadOnlyUse::Full),
@@ -110,6 +111,9 @@ pub const REMOVED_IN_READ_ONLY: &[&str] = &[
     "profile_move",
     "profile_delete",
     "subscriptions_set",
+    // Setup: detection starts every agent's program and the sandbox probe
+    // starts bubblewrap.
+    "setup_plan",
     // Discovery.
     "playbook_discover",
     "playbook_discover_save",

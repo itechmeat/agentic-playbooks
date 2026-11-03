@@ -628,6 +628,19 @@ fn write_via_temp(
     bytes: &[u8],
     create: impl FnOnce(&Path) -> io::Result<File>,
 ) -> io::Result<()> {
+    write_via_temp_checked(dir, path, bytes, create, || Ok(()))
+}
+
+/// [`write_via_temp`] that runs `before_rename` once the temp is written and
+/// synced, right before the rename: an error from it leaves `path` as it
+/// is and removes the temp.
+fn write_via_temp_checked(
+    dir: &Path,
+    path: &Path,
+    bytes: &[u8],
+    create: impl FnOnce(&Path) -> io::Result<File>,
+    before_rename: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
     crate::process_mode::guard()?;
     let tmp = unique_temp(dir, path);
     let res = (|| {
@@ -635,12 +648,89 @@ fn write_via_temp(
         f.write_all(bytes)?;
         f.sync_all()?;
         drop(f);
+        before_rename()?;
         fs::rename(&tmp, path)
     })();
     if res.is_err() {
         let _ = fs::remove_file(&tmp);
     }
     res
+}
+
+/// The file a write of `path` lands in: `path` itself, or, when `path` is a
+/// symbolic link, the file it finally resolves to (which must exist). A
+/// rewrite of a user's own file (a host config kept in a dotfiles folder)
+/// edits that file and leaves the link in place.
+pub fn link_target(path: &Path) -> io::Result<PathBuf> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => fs::canonicalize(path),
+        _ => Ok(path.to_path_buf()),
+    }
+}
+
+/// Rewrites the user's own file `path` atomically, in place: a symbolic
+/// link is followed ([`link_target`]) and stays a link, and the new file
+/// carries the permissions the old one had before it appears, so a private
+/// file is never readable by others, not even for a moment. A file that
+/// does not exist yet is created like [`atomic_write`]. Returns the file
+/// written.
+pub fn atomic_rewrite_in_place(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+    atomic_rewrite_in_place_checked(path, bytes, |_| Ok(()))
+}
+
+/// [`atomic_rewrite_in_place`] that hands `check` the file it resolved
+/// `path` to, once the new content is written beside it and right before
+/// the rename. An error from `check` writes nothing and is returned: a
+/// caller that compares the file it read with what is there now (another
+/// program's save, a link moved to another file) makes that comparison and
+/// the publication one step on the same resolved file.
+pub fn atomic_rewrite_in_place_checked(
+    path: &Path,
+    bytes: &[u8],
+    check: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<PathBuf> {
+    crate::process_mode::guard()?;
+    let target = link_target(path)?;
+    let dir = target
+        .parent()
+        .ok_or_else(|| io::Error::other("path has no parent"))?
+        .to_path_buf();
+    let perm = fs::metadata(&target).ok().map(|m| m.permissions());
+    let Some(perm) = perm else {
+        fs::create_dir_all(&dir)?;
+        write_via_temp_checked(
+            &dir,
+            &target,
+            bytes,
+            |tmp| File::create(tmp),
+            || check(&target),
+        )?;
+        return Ok(target);
+    };
+    write_via_temp_checked(
+        &dir,
+        &target,
+        bytes,
+        |tmp| {
+            #[cfg(unix)]
+            let f = {
+                use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+                // Created no wider than the old file (the umask only narrows),
+                // then set to exactly its mode before the rename.
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(perm.mode() & 0o7777)
+                    .open(tmp)?
+            };
+            #[cfg(not(unix))]
+            let f = File::create(tmp)?;
+            f.set_permissions(perm.clone())?;
+            Ok(f)
+        },
+        || check(&target),
+    )?;
+    Ok(target)
 }
 
 /// Like `atomic_write`, but the resulting file gets 0600 permissions (owner
@@ -668,6 +758,52 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
         let _ = dir;
     }
     Ok(())
+}
+
+/// An exclusive OS lock (`flock` on unix) on `<dir>/<lock_name>`, held for
+/// as long as the guard lives. The kernel releases it when the owner's
+/// process ends, however it ends, so a live owner is never displaced and a
+/// dead one never blocks: no age rule decides who holds it. The file stays
+/// in place after release (removing it would let a second process lock an
+/// unlinked file while a third creates a new one).
+pub struct HeldLock {
+    _file: File,
+}
+
+/// Takes [`HeldLock`] on `<dir>/<lock_name>`, waiting up to
+/// `LOCK_ATTEMPTS x LOCK_STEP_MS` while another handle holds it; then a
+/// `WouldBlock` error. The file is created private and is never followed
+/// through a symbolic link.
+pub fn hold_lock(dir: &Path, lock_name: &str) -> io::Result<HeldLock> {
+    crate::process_mode::guard()?;
+    fs::create_dir_all(dir)?;
+    let path = dir.join(lock_name);
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = opts.open(&path)?;
+    for attempt in 0..LOCK_ATTEMPTS {
+        match file.try_lock() {
+            Ok(()) => return Ok(HeldLock { _file: file }),
+            Err(fs::TryLockError::WouldBlock) => {
+                if attempt + 1 < LOCK_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(LOCK_STEP_MS));
+                }
+            }
+            Err(fs::TryLockError::Error(e)) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        format!(
+            "lock `{}` is held by a live owner; try again",
+            path.display()
+        ),
+    ))
 }
 
 /// RAII lock for a state directory (`<dir>/<lock_name>`), tagged with a unique
@@ -830,6 +966,47 @@ fn lock_is_stale(path: &Path, stale_ms: u128) -> bool {
 #[cfg(all(test, unix))]
 mod unix_tests {
     use super::*;
+
+    /// A rewrite in place follows a link and keeps it, and the new file has
+    /// the old mode before it appears.
+    #[test]
+    fn a_rewrite_in_place_keeps_the_link_and_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let real = t.path().join("dotfiles/config.toml");
+        fs::create_dir_all(real.parent().unwrap()).unwrap();
+        fs::write(&real, "a = 1\n").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = t.path().join("config.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let written = atomic_rewrite_in_place(&link, b"a = 2\n").unwrap();
+        assert_eq!(written, fs::canonicalize(&real).unwrap());
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&real).unwrap(), "a = 2\n");
+        assert_eq!(
+            fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        // A plain file keeps its mode too; a new one is simply created.
+        let plain = t.path().join("plain");
+        fs::write(&plain, "x").unwrap();
+        fs::set_permissions(&plain, fs::Permissions::from_mode(0o640)).unwrap();
+        atomic_rewrite_in_place(&plain, b"y").unwrap();
+        assert_eq!(
+            fs::metadata(&plain).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        let new = t.path().join("sub/new");
+        assert_eq!(atomic_rewrite_in_place(&new, b"z").unwrap(), new);
+        assert_eq!(fs::read_to_string(&new).unwrap(), "z");
+    }
 
     /// An overlay whose directory name matches a symlink already in the
     /// destination is refused, and nothing lands at the link's target;

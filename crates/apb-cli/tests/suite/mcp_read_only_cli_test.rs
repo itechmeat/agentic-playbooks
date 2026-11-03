@@ -504,6 +504,7 @@ fn a_read_only_session_changes_nothing_and_starts_nothing() {
         ("playbook_validate", json!({ "id": "pub" })),
         ("playbook_howto", json!({})),
         ("playbook_interview", json!({})),
+        ("setup_howto", json!({})),
         ("playbook_trash_list", json!({})),
         ("playbook_candidate", json!({ "id": "hm" })),
         ("playbook_known_problems", json!({ "id": "secretpb" })),

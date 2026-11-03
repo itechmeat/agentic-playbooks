@@ -11,4 +11,5 @@ pub use apb_engine::gate as policy;
 pub mod profile_tools;
 pub mod promote;
 pub mod server;
+pub mod setup;
 pub mod tools;

@@ -701,6 +701,26 @@ fn a_project_can_switch_the_check_off() {
     assert!(!manifest.contains("decisions"));
 }
 
+/// The save check is a host session's use, not a run's: a person who turned
+/// it on (and nothing a run uses) gets no decisions block in a run's
+/// manifest, like the host-task use on by default.
+#[test]
+fn the_save_check_alone_snapshots_nothing_into_a_run() {
+    let p = Project::new(&one_node(""), DONE);
+    let server = StubServer::start(vec![]);
+    p.decisions(&format!(
+        "version: 1\nmode: shadow\nproviders:\n  - {{ id: stub, kind: systemone, base_url: \"{}\", model: jev-1.13.0, api_key: \"{{{{env.DECISION_TEST_KEY}}}}\" }}\nprivacy:\n  send: [requests]\nuses:\n  save_nudge: {{ mode: advise }}\n",
+        server.base_url
+    ));
+    let _lock = common::env_lock();
+    let _env = p.env();
+    let (_, run_id, events) = p.run();
+    assert!(decisions(&events).is_empty());
+    assert_eq!(server.count(), 0);
+    let manifest = fs::read_to_string(p.run_dir(&run_id).join("manifest.yaml")).unwrap();
+    assert!(!manifest.contains("decisions"), "{manifest}");
+}
+
 // --- the report and replay over a real run (issue #165 Part 13) ---------------
 
 /// Every file under a directory with its bytes, for an unchanged check.

@@ -123,6 +123,33 @@ impl WfMcp {
     }
 
     #[tool(
+        description = "Agent setup guide (tier 2): the installing agent's procedure (doctor, setup plan, at most five questions to the user, adapting the defaults by forking them, apply by digest, verification, undo, and what still needs the person). Pull when installing or configuring apb for a user.",
+        annotations(read_only_hint = true)
+    )]
+    pub(crate) async fn setup_howto(&self) -> CallToolResult {
+        to_call_tool_result(tools::setup_howto())
+    }
+
+    #[tool(
+        description = "What `apb setup apply` would do on this machine, read only: detected agents, subscriptions, the default playbooks and skills (installed, pristine, modified, update available), the role profiles with their independence, the MCP hosts and their registration, the sandbox, and with project: true this project's standing block. Returns the actions (kind, target, reversible, undo), warnings, needs_person and the plan digest. Applying is a CLI step: apb setup apply --plan <digest>.",
+        annotations(read_only_hint = true)
+    )]
+    pub(crate) async fn setup_plan(
+        &self,
+        Parameters(SetupPlanArgs { project }): Parameters<SetupPlanArgs>,
+    ) -> CallToolResult {
+        let root = (*self.root).clone();
+        let result = tokio::task::spawn_blocking(move || tools::setup_plan(&root, project))
+            .await
+            .unwrap_or_else(|e| {
+                Err(tools::ToolError::Engine(format!(
+                    "setup plan task failed: {e}"
+                )))
+            });
+        to_call_tool_result(result)
+    }
+
+    #[tool(
         description = "Interview guide (tier 2): how to build a playbook by interviewing the user about a process they describe. Pull when the user wants to automate a process no playbook covers.",
         annotations(read_only_hint = true)
     )]

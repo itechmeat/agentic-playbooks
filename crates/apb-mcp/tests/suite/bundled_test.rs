@@ -259,6 +259,118 @@ fn role_profiles_stay_approved_across_a_shipped_skill_update_while_unchanged() {
     );
 }
 
+/// Sets or clears process env vars for one test, restoring them on drop;
+/// hold the config sandbox first, it serializes env changes.
+struct Env(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl Env {
+    fn set(vars: &[(&'static str, Option<&std::ffi::OsStr>)]) -> Self {
+        let prev = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (k, v) in vars {
+            // SAFETY: env mutation is serialized by the sandbox's lock.
+            unsafe {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+        Env(prev)
+    }
+}
+
+impl Drop for Env {
+    fn drop(&mut self) {
+        for (k, v) in &self.0 {
+            // SAFETY: as in `set`.
+            unsafe {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+}
+
+fn stub(dir: &Path, name: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A machine with two agent CLIs as stubs, its own HOME and PATH, on which
+/// setup planned and applied everything; hold the config sandbox first.
+struct SetupMachine {
+    _env: Env,
+    _home: tempfile::TempDir,
+    _bin: tempfile::TempDir,
+    project: tempfile::TempDir,
+}
+
+impl SetupMachine {
+    fn applied() -> Self {
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        stub(
+            bin.path(),
+            "claude",
+            "case \"$1\" in\n  --version) echo '2.1.283 (Claude Code)' ;;\n  mcp) printf '%s' '{}' > \"$HOME/.claude.json\" ;;\nesac\n",
+        );
+        stub(
+            bin.path(),
+            "codex",
+            "case \"$1\" in\n  --version) echo 'codex-cli 0.157.0' ;;\nesac\n",
+        );
+        let path = std::ffi::OsString::from(format!("{}:/usr/bin:/bin", bin.path().display()));
+        let env = Env::set(&[
+            ("HOME", Some(home.path().as_os_str())),
+            ("PATH", Some(&path)),
+            ("XDG_CONFIG_HOME", None),
+            ("CODEX_HOME", None),
+            ("CLAUDE_CONFIG_DIR", None),
+            ("APB_RUN_ID", None),
+            ("APB_HOST_TASK", None),
+            (
+                "APB_TEST_GITHUB_TOKEN",
+                Some(std::ffi::OsStr::new("not-a-real-token-value")),
+            ),
+        ]);
+        let project = tempfile::tempdir().unwrap();
+        apb_core::registry::init_project(project.path()).unwrap();
+        let m = SetupMachine {
+            _env: env,
+            _home: home,
+            _bin: bin,
+            project,
+        };
+        let out = m.apply();
+        assert_eq!(
+            out.status,
+            apb_mcp::setup::ApplyStatus::Applied,
+            "{:?}",
+            out.failed
+        );
+        m
+    }
+
+    fn root(&self) -> &Path {
+        self.project.path()
+    }
+
+    /// Plans and applies, as `apb setup apply` does.
+    fn apply(&self) -> apb_mcp::setup::ApplyOutcome {
+        let none = apb_mcp::setup::ReplaceModified::None;
+        let plan = apb_mcp::setup::plan(self.root(), None, &none).unwrap();
+        assert!(plan.ready, "{:?}", plan.refusal);
+        apb_mcp::setup::apply(self.root(), None, &none, &plan.digest)
+    }
+}
+
 /// The shipped skill `name` as an earlier binary shipped it: version 0.9.0
 /// and other wording.
 fn older_skill(name: &str) -> apb_core::bundled::BundledSkill {
@@ -272,4 +384,165 @@ fn older_skill(name: &str) -> apb_core::bundled::BundledSkill {
         format!("{older_md}\nAn older wording.\n").into_bytes(),
     );
     testing::skill_from_files(name, files).unwrap()
+}
+
+/// N skills of one role profile updated by one apply: the approval is
+/// judged once every skill holds the shipped files, so the profile keeps
+/// it (judged per skill, the first update would see the second skill still
+/// old and the second would find the approval already gone).
+#[test]
+fn one_apply_that_updates_several_skills_of_a_role_keeps_its_approval() {
+    let _cfg = crate::common::config_sandbox();
+    let m = SetupMachine::applied();
+    let origin = bundle_origin(m.root(), "apb-main").expect("approved at setup");
+
+    // An earlier binary's copies of two of the main profile's skills,
+    // untouched since, with the profile approved as it stood then.
+    let skills = ["apb-delivery", "apb-usage"];
+    for name in skills {
+        assert!(role_skills("apb-main").contains(&name));
+        apb_core::bundled::remove_skill(name).unwrap();
+        testing::install_skill(&older_skill(name), false).unwrap();
+    }
+    let r = apb_core::profile::QualifiedProfileRef {
+        name: "apb-main".into(),
+        scope: apb_core::profile::ProfileScope::Global,
+    };
+    let (_, _, bundle) = apb_core::profile_store::compute_bundle(
+        m.root(),
+        apb_core::profile_store::PlaybookOrigin::Global,
+        &r,
+    )
+    .unwrap();
+    TrustStore::load()
+        .approve_kind(&bundle, "apb-main", Kind::ProfileBundle, origin)
+        .unwrap();
+
+    let out = m.apply();
+    assert_eq!(
+        out.status,
+        apb_mcp::setup::ApplyStatus::Applied,
+        "{:?}",
+        out.failed
+    );
+    let upgraded: Vec<&str> = out
+        .done
+        .iter()
+        .filter(|d| d.kind == apb_mcp::setup::ActionKind::UpgradeSkill)
+        .map(|d| d.target.as_str())
+        .collect();
+    assert_eq!(upgraded, skills, "both in one apply");
+    assert!(out.notes.is_empty(), "{:?}", out.notes);
+    assert_eq!(
+        bundle_origin(m.root(), "apb-main"),
+        Some(origin),
+        "the main profile keeps its approval, with the origin it had"
+    );
+}
+
+/// E1 end to end: setup on a machine with two agents installs the shipped
+/// defaults and the role profiles bound to those agents (the reviewer to
+/// the other one), and then every shipped playbook passes
+/// the run gate for a person's start (the dashboard's click answers its
+/// `agent_launch: ask`) and its readiness report names no missing or
+/// unapproved profile or skill.
+#[test]
+fn every_shipped_playbook_runs_on_what_setup_wrote() {
+    let _cfg = crate::common::config_sandbox();
+    let m = SetupMachine::applied();
+    let project = &m.project;
+
+    // The role profiles run on the detected agents, the reviewer on the
+    // other one of the two.
+    let agent = |name: &str| {
+        let r = apb_core::profile::QualifiedProfileRef {
+            name: name.into(),
+            scope: apb_core::profile::ProfileScope::Global,
+        };
+        apb_core::profile_store::resolve_profile(
+            project.path(),
+            apb_core::profile_store::PlaybookOrigin::Global,
+            &r,
+        )
+        .unwrap()
+        .doc
+        .executor
+        .agent
+    };
+    let (main, reviewer) = (agent("apb-main"), agent("apb-reviewer"));
+    for a in [&main, &reviewer, &agent("apb-researcher")] {
+        assert!(["claude", "codex"].contains(&a.as_str()), "{a}");
+    }
+    assert_ne!(main, reviewer, "the reviewer is the other agent");
+
+    // The issue triage reads and labels issues through the official
+    // connector, which a person installs and gives an account (setup does
+    // not): installed here, as AGENT-SETUP says.
+    apb_core::connector::install::install_official("github", false).unwrap();
+    let accounts = apb_core::connector::config::global_config_path("github").unwrap();
+    std::fs::create_dir_all(accounts.parent().unwrap()).unwrap();
+    std::fs::write(
+        &accounts,
+        "accounts:\n  - name: default\n    default: true\n    api_base: https://api.github.com\n    token: \"{{env.APB_TEST_GITHUB_TOKEN}}\"\n",
+    )
+    .unwrap();
+    // The person approves that account, as the approve surface records it.
+    let account = apb_core::connector::config::load_merged(project.path(), "github")
+        .unwrap()
+        .remove(0);
+    TrustStore::load()
+        .approve_kind(
+            &apb_core::connector::config::account_digest(&account),
+            &apb_core::trust::account_trust_id("github", "default"),
+            Kind::ConnectorAccount,
+            OriginKind::LocallyApproved,
+        )
+        .unwrap();
+    let shipped = apb_core::bundled::playbooks();
+    assert!(!shipped.is_empty());
+    for p in &shipped {
+        if let Err(v) = gate(project.path(), &p.id) {
+            panic!("{} is refused at the gate: {v}", p.id);
+        }
+        let report = apb_mcp::advisory_tools::playbook_adopt_report(
+            project.path(),
+            Some(&p.id),
+            Some("global"),
+        )
+        .unwrap();
+        let findings = report["playbooks"][0]["findings"].as_array().unwrap();
+        for f in findings {
+            let code = f["code"].as_str().unwrap_or("");
+            assert!(
+                ![
+                    "profile_missing",
+                    "skill_missing",
+                    "profile_unresolved",
+                    "untrusted",
+                    "playbook_unloadable"
+                ]
+                .contains(&code),
+                "{}: {f}",
+                p.id
+            );
+        }
+    }
+}
+
+#[test]
+fn setup_plan_is_read_inside_a_run_step_and_apply_is_refused() {
+    let _cfg = crate::common::config_sandbox();
+    let _env = Env::set(&[("APB_RUN_ID", Some(std::ffi::OsStr::new("r-step")))]);
+    let project = tempfile::tempdir().unwrap();
+    let plan = apb_mcp::tools::setup_plan(project.path(), false).expect("read in a step");
+    let digest = plan["digest"].as_str().unwrap();
+    let none = apb_mcp::setup::ReplaceModified::None;
+    let out = apb_mcp::setup::apply(project.path(), None, &none, digest);
+    assert_eq!(out.status, apb_mcp::setup::ApplyStatus::Refused);
+    assert!(
+        out.refusal.unwrap().message.contains("r-step"),
+        "the refusal names the run"
+    );
+    let removed = apb_mcp::setup::remove(project.path()).unwrap_err();
+    assert!(removed.contains("r-step"), "{removed}");
 }

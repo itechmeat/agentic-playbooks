@@ -311,6 +311,13 @@ pub(crate) fn dev_cmd(root: PathBuf, no_open: bool) -> ExitCode {
 }
 
 pub(crate) fn mcp_cmd(root: &Path, mode: apb_mcp::server::ServeMode) -> ExitCode {
+    // A host starts this server after an upgrade too: bring the defaults
+    // setup installed in line with this binary. A read-only server writes
+    // nothing, and stdout is the protocol, so the notes go to stderr.
+    if !matches!(mode, apb_mcp::server::ServeMode::ReadOnly) {
+        let notes = apb_mcp::setup::reconcile_if_set_up();
+        apb_core::bundled::print_notes("apb mcp: ", &notes, true);
+    }
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     match rt.block_on(apb_mcp::server::serve_stdio(root.to_path_buf(), mode)) {
         Ok(()) => ExitCode::SUCCESS,
