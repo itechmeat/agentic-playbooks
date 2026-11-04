@@ -2,7 +2,7 @@
 name: apb-diagnosis
 description: Find the cause of a bug, a failing check or unexpected behavior before changing code. Reproduce, isolate, name the root cause with evidence, then write a failing regression test before the fix. Use for every bug fix, a red test or build, a flaky check, or a report that something does not work.
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 ---
 
 # Diagnose before you fix
@@ -66,7 +66,9 @@ leave the tree and HEAD as you found them.
 ## 5. Regression test first
 
 - Write a test that reproduces the original scenario through the real entry
-  point, or as close to it as the project's tests reach.
+  point, or as close to it as the project's tests reach. An existing test
+  that already fails on the unfixed code for the reported cause, and
+  passes after the fix, is the regression test: add no near copy of it.
 - Run it on the unfixed code and see it fail for the reason you named. A test
   that fails for another reason, or passes, does not guard this bug.
 - Gate the test with the apb-test-audit skill in authoring mode: it must

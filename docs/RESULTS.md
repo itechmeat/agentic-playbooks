@@ -526,9 +526,10 @@ the agent read nothing past the reader, or that a package is complete
 relative to the outside world. A record the agent read directly (a `cat` of
 the package) fails the check: that is an honest refusal, not a bypass.
 
-`isolation: full` with `evidence` is V159: the reader needs the run
-directory. A run whose definition uses `evidence` carries a `run_guard`
-naming `evidence`, so an older apb refuses to continue it.
+`evidence` with an enforced isolation level (`isolation: full` or
+`best_effort`) is V159: the reader needs the run directory. A run whose
+definition uses `evidence` carries a `run_guard` naming `evidence`, so an
+older apb refuses to continue it.
 
 ## What is not promised
 

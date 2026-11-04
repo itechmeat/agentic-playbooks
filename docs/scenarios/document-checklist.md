@@ -28,7 +28,9 @@ stands for "an agent reviews, a person edits", with no code and no tests.
    open findings or rejects the document. (human_review gate with three
    options)
 5. After `fixed`, a re-check looks at the failed items only; still failing,
-   the person is asked again, at most three rounds, then a final decision.
+   the person is asked again, at most three rounds, then a final decision;
+   a re-check that leaves an item without a verdict goes to the final
+   decision.
    (agent node, bounded loop edge back to the gate, fallback to a second
    human_review)
 
@@ -36,8 +38,8 @@ stands for "an agent reviews, a person edits", with no code and no tests.
 
 The run ends `done`, `accepted_with_open_findings` (success) or `rejected`
 (failure). Every check execution keeps `check-report.md` in a result
-snapshot, so each round's verdicts stay readable. Only the person changed
-the document.
+snapshot, so each round's verdicts stay readable. Only the person is meant
+to change the document.
 
 ## 5. Failure case
 
@@ -55,6 +57,8 @@ examples/playbooks/document-checklist.yaml runs every step above. The gaps:
 1. Coverage is the agent's own count; apb does not parse the checklist.
 2. The gate cannot tell whether the document changed between rounds; the
    re-check is what finds out.
+3. The check agents are told not to edit the document, but nothing
+   enforces it: `protect` takes static globs and the document is a param.
 
 ## 7. Target
 

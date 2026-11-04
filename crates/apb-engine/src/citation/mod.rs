@@ -78,10 +78,10 @@ pub fn check<K: PartialEq>(
         if absence_basis.is_empty() {
             // Nothing of the kinds the criterion reads exists: an absence
             // resting on no view rests on nothing.
-            problems.push(
-                "the run has no view this criterion reads: an absence needs one read to its end"
-                    .into(),
-            );
+            problems.push(format!(
+                "{} has no view of the kinds read here: an absence needs one read to its end",
+                views.scope()
+            ));
         }
     }
     Checked {

@@ -76,7 +76,7 @@
   import ListProgressPanel from '../lib/ListProgressPanel.svelte'
   import RunOutputsPanel from '../lib/RunOutputsPanel.svelte'
   import RunResultsPanel from '../lib/RunResultsPanel.svelte'
-  import { resultsKey, type ResultsView } from '../lib/results'
+  import { resultsFetch, resultsKey, type ResultsView } from '../lib/results'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
@@ -113,7 +113,10 @@
   let answering = $state(false)
   let projectName = $state('')
   // The run's project directory, where a terminal command for it runs.
-  let projectDir = $state('')
+  // `null` while the lookup for the run's workspace is on its way.
+  let projectDir = $state<string | null>(null)
+  // The run has a workspace, but no directory was found for it.
+  let projectDirMissing = $state(false)
   let now = $state(Date.now())
   let logBox = $state<HTMLElement | null>(null)
   // Run quality: the stored grades, a rules grade in flight, and the journal
@@ -423,8 +426,9 @@
 
   // Bumped on every route change: a response for the previous run is dropped.
   let routeSeq = 0
-  // The `resultsKey` the shown results were fetched for.
-  let resultsFetchedFor: string | null = null
+  // The `resultsKey` the shown results were fetched for, and the latest
+  // results request (an answer to an older one is dropped).
+  const resultsLoad = resultsFetch()
 
   async function load() {
     const seq = routeSeq
@@ -480,15 +484,13 @@
     // Results change only at a settlement or the run's end: any other
     // journal notice leaves them, so the server re-hashes nothing for it.
     const key = detail ? resultsKey(detail.events, detail.run_status) : null
-    if (key === null || key !== resultsFetchedFor) {
+    if (resultsLoad.needed(key)) {
+      const ticket = resultsLoad.begin()
       try {
         const r = await fetchRunResults(id, workspace)
-        if (seq === routeSeq) {
-          results = r
-          resultsFetchedFor = key
-        }
+        if (seq === routeSeq && resultsLoad.succeeded(ticket, key)) results = r
       } catch {
-        if (seq === routeSeq && !reloadFailed) results = null
+        if (seq === routeSeq && !reloadFailed && resultsLoad.failed(ticket)) results = null
       }
     }
   }
@@ -518,7 +520,7 @@
     flowEdges = []
     grades = []
     results = null
-    resultsFetchedFor = null
+    resultsLoad.reset()
     grading = false
     citedSeq = null
     load()
@@ -545,7 +547,8 @@
   $effect(() => {
     const ws = workspace
     projectName = ''
-    projectDir = ''
+    projectDir = ws ? null : ''
+    projectDirMissing = false
     if (!ws) return
     let cancelled = false
     fetchProjects()
@@ -554,8 +557,14 @@
         const p = ps.find((p) => p.workspace_id === ws)
         projectName = p?.name ?? ''
         projectDir = p?.path ?? ''
+        projectDirMissing = !p?.path
       })
-      .catch(() => {})
+      .catch(() => {
+        // No project directory to offer: the command without it, marked.
+        if (cancelled) return
+        projectDir = ''
+        projectDirMissing = true
+      })
     return () => {
       cancelled = true
     }
@@ -794,6 +803,7 @@
         posting={deciding}
         refusals={reviewRefusals}
         {projectDir}
+        {projectDirMissing}
         onDecide={(r, o) => decide(r, o)}
       />
 

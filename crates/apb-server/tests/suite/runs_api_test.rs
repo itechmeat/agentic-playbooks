@@ -2680,6 +2680,13 @@ async fn a_failing_workspace_listing_is_an_error_not_an_empty_result() {
     // A workspace whose `.apb/runs` cannot be listed at all.
     let runs = root.join(".apb/runs");
     fs::set_permissions(&runs, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    // A process with CAP_DAC_OVERRIDE (root in a container) lists it
+    // anyway, so the failure this test needs cannot be built here.
+    if fs::read_dir(&runs).is_ok() {
+        fs::set_permissions(&runs, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        eprintln!("skipped: this process lists a directory of mode 0o000");
+        return;
+    }
 
     let app = build_router(AppState::new(root.to_path_buf()));
     // The 500 body is plain text, not JSON, so read it raw.

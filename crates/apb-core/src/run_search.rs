@@ -187,10 +187,12 @@ pub fn parse_terms<S: AsRef<str>>(raw: &[S]) -> Result<Vec<Term>, QueryError> {
     raw.iter()
         .map(|t| {
             let t = t.as_ref();
-            let (name, value) = t
-                .split_once('=')
-                .or_else(|| t.split_once(':'))
+            // The earliest separator splits, so either one may appear in
+            // the value.
+            let at = t
+                .find(['=', ':'])
                 .ok_or_else(|| QueryError::Malformed(t.to_string()))?;
+            let (name, value) = (&t[..at], &t[at + 1..]);
             let name = name.trim();
             if name.is_empty() || value.trim().is_empty() {
                 return Err(QueryError::Malformed(t.to_string()));
@@ -356,6 +358,12 @@ mod tests {
         );
         // `=` wins, so a value may hold a colon.
         assert_eq!(parse_terms(&["url=a:b"]).unwrap(), vec![term("url", "a:b")]);
+        // The earliest separator splits: a `name:value` term keeps an `=`
+        // inside its value.
+        assert_eq!(
+            parse_terms(&["document:https://x/?a=b"]).unwrap(),
+            vec![term("document", "https://x/?a=b")]
+        );
         assert!(matches!(
             parse_terms(&["nothing"]),
             Err(QueryError::Malformed(_))

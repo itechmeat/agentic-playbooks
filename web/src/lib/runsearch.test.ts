@@ -85,6 +85,11 @@ describe('runsearch', () => {
   it('surfaces the server reason for a refused search, not the raw query', () => {
     expect(searchErrorText({ detail: 'value too long' })).toBe('value too long')
     expect(searchErrorText(new Error('/api/runs?search=1&field=a%3Ab: HTTP 400'))).toBe('HTTP 400')
+    // `requestJson` names the response's absolute URL: its origin and its
+    // query (the search terms) are dropped too.
+    expect(
+      searchErrorText(new Error('http://127.0.0.1:7878/api/runs?search=1&field=customer%3AAcme: workspace w1: boom')),
+    ).toBe('workspace w1: boom')
     expect(searchErrorText('boom')).toBe('boom')
   })
 })

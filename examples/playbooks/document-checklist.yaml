@@ -7,8 +7,9 @@ description: >-
   MUST item fails, a person edits the document and says so; only the
   failed items are checked again, at most three times, then the person
   accepts the open findings or rejects the document. SHOULD findings stay
-  in the report and never block. Nothing here edits the document but the
-  person.
+  in the report and never block. The check agents are told not to edit the
+  document; apb does not enforce it (`protect` takes static globs, and the
+  document is a param).
   Coverage of the checklist (every item has a verdict) is what the agent
   reports in `unchecked`: apb does not parse the checklist itself.
 version: 1.0.0
@@ -79,6 +80,8 @@ nodes:
       fields: [must_failed, should_failed, unchecked, coverage]
     results:
       - path: check-report.md
+  # The re-check gave every item it looked at a verdict? Else a person.
+  - { id: recheck_coverage, type: condition, title: Every re-checked item has a verdict }
   - { id: recheck_verdict, type: condition, title: Any MUST item still failed }
   - id: decide
     type: human_review
@@ -104,7 +107,9 @@ edges:
   - { from: fix, to: recheck, condition: { type: review_status, equals: fixed } }
   - { from: fix, to: accepted_with_open_findings, condition: { type: review_status, equals: accept_open } }
   - { from: fix, to: rejected, condition: { type: review_status, equals: reject } }
-  - { from: recheck, to: recheck_verdict }
+  - { from: recheck, to: recheck_coverage }
+  - { from: recheck_coverage, to: recheck_verdict, condition: { type: output_field, node: recheck, field: unchecked, equals: "0" } }
+  - { from: recheck_coverage, to: decide, fallback: true }
   - { from: recheck_verdict, to: done, condition: { type: output_field, node: recheck, field: must_failed, equals: "0" } }
   - { from: recheck_verdict, to: fix, condition: { type: node_status, node: recheck, equals: success }, max_traversals: 2 }
   - { from: recheck_verdict, to: decide, fallback: true }

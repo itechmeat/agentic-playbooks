@@ -33,8 +33,9 @@ twin of [document-checklist](document-checklist.md).
    (condition node, finish node)
 4. Otherwise a revise agent fixes the document for the failed MUST items,
    never touching the checklist, and a re-check looks at those items only,
-   at most three revisions in all. (agent nodes, `protect`, bounded loop
-   edge)
+   at most three revisions in all; a re-check that leaves an item without
+   a verdict goes to a person. (agent nodes, `protect`, bounded loop
+   edge, condition node)
 5. Still failing, a person accepts the open findings (the run ends success
    as `accepted_with_open_findings`) or rejects the document (failure).
    (human_review gate, review_status edges)
@@ -65,7 +66,9 @@ examples/playbooks/design-doc-check.yaml runs every step above. The gaps:
 1. Coverage is the agent's own count: the checklist is a file the agent
    reads, not a structured register apb checks item by item.
 2. `protect` takes static globs, so the example protects `docs/design/**`
-   rather than exactly the `document` param.
+   rather than exactly the `document` param, and `docs/checklists/**`
+   rather than exactly the `checklist` param: a checklist kept elsewhere is
+   not kept from the revise agent.
 3. A missing `unchecked` field only warns (`output_fields_missing`); the
    example routes it through the fallback to the re-check and the person.
 

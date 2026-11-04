@@ -20,7 +20,7 @@
   let { rows }: { rows: EvidenceRow[] } = $props()
 </script>
 
-{#each rows as r (r.session)}
+{#each rows as r, ri (ri)}
   <section class="evidence" data-testid="evidence-row">
     <h4>Evidence · {evidenceHead(r)}</h4>
     <p class="muted">
@@ -28,7 +28,7 @@
     </p>
     {#if !r.closed}<p class="problem" data-testid="evidence-open">session still open: it serves its attempt only</p>{/if}
     {#if r.output_unsupported}<p class="problem" data-testid="evidence-output-unsupported">the attempt's output was not backed by a claims list</p>{/if}
-    {#each r.views as v (v.id)}
+    {#each r.views as v, vi (vi)}
       {@const line = collectorLine(v)}
       {#if line}<p class="muted" data-testid="evidence-collector">{line}</p>{/if}
     {/each}

@@ -1,6 +1,6 @@
 //! `scripts/daily-cleanup.sh`: on a git that cannot list worktrees with
 //! `--porcelain -z` (older than 2.36) the script warns, skips the worktree
-//! steps and still runs the rest to its end; a merged worktree goes only
+//! steps (the prune included) and still runs the rest to its end; a merged worktree goes only
 //! when every apb run in it has ended and its busy lock is not held.
 
 use std::path::Path;
@@ -85,6 +85,9 @@ fn cleanup_finishes_when_git_cannot_list_worktrees() {
         "{stderr}"
     );
     assert!(stdout.contains("daily cleanup: done"), "{stdout}");
+    // No listing, no prune: it would drop the records of a worktree whose
+    // path is only unavailable for now.
+    assert!(!stdout.contains("worktree prune"), "{stdout}");
 }
 
 fn git(dir: &Path, args: &[&str]) {

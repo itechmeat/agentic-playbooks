@@ -458,11 +458,21 @@ fn the_checklist_examples_validate_and_their_scenarios_pass_at_quick() {
     for (id, scenarios) in [
         (
             "design-doc-check",
-            ["clean", "must-fail-then-fixed", "open-findings"],
+            [
+                "clean",
+                "must-fail-then-fixed",
+                "open-findings",
+                "recheck-unchecked",
+            ],
         ),
         (
             "document-checklist",
-            ["clean", "fixed-by-person", "open-findings"],
+            [
+                "clean",
+                "fixed-by-person",
+                "open-findings",
+                "recheck-unchecked",
+            ],
         ),
     ] {
         register_playbook(

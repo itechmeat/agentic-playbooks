@@ -97,5 +97,5 @@ export function searchErrorText(e: unknown): string {
   const err = e as { detail?: string; message?: string } | undefined
   if (typeof err?.detail === 'string' && err.detail) return err.detail
   const msg = err?.message ?? String(e)
-  return msg.replace(/^\/api\/runs[^:]*:\s*/, '')
+  return msg.replace(/^(?:[a-z][a-z0-9+.-]*:\/\/[^/]*)?\/api\/runs[^:]*:\s*/i, '')
 }

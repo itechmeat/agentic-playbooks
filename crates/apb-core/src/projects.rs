@@ -507,9 +507,14 @@ fn verifiably_gone(path: &Path) -> bool {
 
 /// Transitions `unreachable` entries older than the threshold to
 /// `tombstoned`, physically removes `tombstoned` entries older than the
-/// purge threshold, and drops the long unreachable ones
-/// ([`drop_long_unreachable`]). Called inside the lock on every access.
-fn apply_time_transitions(file: &mut ProjectsFile, cfg: &GlobalConfig) {
+/// purge threshold whose path is not there, and drops the long unreachable
+/// ones ([`drop_long_unreachable`]). Called inside the lock on every
+/// access. Without a config that loads (`None`) nothing moves: the
+/// configured limits are applied again once it loads.
+fn apply_time_transitions(file: &mut ProjectsFile, cfg: Option<&GlobalConfig>) {
+    let Some(cfg) = cfg else {
+        return;
+    };
     let now = crate::clock::now_ms_u64();
     drop_long_unreachable(file, cfg, now);
     let unreach = unreachable_ms(cfg);
@@ -520,7 +525,12 @@ fn apply_time_transitions(file: &mut ProjectsFile, cfg: &GlobalConfig) {
             State::Unreachable { since_ms } if now.saturating_sub(*since_ms) >= unreach => {
                 e.state = State::Tombstoned { since_ms: now };
             }
-            State::Tombstoned { since_ms } if now.saturating_sub(*since_ms) >= purge => {
+            // A path that still stats (a checkout another id took over)
+            // is never purged, as the auto-drop keeps it.
+            State::Tombstoned { since_ms }
+                if now.saturating_sub(*since_ms) >= purge
+                    && std::fs::symlink_metadata(&e.path).is_err() =>
+            {
                 to_remove.push(id.clone());
             }
             _ => {}
@@ -539,7 +549,8 @@ pub fn touch(root: &Path) {
     if crate::process_mode::is_read_only() {
         return;
     }
-    let cfg = GlobalConfig::load().unwrap_or_default();
+    let loaded = GlobalConfig::load().ok();
+    let cfg = loaded.clone().unwrap_or_default();
     if registration_disabled(&cfg) {
         return;
     }
@@ -549,7 +560,7 @@ pub fn touch(root: &Path) {
     let now = crate::clock::now_ms_u64();
 
     let _ = with_registry(Access::Write, |file| {
-        apply_time_transitions(file, &cfg);
+        apply_time_transitions(file, loaded.as_ref());
         register_in(file, &workspace_id, root, now);
     });
 }
@@ -728,14 +739,22 @@ fn dot_git_stamp(dot_git: &Path) -> Option<DotGitStamp> {
 static PARENT_ROOTS: Mutex<BTreeMap<PathBuf, (DotGitStamp, ParentRoot)>> =
     Mutex::new(BTreeMap::new());
 
-fn cached_parent_root(root: &Path) -> ParentRoot {
+/// The stamp of the `.git` file of the linked worktree `root` belongs to,
+/// when it has one that can be stamped.
+fn root_stamp(root: &Path) -> Option<DotGitStamp> {
+    dot_git_stamp(&linked_dot_git(root)?)
+}
+
+/// git's answer for `root`, with the stamp of its `.git` file taken before
+/// git was asked (`None` when there is none to take).
+fn cached_parent_root(root: &Path) -> (Option<DotGitStamp>, ParentRoot) {
     let Some(dot_git) = linked_dot_git(root) else {
-        return ParentRoot::None;
+        return (None, ParentRoot::None);
     };
     // Stamped before git is asked: a `.git` rewritten meanwhile leaves an
     // older stamp, so the next listing asks again.
     let Some(stamp) = dot_git_stamp(&dot_git) else {
-        return ask_git(root);
+        return (None, ask_git(root));
     };
     let known = PARENT_ROOTS.lock().ok().and_then(|m| {
         m.get(root)
@@ -743,16 +762,20 @@ fn cached_parent_root(root: &Path) -> ParentRoot {
             .map(|(_, answer)| answer.clone())
     });
     if let Some(known) = known {
-        return known;
+        return (Some(stamp), known);
     }
     let found = ask_git(root);
     if found != ParentRoot::Unknown
         && let Ok(mut m) = PARENT_ROOTS.lock()
     {
-        m.insert(root.to_path_buf(), (stamp, found.clone()));
+        m.insert(root.to_path_buf(), (stamp.clone(), found.clone()));
     }
-    found
+    (Some(stamp), found)
 }
+
+/// git's answers for the orphaned entries, by path, each with the `.git`
+/// stamp it was asked under.
+type ParentAnswers = BTreeMap<PathBuf, (Option<DotGitStamp>, ParentRoot)>;
 
 /// Fills in the parent of every active entry that has none and is a git
 /// linked worktree of a registered project: entries registered before
@@ -764,9 +787,10 @@ fn cached_parent_root(root: &Path) -> ParentRoot {
 /// [`with_registry`] call: the first pass, over the snapshot read before the
 /// lock, asks; a pass under the lock only reads them, so git never runs while
 /// other registry writers wait. An entry first seen under the lock is left
-/// for the next listing. The change is written once, under the lock,
-/// atomically.
-fn backfill_parents(file: &mut ProjectsFile, asked: &mut Option<BTreeMap<PathBuf, ParentRoot>>) {
+/// for the next listing, and so is one whose `.git` file changed since git
+/// was asked (its stamp is read again, git is not). The change is written
+/// once, under the lock, atomically.
+fn backfill_parents(file: &mut ProjectsFile, asked: &mut Option<ParentAnswers>) {
     let orphans: Vec<(String, PathBuf)> = file
         .entries
         .values()
@@ -783,9 +807,12 @@ fn backfill_parents(file: &mut ProjectsFile, asked: &mut Option<BTreeMap<PathBuf
             .collect()
     });
     for (id, path) in orphans {
-        let Some(ParentRoot::At(parent_root)) = answers.get(&path) else {
+        let Some((stamp, ParentRoot::At(parent_root))) = answers.get(&path) else {
             continue;
         };
+        if root_stamp(&path) != *stamp {
+            continue;
+        }
         if let ParentLookup::At(parent) = parent_entry(file, &id, parent_root)
             && let Some(e) = file.entries.get_mut(&id)
         {
@@ -870,14 +897,14 @@ pub fn bind_id(root: &Path) -> std::io::Result<String> {
 /// ([`backfill_parents`]). The registry is written only when a state or a
 /// parent actually changed.
 pub fn list_active() -> Vec<ProjectEntry> {
-    let cfg = GlobalConfig::load().unwrap_or_default();
+    let cfg = GlobalConfig::load().ok();
     let now = crate::clock::now_ms_u64();
     let mut asked = None;
     with_registry(Access::View, |file| {
         for e in file.entries.values_mut() {
             reconcile(e, now);
         }
-        apply_time_transitions(file, &cfg);
+        apply_time_transitions(file, cfg.as_ref());
         backfill_parents(file, &mut asked);
         file.entries
             .values()
@@ -902,10 +929,10 @@ pub fn list_reachable() -> Vec<ProjectEntry> {
 /// otherwise it turns `unreachable` and a structured error is returned.
 /// Time-based transitions are applied along the way.
 pub fn resolve_root(workspace_id: &str) -> Result<PathBuf, ProjectAccessError> {
-    let cfg = GlobalConfig::load().unwrap_or_default();
+    let cfg = GlobalConfig::load().ok();
     let now = crate::clock::now_ms_u64();
     with_registry(Access::View, |file| {
-        apply_time_transitions(file, &cfg);
+        apply_time_transitions(file, cfg.as_ref());
         let Some(entry) = file.entries.get_mut(workspace_id) else {
             return Err(ProjectAccessError::Unknown(workspace_id.to_string()));
         };
@@ -1610,9 +1637,17 @@ mod tests {
             .arg("-C")
             .arg(dir)
             .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
             .args(args)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .output()
             .unwrap();
         assert!(out.status.success(), "git {args:?}: {out:?}");
@@ -1796,6 +1831,58 @@ mod tests {
             Some(main_id.as_str()),
             "the listing after the change nests the worktree"
         );
+    }
+
+    /// An answer git gave before the lock stands only while the worktree's
+    /// `.git` stamp is the one it was asked under: a `.git` rewritten
+    /// meanwhile (a `git worktree move` or `repair`) leaves the entry for
+    /// the next listing instead of recording a parent from the old file.
+    #[test]
+    fn an_answer_from_an_older_dot_git_is_not_applied() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        setup(cfg.path());
+        let _g = EnvGuard;
+
+        let base = tempfile::tempdir().unwrap();
+        let main = base.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q"]);
+        std::fs::write(main.join(".gitignore"), ".apb/workspace.local\n").unwrap();
+        git(&main, &["add", ".gitignore"]);
+        git(&main, &["commit", "-q", "-m", "init"]);
+        init_project(&main).unwrap();
+        let main_id = crate::workspace::ensure_id(&main).unwrap();
+        let wt = base.path().join("wt");
+        git(&main, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+        init_project(&wt).unwrap();
+        let wt_id = crate::workspace::ensure_id(&wt).unwrap();
+        write_old_registry(
+            cfg.path(),
+            &[(&main_id, &main, "main"), (&wt_id, &wt, "wt")],
+        );
+        let Loaded::Writable(file) = read_file(&registry_file(cfg.path())) else {
+            panic!("registry not writable");
+        };
+        let path = PathBuf::from(&file.entries[&wt_id].path);
+        let parent_root = std::fs::canonicalize(&main).unwrap();
+        let answered = |stamp: Option<DotGitStamp>| {
+            let mut f = file.clone();
+            let mut asked = Some(BTreeMap::from([(
+                path.clone(),
+                (stamp, ParentRoot::At(parent_root.clone())),
+            )]));
+            backfill_parents(&mut f, &mut asked);
+            f.entries[&wt_id].parent_workspace_id.clone()
+        };
+        let now = dot_git_stamp(&wt.join(".git"));
+        assert!(now.is_some());
+        assert_eq!(answered(now).as_deref(), Some(main_id.as_str()));
+        let older = DotGitStamp {
+            bytes: b"gitdir: /elsewhere/.git/worktrees/wt\n".to_vec(),
+            modified: None,
+        };
+        assert_eq!(answered(Some(older)), None);
     }
 
     fn entry(id: &str, name: &str, parent: Option<&str>) -> ProjectEntry {
@@ -2122,6 +2209,22 @@ mod tests {
             raw.contains(&hidden_id),
             "a stat error other than NotFound must never drop an entry"
         );
+
+        // A tombstone past the purge limit is kept too while its path
+        // exists: the listing purges only a path that is not there.
+        let _ = with_registry(Access::Write, |file| {
+            if let Some(e) = file.entries.get_mut(&id) {
+                e.state = State::Tombstoned {
+                    since_ms: now.saturating_sub(400 * MS_PER_DAY),
+                };
+            }
+        });
+        let _ = list_active();
+        let raw = std::fs::read_to_string(registry_file(cfg.path())).unwrap();
+        assert!(
+            raw.contains(&format!("\"{id}\"")),
+            "a tombstone whose path still exists must never be purged"
+        );
     }
 
     /// A config.yaml that does not parse must not silently lower the
@@ -2157,6 +2260,14 @@ mod tests {
         assert!(
             raw.contains(&id),
             "a broken config must not fall back to the 30-day default drop"
+        );
+        // The listings and the lookup by id skip it as well.
+        let _ = list_active();
+        let _ = resolve_root(&id);
+        let raw = std::fs::read_to_string(registry_file(cfg.path())).unwrap();
+        assert!(
+            raw.contains(&id),
+            "a listing with a broken config must not drop the entry"
         );
     }
 

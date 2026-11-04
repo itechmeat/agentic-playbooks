@@ -13,7 +13,8 @@
 - Fix the responsible boundary. Verify the original scenario and the
   guarantees around it.
 - Write the regression test before the fix and see it fail for the named
-  cause; gate it with the apb-test-audit skill.
+  cause; gate it with the apb-test-audit skill. When a test is not
+  practical, record why and what evidence stands in for it.
 - A containment without a known cause is a mitigation, not a verified fix.
   Label it so.
 

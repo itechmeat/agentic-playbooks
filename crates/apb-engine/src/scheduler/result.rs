@@ -311,11 +311,13 @@ impl Builder<'_> {
         });
     }
 
-    /// Scrubs and stages one text; `Err(reason)` when it was not stored.
+    /// Scrubs `text` and stages it: the digest, whether the scrub changed
+    /// it, its size and the stored (scrubbed) text; `Err(reason)` when it
+    /// was not stored.
     fn stage(
         &mut self,
         text: &str,
-    ) -> std::io::Result<Result<(String, bool, u64), OmissionReason>> {
+    ) -> std::io::Result<Result<(String, bool, u64, String), OmissionReason>> {
         if text.contains('\0') {
             return Ok(Err(OmissionReason::BinaryNotSupported));
         }
@@ -324,7 +326,10 @@ impl Builder<'_> {
         };
         let redacted = clean != text;
         match self.txn.stage_object(clean.as_bytes())? {
-            Staged::Stored(digest) => Ok(Ok((digest, redacted, clean.len() as u64))),
+            Staged::Stored(digest) => {
+                let size = clean.len() as u64;
+                Ok(Ok((digest, redacted, size, clean)))
+            }
             full @ (Staged::SnapshotFull | Staged::RunFull) => {
                 self.snapshot_full = matches!(full, Staged::SnapshotFull);
                 self.stopped.insert(IncompleteReason::StorageLimit);
@@ -417,7 +422,7 @@ fn fill(req: &Request<'_>, b: &mut Builder<'_>, scrub_ok: bool) -> std::io::Resu
     }
     // The output is reserved first.
     match b.stage(req.output)? {
-        Ok((digest, redacted, size)) => b.entries.push(SnapshotEntry {
+        Ok((digest, redacted, size, _)) => b.entries.push(SnapshotEntry {
             part: EntryPart::Output,
             scope: None,
             path: None,
@@ -707,14 +712,15 @@ fn file(
         b.omit(EntryPart::File, at, OmissionReason::BinaryNotSupported);
         return Ok(());
     };
-    // A declared package that does not parse is kept as plain text with
-    // its first problem ([`apb_core::records`]).
-    let records_invalid = match decl.format {
-        ResultFormat::Records => apb_core::records::parse(text).err(),
-        ResultFormat::Text => None,
-    };
     match b.stage(text)? {
-        Ok((digest, redacted, size)) => {
+        Ok((digest, redacted, size, stored)) => {
+            // A declared package that does not parse as stored (after the
+            // scrub) is kept as plain text with its first problem
+            // ([`apb_core::records`]).
+            let records_invalid = match decl.format {
+                ResultFormat::Records => apb_core::records::parse(&stored).err(),
+                ResultFormat::Text => None,
+            };
             let path = b.path(rel);
             b.entries.push(SnapshotEntry {
                 part: EntryPart::File,
