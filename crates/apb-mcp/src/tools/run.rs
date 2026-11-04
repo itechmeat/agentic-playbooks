@@ -204,13 +204,16 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
     );
     let node_times = apb_engine::liveness::node_times(&view.events);
     let progress = view.progress.as_ref();
-    let (cfg, config_error) = match apb_engine::run_config::read_run_config(&dir) {
-        Ok(cfg) => (cfg, None),
-        Err(e) => (
-            apb_engine::run_config::RunConfig::default(),
-            Some(e.to_string()),
-        ),
-    };
+    // The config error comes from the redactor, which parsed the run's
+    // own config while it resolved its secrets: apb's own fixed sentence,
+    // never the parser's quote of the value it choked on, and it is
+    // added back after the redaction below (the answer withholds, the
+    // sentence stays readable).
+    let config_error = apb_engine::run_redact::WorkspaceRedaction::new(root)
+        .run_dir(&dir)
+        .config_error()
+        .map(str::to_string);
+    let cfg = apb_engine::run_config::read_run_config(&dir).unwrap_or_default();
     // Lifted out of `progress` to the top level (spec 2026-07-20-interactive-
     // nodes, Task 8; issue #42 finding 4; issue #45 finding 4): an
     // intermediary that calls `run_status` must see a pending question,
@@ -244,9 +247,6 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
         "superseded_by": cfg.superseded_by,
         "failure_reason": failure_reason,
     });
-    if let Some(e) = config_error {
-        out["config_error"] = json!(e);
-    }
     // Host execution mode (0.23.0): the run's execution block (host mode, or
     // a `cli` run with the host fallback) and the tasks the host executes,
     // prompts inline. `pending_tasks` is there only while a task waits, as in
@@ -307,7 +307,13 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
         super::actions::mark(&mut actions, runs, caller);
     }
     super::actions::add_to(&mut out, &actions, caller);
-    Ok(super::redacted_with(&redaction, &dir, out))
+    let mut out = super::redacted_with(&redaction, &dir, out);
+    // Added after the redaction: the sentence is apb's own fixed words,
+    // and a withheld answer must still name why the run's text withholds.
+    if let Some(e) = config_error {
+        out["config_error"] = json!(e);
+    }
+    Ok(out)
 }
 
 /// The run's launch authorization (who launched it, how an `ask` or `deny`
@@ -541,10 +547,25 @@ pub fn drop_inline_prompts(out: &mut Value) {
 }
 
 /// The execution block of a run's manifest, for `run_status`: `null` for a
-/// plain `cli` run.
+/// plain `cli` run. The mode reads as the base mode (`cli`, `host`): the
+/// internal `+guard` suffix an old apb refuses on is reported as the
+/// `guarded` attribute instead, so a host that matches `mode == "host"`
+/// keeps matching.
 fn run_execution(run_dir: &Path) -> Value {
     match apb_engine::manifest::read(run_dir) {
-        Ok(Some(m)) => json!(m.execution),
+        Ok(Some(m)) => {
+            let mut v = match m.execution.as_ref() {
+                Some(e) => serde_json::to_value(e).unwrap_or(Value::Null),
+                None => Value::Null,
+            };
+            if let (Some(obj), Some(_)) = (v.as_object_mut(), m.execution.as_ref()) {
+                obj.insert("mode".to_string(), json!(m.base_mode()));
+                if m.is_guarded() {
+                    obj.insert("guarded".to_string(), json!(true));
+                }
+            }
+            v
+        }
         _ => Value::Null,
     }
 }
@@ -1543,6 +1564,43 @@ mod progress_tests {
                 .get("limits")
                 .is_none()
         );
+    }
+
+    /// `run_status` for a run whose `run.yaml` does not parse carries
+    /// `config_error` as apb's fixed sentence (never the parser's quote
+    /// of the value it choked on), next to the withheld text; a run with
+    /// a readable config carries no `config_error`.
+    #[test]
+    fn run_status_names_a_config_error_and_keeps_the_text_withheld() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":0,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+                "\n",
+                r#"{"seq":1,"ts":1000,"type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"ok"}"#,
+                "\n",
+                r#"{"seq":2,"ts":2000,"type":"run_finished","outcome":"succeeded"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(run_dir.join("run.yaml"), "mode: guarded\n").unwrap();
+        let out = run_status(tmp.path(), "r1").unwrap();
+        let sentence = out["config_error"].as_str().unwrap();
+        assert!(
+            sentence.starts_with("run.yaml does not parse for this apb")
+                && !sentence.contains("guarded"),
+            "{sentence}"
+        );
+        assert_eq!(out["secrets_unresolved"], true);
+        // The control: a readable config carries no error.
+        std::fs::write(run_dir.join("run.yaml"), "params: {}\n").unwrap();
+        let out = run_status(tmp.path(), "r1").unwrap();
+        assert!(out.get("config_error").is_none());
+        assert!(out.get("secrets_unresolved").is_none());
     }
 
     /// `failure_reason` stays absent (JSON `null`) for a run that is not

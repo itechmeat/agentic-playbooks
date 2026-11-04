@@ -86,7 +86,15 @@ pub(crate) fn sanitize_for_terminal(s: &str, max: usize) -> String {
     // Redacted before anything collapses or cuts it, so neither splits a
     // secret value into a shape the redactor no longer knows.
     let s = shown(s);
-    let cleaned = apb_core::text::replace_hidden(&s, ' ');
+    sanitize_plain(&s, max)
+}
+
+/// [`sanitize_for_terminal`] without the redaction step, for text apb
+/// built itself from fixed words (a config error sentence): a redactor
+/// that withholds would turn it into `[secrets_unresolved]` and hide the
+/// very sentence the row is there to show.
+pub(crate) fn sanitize_plain(s: &str, max: usize) -> String {
+    let cleaned = apb_core::text::replace_hidden(s, ' ');
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     let trimmed = collapsed.trim();
     if trimmed.chars().count() <= max {

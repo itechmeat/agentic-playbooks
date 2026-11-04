@@ -1151,16 +1151,7 @@ pub(crate) fn prepare_placed(
     // an apb from 0.23 on refuses to resume it (candidate A of the E5
     // investigation): the manifest is write-once, so the value is decided
     // here, before the origin stamp.
-    let guarded = apb_core::validate::guarded_features(&playbook)
-        .into_iter()
-        .any(|f| {
-            matches!(
-                f,
-                apb_core::validate::GuardedFeature::ApprovalBinding
-                    | apb_core::validate::GuardedFeature::PersonOnly
-                    | apb_core::validate::GuardedFeature::RequiredApproval
-            )
-        });
+    let guarded = crate::manifest::manifest_guard(&playbook);
     manifest.execution =
         crate::manifest::ManifestExecution::from_resolved_guarded(&execution, guarded);
     // 0.24.0: the irreversible consent, only for a run that needed it.

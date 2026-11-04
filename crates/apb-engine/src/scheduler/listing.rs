@@ -322,9 +322,13 @@ fn list_runs_with(
         } else {
             None
         };
+        // Only a file that is there and does not parse lands here: a run
+        // without a config reads as the default. The message is apb's own
+        // fixed sentence, never the parser's quote of the value it
+        // choked on.
         let (cfg, config_error) = match crate::run_config::read_run_config(&entry.path()) {
             Ok(cfg) => (Some(cfg), None),
-            Err(e) => (None, Some(e.to_string())),
+            Err(e) => (None, Some(crate::run_config::config_error_message(&e))),
         };
         let parent_run = cfg.as_ref().and_then(|c| c.parent_run.clone());
         let continued_from = cfg.as_ref().and_then(|c| c.continued_from.clone());

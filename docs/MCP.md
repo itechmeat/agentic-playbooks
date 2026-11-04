@@ -709,7 +709,9 @@ elsewhere. `model_hint` is advisory only: the model the profile declares for a
 fallback entry or a routed tier; `hint_source` names the chain step and
 `fallback_of` what closed the previous one, so a fallback task reads as a
 declaration, not as the model that did the work. `run_status` carries the run's `execution` block (absent on a `cli`
-run started without the host fallback) and `pending_tasks` only while a task
+run started without the host fallback and without a person-only gate or an
+approval; on such a guarded run it carries `guarded: true` and the `mode`
+stays the base mode, `cli` or `host`) and `pending_tasks` only while a task
 waits (absent, never null or empty, in `run_status`, `run_wait` and
 `supervisor_wait_event` alike), and `supervisor_wait_event` returns
 `reason: host_task` with `pending_tasks` for a session that supervises its

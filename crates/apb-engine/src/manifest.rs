@@ -518,6 +518,24 @@ impl ManifestExecution {
     }
 }
 
+/// Whether a run of `playbook` writes the manifest guard: its definition
+/// uses a person-only gate or an approval, the runs the journal
+/// `run_guard` follows today. An evidence-only run keeps the journal
+/// guard alone: the manifest stays as it was, so an older apb that
+/// stopped such a run can still resume it past the ended guard.
+pub fn manifest_guard(playbook: &apb_core::schema::Playbook) -> bool {
+    apb_core::validate::guarded_features(playbook)
+        .into_iter()
+        .any(|f| {
+            matches!(
+                f,
+                apb_core::validate::GuardedFeature::ApprovalBinding
+                    | apb_core::validate::GuardedFeature::PersonOnly
+                    | apb_core::validate::GuardedFeature::RequiredApproval
+            )
+        })
+}
+
 impl RunExecutionManifest {
     /// The run's execution mode. An unknown mode (written by a newer apb) is
     /// an error naming the version mismatch: a binary that does not know the
@@ -547,6 +565,20 @@ impl RunExecutionManifest {
         self.execution
             .as_ref()
             .is_some_and(|e| e.mode.ends_with(ManifestExecution::GUARD_SUFFIX))
+    }
+
+    /// The execution mode a surface shows: the part before the guard
+    /// suffix, so the internal suffix never reaches a person or a host
+    /// that matches on the mode ([`Self::is_guarded`] carries it as its
+    /// own attribute instead). `cli` for a run without an execution block.
+    pub fn base_mode(&self) -> &str {
+        let mode = self
+            .execution
+            .as_ref()
+            .map(|e| e.mode.as_str())
+            .unwrap_or(apb_core::execution::ExecutionMode::Cli.as_str());
+        mode.strip_suffix(ManifestExecution::GUARD_SUFFIX)
+            .unwrap_or(mode)
     }
 
     /// Whether the run executes its agent steps as host tasks.
@@ -894,6 +926,37 @@ mod tests {
         );
     }
 
+    /// A person-only gate, an approval binding or a required approval
+    /// writes the manifest guard; an evidence-only run and a plain run
+    /// do not.
+    #[test]
+    fn manifest_guard_names_the_approval_features_only() {
+        let base = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n";
+        let with = |node: &str| {
+            apb_core::schema::Playbook::from_yaml(&base.replace(
+                "  - { id: done, type: finish, outcome: success }",
+                &format!("{node}\n  - {{ id: done, type: finish, outcome: success }}"),
+            ))
+            .unwrap()
+        };
+        assert!(!manifest_guard(
+            &apb_core::schema::Playbook::from_yaml(base).unwrap()
+        ));
+        for node in [
+            "  - id: gate\n    type: human_review\n    person_only: true\n    options: [approve]\n",
+            "  - id: gate\n    type: human_review\n    approves: { results: [work] }\n    options: [approve]\n",
+            "  - id: work\n    type: agent_task\n    profile: x\n    requires_approval: { gate: gate }\n    prompt: p\n",
+        ] {
+            assert!(manifest_guard(&with(node)), "{node}");
+        }
+        assert!(
+            !manifest_guard(&with(
+                "  - id: work\n    type: agent_task\n    profile: x\n    evidence: { from: [work] }\n    prompt: p\n"
+            )),
+            "evidence only keeps the journal guard"
+        );
+    }
+
     #[test]
     fn a_guarded_manifest_mode_reads_as_its_real_mode() {
         for (mode, want) in [
@@ -912,6 +975,12 @@ mod tests {
                 m.is_host_mode().unwrap(),
                 want == apb_core::execution::ExecutionMode::Host
             );
+            assert_eq!(
+                m.base_mode(),
+                mode.strip_suffix("+guard").unwrap(),
+                "{mode}"
+            );
+            assert_eq!(m.is_guarded(), mode.ends_with("+guard"), "{mode}");
         }
         // A bare `guarded` names no real mode, so it still refuses.
         let dir = tempfile::tempdir().unwrap();

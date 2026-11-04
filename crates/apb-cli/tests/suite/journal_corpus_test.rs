@@ -3876,32 +3876,39 @@ fn e6_synthetic_torn_run_guard_every_resume_refuses() {
     assert!(text[line..end].contains("\"type\":\"run_guard\""), "row E6");
     fs::write(&path, &text[..line + (end - line) / 2]).unwrap();
     let new = new_binary();
-    let old = old_readers(&case)
+    let old: Vec<_> = old_readers(&case)
         .map(|(b, v)| [b, v])
         .into_iter()
-        .flatten();
-    for reader in std::iter::once(new).chain(old) {
-        case.read(&reader, &run);
+        .flatten()
+        .collect();
+    for reader in std::iter::once(&new).chain(old.iter()) {
+        case.read(reader, &run);
         case.restore();
         let before = case.journal_bytes(&run);
-        let ran = case.run(&reader, &["resume", &run]);
-        // An old binary may refuse on the manifest guard first; the new
-        // binary and a binary that checks the journal first refuse on the
-        // torn tail.
+        let ran = case.run(reader, &["resume", &run]);
+        // The new binary accepts the manifest guard, so its refusal must
+        // name the torn tail; an old binary may refuse on the manifest
+        // guard before it reads the journal at all, so either refusal
+        // counts there.
         let torn = ran
             .stderr
             .contains("resume failed: yaml error: EOF while parsing a string");
         let manifest_guard = ran.stderr.contains("cli+guard");
+        let refused = if reader == &new {
+            torn
+        } else {
+            torn || manifest_guard
+        };
         assert!(
-            ran.code == Some(2) && (torn || manifest_guard),
+            ran.code == Some(2) && refused,
             "row E6: {} refuses the torn tail: {ran:?}",
-            label(&reader)
+            label(reader)
         );
         assert_eq!(
             case.journal_bytes(&run),
             before,
             "row E6: {} wrote nothing",
-            label(&reader)
+            label(reader)
         );
     }
 }

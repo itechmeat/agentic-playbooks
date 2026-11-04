@@ -1606,6 +1606,41 @@ fn print_run_rows(root: &Path, runs: Vec<apb_engine::RunSummary>) {
     // ancestors'); the workspace's connector secrets resolved once.
     let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
     for (r, mode) in runs.into_iter().zip(modes) {
+        // A run whose redactor withholds (its config or a run of its
+        // tree does not parse) still lists: the row keeps the facts apb
+        // wrote itself (ids, state, markers) and names the config error;
+        // only the run's own reported text stays withheld, so one
+        // unreadable `run.yaml` hides no other row and no position in
+        // the table. The journal-sourced detail markers (a pause, a
+        // finding, search fields) are left out: their text may hold a
+        // value no redactor could read.
+        let mut line = format!("{}\t{}\t{}", r.run_id, r.playbook, r.status);
+        if show_mode {
+            line.push('\t');
+            line.push_str(mode.as_deref().unwrap_or("cli"));
+        }
+        if redaction.run(&r.run_id).withholds() {
+            if r.driver_dead {
+                line.push_str("\tdriver dead");
+            }
+            if r.unknown_events > 0 {
+                line.push('\t');
+                line.push_str(&unknown_events_note(r.unknown_events));
+            }
+            if let Some(scope) = &r.scope {
+                line.push_str(&format!("\t{scope}"));
+            }
+            if let Some(e) = &r.config_error {
+                line.push_str(&format!(
+                    "\tconfig error: {}",
+                    crate::util::sanitize_plain(e, QUESTION_TEXT_MAX * 2)
+                ));
+            }
+            // Printed directly: every field on the line is a fact apb
+            // wrote itself, and `say` would withhold the whole line.
+            println!("{line}");
+            continue;
+        }
         crate::util::with_run_redaction(redaction.run(&r.run_id), || {
             // The status column stays exactly as it always has (a script
             // parsing it must keep working); a dead driver and events a
@@ -1643,7 +1678,7 @@ fn print_run_rows(root: &Path, runs: Vec<apb_engine::RunSummary>) {
             if let Some(e) = &r.config_error {
                 line.push_str(&format!(
                     "\tconfig error: {}",
-                    sanitize_for_terminal(e, QUESTION_TEXT_MAX * 2)
+                    crate::util::sanitize_plain(e, QUESTION_TEXT_MAX * 2)
                 ));
             }
             if let Some(fields) = r.search.as_ref().and_then(search_text) {
@@ -1726,11 +1761,19 @@ fn run_detail_text(
             _ => None,
         })
         .unwrap_or_default();
-    say!("{run_id}\t{playbook}\t{}", view.run_status.as_str());
-    if let Err(e) = apb_engine::run_config::read_run_config(&run_dir) {
-        say!(
+    // The header and the config error line print directly: they carry
+    // only facts apb wrote itself, and a run whose `run.yaml` does not
+    // parse keeps its row identifiable while its reported text withholds.
+    println!("{run_id}\t{playbook}\t{}", view.run_status.as_str());
+    // The redactor already parsed the run's own config while it resolved
+    // its secrets: its error is the one sentence, a fixed wording plus
+    // the parser's line and column, never the parser's quote of the
+    // value it choked on (that value may be a secret param a step wrote
+    // into the file).
+    if let Some(e) = redaction.run_dir(&run_dir).config_error() {
+        println!(
             "  config error: {}",
-            sanitize_for_terminal(&e.to_string(), QUESTION_TEXT_MAX * 2)
+            crate::util::sanitize_plain(e, QUESTION_TEXT_MAX * 2)
         );
     }
     say!(

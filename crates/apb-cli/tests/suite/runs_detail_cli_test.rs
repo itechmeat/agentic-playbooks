@@ -707,14 +707,17 @@ fn runs_with_an_id_shows_requested_and_reported_models_and_why_a_step_was_entere
 }
 
 /// A run whose `run.yaml` does not parse shows its own clear config
-/// error in the listing and in its detail, and hides no other run: no
-/// line reads `[secrets_unresolved]` for it.
+/// error in the listing and in its detail, keeps every other run fully
+/// readable, and never prints a secret value: its own text withholds as
+/// `[secrets_unresolved]` until the file reads again.
 #[test]
-fn a_run_with_an_unreadable_config_shows_its_error_and_hides_no_other_run() {
+fn a_run_with_an_unreadable_config_names_the_error_hides_no_run_and_no_secret() {
     let dir = project();
     let bad = dir.path().join(".apb/runs/bad-1");
     fs::create_dir_all(&bad).unwrap();
     fs::write(bad.join("events.jsonl"), JOURNAL).unwrap();
+    // `guarded` is no run mode: the file does not parse. The value the
+    // parser quotes must never reach a surface.
     fs::write(bad.join("run.yaml"), "mode: guarded\n").unwrap();
     apb()
         .arg("runs")
@@ -722,10 +725,12 @@ fn a_run_with_an_unreadable_config_shows_its_error_and_hides_no_other_run() {
         .assert()
         .success()
         .stdout(predicate::str::contains("demo-1\tdemo\tsucceeded"))
+        // The bad run keeps its journal facts and names the error.
         .stdout(predicate::str::contains("bad-1\tdemo\tsucceeded"))
         .stdout(predicate::str::contains("config error:"))
-        .stdout(predicate::str::contains("[secrets_unresolved]").not());
-    // The parse error names the unknown variant, not a withheld text.
+        .stdout(predicate::str::contains("unknown variant").not());
+    // The detail shows the error and the withheld text, never the
+    // parser's quote.
     let out = apb()
         .args(["runs", "bad-1"])
         .current_dir(dir.path())
@@ -734,14 +739,16 @@ fn a_run_with_an_unreadable_config_shows_its_error_and_hides_no_other_run() {
     assert!(out.status.success(), "{out:?}");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.contains("config error:")
-            && text.contains("unknown variant")
-            && text.contains("guarded"),
+        text.contains("config error:") && text.contains("run.yaml does not parse for this apb"),
         "the detail names the config error:\n{text}"
     );
     assert!(
-        !text.contains("[secrets_unresolved]") && text.contains("demo 1.0.0\tsucceeded"),
-        "the detail shows the run:\n{text}"
+        !text.contains("unknown variant") && !text.contains("guarded"),
+        "no parser quote of the file's value:\n{text}"
+    );
+    assert!(
+        text.contains("demo 1.0.0\tsucceeded") && text.contains("[secrets_unresolved]"),
+        "the run shows with its text withheld:\n{text}"
     );
     // The JSON list keeps the good run readable and names the error on
     // the bad one.
@@ -753,7 +760,47 @@ fn a_run_with_an_unreadable_config_shows_its_error_and_hides_no_other_run() {
     assert!(out.status.success(), "{out:?}");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.contains("\"config_error\"") && !text.contains("[secrets_unresolved]"),
-        "the JSON names the error and withholds nothing:\n{text}"
+        text.contains("\"config_error\"")
+            && text.contains("run.yaml does not parse for this apb")
+            && !text.contains("unknown variant"),
+        "the JSON names the error:\n{text}"
     );
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let rows = v["runs"].as_array().expect("listing rows");
+    let good = rows.iter().find(|r| r["run_id"] == "demo-1").unwrap();
+    assert!(
+        good.get("secrets_unresolved").is_none(),
+        "the good run withholds nothing: {good}"
+    );
+    let bad_row = rows.iter().find(|r| r["run_id"] == "bad-1").unwrap();
+    assert_eq!(bad_row["secrets_unresolved"], true);
+    assert_eq!(bad_row["status"], "succeeded");
+}
+
+/// A guarded run's manifest carries the internal `+guard` suffix; no
+/// surface shows it: the detail line reads `cli (guarded)`, the table
+/// column reads `cli`, and `run_status` reports `mode: cli` with
+/// `guarded: true`.
+#[test]
+fn a_guarded_runs_mode_reads_as_its_base_mode_with_a_guard_attribute() {
+    let dir = project_with_host_run("  mode: cli+guard\n  source: default\n", "");
+    apb()
+        .args(["runs", "host-1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "  execution: cli (default, guarded)\n",
+        ))
+        .stdout(predicate::str::contains("+guard").not());
+    apb()
+        .arg("runs")
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host-1\tdemo\tsucceeded\tcli\n"))
+        .stdout(predicate::str::contains("+guard").not());
+    let out = apb_mcp::tools::run::run_status(dir.path(), "host-1").unwrap();
+    assert_eq!(out["execution"]["mode"], "cli");
+    assert_eq!(out["execution"]["guarded"], true);
 }
