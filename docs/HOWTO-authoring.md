@@ -914,7 +914,7 @@ output with claims that cite what it read:
 
 | Code | Severity | What it means |
 |------|----------|---------------|
-| V159 | error | `evidence` on a node other than an `agent_task`; a `from` list that is empty, names an unknown node, a node that settles no result (anything but an `agent_task`, a `script` or a `finish` with a prompt) or a node that does not reach this one; a `kinds` entry that is not a slug; or `evidence` with `isolation: full` (the reader needs the run directory) |
+| V159 | error | `evidence` on a node other than an `agent_task`; a `from` list that is empty, names an unknown node, a node that settles no result (anything but an `agent_task`, a `script` or a `finish` with a prompt) or a node that does not reach this one; a `kinds` entry that is not a slug; or `evidence` with an enforced isolation level, `full` or `best_effort` (the reader needs the run directory) |
 
 ### Run outputs (outputs:)
 
@@ -3574,9 +3574,12 @@ the server infers from node types, never narrow it. Values: `fs_read`,
 `fs_write`, `network`, `external`, `secrets`, `irreversible`. A script or
 agent node may declare what it really does in its own `effects` (the demo's
 script declares `[fs_read, fs_write]`): a run still counts everything such a
-node can do, and the dashboard's effects box marks the rest `assumed`
+node can do. The dashboard's effects box marks an effect `assumed`
 (`assumed_effects` of the playbook detail) instead of listing it as an
-effect the playbook has. Declare
+effect the playbook has only when nothing else covers it: no declaration of
+the playbook or of any node, no node kind that implies it, no node without
+a declaration that infers it, no connector binding and no baseline source.
+Declare
 `irreversible` for anything that cannot be rolled back (a push, a merged or
 opened pull request, deploys, publishes, external notifications): a run of a
 playbook whose tree declares it starts only with an explicit consent (MCP

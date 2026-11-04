@@ -12,7 +12,7 @@ description: >-
   project's own tests are executed by apb before and after the work and
   reported with what changed. No commit, push or pull request is made by
   the run.
-version: 1.2.0
+version: 1.2.1
 agent_launch: ask
 params:
   - name: change_kind
@@ -184,7 +184,9 @@ nodes:
       observed before the code that depends on it. Implement end to end
       through the real entry points. A bugfix follows sections 5 and
       6 of the apb-diagnosis skill: a regression test that fails for the
-      named cause before the fix and passes after it; a refactor shows
+      named cause before the fix and passes after it, or, when a test is
+      not practical, the recorded reason and the evidence that stands in
+      for it; a refactor shows
       preservation. Gate every test you add or change with the authoring
       mode of the apb-test-audit skill. Run the project's own checks. Do
       not commit, push or
@@ -214,7 +216,9 @@ nodes:
       self_check blocked and say why in gaps. Otherwise implement only this
       subtask, end to end through the real entry points. A bugfix follows
       sections 5 and 6 of the apb-diagnosis skill for the cause the design
-      named. Gate every test
+      named in the subtask that fixes that cause; a later subtask keeps
+      that test and its failing evidence and adds no second test for it.
+      Gate every test
       you add or change with the authoring mode of the apb-test-audit
       skill, and run its checks
       and the project's own checks. Then review your change against the

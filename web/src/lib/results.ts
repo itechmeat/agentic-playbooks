@@ -255,13 +255,47 @@ export function formatBytes(n: number): string {
 /**
  * What the run's result snapshots can have changed by: the settlements of
  * nodes and list items it journaled (a snapshot is stamped only at one, and
- * a capture that failed is recorded there too) and the run's status. The
- * run page fetches the results again only when this changes, so an
- * ordinary journal notice re-hashes no snapshot on the server.
+ * a capture that failed is recorded there too), the attempts that started
+ * and ended (each opens its evidence session before it starts and closes
+ * it, with its final reads and its claims, when it ends) and the run's
+ * status. Reads during an attempt show at its end. The run page fetches the results again only when
+ * this changes, so an ordinary journal notice re-hashes no snapshot on the
+ * server.
  */
 export function resultsKey(events: { type: string }[], runStatus: string): string {
   const settled = events.filter((e) => e.type === 'node_finished' || e.type === 'list_item_settled').length
-  return `${settled}:${runStatus}`
+  const attempts = events.filter((e) => e.type === 'attempt_started' || e.type === 'attempt_finished').length
+  return `${settled}:${attempts}:${runStatus}`
+}
+
+/**
+ * The bookkeeping of the run page's results fetch: the `resultsKey` the
+ * shown results were fetched for, and which request is the latest. Only
+ * the latest request's answer counts: an older success never marks a key
+ * a newer failure cleared, and an older failure never clears a newer
+ * success. A current failure forgets the key, so the next load fetches.
+ */
+export function resultsFetch() {
+  let fetchedFor: string | null = null
+  let latest = 0
+  return {
+    needed: (key: string | null): boolean => key === null || key !== fetchedFor,
+    begin: (): number => ++latest,
+    succeeded(ticket: number, key: string | null): boolean {
+      if (ticket !== latest) return false
+      fetchedFor = key
+      return true
+    },
+    failed(ticket: number): boolean {
+      if (ticket !== latest) return false
+      fetchedFor = null
+      return true
+    },
+    reset(): void {
+      latest++
+      fetchedFor = null
+    },
+  }
 }
 
 // ---- evidence claims ------------------------------------------------------

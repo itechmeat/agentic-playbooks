@@ -161,6 +161,32 @@ describe('ReviewPanel bound and person-only gates', () => {
     )
   })
 
+  it('shows no command while the project directory is still being looked up, since one without it may run elsewhere', () => {
+    auth.set({ required: false, authenticated: true, checked: true })
+    app = mount(ReviewPanel, {
+      target: document.body,
+      props: { reviews: entries([bound]), onDecide: () => {}, projectDir: null },
+    })
+    flushSync()
+    expect(document.querySelectorAll('[data-testid="review-cli-command"]')).toHaveLength(0)
+    expect(document.querySelector('[data-testid="review-cli-pending"]')?.textContent).toContain(
+      "Looking up the run's project directory",
+    )
+  })
+
+  it('says to run the command from the project when the run\'s project directory could not be found', () => {
+    auth.set({ required: false, authenticated: true, checked: true })
+    app = mount(ReviewPanel, {
+      target: document.body,
+      props: { reviews: entries([bound]), onDecide: () => {}, projectDir: '', projectDirMissing: true },
+    })
+    flushSync()
+    expect(document.querySelector('[data-testid="review-cli-no-dir"]')?.textContent).toContain(
+      'run the command from that project',
+    )
+    expect(document.querySelectorAll('[data-testid="review-cli-command"]')).toHaveLength(2)
+  })
+
   it('with a signed-in session decides a person-only gate by its buttons with the binding nonce, and shows the server refusal', () => {
     const onDecide = vi.fn()
     const reviews = entries([bound])

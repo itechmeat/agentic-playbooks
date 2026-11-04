@@ -89,4 +89,16 @@ describe('evidence helpers', () => {
       'collect/file:workspace:mail.jsonl: the collector says the package is not complete; incomplete as stored',
     )
   })
+
+  it('renders views and sessions whose ids a withheld answer made equal', () => {
+    const withheld = '[secrets_unresolved]'
+    const views = row.views.map((v) => ({ ...v, id: withheld, collector_complete: false }))
+    const rows = [
+      { ...row, session: withheld, views },
+      { ...row, session: withheld, views },
+    ]
+    app = mount(EvidenceClaims, { target: document.body, props: { rows } })
+    expect(document.querySelectorAll('[data-testid="evidence-row"]').length).toBe(2)
+    expect(document.querySelectorAll('[data-testid="evidence-collector"]').length).toBe(4)
+  })
 })

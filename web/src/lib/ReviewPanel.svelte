@@ -23,14 +23,19 @@
     posting = null,
     refusals = {},
     projectDir = '',
+    projectDirMissing = false,
     onDecide,
   }: {
     reviews: ReviewEntry[]
     /** `<node>:<option>` of the decision in flight. */
     posting?: string | null
     refusals?: Record<string, string>
-    /** The run's project directory, where a terminal command must run. */
-    projectDir?: string
+    /** The run's project directory, where a terminal command must run;
+     * `null` while it is still being looked up. */
+    projectDir?: string | null
+    /** The run belongs to a workspace whose directory could not be found:
+     * the command is shown without it, with a note to run it there. */
+    projectDirMissing?: boolean
     onDecide: (review: ReviewEntry, option: string) => void | Promise<void>
   } = $props()
 
@@ -109,9 +114,18 @@
               here. Decide from a terminal, or issue a key with <code class="mono">apb server key issue</code> and sign
               in:
             </p>
-            {#each pr.options as opt (opt)}
-              <code class="mono" data-testid="review-cli-command">{reviewCommand(pr, opt, projectDir)}</code>
-            {/each}
+            {#if projectDir === null}
+              <p class="note" data-testid="review-cli-pending">Looking up the run's project directory...</p>
+            {:else}
+              {#if projectDirMissing}
+                <p class="note" data-testid="review-cli-no-dir">
+                  The run's project directory could not be found: run the command from that project.
+                </p>
+              {/if}
+              {#each pr.options as opt (opt)}
+                <code class="mono" data-testid="review-cli-command">{reviewCommand(pr, opt, projectDir)}</code>
+              {/each}
+            {/if}
           </div>
         {:else}
           <div class="options">

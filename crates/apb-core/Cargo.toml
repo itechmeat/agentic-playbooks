@@ -54,4 +54,8 @@ ts = ["dep:ts-rs"]
 testing = []
 
 [dev-dependencies]
+# The crate's own `testing` seams for its integration tests (the
+# `isolate_test_config!` its test binary expands), so `cargo test -p
+# apb-core` builds without another crate turning the feature on.
+apb-core = { path = ".", features = ["testing"] }
 tempfile = "3.27.0"

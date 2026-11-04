@@ -33,6 +33,9 @@ const GAP_Y: usize = 64;
 const PAD: usize = 16;
 /// The longest node label, in chars, cut after redaction.
 const LABEL_MAX_CHARS: usize = 24;
+/// The width a label character takes at the label's font size (11px), a
+/// little over the average so a label is never cut.
+const LABEL_CHAR_W: usize = 7;
 /// The longest tooltip, in chars, cut after redaction.
 const TITLE_MAX_CHARS: usize = 80;
 /// The horizontal room one back edge gets, drawn around the right side.
@@ -144,7 +147,20 @@ pub(super) fn layout(pb: &Playbook) -> Layout {
     let ranks = ranks_of(pb, &back);
     let rows = order_of(pb, &ranks);
     let mut l = coords_of(&rows);
-    l.width += lanes_of(pb, &ranks).len() * BACK_LANE;
+    let lanes = lanes_of(pb, &ranks);
+    l.width += lanes.len() * BACK_LANE;
+    // A lane label is centered on its lane: room for the half of the
+    // widest one right of its lane, so no label runs out of the drawing.
+    let need = lanes
+        .iter()
+        .filter_map(|(i, k)| {
+            let label = pb.edges[*i].condition.as_ref().and_then(edge_label)?;
+            let chars = label.chars().count().min(LABEL_MAX_CHARS + 1);
+            Some(detour_x(&l, *k) + (chars * LABEL_CHAR_W).div_ceil(2))
+        })
+        .max()
+        .unwrap_or(0);
+    l.width = l.width.max(need);
     l
 }
 
@@ -387,7 +403,7 @@ fn coords_of(rows: &[Vec<String>]) -> Layout {
             nodes.push(NodeBox {
                 id: id.clone(),
                 rank: r,
-                x: offset + i * (NODE_W + GAP_X),
+                x: PAD + offset + i * (NODE_W + GAP_X),
                 y: PAD + r * (NODE_H + GAP_Y),
             });
         }
@@ -1110,6 +1126,36 @@ mod tests {
             && p.0 <= bx + NODE_W as f64 + 1.0
             && p.1 >= by - 1.0
             && p.1 <= by + NODE_H as f64 + 1.0
+    }
+
+    /// The content starts at the left padding, as the width and the lanes
+    /// assume: the margins on both sides are equal.
+    #[test]
+    fn the_boxes_sit_inside_an_equal_padding_on_both_sides() {
+        let l = layout(&pb(CHAIN));
+        let left = l.nodes.iter().map(|n| n.x).min().unwrap();
+        let right = l.nodes.iter().map(|n| n.x + NODE_W).max().unwrap();
+        assert_eq!(left, PAD);
+        assert_eq!(l.width - right, PAD);
+    }
+
+    /// A lane label is centered on its lane: the drawing is wide enough to
+    /// hold the half of it right of the last lane.
+    #[test]
+    fn a_lane_label_fits_inside_the_drawing() {
+        const BACK: &str = "schema: 2\nid: b\nname: B\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: work, type: script, script: work.sh, runner: sh }\n  - { id: gate, type: human_review, options: [send_it_back_again, done] }\n  - { id: end, type: finish, outcome: success, prompt: sum up }\nedges:\n  - { from: s, to: work }\n  - { from: work, to: gate }\n  - { from: gate, to: work, condition: { type: review_status, equals: send_it_back_again } }\n  - { from: gate, to: end, condition: { type: review_status, equals: done } }\n";
+        let p = pb(BACK);
+        let l = layout(&p);
+        let label = "review: send_it_back_again"
+            .chars()
+            .count()
+            .min(LABEL_MAX_CHARS + 1);
+        assert!(
+            l.width >= detour_x(&l, 0) + (label * LABEL_CHAR_W).div_ceil(2),
+            "width {} lane {}",
+            l.width,
+            detour_x(&l, 0)
+        );
     }
 
     #[test]

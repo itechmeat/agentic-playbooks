@@ -2,7 +2,7 @@
 name: apb-delivery
 description: Deliver an authorized feature, bug fix or refactoring from the original request to a reviewed, checked and reported change. Use for product code changes. Inside an apb playbook, run only the stage the node names. Research and design-only tasks stay local and unpublished.
 metadata:
-  version: "1.3.0"
+  version: "1.3.1"
 ---
 
 # Deliver a change
@@ -53,7 +53,8 @@ the apb-review skill, section 0.
   current advised design.
 - **Bug fix.** Use the apb-diagnosis skill: reproduce, isolate, name the
   root cause with evidence, and write a regression test that fails before
-  the fix. Show the original scenario passing after it.
+  the fix, or record why one is not practical and what evidence stands in
+  for it. Show the original scenario passing after it.
 - **Refactoring.** State what must be preserved and the realistic benefit.
   Show preservation with tests, characterization or comparisons.
 - A behavior change hidden inside a refactoring or fix is not allowed. Name

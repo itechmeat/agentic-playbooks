@@ -32,7 +32,10 @@ pub fn cite_problem<K: PartialEq>(
         return Some(format!("`{r}` names no record of {}", views.scope()));
     };
     if !views.holding(r).any(|v| kinds.contains(&v.kind)) {
-        return Some(format!("`{r}` is outside the views this criterion reads"));
+        return Some(format!(
+            "`{r}` is outside the views of {} read here",
+            views.scope()
+        ));
     }
     if !views.citable(r) {
         return Some(format!(

@@ -50,8 +50,13 @@ pub(crate) fn stats_cmd(
     // redacted, like MCP `playbook_stats`.
     let mut text = run_stats::render_text(&r);
     let mut value = serde_json::to_value(&r).unwrap_or_default();
+    // One workspace redaction per root, as MCP `playbook_stats` builds it.
+    let mut workspaces = std::collections::BTreeMap::new();
     for (run_id, run_root) in &runs {
-        let red = apb_engine::run_redact::WorkspaceRedaction::new(run_root).run(run_id);
+        let red = workspaces
+            .entry(run_root.clone())
+            .or_insert_with(|| apb_engine::run_redact::WorkspaceRedaction::new(run_root))
+            .run(run_id);
         if json {
             red.redact_json(&mut value);
         } else {

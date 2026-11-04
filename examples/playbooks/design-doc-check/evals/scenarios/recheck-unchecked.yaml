@@ -1,0 +1,24 @@
+schema: 1
+id: recheck-unchecked
+title: The re-check passes every item it gave a verdict but leaves one without, so a person decides
+params: { document: docs/design/cache.md }
+answers:
+  check:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { must_failed: 1, should_failed: 0, unchecked: 0, coverage: "CHECKLIST: 6/6" }
+  revise:
+    - { visit: 1, attempts: [ { status: succeeded, output: "added the failure modes" } ] }
+  recheck:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { must_failed: 0, should_failed: 0, unchecked: 1, coverage: "CHECKLIST: 0/1" }
+  decide:
+    - { visit: 1, review: { decision: reject, note: "The failure modes item still has no verdict." } }
+expect:
+  run: { outcome: [failed] }
+  finish: rejected
+  visits: { check: 1, revise: 1, recheck: 1, decide: 1 }
+  route: { not_visits: [done] }

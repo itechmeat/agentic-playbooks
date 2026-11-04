@@ -736,7 +736,7 @@ fn median_f(values: &mut [u64]) -> Option<f64> {
 /// `a 1, b 2`.
 fn kinds(map: &BTreeMap<String, u64>) -> String {
     map.iter()
-        .map(|(k, v)| format!("{k} {v}"))
+        .map(|(k, v)| format!("{} {v}", apb_core::text::visible(k)))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -783,7 +783,7 @@ pub fn lines(s: &InterventionStats) -> Vec<String> {
             .split
             .iter()
             .filter(|(_, k)| k.value > 0 || k.known_runs != k.runs)
-            .map(|(name, k)| format!("{name} {}", k.text()))
+            .map(|(name, k)| format!("{} {}", apb_core::text::visible(name), k.text()))
             .collect();
         if !split.is_empty() {
             line.push_str(&format!(" ({})", split.join(", ")));
@@ -859,4 +859,47 @@ pub fn run_lines(r: &RunInterventions) -> Vec<String> {
         ));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs this build writes record every attribution field.
+    #[test]
+    fn this_build_records_attribution() {
+        assert!(attribution_known(Some(env!("CARGO_PKG_VERSION"))));
+    }
+
+    /// Keys come from the journal: a hidden character never reaches the
+    /// terminal.
+    #[test]
+    fn journal_keys_are_printed_visible() {
+        let mut r = RunInterventions::default();
+        r.operator.insert("pause\u{1b}[2J".into(), 1);
+        r.questions.asked = 1;
+        r.questions.answered.insert("sup\u{7}".into(), 1);
+        let text = run_lines(&r).join("\n");
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\u{7}'),
+            "{text:?}"
+        );
+
+        let mut c = CategoryStats::default();
+        c.split.insert(
+            "option:ok\u{1b}".into(),
+            KnownCount {
+                value: 1,
+                known_runs: 1,
+                runs: 1,
+            },
+        );
+        let s = InterventionStats {
+            categories: vec![c],
+            other: [("x\u{1b}".to_string(), 1)].into(),
+            ..InterventionStats::default()
+        };
+        let text = lines(&s).join("\n");
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+    }
 }

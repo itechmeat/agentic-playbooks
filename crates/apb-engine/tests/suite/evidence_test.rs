@@ -287,12 +287,21 @@ fn an_absence_needs_complete_views_read_to_their_end() {
         &rd,
         "read",
         3,
-        json!([{"id": "a2", "text": "No record at all.", "absence": {"kinds": ["records"]}}]),
+        json!([
+            {"id": "a2", "text": "No record at all.", "absence": {"kinds": ["records"]}},
+            {"id": "a3", "text": "No refund arrived.", "absence": {"kinds": ["refund"]}}
+        ]),
     );
     at_success(&rd, &s, &spec(&["collect"], None)).unwrap();
     let v = verdicts(&rd, &s);
-    assert_eq!(v[0].1, Verdict::Unsupported, "{v:?}");
-    assert!(v[0].2[0].contains("read to its end"));
+    assert_eq!(one(&v, "a2").1, Verdict::Unsupported, "{v:?}");
+    assert!(one(&v, "a2").2[0].contains("read to its end"));
+    // A kind with no view in the session: the problem names the session,
+    // not a run or a criterion.
+    let a3 = one(&v, "a3");
+    assert_eq!(a3.1, Verdict::Unsupported, "{v:?}");
+    assert!(a3.2[0].contains("this session has no view"), "{v:?}");
+    assert!(!a3.2[0].contains("criterion"), "{v:?}");
 }
 
 /// Every flag of a weak but valid citation, on one fixture.
@@ -479,6 +488,80 @@ fn an_invalid_package_is_kept_as_plain_text_with_its_problem() {
         .map(|v| v.kind)
         .collect();
     assert!(kinds.contains(&"file".to_string()), "{kinds:?}");
+}
+
+/// The package is judged on the text stored, not the text read: a secret
+/// value in a record id is scrubbed out of it, the stored package no
+/// longer parses, and the entry is kept as plain text with its problem.
+#[test]
+fn a_package_is_parsed_after_its_secrets_are_scrubbed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let secret = "quietharbor".repeat(4);
+    init_project(root).unwrap();
+    seed_playbook(
+        root,
+        "sec",
+        r#"schema: 2
+id: sec
+name: sec
+version: 1.0.0
+params:
+  - { name: token, type: text, secret: true }
+nodes:
+  - { id: start, type: start }
+  - { id: collect, type: script, script: scripts/collect.sh, runner: sh, results: [ { path: mail.jsonl, format: records } ] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: collect }
+  - { from: collect, to: done }
+"#,
+    );
+    let vdir = root.join(".apb/playbooks/sec/1.0.0");
+    fs::create_dir_all(vdir.join("scripts")).unwrap();
+    common::write_sync(
+        &vdir.join("scripts/collect.sh"),
+        &format!(
+            "cat > mail.jsonl <<'APB_EOF'\n\
+{{\"apb_records\": 1, \"complete\": true, \"source\": \"inbox\"}}\n\
+{{\"id\": \"m-{secret}\", \"kind\": \"mail\", \"text\": \"one\"}}\n\
+APB_EOF\necho ok\n"
+        ),
+    );
+    let opts = RunOptions {
+        params: [("token".to_string(), secret.clone())].into(),
+        ..RunOptions::default()
+    };
+    let r = run(root, "sec", None, opts).unwrap();
+    assert_eq!(r.outcome, RunStatus::Succeeded);
+    let rd = root.join(".apb/runs").join(&r.run_id);
+    let view = apb_engine::result_view::ResultsView::load(&rd).unwrap();
+    let row = view
+        .rows
+        .iter()
+        .find(|r| r.execution.node == "collect")
+        .unwrap();
+    let m: apb_core::result_store::SnapshotManifest = serde_json::from_slice(
+        &fs::read(rd.join(format!("results/snapshots/{}.json", row.snapshot_id))).unwrap(),
+    )
+    .unwrap();
+    let file = m
+        .entries
+        .iter()
+        .find(|e| e.path.as_deref() == Some("mail.jsonl"))
+        .unwrap();
+    assert!(file.redacted, "{file:?}");
+    assert_eq!(
+        file.format,
+        apb_core::result_store::ResultFormat::Text,
+        "{file:?}"
+    );
+    assert!(
+        file.records_invalid
+            .as_deref()
+            .is_some_and(|p| p.contains("line 2")),
+        "{file:?}"
+    );
 }
 
 // --- duplicate ids, failed sources, caps and session lifetimes -----------

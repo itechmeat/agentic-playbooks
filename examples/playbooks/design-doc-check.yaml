@@ -16,7 +16,9 @@ defaults:
   profile: main
 params:
   - { name: document, type: text, label: "Design document to check (a path)", search: true }
-  - { name: checklist, type: text, label: "Checklist (a path)", default: docs/checklists/design.yaml }
+  # `protect` takes static globs: only a checklist under docs/checklists/
+  # is kept from the revise agent.
+  - { name: checklist, type: text, label: "Checklist (a path under docs/checklists/)", default: docs/checklists/design.yaml }
 goal:
   statement: the design document meets every MUST item of the checklist
   criteria:
@@ -85,6 +87,8 @@ nodes:
       fields: [must_failed, should_failed, unchecked, coverage]
     results:
       - path: check-report.md
+  # The re-check gave every item it looked at a verdict? Else a person.
+  - { id: recheck_coverage, type: condition, title: Every re-checked item has a verdict }
   - { id: recheck_verdict, type: condition, title: Any MUST item still failed }
   - id: decide
     type: human_review
@@ -108,7 +112,9 @@ edges:
   - { from: verdict, to: done, condition: { type: output_field, node: check, field: must_failed, equals: "0" } }
   - { from: verdict, to: revise, fallback: true }
   - { from: revise, to: recheck }
-  - { from: recheck, to: recheck_verdict }
+  - { from: recheck, to: recheck_coverage }
+  - { from: recheck_coverage, to: recheck_verdict, condition: { type: output_field, node: recheck, field: unchecked, equals: "0" } }
+  - { from: recheck_coverage, to: decide, fallback: true }
   - { from: recheck_verdict, to: done, condition: { type: output_field, node: recheck, field: must_failed, equals: "0" } }
   - { from: recheck_verdict, to: revise, condition: { type: node_status, node: recheck, equals: success }, max_traversals: 2 }
   - { from: recheck_verdict, to: decide, fallback: true }

@@ -1417,7 +1417,7 @@ pub enum EventPayload {
     /// and scope the current bindings name. The finish node's
     /// `node_finished` follows; safe to skip, no state. Additive variant.
     EvidenceObserved {
-        #[serde(default)]
+        #[serde(default, deserialize_with = "lenient_default")]
         observations: Vec<EvidenceObservation>,
     },
     /// How the tree of a `read_only` node is held for one attempt (a
@@ -4594,6 +4594,17 @@ mod deferral_tests {
         let events = read_all(dir.path()).unwrap();
         assert_eq!(events.len(), 2, "no guard follows the checkpoint");
         assert!(crate::state::RunState::fold(&events).deferred.is_empty());
+    }
+
+    /// A newer apb's shape of `evidence_observed.observations` reads as no
+    /// observation, never as a journal that does not read.
+    #[test]
+    fn evidence_observations_decode_leniently() {
+        let line = r#"{"seq":3,"ts":5,"type":"evidence_observed","observations":{"v":2}}"#;
+        match serde_json::from_str::<Event>(line).unwrap().payload {
+            EventPayload::EvidenceObserved { observations } => assert!(observations.is_empty()),
+            other => panic!("{other:?}"),
+        }
     }
 
     mod deferral_guard_log {

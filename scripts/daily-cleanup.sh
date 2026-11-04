@@ -97,7 +97,9 @@ commit_patch_ids() {
 
 # `--porcelain -z` needs git 2.36 or newer; on an older git the command
 # fails and every loop below would silently see no records, so say so.
+listed=1
 if ! git worktree list --porcelain -z >/dev/null 2>&1; then
+  listed=0
   echo "warning: 'git worktree list --porcelain -z' failed (git too old?); worktree cleanup and sweep are skipped" >&2
 fi
 
@@ -225,7 +227,11 @@ while IFS=$'\t' read -r ref path; do
     run git worktree remove "$path" || echo "keep $path: git refused to remove it"
   fi
 done < <(worktree_branches)
-run git worktree prune || echo "worktree prune failed"
+# Only after a listing that worked: a prune would otherwise drop the
+# records of a worktree whose path is only unavailable for now.
+if [ "$listed" = 1 ]; then
+  run git worktree prune || echo "worktree prune failed"
+fi
 
 # 1. Cargo artifacts older than a week, in every remaining target dir.
 if command -v cargo-sweep >/dev/null 2>&1; then

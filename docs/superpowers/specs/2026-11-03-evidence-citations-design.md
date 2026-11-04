@@ -56,8 +56,9 @@ claims: required | optional (default optional), on_invalid: mark | fail
 (default mark), budget_chars?: u64 }` (`apb_core::schema::Evidence`).
 V159 refuses it on another kind of node, a `from` list that is empty,
 names an unknown node, a node that settles no result or a node that does
-not reach the consumer, a `kinds` entry that is not a slug, and `isolation:
-full` (the reader needs the run directory). Every `from` node is
+not reach the consumer, a `kinds` entry that is not a slug, and an enforced
+isolation level, `full` or `best_effort` (the reader needs the run
+directory). Every `from` node is
 snapshotted (`validate::snapshotted_nodes`). A definition with `evidence`
 carries a `run_guard` naming `evidence` (`GuardedFeature::Evidence`), so an
 older apb refuses to continue a run that would drop the check.
