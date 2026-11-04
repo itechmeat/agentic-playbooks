@@ -77,6 +77,13 @@ this page.
   using the install receipt written under `~/.config/apb/`. It only works for
   installs made through the one-liner installer (or another installer-based
   method); it will not work for a Homebrew install or a source build.
+- Which releases it takes: a stable install takes stable releases only. A
+  pre-release install (such as `1.0.0-beta.2`) also takes a newer
+  pre-release of its own line (`1.0.0-beta.3`, `1.0.0-rc.1`) and any newer
+  stable release (`1.0.0`, `1.2.0`), never a pre-release of a later line
+  (`1.1.0-alpha.1`). When the newest release is a pre-release of a later
+  line, it takes the newest stable release. When the look at the
+  pre-releases fails, it prints a warning and checks stable releases only.
 - `apb self-update --check` reports whether an update is available without
   installing it. Exit codes: `0` already up to date, `10` an update is
   available, `2` the check failed (including when there is no install

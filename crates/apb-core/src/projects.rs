@@ -616,49 +616,182 @@ enum ParentLookup {
 }
 
 /// The workspace id of the registered project `root` is a git linked
-/// worktree of: git reports a git dir apart from the common dir, the main
-/// worktree is the common dir's parent, and the parent project sits at the
-/// same place inside it as `root` does inside its worktree. Asked through
-/// [`crate::git::Repo`], never a plain `git`. [`ParentLookup::Unknown`] for a
-/// directory whose `.git` points somewhere git cannot open (the recorded
-/// parent then stands), [`ParentLookup::None`] for a main checkout, a
-/// directory outside git, or a parent that is not registered.
+/// worktree of: [`parent_root`] finds the parent project's directory, and an
+/// entry other than `workspace_id` registered there is the parent.
 fn worktree_parent(file: &ProjectsFile, workspace_id: &str, root: &Path) -> ParentLookup {
-    // A linked worktree's top holds a `.git` file; a main checkout's is a
-    // directory. Only the former is worth starting git for on every touch.
-    let Some(dot_git) = root
-        .ancestors()
-        .map(|d| d.join(".git"))
-        .find(|g| g.exists())
-    else {
-        return ParentLookup::None;
-    };
-    if !dot_git.is_file() {
-        return ParentLookup::None;
+    match parent_root(root) {
+        ParentRoot::At(parent_root) => parent_entry(file, workspace_id, &parent_root),
+        ParentRoot::None => ParentLookup::None,
+        ParentRoot::Unknown => ParentLookup::Unknown,
     }
-    let Ok(repo) = crate::git::Repo::locate(root) else {
-        return ParentLookup::Unknown;
-    };
-    if repo.git_dir == repo.common_dir {
-        return ParentLookup::None;
-    }
-    let Some(main_tree) = repo.common_dir.parent() else {
-        return ParentLookup::Unknown;
-    };
-    let Ok(canon) = std::fs::canonicalize(root) else {
-        return ParentLookup::Unknown;
-    };
-    let Ok(inside) = canon.strip_prefix(&repo.work_tree) else {
-        return ParentLookup::Unknown;
-    };
-    let Ok(parent_root) = std::fs::canonicalize(main_tree.join(inside)) else {
-        return ParentLookup::Unknown;
-    };
+}
+
+/// The registered entry, other than `workspace_id`, at `parent_root`.
+fn parent_entry(file: &ProjectsFile, workspace_id: &str, parent_root: &Path) -> ParentLookup {
     file.entries
         .values()
-        .find(|e| e.workspace_id != workspace_id && entry_at(e, &parent_root))
+        .find(|e| e.workspace_id != workspace_id && entry_at(e, parent_root))
         .map(|e| ParentLookup::At(e.workspace_id.clone()))
         .unwrap_or(ParentLookup::None)
+}
+
+/// What [`parent_root`] learned from git about a directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParentRoot {
+    /// A linked worktree whose parent project would sit at this canonical
+    /// directory of the main checkout.
+    At(PathBuf),
+    /// A main checkout or a directory outside git.
+    None,
+    /// git could not be asked.
+    Unknown,
+}
+
+/// Where the parent project of `root` sits when `root` is in a git linked
+/// worktree. A linked worktree's top holds a `.git` file, a main checkout's a
+/// directory: only the former is worth starting git for ([`ask_git`]).
+/// [`ParentRoot::None`] for a main checkout or a directory outside git.
+fn parent_root(root: &Path) -> ParentRoot {
+    match linked_dot_git(root) {
+        Some(_) => ask_git(root),
+        None => ParentRoot::None,
+    }
+}
+
+/// The `.git` file of the linked worktree `root` is in: the nearest `.git`
+/// among `root` and its ancestors, when it is a file.
+fn linked_dot_git(root: &Path) -> Option<PathBuf> {
+    root.ancestors()
+        .map(|d| d.join(".git"))
+        .find(|g| g.exists())
+        .filter(|g| g.is_file())
+}
+
+/// git's answer for a directory in a linked worktree: git reports a git dir
+/// apart from the common dir, the main worktree is the common dir's parent,
+/// and the parent project sits at the same place inside it as `root` does
+/// inside its worktree. Asked through [`crate::git::Repo`], never a plain
+/// `git`. [`ParentRoot::Unknown`] when git cannot open what `.git` points
+/// to.
+fn ask_git(root: &Path) -> ParentRoot {
+    let Ok(repo) = crate::git::Repo::locate(root) else {
+        return ParentRoot::Unknown;
+    };
+    if repo.git_dir == repo.common_dir {
+        return ParentRoot::None;
+    }
+    let Some(main_tree) = repo.common_dir.parent() else {
+        return ParentRoot::Unknown;
+    };
+    let Ok(canon) = std::fs::canonicalize(root) else {
+        return ParentRoot::Unknown;
+    };
+    let Ok(inside) = canon.strip_prefix(&repo.work_tree) else {
+        return ParentRoot::Unknown;
+    };
+    match std::fs::canonicalize(main_tree.join(inside)) {
+        Ok(parent_root) => ParentRoot::At(parent_root),
+        Err(_) => ParentRoot::Unknown,
+    }
+}
+
+/// The identity of a linked worktree's `.git` file: its bytes (the `gitdir:`
+/// line naming the main checkout) and its modification time. `git worktree
+/// add`, `move` and `repair` rewrite the file, so a git answer kept under an
+/// equal stamp still holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DotGitStamp {
+    bytes: Vec<u8>,
+    modified: Option<std::time::SystemTime>,
+}
+
+/// A `.git` file longer than this is not one git wrote; it is never stamped,
+/// so git is asked every time.
+const DOT_GIT_MAX: u64 = 4096;
+
+fn dot_git_stamp(dot_git: &Path) -> Option<DotGitStamp> {
+    use std::io::Read;
+    let file = std::fs::File::open(dot_git).ok()?;
+    let modified = file.metadata().ok()?.modified().ok();
+    let mut bytes = Vec::new();
+    file.take(DOT_GIT_MAX + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= DOT_GIT_MAX).then_some(DotGitStamp { bytes, modified })
+}
+
+/// What git said about each orphaned linked worktree in this process, under
+/// the stamp of its `.git` file at the time: a dashboard lists the registry
+/// every few seconds and must not start git for the same worktree each time.
+/// An answer stands only while the stamp is equal; a failure to ask git is
+/// not kept; [`backfill_parents`] keeps only the entries still orphaned, so
+/// the map is never larger than the registry. A workspace's own touch always
+/// asks git afresh.
+static PARENT_ROOTS: Mutex<BTreeMap<PathBuf, (DotGitStamp, ParentRoot)>> =
+    Mutex::new(BTreeMap::new());
+
+fn cached_parent_root(root: &Path) -> ParentRoot {
+    let Some(dot_git) = linked_dot_git(root) else {
+        return ParentRoot::None;
+    };
+    // Stamped before git is asked: a `.git` rewritten meanwhile leaves an
+    // older stamp, so the next listing asks again.
+    let Some(stamp) = dot_git_stamp(&dot_git) else {
+        return ask_git(root);
+    };
+    let known = PARENT_ROOTS.lock().ok().and_then(|m| {
+        m.get(root)
+            .filter(|(kept, _)| *kept == stamp)
+            .map(|(_, answer)| answer.clone())
+    });
+    if let Some(known) = known {
+        return known;
+    }
+    let found = ask_git(root);
+    if found != ParentRoot::Unknown
+        && let Ok(mut m) = PARENT_ROOTS.lock()
+    {
+        m.insert(root.to_path_buf(), (stamp, found.clone()));
+    }
+    found
+}
+
+/// Fills in the parent of every active entry that has none and is a git
+/// linked worktree of a registered project: entries registered before
+/// worktree nesting existed, or before their parent project was registered,
+/// and not touched since. A recorded parent is never changed here; only a
+/// touch of the workspace itself does that.
+///
+/// `asked` carries git's answers across the passes of one
+/// [`with_registry`] call: the first pass, over the snapshot read before the
+/// lock, asks; a pass under the lock only reads them, so git never runs while
+/// other registry writers wait. An entry first seen under the lock is left
+/// for the next listing. The change is written once, under the lock,
+/// atomically.
+fn backfill_parents(file: &mut ProjectsFile, asked: &mut Option<BTreeMap<PathBuf, ParentRoot>>) {
+    let orphans: Vec<(String, PathBuf)> = file
+        .entries
+        .values()
+        .filter(|e| e.state == State::Active && e.parent_workspace_id.is_none())
+        .map(|e| (e.workspace_id.clone(), PathBuf::from(&e.path)))
+        .collect();
+    let answers = asked.get_or_insert_with(|| {
+        if let Ok(mut m) = PARENT_ROOTS.lock() {
+            m.retain(|root, _| orphans.iter().any(|(_, path)| path == root));
+        }
+        orphans
+            .iter()
+            .map(|(_, path)| (path.clone(), cached_parent_root(path)))
+            .collect()
+    });
+    for (id, path) in orphans {
+        let Some(ParentRoot::At(parent_root)) = answers.get(&path) else {
+            continue;
+        };
+        if let ParentLookup::At(parent) = parent_entry(file, &id, parent_root)
+            && let Some(e) = file.entries.get_mut(&id)
+        {
+            e.parent_workspace_id = Some(parent);
+        }
+    }
 }
 
 /// Whether `entry` names the directory `canon` (already canonical).
@@ -733,15 +866,19 @@ pub fn bind_id(root: &Path) -> std::io::Result<String> {
 
 /// Active and unreachable entries (excluding tombstoned), each reconciled
 /// with the disk ([`is_reachable`]) and with time-based transitions applied
-/// (spec 6.4). The registry is written only when a state actually changed.
+/// (spec 6.4), and the worktree parent filled in where an entry lacks it
+/// ([`backfill_parents`]). The registry is written only when a state or a
+/// parent actually changed.
 pub fn list_active() -> Vec<ProjectEntry> {
     let cfg = GlobalConfig::load().unwrap_or_default();
     let now = crate::clock::now_ms_u64();
+    let mut asked = None;
     with_registry(Access::View, |file| {
         for e in file.entries.values_mut() {
             reconcile(e, now);
         }
         apply_time_transitions(file, &cfg);
+        backfill_parents(file, &mut asked);
         file.entries
             .values()
             .filter(|e| !matches!(e.state, State::Tombstoned { .. }))
@@ -1521,6 +1658,144 @@ mod tests {
             .map(|(d, e)| (d, e.workspace_id))
             .collect();
         assert_eq!(nested, vec![(0, main_id), (1, wt_id)]);
+    }
+
+    /// A registry written before worktree nesting existed holds a linked
+    /// worktree's entry without `parent_workspace_id`. A listing fills the
+    /// parent in from git and keeps it in the file, so the pickers nest the
+    /// worktree without it being touched again.
+    #[test]
+    fn a_listing_backfills_the_parent_of_an_entry_from_the_old_shape() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        setup(cfg.path());
+        let _g = EnvGuard;
+
+        let base = tempfile::tempdir().unwrap();
+        let main = base.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q"]);
+        std::fs::write(main.join(".gitignore"), ".apb/workspace.local\n").unwrap();
+        git(&main, &["add", ".gitignore"]);
+        git(&main, &["commit", "-q", "-m", "init"]);
+        init_project(&main).unwrap();
+        let main_id = crate::workspace::ensure_id(&main).unwrap();
+        let wt = base.path().join("wt");
+        git(&main, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+        init_project(&wt).unwrap();
+        let wt_id = crate::workspace::ensure_id(&wt).unwrap();
+
+        // Exactly what beta.2 and earlier wrote: no `parent_workspace_id`.
+        write_old_registry(
+            cfg.path(),
+            &[(&main_id, &main, "main"), (&wt_id, &wt, "wt")],
+        );
+
+        let listed = list_active();
+        let of = |id: &str| listed.iter().find(|e| e.workspace_id == id).unwrap();
+        assert_eq!(
+            of(&wt_id).parent_workspace_id.as_deref(),
+            Some(main_id.as_str()),
+            "the listing nests the old worktree entry"
+        );
+        assert_eq!(of(&main_id).parent_workspace_id, None);
+
+        let written: Value =
+            serde_json::from_slice(&std::fs::read(registry_file(cfg.path())).unwrap()).unwrap();
+        assert_eq!(
+            written["entries"][wt_id.as_str()]["parent_workspace_id"],
+            main_id.as_str(),
+            "the backfilled parent is kept in the file"
+        );
+        assert!(
+            written["entries"][main_id.as_str()]
+                .get("parent_workspace_id")
+                .is_none()
+        );
+        assert_eq!(written["entries"][wt_id.as_str()]["last_seen_ms"], 1);
+
+        // Once nested, the worktree is no longer asked about, and what git
+        // said about it is not kept: the cache holds orphans only.
+        let _ = list_active();
+        assert!(
+            !PARENT_ROOTS.lock().unwrap().contains_key(&wt),
+            "a nested entry's git answer is dropped"
+        );
+    }
+
+    /// Writes the registry exactly as beta.2 and earlier did: active
+    /// entries without `parent_workspace_id`.
+    fn write_old_registry(cfg: &Path, entries: &[(&str, &Path, &str)]) {
+        let entries: Map<String, Value> = entries
+            .iter()
+            .map(|(id, path, name)| {
+                let entry = serde_json::json!({
+                    "workspace_id": id,
+                    "fingerprint": null,
+                    "path": path.to_string_lossy(),
+                    "name": name,
+                    "last_seen_ms": 1,
+                    "playbook_count": 0,
+                    "state": { "kind": "active" }
+                });
+                (id.to_string(), entry)
+            })
+            .collect();
+        let old = serde_json::json!({ "schema_version": SCHEMA_VERSION, "entries": entries });
+        std::fs::write(registry_file(cfg), old.to_string()).unwrap();
+    }
+
+    /// A long-lived process (the dashboard) lists a directory while it is
+    /// not in git, then the directory becomes a linked worktree of a
+    /// registered project. The next listing nests it: what git said about
+    /// the plain directory is not kept past the change of its `.git`.
+    #[test]
+    fn a_directory_that_becomes_a_worktree_later_is_backfilled() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        setup(cfg.path());
+        let _g = EnvGuard;
+
+        let base = tempfile::tempdir().unwrap();
+        let main = base.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q"]);
+        std::fs::write(main.join(".gitignore"), ".apb/workspace.local\n").unwrap();
+        git(&main, &["add", ".gitignore"]);
+        git(&main, &["commit", "-q", "-m", "init"]);
+        init_project(&main).unwrap();
+        let main_id = crate::workspace::ensure_id(&main).unwrap();
+        let wt = base.path().join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        init_project(&wt).unwrap();
+        let wt_id = crate::workspace::ensure_id(&wt).unwrap();
+        write_old_registry(
+            cfg.path(),
+            &[(&main_id, &main, "main"), (&wt_id, &wt, "wt")],
+        );
+
+        let parent_of_wt = || {
+            list_active()
+                .into_iter()
+                .find(|e| e.workspace_id == wt_id)
+                .unwrap()
+                .parent_workspace_id
+        };
+        assert_eq!(parent_of_wt(), None, "a plain directory has no parent");
+
+        // The same directory, same workspace id, now a linked worktree.
+        let id_file = wt.join(".apb").join("workspace.local");
+        let id_bytes = std::fs::read(&id_file).unwrap();
+        std::fs::remove_dir_all(&wt).unwrap();
+        git(&main, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+        std::fs::create_dir_all(wt.join(".apb")).unwrap();
+        std::fs::write(&id_file, id_bytes).unwrap();
+
+        assert_eq!(
+            parent_of_wt().as_deref(),
+            Some(main_id.as_str()),
+            "the listing after the change nests the worktree"
+        );
     }
 
     fn entry(id: &str, name: &str, parent: Option<&str>) -> ProjectEntry {
