@@ -107,7 +107,7 @@ pub struct RunSnapshot {
 
 impl RunSnapshot {
     /// What this observation would make a waiting caller do, if anything.
-    fn stop_reason(&self) -> Option<WaitReason> {
+    pub(crate) fn stop_reason(&self) -> Option<WaitReason> {
         if self.status.is_terminal() {
             return Some(WaitReason::Finished);
         }

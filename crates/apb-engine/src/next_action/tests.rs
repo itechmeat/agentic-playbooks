@@ -87,10 +87,15 @@ impl Fx {
 
     /// The default wait's exit; 5 when it keeps waiting.
     fn default_exit(&self, id: &str) -> u8 {
+        let dir = self.root().join(".apb/runs").join(id);
+        let stops = crate::run_wait::snapshot(&dir, id)
+            .unwrap()
+            .stop_reason()
+            .is_some();
         let r = wait_run_with(
             self.root(),
             id,
-            Duration::from_millis(300),
+            wait_budget(stops),
             Duration::from_millis(20),
             Duration::from_millis(10),
         )
@@ -100,13 +105,36 @@ impl Fx {
 
     /// The following wait's exit; 5 when it keeps waiting.
     fn follow_exit(&self, id: &str) -> u8 {
+        let dir = self.root().join(".apb/runs").join(id);
+        let obs = Observation::load(&dir, id).unwrap();
+        let stops = matches!(
+            verdict::follow_auto(&obs, &next_actions(&obs)),
+            verdict::FollowAuto::Return(_)
+        );
         FollowAutoWaiter::new(self.root(), id)
             .unwrap()
             .with_timing(Duration::from_millis(20), Duration::from_millis(10))
-            .wait(Duration::from_millis(300))
+            .wait(wait_budget(stops))
             .unwrap()
             .exit
             .code()
+    }
+}
+
+/// How long a test wait may take. A wait that should return (a finish, a
+/// gate, a stop) gets a budget no machine runs out of, because it returns as
+/// soon as the grace holds; a short budget there races the cost of one
+/// observation, which on a slow host (a stale `driver.pid` costs two `ps`
+/// runs per probe) can exceed it and turn the stop into a timeout. A wait
+/// that should keep waiting can only end in the timeout, so a short budget
+/// keeps the test fast. Which one applies is read from the same verdict the
+/// wait decides on, once, before it starts; the wait itself still has to
+/// reach the exit the test expects.
+fn wait_budget(stops: bool) -> Duration {
+    if stops {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_millis(300)
     }
 }
 
