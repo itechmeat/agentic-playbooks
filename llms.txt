@@ -148,6 +148,7 @@ apb server          manage server-mode API keys
 apb dev             dev mode: Vite HMR frontend + API server (source tree)
 apb mcp             stdio MCP server for coding agents
 apb self-update     update apb to the latest release
+apb passkey         enroll|list|remove the passkeys that gate person-only decisions and approvals (person only, refused inside a run step; removing the last one needs a one-time code typed at the terminal)
 ```
 
 ## Architecture

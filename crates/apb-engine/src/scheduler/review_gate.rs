@@ -53,7 +53,8 @@ fn queued_decision(
         } => for_node
             .filter(|e| e.nonce.as_deref() == Some(*nonce))
             .filter(|e| {
-                !*person_only || crate::review::channel::decides_person_only(run_dir, e.channel)
+                (!*person_only || crate::review::channel::decides_person_only(run_dir, e.channel))
+                    && crate::review::channel::passkey_stamp_ok(&e.passkey)
             })
             .nth(*consumed),
         Consume::Stamped { person_only } => {

@@ -163,11 +163,15 @@ pub enum CallerRefusal {
     /// A run step never decides a gate or answers a question of its own
     /// run, one of its ancestors or one of its descendants.
     RunStepOwnRun,
+    /// The machine holds at least one passkey, so this decision needs a
+    /// fresh WebAuthn assertion bound to the request and the chosen option,
+    /// and this caller cannot give one.
+    PasskeyRequired,
 }
 
 impl CallerRefusal {
     /// Every refusal, in declaration order.
-    pub const ALL: [CallerRefusal; 10] = [
+    pub const ALL: [CallerRefusal; 11] = [
         CallerRefusal::ReadOnlyServer,
         CallerRefusal::SupervisorOnly,
         CallerRefusal::RelayToPerson,
@@ -178,6 +182,7 @@ impl CallerRefusal {
         CallerRefusal::KeylessDashboard,
         CallerRefusal::BearerKey,
         CallerRefusal::RunStepOwnRun,
+        CallerRefusal::PasskeyRequired,
     ];
 
     /// The wire name (`agent_channel`).
@@ -193,6 +198,7 @@ impl CallerRefusal {
             CallerRefusal::KeylessDashboard => "keyless_dashboard",
             CallerRefusal::BearerKey => "bearer_key",
             CallerRefusal::RunStepOwnRun => "run_step_own_run",
+            CallerRefusal::PasskeyRequired => "passkey_required",
         }
     }
 }

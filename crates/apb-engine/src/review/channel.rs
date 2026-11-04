@@ -27,22 +27,79 @@ pub fn refuse_for_person_only(
     node: &str,
     channel: Option<DecisionChannel>,
 ) -> Result<(), EngineError> {
-    if decides_person_only(run_dir, channel) {
+    // The dashboard session stays open: its route stamps the entry only
+    // after it verified the assertion, and the append-time check enforces
+    // that stamp. The terminal has no assertion to give, so with a passkey
+    // enrolled it is refused like any other channel.
+    let stamped_dashboard = channel == Some(DecisionChannel::DashboardSession);
+    if decides_person_only(run_dir, channel)
+        && (stamped_dashboard || !passkey_required_for_person_only(run_dir, node))
+    {
         return Ok(());
     }
     let refusal = channel
         .and_then(DecisionChannel::person_only_refusal)
-        .unwrap_or(CallerRefusal::NotThisCaller);
+        .unwrap_or(if decides_person_only(run_dir, channel) {
+            CallerRefusal::PasskeyRequired
+        } else {
+            CallerRefusal::NotThisCaller
+        });
     let run = run_id_of(run_dir);
     let through = channel.map_or("an unstated channel", DecisionChannel::as_str);
-    Err(EngineError::ChannelRefused {
-        refusal,
-        message: format!(
-            "gate `{node}` of run `{run}` is person_only, so only a person decides it; {through} is not a person's channel ({}). Decide at an interactive terminal outside a run step with `apb review {run} {node} --decision <option>{}`, or on the run page of a dashboard where you are signed in.",
-            refusal.as_str(),
+    // With a passkey enrolled on this machine the terminal stops being a
+    // way to decide a person-only gate at all: the dashboard, where a
+    // fresh WebAuthn assertion is asked for, is the only way left.
+    let passkey = passkey_required_for_person_only(run_dir, node);
+    let how = if passkey {
+        let link = run_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|root| crate::people::link::run_link(root, &run))
+            .unwrap_or_else(|| "the dashboard's run page".to_string());
+        format!(
+            "A passkey is enrolled on this machine, so this gate needs a fresh passkey assertion; decide on the dashboard: {link}"
+        )
+    } else {
+        format!(
+            "Decide at an interactive terminal outside a run step with `apb review {run} {node} --decision <option>{}`, or on the run page of a dashboard where you are signed in.",
             bound_args(run_dir, node)
+        )
+    };
+    Err(EngineError::ChannelRefused {
+        refusal: if passkey {
+            CallerRefusal::PasskeyRequired
+        } else {
+            refusal
+        },
+        message: format!(
+            "gate `{node}` of run `{run}` is person_only, so only a person decides it; {through} is not a person's channel ({}). {how}",
+            refusal.as_str()
         ),
     })
+}
+
+/// Whether a passkey assertion is required on top of a person's channel
+/// for the gate `node` of the run at `run_dir`: at least one passkey is
+/// enrolled on this machine and the gate is one only a person decides
+/// ([`super::passkey_required`] covers bound approvals too). A playbook
+/// that does not read fails closed: the requirement stands.
+fn passkey_required_for_person_only(run_dir: &Path, node: &str) -> bool {
+    apb_core::passkey::count() > 0
+        && crate::progress::load_run_playbook(run_dir)
+            .and_then(|p| {
+                p.node(node).map(|n| {
+                    n.person_only || matches!(n.kind, apb_core::schema::NodeKind::Publish { .. })
+                })
+            })
+            .unwrap_or(true)
+}
+
+/// Whether a channel entry carries the passkey stamp this machine demands:
+/// any entry at all when no passkey is enrolled, else only an entry a
+/// dashboard decision posted with a verified assertion. The drive
+/// consumes nothing else, and `apb doctor --run` names the reason.
+pub fn passkey_stamp_ok(passkey: &Option<String>) -> bool {
+    apb_core::passkey::count() == 0 || passkey.is_some()
 }
 
 /// The open request of gate `gate`: the seq of its latest

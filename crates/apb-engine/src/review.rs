@@ -62,6 +62,13 @@ pub struct ReviewEntry {
         deserialize_with = "crate::decision_channel::lenient_channel"
     )]
     pub channel: Option<crate::decision_channel::DecisionChannel>,
+    /// The credential id prefix of the passkey whose assertion this
+    /// decision carried, stamped only by the dashboard route after it
+    /// verified the assertion. While this machine holds at least one
+    /// passkey, a person-only or bound gate consumes nothing else.
+    /// `None` in old channels and whenever no passkey was used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passkey: Option<String>,
 }
 
 /// Rejects a decision that names something other than a currently pending gate
@@ -213,10 +220,14 @@ fn check_review_target(
 /// Who posts a decision: the channel it came through, and whether it is the
 /// engine's own decision (an unattended run's declared one, an enforced
 /// recommendation), which takes the open binding without naming it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Poster {
     channel: Option<DecisionChannel>,
     engine: bool,
+    /// Set only by the dashboard route after it verified a WebAuthn
+    /// assertion for this very decision; the value is the credential id
+    /// prefix the entry stamps in `passkey`.
+    passkey: Option<String>,
 }
 
 /// What [`post_decision`] stamps on a channel entry.
@@ -369,6 +380,7 @@ pub(crate) fn answers_stamped(
     e.request == Some(request)
         && binding.is_none_or(|b| e.nonce.as_deref() == Some(b.nonce.as_str()))
         && (!person_only || crate::review::channel::decides_person_only(run_dir, e.channel))
+        && crate::review::channel::passkey_stamp_ok(&e.passkey)
 }
 
 /// The bound snapshots of a binding, for a message.
@@ -511,6 +523,7 @@ pub fn post_decision_to(
         Poster {
             channel: None,
             engine: false,
+            passkey: None,
         },
     )
 }
@@ -544,8 +557,67 @@ pub fn post_decision_via(
         Poster {
             channel: Some(channel),
             engine: false,
+            passkey: None,
         },
     )
+}
+
+/// [`post_decision_via`] carrying a verified passkey assertion: the
+/// dashboard route's entry, after the route verified the assertion against
+/// the store and bound it to this run, gate, request and option. The
+/// credential id prefix is stamped on the entry; the engine consumes such
+/// a gate's decision only from an entry that carries it while this
+/// machine holds at least one passkey. `passkey_credential` is a short
+/// prefix of the credential id, never a secret.
+pub fn post_decision_passkey(
+    run_dir: &Path,
+    cmd: ReviewCommand,
+    nonce: Option<String>,
+    request: Option<u64>,
+    passkey_credential: String,
+) -> Result<u64, EngineError> {
+    crate::review::channel::refuse_own_run(run_dir, &apb_core::step_env::StepCaller::from_env())?;
+    append_decision(
+        run_dir,
+        cmd,
+        nonce,
+        request,
+        None,
+        Poster {
+            channel: Some(DecisionChannel::DashboardSession),
+            engine: false,
+            passkey: Some(passkey_credential),
+        },
+    )
+}
+
+/// Whether the decision `cmd` makes on the run at `run_dir` needs a fresh
+/// passkey assertion on this machine: at least one passkey is enrolled
+/// and the gate is `person_only`, is a `publish` consent, or answers a
+/// bound request (an approval, `approves` or `requires_approval`). A
+/// playbook or journal that does not read fails closed: the requirement
+/// stands, since the store is what decided it.
+pub fn passkey_required(run_dir: &Path, cmd: &ReviewCommand) -> bool {
+    if apb_core::passkey::count() == 0 {
+        return false;
+    }
+    let gate = crate::progress::load_run_playbook(run_dir)
+        .and_then(|p| p.node(cmd.node.as_str()).cloned());
+    let person_gate = match &gate {
+        Some(n) => n.person_only || matches!(n.kind, apb_core::schema::NodeKind::Publish { .. }),
+        // Unknown gate: fail closed, the store is why.
+        None => return true,
+    };
+    if person_gate {
+        return true;
+    }
+    match crate::event::read_all(run_dir) {
+        Ok(events) => {
+            open_request(&events, cmd.node.as_str()).is_some_and(|(_, binding)| binding.is_some())
+        }
+        // The journal does not read: fail closed.
+        Err(_) => true,
+    }
 }
 
 /// Queues a decision the engine itself makes for the request the journal
@@ -575,6 +647,7 @@ pub(crate) fn post_engine_decision(
         Poster {
             channel: Some(channel),
             engine: true,
+            passkey: None,
         },
     )
 }
@@ -596,7 +669,47 @@ fn append_decision(
     if let Some(seq) = request {
         check_review_request(run_dir, &cmd.node, seq)?;
     }
+    let passkey_prefix = poster.passkey.clone();
+    let poster_channel = poster.channel;
+    let poster_engine = poster.engine;
     let stamps = check_review_target(run_dir, &cmd, nonce, poster)?;
+
+    // The passkey gate: while this machine holds at least one passkey, a
+    // person-only gate and a bound approval take a decision only with a
+    // fresh WebAuthn assertion, which only the dashboard route can verify.
+    // The engine's own decisions (an unattended run's declared outcome, an
+    // enforced recommendation) and a scenario run's scripted one are
+    // exempt: they are not a person's consent anyway, and V156 already
+    // refuses both on a person-only gate.
+    let exempt = poster_engine || poster_channel == Some(DecisionChannel::Scenario);
+    if passkey_prefix.is_some() && poster_channel != Some(DecisionChannel::DashboardSession) {
+        return Err(EngineError::Invalid(
+            "a passkey assertion is stamped only on a decision through the dashboard".to_string(),
+        ));
+    }
+    let entry_passkey = if let Some(prefix) = passkey_prefix {
+        Some(prefix)
+    } else if !exempt && passkey_required(run_dir, &cmd) {
+        let run = run_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        let link = run_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|root| crate::people::link::run_link(root, &run))
+            .unwrap_or_else(|| "the dashboard's run page".to_string());
+        return Err(EngineError::ChannelRefused {
+            refusal: crate::decision_channel::CallerRefusal::PasskeyRequired,
+            message: format!(
+                "gate `{}` of run `{run}` needs a passkey: at least one passkey is enrolled on this machine, so this decision takes a fresh passkey assertion. Decide on the dashboard: {link}",
+                cmd.node
+            ),
+        });
+    } else {
+        None
+    };
 
     let seq = read_reviews_after(run_dir, None)?.len() as u64;
 
@@ -607,6 +720,7 @@ fn append_decision(
         by,
         request: stamps.request,
         channel: stamps.channel,
+        passkey: entry_passkey,
     };
     let line = serde_json::to_string(&entry).map_err(|e| EngineError::Yaml(e.to_string()))?;
 

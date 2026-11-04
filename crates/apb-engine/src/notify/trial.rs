@@ -66,3 +66,50 @@ pub fn send_trial(root: &Path, target: Option<NotifyTarget>) -> Result<NotifyTar
         .unwrap_or("the connector call failed")
         .to_string())
 }
+
+/// Sends `subject` and `text` as one message through the machine's notify
+/// target, outside any run, and journals nothing: the message a passkey
+/// enrollment or removal puts in front of the person. Quiet when
+/// notifications are off (no plan resolved), an error only when a
+/// configured target cannot carry the message.
+pub fn send_notice(root: &Path, subject: &str, text: &str) -> Result<(), String> {
+    let request = NotifyRequest::On {
+        target: None,
+        on: None,
+        finished: None,
+    };
+    let check = super::check(root, None, Some(&request));
+    let Some(plan) = check.plan else {
+        return Ok(());
+    };
+    let record = plan.target;
+    let live = LiveTarget::load(
+        root,
+        &record.connector,
+        Some(&record.account),
+        &record.function,
+    )
+    .map_err(|e| e.message)?;
+    let notice = Notice {
+        subject: subject.to_string(),
+        text: text.to_string(),
+    };
+    let args = args_for(&live, &record, &notice)
+        .ok_or_else(|| "the function does not name the args a notification fills".to_string())?;
+    let (value, ok) = crate::connector::call::play_call(
+        root,
+        &record.connector,
+        Some(&record.account),
+        &record.function,
+        &args,
+        false,
+        false,
+    );
+    if ok {
+        return Ok(());
+    }
+    Err(value["error"]["message"]
+        .as_str()
+        .unwrap_or("the connector call failed")
+        .to_string())
+}

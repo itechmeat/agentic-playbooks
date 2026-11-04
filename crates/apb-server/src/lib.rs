@@ -16,9 +16,11 @@ pub mod auth;
 mod httpserve;
 pub mod ingest;
 pub mod lock;
+pub mod passkeys;
 mod ratelimit;
 pub mod routes;
 pub mod state;
+pub mod webauthn;
 // Unit tests run with an isolated global config dir, set before any test
 // thread starts (`apb_core::config::test_isolation`).
 #[cfg(test)]
@@ -29,7 +31,7 @@ pub mod watch;
 pub mod ws;
 
 use axum::Router;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use std::net::IpAddr;
 
 pub use state::AppState;
@@ -40,6 +42,27 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/auth/login", post(routes::auth::login_handler))
         .route("/api/auth/logout", post(routes::auth::logout_handler))
         .route("/api/auth/status", get(routes::auth::status_handler))
+        .route("/api/passkeys", get(routes::passkeys::list_handler))
+        .route(
+            "/api/passkeys/enroll/start",
+            post(routes::passkeys::enroll_start_handler),
+        )
+        .route(
+            "/api/passkeys/enroll/finish",
+            post(routes::passkeys::enroll_finish_handler),
+        )
+        .route(
+            "/api/passkeys/assert/challenge",
+            post(routes::passkeys::assert_challenge_handler),
+        )
+        .route(
+            "/api/passkeys/assert/verify",
+            post(routes::passkeys::assert_verify_handler),
+        )
+        .route(
+            "/api/passkeys/{label}",
+            delete(routes::passkeys::remove_handler),
+        )
         .route("/api/projects", get(routes::meta::list_projects_handler))
         .route(
             "/api/playbooks",

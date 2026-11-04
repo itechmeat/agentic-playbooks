@@ -76,6 +76,9 @@ fn ignored_because(
     if person_only && !crate::review::channel::decides_person_only(run_dir, e.channel) {
         return Some("not a person's channel");
     }
+    if person_only && !crate::review::channel::passkey_stamp_ok(&e.passkey) {
+        return Some("no passkey assertion");
+    }
     None
 }
 

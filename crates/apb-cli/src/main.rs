@@ -42,6 +42,7 @@ mod manage;
 mod memory;
 mod notify;
 mod onboarding;
+mod passkey;
 mod pause;
 mod pipe;
 mod problems;
@@ -284,6 +285,12 @@ enum Command {
         /// it (`sha256:...`)
         #[arg(long, value_name = "BUNDLE_DIGEST")]
         accept: Option<String>,
+    },
+    /// Manage the passkeys that gate person-only decisions and approvals
+    /// on this machine
+    Passkey {
+        #[command(subcommand)]
+        action: passkey::PasskeyAction,
     },
     /// List deleted playbooks or restore one with all its versions
     Trash {
@@ -1080,6 +1087,7 @@ fn main() -> ExitCode {
                 accept: accept.as_deref(),
             },
         ),
+        Some(Command::Passkey { action }) => passkey::passkey_cmd(&root, action),
         Some(Command::Trash { action }) => trash_cmd(&root, action),
         Some(Command::Trust { action }) => trust_cmd(&root, action),
         Some(Command::Intent { action }) => intent_cmd(&root, action),

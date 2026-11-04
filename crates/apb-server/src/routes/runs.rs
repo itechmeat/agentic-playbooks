@@ -613,6 +613,12 @@ pub(crate) struct ReviewBody {
     /// action's `target.request.seq`).
     #[serde(default)]
     request: Option<u64>,
+    /// While this machine holds at least one passkey, a person-only gate
+    /// and an approval decide only with the token a verified WebAuthn
+    /// assertion minted for exactly this decision (the Passkeys page's
+    /// decide flow runs the assertion first).
+    #[serde(default)]
+    passkey_token: Option<String>,
 }
 
 /// The answer to a gate's engine refusal: 404 for a node or request that
@@ -693,9 +699,55 @@ pub(crate) async fn post_review_handler(
     // session decides a person-only gate (a keyless dashboard and a bearer
     // key are 403).
     let channel = crate::auth::RequestChannel::of(channel.map(|c| c.0));
-    match apb_engine::review::post_decision_via(&run_dir, cmd, body.nonce, body.request, channel) {
-        Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
-        Err(e) => gate_refusal(e),
+    // While a passkey is enrolled on this machine, this gate takes its
+    // decision only with a fresh assertion bound to exactly this run,
+    // gate, request and option: the token `assert/verify` minted for it.
+    if apb_engine::review::passkey_required(&run_dir, &cmd) {
+        let Some(token) = body.passkey_token.as_deref() else {
+            return (
+                StatusCode::FORBIDDEN,
+                "this gate needs a passkey: at least one passkey is enrolled on this machine, so a fresh passkey assertion decides it. Use the Passkeys flow on the run page, which runs the assertion first",
+            )
+                .into_response();
+        };
+        let purpose = serde_json::json!({
+            "decision": {
+                "run": id,
+                "node": cmd.node,
+                "decision": cmd.decision,
+                "request": body.request,
+                "nonce": body.nonce,
+            }
+        });
+        let digest = crate::passkeys::purpose_digest(&purpose);
+        let Some(credential) = state.passkeys.take_token(token, &digest) else {
+            return (
+                StatusCode::FORBIDDEN,
+                "that passkey assertion is wrong, used or expired, or answers another decision; run it again for this gate",
+            )
+                .into_response();
+        };
+        match apb_engine::review::post_decision_passkey(
+            &run_dir,
+            cmd,
+            body.nonce,
+            body.request,
+            credential,
+        ) {
+            Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
+            Err(e) => gate_refusal(e),
+        }
+    } else {
+        match apb_engine::review::post_decision_via(
+            &run_dir,
+            cmd,
+            body.nonce,
+            body.request,
+            channel,
+        ) {
+            Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
+            Err(e) => gate_refusal(e),
+        }
     }
 }
 

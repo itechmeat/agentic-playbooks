@@ -2518,7 +2518,7 @@ export type ActionCode = "answer_question" | "decide_review" | "decide_publish" 
 
 export type Principal = "person" | "operator" | "host" | "supervisor";
 
-export type CallerRefusal = "read_only_server" | "supervisor_only" | "relay_to_person" | "not_this_caller" | "agent_channel" | "run_step" | "no_terminal" | "keyless_dashboard" | "bearer_key" | "run_step_own_run";
+export type CallerRefusal = "read_only_server" | "supervisor_only" | "relay_to_person" | "not_this_caller" | "agent_channel" | "run_step" | "no_terminal" | "keyless_dashboard" | "bearer_key" | "run_step_own_run" | "passkey_required";
 
 export type RequestKind = "question" | "review" | "publish";
 

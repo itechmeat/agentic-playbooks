@@ -430,6 +430,8 @@ mod parallel_cancel_test;
 mod parallel_concurrency_test;
 #[path = "suite/parallel_e2e_test.rs"]
 mod parallel_e2e_test;
+#[path = "suite/passkey_gate_test.rs"]
+mod passkey_gate_test;
 #[cfg(unix)]
 #[path = "suite/process_group_test.rs"]
 mod process_group_test;

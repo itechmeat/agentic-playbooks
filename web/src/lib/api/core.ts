@@ -449,6 +449,7 @@ export const postReview = (
   workspace = '',
   nonce?: string,
   request?: number,
+  passkeyToken?: string,
 ) =>
   requestJson<{ posted_seq: number }>(`${run(id)}/review${qs({ workspace })}`, {
     method: 'POST',
@@ -459,6 +460,7 @@ export const postReview = (
       note,
       ...(nonce ? { nonce } : {}),
       ...(request !== undefined ? { request } : {}),
+      ...(passkeyToken ? { passkey_token: passkeyToken } : {}),
     }),
   })
 

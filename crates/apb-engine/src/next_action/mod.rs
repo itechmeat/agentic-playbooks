@@ -76,6 +76,13 @@ pub fn caller_refusal(
     }
     let gate = matches!(a.code, ActionCode::DecideReview | ActionCode::DecidePublish);
     if gate && a.person_only {
+        // With a passkey enrolled on this machine, even a person's channel
+        // needs a fresh assertion, which only the dashboard can give.
+        if apb_core::passkey::count() > 0
+            && channel != crate::decision_channel::DecisionChannel::DashboardSession
+        {
+            return Some(CallerRefusal::PasskeyRequired);
+        }
         return channel.person_only_refusal();
     }
     None

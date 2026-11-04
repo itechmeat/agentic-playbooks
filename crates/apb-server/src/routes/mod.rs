@@ -14,6 +14,7 @@ pub mod judge;
 pub mod memory;
 pub mod meta;
 pub mod notify;
+pub mod passkeys;
 pub mod playbooks;
 pub mod problems;
 pub mod profiles;

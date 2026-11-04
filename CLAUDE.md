@@ -212,7 +212,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   locks (`fsutil.rs`; `fsutil/beneath` the descriptor-relative reads and
   writes beneath one anchor: no link followed at any component, a regular
   file with one link only, capped reads that never cut, 0700 and 0600 at
-  creation, `flock` locks closed on exec), the single wall-clock source (`clock.rs`), the agent-neutral
+  creation, `flock` locks closed on exec), the machine's passkey store
+  (`passkey.rs`: `<config_dir>/passkeys.yaml`, 0600 and atomic through
+  fsutil, the one-time enrollment code file, `count` on the decision
+  paths), the single wall-clock source (`clock.rs`), the agent-neutral
   entry to each agent's output reader: reply and reported token usage
   (`agent_output.rs`), the execution mode resolution (`execution.rs`: the
   `execution` config section, `cli` or `host` per run, the fallback rule),
@@ -690,6 +693,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `launch.rs` the `--confirm-launch` flags of `apb run`, `apb resume` and
   `apb eval`, the terminal question and `apb launch floor`,
   `pipe.rs` the panic hook that ends the binary quietly on a closed stdout.
+  `passkey.rs` is `apb passkey enroll|list|remove` (person only, refused
+  inside a run step; removing the last passkey needs the one-time code
+  typed back at the terminal).
   `eval.rs` is `apb eval` and holds `EvalLevel` (`deep`, `quick`, `smoke`);
   `scenario.rs` is `apb eval --level quick|smoke` (the version's validator
   errors refused first, the smoke checks, one bounded `apb __scenario-run`
@@ -705,14 +711,19 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `quality` for a run's grades, a playbook's candidate, its summary and a
   promotion that names what it saw, `judge` for the judge sandbox and
   labelled examples, `scenario` for scenario runs, `demo` for the keyless
-  demo, `problems` for
+  demo, `passkeys` for the enrollment and assertion ceremonies over the
+  machine's passkey store, `problems` for
   a playbook's known problems, `results` for a run's result snapshots
   (the listing, one entry, the raw download and the live comparison),
   `discover` for history discovery, loopback
   only; `auth.rs` inserts the `RequestChannel` (keyless, bearer, session)
   a decision route maps to its channel; `state.rs` also holds the tool-layer
   answer and refusal mapping they share (`ToolError::Refused` is 403);
-  `runs` also serves the report page), shared request state in `state.rs`, and the svelte
+  `runs` also serves the report page), `passkeys.rs` the in-memory
+  ceremony state (single-use challenges and assertion tokens) and the
+  webauthn module (`webauthn.rs`: ES256 and EdDSA verification over COSE,
+  origin and RP ID against the dashboard's own origin), shared request
+  state in `state.rs`, and the svelte
   frontend from `web/` embedded via rust-embed (`assets.rs`, `web/dist`).
 
 ### Concepts that span files
@@ -841,7 +852,11 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   never decides or answers for its own run tree (siblings included; a tree
   that does not read refuses) on any gate. A server key signs in, so it is
   a person's credential and the bearer refusal guards against mistakes
-  only. A supervisor patch, in-run or forward, never weakens these fields,
+  only. With a passkey enrolled, a person-only gate and an approval decide
+  only with a fresh assertion through the dashboard, `passkey_required`
+  otherwise (`apb_core::passkey` the store, see
+  `docs/superpowers/specs/2026-11-04-passkeys-design.md`). A supervisor
+  patch, in-run or forward, never weakens these fields,
   and an in-run one never re-points such a gate's options
   (`approval_weakened`, `scheduler::approval::patch_refusal`). Every move
   to a named node (a patch's `continue_from`, `node_retry`,
