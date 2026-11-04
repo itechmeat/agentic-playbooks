@@ -449,6 +449,7 @@ fn child_request(root: &Path, a: &ChildArgs) -> Result<DriveRequest, Box<Scenari
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use std::time::{Duration, Instant};
 
     const PLAYBOOK: &str = "schema: 2\nid: pb\nname: pb\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: agent_task, prompt: work }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n";
@@ -495,6 +496,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn sh(script: &str) -> Command {
         let mut c = Command::new("sh");
         c.args(["-c", script]);

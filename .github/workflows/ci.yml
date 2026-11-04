@@ -279,12 +279,14 @@ jobs:
           [ "$WEB" = "success" ] && [ "$LINT" = "success" ] && [ "$TEST" = "success" ] \
             && [ "$CORPUS" = "success" ]
 
-  # The release gate (test-gate.yml) runs the suite on macOS arm and Intel,
-  # so a Linux-only assumption in a test (a GNU tool, /proc, the util-linux
-  # `setsid` binary) used to surface first on the release tag. This leg runs
-  # the same tests on macOS for every PR. Web checks, cargo deny, fmt and
-  # clippy stay on the Linux jobs above; clippy on macOS still runs in the
-  # release gate.
+  # The release gate (test-gate.yml) runs clippy and the suite on macOS arm
+  # and Intel, so a Linux-only assumption in a test (a GNU tool, /proc, the
+  # util-linux `setsid` binary) or code that only macOS compiles (and so
+  # only lints there) used to surface first on the release tag. This leg
+  # runs the same clippy command and the same tests on macOS for every PR
+  # (release_workflow_test keeps the clippy command equal to the gate's).
+  # Web checks, cargo deny and fmt are platform-independent and stay on the
+  # Linux jobs above.
   test-macos:
     runs-on: macos-latest
     # A cold macOS build plus the suite takes roughly 10 to 15 minutes; the
@@ -312,6 +314,7 @@ jobs:
         with:
           # Pinned by SHA, so the toolchain comes from this input, not the ref.
           toolchain: stable
+          components: clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -320,6 +323,12 @@ jobs:
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@45fceba0fc176f41d2aee1ca9d6598ba628eea62 # nextest
+
+      # The same clippy command as the release gate (test-gate.yml):
+      # cfg(target_os) code only compiles, and so only lints, on its own
+      # platform. 1.0.0-beta.3's gate failed on dead code only macOS built.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # The same test command as the release gate (test-gate.yml).
       - name: Test

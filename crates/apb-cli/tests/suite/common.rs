@@ -220,36 +220,83 @@ pub fn wait_released(root: &Path, run_id: &str) {
 }
 
 /// Kills every `apb __pause-waker` of run `run_id` in the project at
-/// `root` (Linux `/proc`; elsewhere nothing to find). A waker outlives
-/// every process a test controls, like a detached driver. The root counts:
-/// run ids are unique per project only, and two tests' runs started in the
-/// same millisecond share one.
+/// `root` and waits until each one is gone. A waker outlives every process
+/// a test controls, like a detached driver. The root counts: run ids are
+/// unique per project only, and two tests' runs started in the same
+/// millisecond share one.
+///
+/// Waiting matters: a waker polls the journal, so one still alive when a
+/// test rewrites the journal (a wake time moved into the past) resumes the
+/// run itself, racing the command under test. The waker processes are
+/// found on every unix the suite runs on (Linux `/proc`, `ps` elsewhere),
+/// never skipped: a macOS run that found none left them alive.
+#[cfg(unix)]
 pub fn kill_wakers(root: &Path, run_id: &str) {
     let Ok(root) = std::fs::canonicalize(root) else {
         return;
     };
     let root = root.to_string_lossy().into_owned();
-    let Ok(procs) = std::fs::read_dir("/proc") else {
-        return;
-    };
-    for entry in procs.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|p| p.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
-            continue;
-        };
-        let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
-        let has = |s: &str| args.contains(&s.as_bytes());
-        if has("__pause-waker") && has(&root) && has(run_id) {
-            #[cfg(unix)]
-            sig::kill_pid(pid);
+    let pids: Vec<u32> = process_args()
+        .into_iter()
+        .filter(|(_, args)| {
+            let has = |s: &str| args.iter().any(|a| a == s);
+            has("__pause-waker") && has(&root) && has(run_id)
+        })
+        .map(|(pid, _)| pid)
+        .collect();
+    for &pid in &pids {
+        sig::kill_pid(pid);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    for pid in pids {
+        while sig::alive(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waker {pid} of run {run_id} did not die"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
+}
+
+/// Every process the suite may see, as its pid and arguments: the exact
+/// argv from `/proc` on Linux.
+#[cfg(target_os = "linux")]
+fn process_args() -> Vec<(u32, Vec<String>)> {
+    let procs = std::fs::read_dir("/proc").expect("read /proc");
+    procs
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+            let args = cmdline
+                .split(|b| *b == 0)
+                .map(|a| String::from_utf8_lossy(a).into_owned())
+                .collect();
+            Some((pid, args))
+        })
+        .collect()
+}
+
+/// Every process the suite may see, as its pid and arguments: `ps` where
+/// there is no `/proc` (macOS). The arguments are split on whitespace, which
+/// the ones matched here (a canonical temp dir, a run id, a subcommand)
+/// never contain. A `ps` that fails fails the test rather than kill nothing.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_args() -> Vec<(u32, Vec<String>)> {
+    let out = std::process::Command::new("ps")
+        .args(["-A", "-ww", "-o", "pid=", "-o", "args="])
+        .output()
+        .expect("run ps");
+    assert!(out.status.success(), "ps failed: {out:?}");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let pid = words.next()?.parse::<u32>().ok()?;
+            Some((pid, words.map(str::to_string).collect()))
+        })
+        .collect()
 }
 
 /// Kills a detached run's driver when a test ends, however it ends. The

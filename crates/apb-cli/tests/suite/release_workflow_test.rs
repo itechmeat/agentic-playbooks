@@ -340,6 +340,76 @@ fn the_linux_test_leg_runs_the_sandbox_tests_for_real() {
     assert_runs_the_sandbox_tests(job, "${{ matrix.linux && 'require' || '' }}");
 }
 
+#[test]
+fn the_macos_pr_leg_runs_the_release_gates_clippy() {
+    // cfg(target_os) code only compiles, and so only lints, on its own
+    // platform: 1.0.0-beta.3's release gate failed on dead code only macOS
+    // built, which no pull request had linted. The macOS leg of CI runs the
+    // gate's clippy command, with the component installed, before its tests.
+    fn run_of(s: &Value) -> &str {
+        s.get("run").and_then(Value::as_str).unwrap_or_default()
+    }
+    fn clippy_of<'a>(steps: &[&'a Value], what: &str) -> (usize, &'a str) {
+        steps
+            .iter()
+            .enumerate()
+            .find(|(_, s)| run_of(s).contains("cargo clippy"))
+            .map(|(i, s)| (i, run_of(s).trim()))
+            .unwrap_or_else(|| panic!("{what} runs clippy"))
+    }
+    let gate = load(&repo_root().join(".github/workflows/test-gate.yml"));
+    let gate_job = gate
+        .get("jobs")
+        .and_then(|j| j.get("gate"))
+        .expect("test-gate.yml has a `gate` job");
+    let gate_steps = Release::steps(gate_job);
+    let (at, gate_clippy) = clippy_of(&gate_steps, "the release gate");
+    assert!(
+        gate_steps[at].get("if").is_none(),
+        "the release gate lints on every leg"
+    );
+    let ci = load(&repo_root().join(".github/workflows/ci.yml"));
+    let job = ci
+        .get("jobs")
+        .and_then(|j| j.get("test-macos"))
+        .expect("ci.yml has a `test-macos` job");
+    assert!(
+        job.get("runs-on")
+            .and_then(Value::as_str)
+            .is_some_and(|r| r.starts_with("macos")),
+        "test-macos runs on macOS"
+    );
+    let steps = Release::steps(job);
+    let (clippy, command) = clippy_of(&steps, "test-macos");
+    assert_eq!(command, gate_clippy, "the same clippy command as the gate");
+    assert!(
+        steps[clippy].get("if").is_none(),
+        "test-macos lints unconditionally"
+    );
+    let toolchain = steps
+        .iter()
+        .position(|s| {
+            s.get("uses")
+                .and_then(Value::as_str)
+                .is_some_and(|u| u.starts_with("dtolnay/rust-toolchain@"))
+        })
+        .expect("test-macos installs Rust");
+    assert!(
+        steps[toolchain]
+            .get("with")
+            .and_then(|w| w.get("components"))
+            .and_then(Value::as_str)
+            .is_some_and(|c| c.split(',').any(|c| c.trim() == "clippy")),
+        "test-macos installs the clippy component"
+    );
+    assert!(toolchain < clippy, "Rust is installed before clippy runs");
+    let test = steps
+        .iter()
+        .position(|s| run_of(s).contains("cargo nextest run"))
+        .expect("test-macos runs nextest");
+    assert!(clippy < test, "clippy runs before the tests");
+}
+
 fn assert_runs_the_sandbox_tests(job: &Value, required: &str) {
     let steps = Release::steps(job);
     fn run_of(s: &Value) -> &str {
