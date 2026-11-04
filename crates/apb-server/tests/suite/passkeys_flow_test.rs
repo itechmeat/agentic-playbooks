@@ -554,11 +554,22 @@ async fn assert_token(
     auth: &Authenticator,
     purpose: serde_json::Value,
 ) -> Result<((String, String), serde_json::Value), String> {
+    assert_token_in(app, auth, purpose, "").await
+}
+
+/// [`assert_token`] with `query` (`?workspace=...` or empty) on both
+/// ceremony routes, the way the dashboard calls them for a decision.
+async fn assert_token_in(
+    app: &axum::Router,
+    auth: &Authenticator,
+    purpose: serde_json::Value,
+    query: &str,
+) -> Result<((String, String), serde_json::Value), String> {
     let (status, start) = request_json(
         app,
         "POST",
         HOST,
-        "/api/passkeys/assert/challenge",
+        &format!("/api/passkeys/assert/challenge{query}"),
         serde_json::json!({ "purpose": purpose }),
     )
     .await;
@@ -575,8 +586,14 @@ async fn assert_token(
         "authenticatorData": assertion["authenticatorData"],
         "signature": assertion["signature"],
     });
-    let (status, verify) =
-        request_json(app, "POST", HOST, "/api/passkeys/assert/verify", body).await;
+    let (status, verify) = request_json(
+        app,
+        "POST",
+        HOST,
+        &format!("/api/passkeys/assert/verify{query}"),
+        body,
+    )
+    .await;
     if status != StatusCode::OK {
         return Err(format!("assert/verify: {status} {verify:?}"));
     }
@@ -1069,4 +1086,116 @@ async fn removal_of_the_last_passkey_stays_terminal_only_and_needs_an_assertion_
         .unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN, "{}", res.status());
     assert_eq!(apb_core::passkey::count(), 1, "the last passkey stays");
+}
+
+/// The dashboard as `apb serve` runs it pins no project root: a decision's
+/// ceremony names the run's project with `?workspace=`, like the review
+/// post, and the gate is decided. Enrolling and removing stay
+/// workspace-independent.
+#[tokio::test]
+async fn a_decision_ceremony_on_the_global_dashboard_names_its_workspace() {
+    let bench = Bench::new().await;
+    let rooted = bench.app();
+    let laptop = Authenticator::es256(11);
+    enroll_first(&bench, &rooted, &laptop).await;
+
+    // Register the bench's project; the env lock of the bench is held.
+    let saved: Vec<_> = ["CI", "APB_NO_REGISTRY"]
+        .iter()
+        .map(|k| (*k, std::env::var_os(k)))
+        .collect();
+    for (k, _) in &saved {
+        // SAFETY (tests): serialized by the bench's env lock.
+        unsafe { std::env::remove_var(k) };
+    }
+    apb_core::projects::touch(&bench.root);
+    let ws = std::fs::read_to_string(bench.root.join(".apb/workspace.local"))
+        .expect("workspace.local written by registration")
+        .trim()
+        .to_string();
+
+    let (run_id, rd, rx) = bench.start("po");
+    let request = poll("the request", || {
+        apb_engine::event::read_all(&rd)
+            .ok()?
+            .iter()
+            .rev()
+            .find_map(|e| match &e.payload {
+                apb_engine::event::EventPayload::ReviewRequested { node, .. } if node == "g" => {
+                    Some(e.seq)
+                }
+                _ => None,
+            })
+    });
+    let app = build_router(AppState::new_global());
+    let query = format!("?workspace={ws}");
+    let purpose = decision_purpose(&run_id, "g", "approve", request);
+    let ((token, _prefix), assertion) = assert_token_in(&app, &laptop, purpose, &query)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    let (status, posted) = request_json(
+        &app,
+        "POST",
+        HOST,
+        &format!("/api/runs/{run_id}/review{query}"),
+        serde_json::json!({
+            "node": "g", "decision": "approve", "request": request,
+            "passkey_token": token,
+            "assertionId": assertion["id"],
+            "assertionClientDataJSON": assertion["clientDataJSON"],
+            "assertionAuthenticatorData": assertion["authenticatorData"],
+            "assertionSignature": assertion["signature"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{posted}");
+    assert!(
+        rx.recv_timeout(DEADLINE).unwrap(),
+        "the gate decided the run"
+    );
+
+    // An enroll purpose needs no workspace on the global dashboard.
+    assert_token(&app, &laptop, serde_json::json!({ "enroll_new": {} }))
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    for (k, v) in saved {
+        if let Some(v) = v {
+            // SAFETY (tests): serialized by the bench's env lock.
+            unsafe { std::env::set_var(k, v) };
+        }
+    }
+}
+
+/// With a passkey enrolled the CLI refuses a publish consent too, so the
+/// keyless dashboard's refusal does not send the person there: it names
+/// the one route that works, a server key and a signed-in session.
+#[tokio::test]
+async fn a_keyless_publish_refusal_with_a_passkey_names_the_server_key() {
+    let bench = Bench::new().await;
+    apb_core::passkey::add_into(
+        &bench.config_dir.join("passkeys.yaml"),
+        "laptop",
+        "Q0VER0lKUg",
+        "A0VER0lKUg==",
+        -7,
+        0,
+    )
+    .unwrap();
+    std::fs::create_dir_all(bench.root.join(".apb/runs/r-pub")).unwrap();
+    let (status, text) = request_raw(
+        &bench.app(),
+        "POST",
+        HOST,
+        "/api/runs/r-pub/review",
+        serde_json::json!({ "node": "push", "decision": "publish", "nonce": "n" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
+    assert!(text.contains("apb server key issue"), "{text}");
+    assert!(text.contains("passkey"), "{text}");
+    assert!(
+        !text.contains("apb publish approve"),
+        "the CLI refuses too while a passkey is enrolled: {text}"
+    );
 }

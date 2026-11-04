@@ -10,7 +10,7 @@
 // is refused naming the passkey, the ceremony runs here (lib/passkeys),
 // and the decision is posted again with the token it minted.
 import { postAnswer, postReview, resolveIntent } from './api'
-import { ApiError, jsonHeaders, requestJson } from './api/http'
+import { ApiError, jsonHeaders, qs, requestJson } from './api/http'
 import {
   PASSKEYS_MESSAGE,
   challengeBytes,
@@ -82,14 +82,18 @@ async function realGetAssertion(challenge: string): Promise<AssertionResult> {
   }
 }
 
-function realCeremony(): DecisionCeremony {
+/** The browser's ceremony for a decision. A decision names its run's
+ * project with `workspace`, exactly like the review post it precedes: the
+ * dashboard pins no project root. */
+export function realCeremony(workspace: string): DecisionCeremony {
+  const query = qs({ workspace })
   const post = <T>(url: string, body: unknown) =>
     requestJson<T>(url, { method: 'POST', headers: jsonHeaders, body: JSON.stringify(body) })
   return {
-    assertChallenge: (purpose) => post<{ challenge: string }>('/api/passkeys/assert/challenge', { purpose }),
+    assertChallenge: (purpose) => post<{ challenge: string }>(`/api/passkeys/assert/challenge${query}`, { purpose }),
     getAssertion: realGetAssertion,
     verifyAssertion: (purpose, challenge, assertion) =>
-      post<{ token: string }>('/api/passkeys/assert/verify', { purpose, challenge, ...assertion }),
+      post<{ token: string }>(`/api/passkeys/assert/verify${query}`, { purpose, challenge, ...assertion }),
   }
 }
 
@@ -128,7 +132,7 @@ export async function postDecision(
           throw e
         }
       },
-      ...realCeremony(),
+      ...realCeremony(workspace),
       ...overrides,
       secureContext: overrides?.secureContext ?? secureContextOk,
     },

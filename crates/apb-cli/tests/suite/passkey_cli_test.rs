@@ -80,3 +80,31 @@ fn a_remove_without_a_terminal_removes_nothing() {
     // Cleanup so other suites start from an empty store.
     let _ = std::fs::remove_file(&file);
 }
+
+/// `apb passkey list` shows a credential by its eight-character prefix, the
+/// dashboard's convention (a credential id can track a person), and never
+/// writes a label's control characters to the terminal raw.
+#[test]
+fn a_list_shows_a_credential_prefix_and_a_clean_label() {
+    let cfg = own_config_dir();
+    let file = cfg.join("passkeys.yaml");
+    let id = "Q3JlZGVudGlhbElkVGhhdElzTG9uZw";
+    apb_core::passkey::add_into(&file, "desk\u{1b}[31mred", id, "cEE=", -7, 0).unwrap();
+    let out = apb()
+        .args(["passkey", "list"])
+        .env("APB_CONFIG_DIR", &cfg)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("credential Q3JlZGVu..."), "{text}");
+    assert!(
+        !text.contains(id),
+        "the full credential id is not shown: {text}"
+    );
+    assert!(
+        !text.contains('\u{1b}'),
+        "no raw escape reaches the terminal: {text}"
+    );
+    assert!(text.contains("desk"), "{text}");
+}

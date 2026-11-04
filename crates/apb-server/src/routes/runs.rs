@@ -657,13 +657,20 @@ fn gate_refusal(e: apb_engine::EngineError) -> axum::response::Response {
 /// `network: open` a sandboxed agent shares that loopback: it could read the
 /// open plan's nonce and consent to its own push. So a keyless dashboard
 /// never takes a `publish` decision; a `skip` pushes nothing and stays open.
-/// The person approves with the CLI, or issues a dashboard key first.
+/// The person approves with the CLI, or issues a dashboard key first; while
+/// a passkey is enrolled only the signed-in dashboard is left.
 fn keyless_publish_refusal(
     auth: &crate::auth::AuthState,
     run_id: &str,
     body: &ReviewBody,
 ) -> Option<String> {
     (!auth.enabled() && body.decision == apb_core::publish::OPTION_PUBLISH).then(|| {
+        // While a passkey is enforced the CLI refuses a publish consent
+        // too (`passkey_required`), so the one route left is a signed-in
+        // dashboard session with a fresh assertion.
+        if apb_engine::review::passkey_enforced() {
+            return "a dashboard without keys does not take a publish consent, since anything on this machine can reach it, and while a passkey is enrolled the CLI refuses it too: issue a key with `apb server key issue`, sign in, and decide with a passkey on the run page".to_string();
+        }
         format!(
             "a dashboard without keys does not take a publish consent, since anything on this machine can reach it; approve with `apb publish approve {run_id} --node {} --nonce <nonce>`, or issue a key with `apb server key issue` and sign in",
             body.node

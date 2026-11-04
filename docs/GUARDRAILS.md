@@ -362,9 +362,9 @@ protected step (a person at a terminal, typing the code back). The store
 itself has no tamper proof, and a same-user writer of `<config_dir>`
 stays out of scope, like for every other apb guard: appending a record
 with its own key into `passkeys.yaml` directly enrolls it with no
-notice (the notify notice and the journal cover only enrollments and
-removals through apb's own surfaces; `apb passkey list` is the only
-view), and deleting the file reads as "no passkey enrolled", which
+notice (the notify notice covers only enrollments and removals through
+apb's own surfaces, and no run journal records either; `apb passkey
+list` is the one view of what is enrolled), and deleting the file reads as "no passkey enrolled", which
 switches the whole requirement off silently; the only trace is the
 `apb doctor` warning row that recommends enrolling again. Nothing inside
 the same uid can be made tamper-proof against such a writer: it can

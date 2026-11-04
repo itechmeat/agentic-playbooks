@@ -805,3 +805,73 @@ fn no_passkey_enrolled_keeps_today_behaviour() {
     let (outcome, _) = rx.recv_timeout(DEADLINE).unwrap();
     assert_eq!(outcome, RunStatus::Succeeded);
 }
+
+/// A publish gate that is not `person_only`: the engine still asks for a
+/// passkey on it (`passkey_required`).
+const PUBLISH_GATE: &str = "schema: 2\nid: pg\nname: pg\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: w, type: script, script: \"true\", runner: sh }\n  - { id: g, type: publish, from: w, remote: origin, branch: \"apb/x\" }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: w }\n  - { from: w, to: g }\n  - { from: g, to: f }\n";
+
+/// The publish decision of `g` as a surface shows it.
+fn publish_action() -> apb_engine::next_action::NextAction {
+    use apb_engine::next_action::{
+        ActionCode, ActionTarget, NextAction, Principal, RequestKind, RequestRef,
+    };
+    NextAction {
+        code: ActionCode::DecidePublish,
+        run_id: "r".into(),
+        target: ActionTarget {
+            node: Some("g".into()),
+            request: Some(RequestRef {
+                kind: RequestKind::Publish,
+                seq: 1,
+                nonce: None,
+            }),
+            ..ActionTarget::default()
+        },
+        args: vec![],
+        principals: vec![Principal::Person],
+        ready: true,
+        not_ready: None,
+        auto: None,
+        reason: String::new(),
+        command: None,
+        unattended: None,
+        person_only: false,
+        caller_refusal: None,
+    }
+}
+
+/// The surfaces mark an action with the refusal the engine would give at
+/// append time: a publish consent needs a passkey on every gate, not only
+/// a person-only one, so the terminal and MCP are marked
+/// `passkey_required`, while the dashboard (which runs the ceremony) and a
+/// scenario's script (exempt in the engine) are not.
+#[test]
+fn a_publish_gate_is_marked_passkey_required_for_the_terminal() {
+    let _guard = common::env_lock();
+    with_fake_passkey_enrolled(|_| {
+        let dir = tempfile::tempdir().unwrap();
+        let rd = dir.path().join("r");
+        fs::create_dir_all(&rd).unwrap();
+        fs::write(rd.join("playbook.yaml"), PUBLISH_GATE).unwrap();
+        let step = apb_core::step_env::StepCaller::default();
+        let a = publish_action();
+        for channel in [DecisionChannel::Terminal, DecisionChannel::Mcp] {
+            assert_eq!(
+                apb_engine::next_action::caller_refusal(&a, &rd, channel, &step),
+                Some(CallerRefusal::PasskeyRequired),
+                "{channel:?}"
+            );
+        }
+        for channel in [
+            DecisionChannel::DashboardSession,
+            DecisionChannel::DashboardKeyless,
+            DecisionChannel::Scenario,
+        ] {
+            assert_eq!(
+                apb_engine::next_action::caller_refusal(&a, &rd, channel, &step),
+                None,
+                "{channel:?}"
+            );
+        }
+    });
+}

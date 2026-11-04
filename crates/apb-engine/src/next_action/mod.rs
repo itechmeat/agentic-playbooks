@@ -75,11 +75,12 @@ pub fn caller_refusal(
         return Some(CallerRefusal::RunStepOwnRun);
     }
     let gate = matches!(a.code, ActionCode::DecideReview | ActionCode::DecidePublish);
-    if gate && a.person_only {
+    if gate {
         // One predicate with the engine's (`review::passkey_required`): a
         // person-only gate, a publish consent and a bound approval all need
         // a fresh assertion while a passkey is enforced, which only the
-        // dashboard can give.
+        // dashboard can give. A scenario's script is exempt, as it is on
+        // the append path.
         let cmd = crate::review::ReviewCommand {
             node: a.target.node.clone().unwrap_or_default(),
             decision: String::new(),
@@ -88,9 +89,12 @@ pub fn caller_refusal(
         if crate::review::passkey_required(run_dir, &cmd)
             && channel != crate::decision_channel::DecisionChannel::DashboardSession
             && channel != crate::decision_channel::DecisionChannel::DashboardKeyless
+            && channel != crate::decision_channel::DecisionChannel::Scenario
         {
             return Some(CallerRefusal::PasskeyRequired);
         }
+    }
+    if gate && a.person_only {
         return channel.person_only_refusal();
     }
     None

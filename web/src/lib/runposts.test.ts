@@ -8,7 +8,7 @@ vi.mock('./api', async () => {
 
 import { ApiError } from './api/http'
 import { PASSKEYS_MESSAGE } from './passkeys'
-import { b64u, postDecision } from './runposts'
+import { b64u, postDecision, realCeremony } from './runposts'
 
 describe('the browser wire format', () => {
   it('encodes the authenticator fields as base64url', () => {
@@ -79,5 +79,34 @@ describe('postDecision with a passkey enrolled', () => {
     }
     await expect(postDecision(target, 'approve', 'w', '', deps)).rejects.toThrow(PASSKEYS_MESSAGE)
     expect(deps.getAssertion).not.toHaveBeenCalled()
+  })
+})
+
+describe('the decision ceremony of the dashboard', () => {
+  it('names the workspace on both ceremony routes, like the review post', async () => {
+    const urls: string[] = []
+    const fetchMock = vi.fn(async (url: string) => {
+      urls.push(url)
+      return new Response(JSON.stringify({ challenge: 'C', token: 'T' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const purpose = { decision: { run: 'r1', node: 'gate', decision: 'approve', request: 7, nonce: null } }
+      const c = realCeremony('w 1')
+      await c.assertChallenge(purpose)
+      await c.verifyAssertion(purpose, 'C', { id: 'i', clientDataJSON: 'a', authenticatorData: 'b', signature: 's' })
+      expect(urls).toEqual([
+        '/api/passkeys/assert/challenge?workspace=w%201',
+        '/api/passkeys/assert/verify?workspace=w%201',
+      ])
+      urls.length = 0
+      await realCeremony('').assertChallenge(purpose)
+      expect(urls).toEqual(['/api/passkeys/assert/challenge'])
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

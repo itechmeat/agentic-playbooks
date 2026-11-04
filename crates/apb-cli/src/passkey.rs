@@ -88,9 +88,14 @@ fn list() -> ExitCode {
     }
     println!("passkeys enrolled on this machine:");
     for p in &all {
+        // The dashboard's convention: a credential id can track a person,
+        // so only its first eight characters are shown.
+        let prefix: String = p.id.chars().take(8).collect();
         println!(
-            "  {}  alg {}  added {}  credential {}...",
-            p.label, p.alg, p.created_at, p.id
+            "  {}  alg {}  added {}  credential {prefix}...",
+            sanitize_for_terminal(&p.label, 100),
+            p.alg,
+            p.created_at
         );
     }
     ExitCode::SUCCESS
@@ -190,13 +195,16 @@ fn remove(root: &Path, label: &str) -> ExitCode {
     }
     match passkey::remove_by_label_into(&path, label, true) {
         Ok(r) => {
-            println!("removed passkey `{}` from this machine", r.label);
+            println!(
+                "removed passkey `{}` from this machine",
+                sanitize_for_terminal(&r.label, 100)
+            );
             send_notice(
                 root,
                 &format!(
                     "a passkey was removed on {}: label `{}`",
                     machine_name(),
-                    r.label
+                    sanitize_for_terminal(&r.label, 100)
                 ),
             );
             if passkey::count_strict().unwrap_or(1) == 0 {

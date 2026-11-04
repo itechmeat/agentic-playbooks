@@ -11,7 +11,7 @@
 //! `userVerification` is required, and nothing secret is stored or
 //! logged.
 
-use axum::extract::{Path as AxPath, State};
+use axum::extract::{Path as AxPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use serde::{Deserialize, Serialize};
@@ -459,6 +459,7 @@ pub(crate) async fn enroll_finish_handler(
 /// one validated purpose.
 pub(crate) async fn assert_challenge_handler(
     State(state): State<AppState>,
+    Query(q): Query<WorkspaceQuery>,
     Json(body): Json<AssertChallengeBody>,
 ) -> Response {
     if let Err(why) = body.purpose.validate() {
@@ -466,10 +467,13 @@ pub(crate) async fn assert_challenge_handler(
     }
     let purpose = match &body.purpose.decision {
         Some(d) => {
-            let Some(root) = state.root.as_deref() else {
-                return (StatusCode::INTERNAL_SERVER_ERROR, "no workspace root").into_response();
+            // A decision names its run's project like the review post does;
+            // enroll and remove purposes stay workspace-independent.
+            let root = match resolve_root(&state, q.workspace.as_deref()) {
+                Ok(root) => root,
+                Err(response) => return response,
             };
-            match AssertPurpose::resolved_decision(root, d) {
+            match AssertPurpose::resolved_decision(&root, d) {
                 Ok(p) => p,
                 Err(why) => return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response(),
             }
@@ -514,6 +518,7 @@ pub(crate) async fn assert_challenge_handler(
 pub(crate) async fn assert_verify_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<WorkspaceQuery>,
     Json(body): Json<AssertVerifyBody>,
 ) -> Response {
     if let Err(why) = body.purpose.validate() {
@@ -521,10 +526,13 @@ pub(crate) async fn assert_verify_handler(
     }
     let purpose = match &body.purpose.decision {
         Some(d) => {
-            let Some(root) = state.root.as_deref() else {
-                return (StatusCode::INTERNAL_SERVER_ERROR, "no workspace root").into_response();
+            // A decision names its run's project like the review post does;
+            // enroll and remove purposes stay workspace-independent.
+            let root = match resolve_root(&state, q.workspace.as_deref()) {
+                Ok(root) => root,
+                Err(response) => return response,
             };
-            match AssertPurpose::resolved_decision(root, d) {
+            match AssertPurpose::resolved_decision(&root, d) {
                 Ok(p) => p,
                 Err(why) => return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response(),
             }
@@ -663,7 +671,7 @@ pub(crate) async fn remove_handler(
     }
 }
 
-use crate::state::AppState;
+use crate::state::{AppState, WorkspaceQuery, resolve_root};
 
 /// The machine's host name, for the enrollment and removal notices.
 pub(crate) fn machine_name() -> String {
