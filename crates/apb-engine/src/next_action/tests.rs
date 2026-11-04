@@ -42,6 +42,24 @@ edges:
   - { from: kid, to: f }
 "#;
 
+/// The same playbook with the gate a `publish` node, over which the run's
+/// snapshot is rewritten in the publish-consent test.
+const PUBLISH_PLAYBOOK: &str = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: w, type: script, script: "true", runner: sh }
+  - { id: gate, type: publish, from: w, remote: origin, branch: "apb/x" }
+  - { id: f, type: finish, outcome: success }
+edges:
+  - { from: s, to: w }
+  - { from: w, to: gate }
+  - { from: gate, to: f }
+"#;
+
 /// A project with runs written by hand.
 struct Fx {
     tmp: tempfile::TempDir,
@@ -986,9 +1004,12 @@ fn every_wait_says_what_an_unattended_run_does_there() {
     assert_eq!(unattended_of(&fx, "op", ActionCode::ResumeRun), None);
 }
 
-/// A dashboard without keys takes no publish consent: the decision path
-/// refuses it (`keyless_dashboard`) and the next actions mark it from the
-/// same rule, while a skip, a signed-in session and a review gate pass.
+/// A dashboard without keys takes no publish consent on a publish gate:
+/// the decision path refuses it (`keyless_dashboard`) and the next actions
+/// mark it from the same rule, while a skip, a signed-in session and a
+/// review gate pass. An option named `publish` on a `human_review` gate is
+/// an ordinary review decision: the actions do not mark it and the
+/// decision goes through.
 #[test]
 fn a_keyless_dashboard_is_refused_a_publish_consent_in_the_actions_as_on_the_decision_path() {
     use crate::decision_channel::DecisionChannel;
@@ -1003,13 +1024,10 @@ fn a_keyless_dashboard_is_refused_a_publish_consent_in_the_actions_as_on_the_dec
     };
     let step = apb_core::step_env::StepCaller::default();
     let refusal = |a: &NextAction, c| caller_refusal(a, &r.dir, c, &step);
-    assert_eq!(
-        refusal(&publish, DecisionChannel::DashboardKeyless),
-        Some(CallerRefusal::KeylessDashboard)
-    );
-    assert_eq!(refusal(&publish, DecisionChannel::DashboardSession), None);
+    // The gate here is a `human_review`, so even a publish-named action is
+    // not this rule's.
+    assert_eq!(refusal(&publish, DecisionChannel::DashboardKeyless), None);
     assert_eq!(refusal(&review, DecisionChannel::DashboardKeyless), None);
-
     let post = |decision: &str| {
         crate::review::post_decision_via(
             &r.dir,
@@ -1018,11 +1036,24 @@ fn a_keyless_dashboard_is_refused_a_publish_consent_in_the_actions_as_on_the_dec
                 decision: decision.into(),
                 note: String::new(),
             },
-            Some("n".into()),
+            None,
             None,
             DecisionChannel::DashboardKeyless,
         )
     };
+    match post(apb_core::publish::OPTION_PUBLISH) {
+        Ok(_) => {}
+        other => panic!("a review option named `publish` was refused: {other:?}"),
+    }
+
+    // The same decision on a `publish` node is the consent the rule
+    // refuses, in the actions as on the decision path.
+    std::fs::write(r.dir.join("playbook.yaml"), PUBLISH_PLAYBOOK).unwrap();
+    assert_eq!(
+        refusal(&publish, DecisionChannel::DashboardKeyless),
+        Some(CallerRefusal::KeylessDashboard)
+    );
+    assert_eq!(refusal(&publish, DecisionChannel::DashboardSession), None);
     match post(apb_core::publish::OPTION_PUBLISH) {
         Err(crate::error::EngineError::ChannelRefused { refusal, message }) => {
             assert_eq!(refusal, CallerRefusal::KeylessDashboard);
@@ -1033,7 +1064,6 @@ fn a_keyless_dashboard_is_refused_a_publish_consent_in_the_actions_as_on_the_dec
         }
         other => panic!("a keyless publish consent went through: {other:?}"),
     }
-    assert!(!r.dir.join("reviews.jsonl").exists(), "nothing was queued");
     // Anything but the consent is not this rule's (the gate's own checks
     // answer it).
     assert!(!matches!(

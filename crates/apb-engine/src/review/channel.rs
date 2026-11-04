@@ -86,16 +86,37 @@ pub fn refuse_for_person_only(
     })
 }
 
-/// Whether `channel` never gives `decision` as a publish consent: a
-/// dashboard without keys takes no `publish` decision (decision record
-/// 0010). Anything on this machine reaches it, a sandboxed agent under
-/// `network: open` included, and the open plan's nonce is in the run
-/// payload, so it could consent to its own push. A `skip` pushes nothing
-/// and goes through. The one rule the decision path
-/// ([`refuse_publish_consent`]) and the next actions
-/// (`next_action::caller_refusal`) share.
-pub fn refuses_publish_consent(channel: DecisionChannel, decision: &str) -> bool {
-    channel == DecisionChannel::DashboardKeyless && decision == apb_core::publish::OPTION_PUBLISH
+/// Whether `channel` never gives `decision` as a publish consent on a
+/// `publish` gate (`is_publish_gate`): a dashboard without keys takes no
+/// publish consent (decision record 0010). Anything on this machine
+/// reaches it, a sandboxed agent under `network: open` included, and the
+/// open plan's nonce is in the run payload, so it could consent to its own
+/// push. The rule protects consent to a publish node's push plan only: an
+/// option named `publish` on a `human_review` gate is an ordinary review
+/// decision, so the gate decides it. A `skip` pushes nothing and goes
+/// through. The one rule the decision path ([`refuse_publish_consent`])
+/// and the next actions (`next_action::caller_refusal`) share.
+pub fn refuses_publish_consent(
+    channel: DecisionChannel,
+    decision: &str,
+    is_publish_gate: bool,
+) -> bool {
+    is_publish_gate
+        && channel == DecisionChannel::DashboardKeyless
+        && decision == apb_core::publish::OPTION_PUBLISH
+}
+
+/// Whether the gate `node` of the run at `run_dir` is a `publish` node, so
+/// [`refuses_publish_consent`] applies to it. A playbook that does not
+/// read, or a node it does not have, is one: the rule fails closed, the
+/// same way `check_review_target` judges an unreadable snapshot.
+pub fn is_publish_gate(run_dir: &Path, node: &str) -> bool {
+    crate::progress::load_run_playbook(run_dir)
+        .and_then(|p| {
+            p.node(node)
+                .map(|n| matches!(n.kind, apb_core::schema::NodeKind::Publish { .. }))
+        })
+        .unwrap_or(true)
 }
 
 /// The refusal of `decision` on the publish gate `node` of the run at
@@ -109,7 +130,7 @@ pub fn refuse_publish_consent(
     decision: &str,
     channel: DecisionChannel,
 ) -> Result<(), EngineError> {
-    if !refuses_publish_consent(channel, decision) {
+    if !refuses_publish_consent(channel, decision, is_publish_gate(run_dir, node)) {
         return Ok(());
     }
     let message = if passkey_enforced_here() {

@@ -2742,3 +2742,59 @@ async fn a_failing_workspace_listing_is_an_error_not_an_empty_result() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["runs"].as_array().unwrap().len(), 0);
 }
+
+/// A review gate that offers an option named `publish`: the rule protects
+/// consent to a publish node's push plan only, so a keyless dashboard
+/// takes the decision, the engine's channel records it, and the next
+/// actions do not mark it refused. A publish node's consent is still
+/// refused (`a_keyless_dashboard_refuses_a_publish_consent`).
+#[tokio::test]
+async fn a_keyless_dashboard_decides_a_publish_named_option_on_a_review_gate() {
+    let dir = seed_with_run();
+    let yaml = r#"
+schema: 1
+id: gated
+name: Gated
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: gate, type: human_review, options: [publish, reject] }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: ok, condition: { type: review_status, equals: publish } }
+  - { from: gate, to: no, condition: { type: review_status, equals: reject } }
+"#;
+    let request = apb_engine::event::EventPayload::review_requested(
+        "gate",
+        vec!["publish".into(), "reject".into()],
+        String::new(),
+    );
+    seed_gate_run_yaml(dir.path(), "pub-opt-1", yaml, &[request]);
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (_, json) = get_json(app.clone(), "/api/runs/pub-opt-1").await;
+    let review = json["next_actions"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["code"] == "decide_review")
+        .cloned()
+        .expect("a decide_review action");
+    assert_eq!(
+        review["caller_refusal"],
+        serde_json::Value::Null,
+        "{review}"
+    );
+
+    let (status, body) = post_as(
+        app,
+        "/api/runs/pub-opt-1/review",
+        None,
+        serde_json::json!({ "node": "gate", "decision": "publish" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let channel = fs::read_to_string(dir.path().join(".apb/runs/pub-opt-1/reviews.jsonl")).unwrap();
+    assert!(channel.contains("publish"), "{channel}");
+}
