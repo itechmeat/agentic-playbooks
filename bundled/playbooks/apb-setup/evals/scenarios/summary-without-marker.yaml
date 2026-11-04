@@ -1,0 +1,30 @@
+schema: 1
+id: summary-without-marker
+title: The summary leaves out the SETUP PLAN marker; the goal is not enforced, so the run still succeeds with that criterion unmet
+instruction: "Set apb up for me."
+answers:
+  interview:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { goals: "code", agents: "both installed agents, the second one reviews", budget: "balanced", write_outside_repo: "false", notifications: "not wanted", notes: "" }
+  plan:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { digest: "sha256:0f1e", changes: "[\"write the global profile apb-reviewer\"]", unmet: "none", person_only: "a notification target", apply_command: "apb setup apply --digest sha256:0f1e", undo_command: "apb setup remove" }
+  verify:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { validation: "every default validates", warnings: "none", trial_command: "apb trial apb-research" }
+
+  summary:
+    - visit: 1
+      attempts:
+        - { status: succeeded, output: "Here is what setup would change. Nothing was applied by this run." }
+expect:
+  # apb-setup's goal has no `enforce`, so an unmet marker criterion is
+  # reported in the goal and does not fail the run.
+  run: { outcome: [succeeded] }
+  finish: summary

@@ -20,7 +20,12 @@ are local, listed in the plan and reversible with `apb setup remove`:
    `apb-researcher`) from the agents this machine actually has and the
    models table. The reviewer is another agent when one is usable; with a
    single agent it is the same agent in a fresh session, and the plan says
-   so (`same_agent_reviewer`).
+   so (`same_agent_reviewer`). `apb doctor` says it too, the fit report of
+   a playbook that binds both roles carries a `same_agent_reviewer` note
+   (it never blocks), and a run of such a playbook records it at start as a
+   limit (`run_provenance.limits`), shown by `run_status` and as a `limit:`
+   line of `apb runs <id>`. Only the primary agents are compared, not the
+   fallbacks; a later profile rebind does not update a run's limit.
 4. Register the MCP server `agentic-playbooks` in every detected host:
    Claude Code through its own CLI at user scope, Codex and OpenCode by
    adding one entry to their config file (the original is backed up first,
@@ -154,9 +159,11 @@ into the task record. apb depends on none of them.
    8. `manual`: host entries the person adds by hand, with the `snippet`;
    9. `suggestions`: review helpers; the installed ones are `required`
       in every review cycle (setup never installs one);
-   10. `warnings`, `refusal`, `needs_person` and `digest`. The digest also
-       covers the host programs apply starts (the Claude Code CLI's path), so
-       another binary on PATH is another plan.
+   10. `warnings`, `refusal`, `needs_person` and `digest`. An
+       `update_available` warning also carries `diff`, what the shipped
+       content changes (see "Upgrades"). The digest also covers the host
+       programs apply starts (the Claude Code CLI's path) and those diffs,
+       so another binary on PATH, or other shipped changes, is another plan.
 4. **Ask the person, at most five short questions,** only what the plan
    cannot answer:
    1. What do you want playbooks for (goals and domains: code, research,
@@ -187,15 +194,41 @@ into the task record. apb depends on none of them.
    `apb-` id. Tell the person which copies you saved, so they review them.
    `apb-issue-triage` reads and labels issues through the official `github`
    connector: the person installs it (`apb connector install github`), adds
-   an account and approves it.
+   an account and approves it. `apb-inbox-digest` reads mail through the
+   official `imap` connector the same way: `apb connector install imap`, an
+   account, and its approval.
 7. **Verify.** Run `apb adopt <id> --scope global` for the playbooks the
    person will use (the defaults live in the global store; `apb validate`
-   reads only the project's), then one dry trial (`playbook_trial`) of the
-   main one.
+   reads only the project's). Play the main default's scenarios at quick,
+   from the project: `apb eval apb-feature-delivery --scope global --level
+   quick` (free: no agent, connector or model is started, and it needs no
+   trust). Then one dry trial (`playbook_trial`) of the main one.
 8. **Report** to the person: what was installed and registered (from
    `done` of the apply), the warnings (an update available, a reviewer on the
    same agent), what still needs them (`needs_person`, with the answers they
    gave), and that `apb setup remove` undoes setup.
+
+## Defaults
+
+apb ships these playbooks. Setup installs each into the global store,
+trusted for its exact shipped digest only. A default is never edited in
+place: a copy takes the person's own id (step 6). Every default ships
+scenarios under `evals/scenarios/`, installed beside it and played in
+apb's own CI; play them from any project with `apb eval <id> --scope global
+--level quick` (see `docs/EVALS.md`, "Scenario runs"). Every default
+declares `agent_launch: ask`.
+
+| Default | What it does | What it needs | Effects |
+|---|---|---|---|
+| `apb-setup` | Re-adapts apb: at most five questions, reads `apb setup plan` and `apb doctor`, checks the defaults, suggests one dry trial. Applies nothing. | `apb-main` | `fs_read` |
+| `apb-feature-delivery` | One feature, bug fix or refactoring: intake card, design, a decomposition into ordered subtasks when large, implementation, a three-role read-only review panel, at most two repair rounds, and a report against the original request. Nothing changes the tree between the last review and the report; the project's tests run before and after the work. No commit, push or pull request. | `apb-main`, `apb-reviewer` | `fs_read`, `fs_write` |
+| `apb-code-review` | A read-only panel over one change: correctness, security, tests and the project's own checks side by side, merged into one report. | `apb-reviewer` | `fs_read` |
+| `apb-research` | One bounded question answered with sources or a disposable experiment, with its limits stated. | `apb-researcher` | `fs_read`, `network` |
+| `apb-issue-triage` | Classifies the untriaged open issues of one repository, labels them from the playbook's params with an engine read-back, and asks reporters for missing information only after a person approves. | `apb-main`; the `github` connector with an approved account | `network`, `external`, `irreversible` |
+| `apb-inbox-digest` | Reads the unread mail of one folder, classifies each message (action needed, reply needed, for information, newsletter, suspicious) with a judge checking each verdict, and writes `inbox-digest.md` in the project. Binds only the connector's read-only functions, so it never marks, moves or sends mail through it; the listing step runs unsandboxed (it binds the connector), the classifying and digest steps in a sandbox where the machine has one. | `apb-main`; the `imap` connector with an approved account | `network`, `fs_write` |
+
+A default that needs a connector is refused at the gate until the person
+installed the connector and approved an account for it.
 
 ## Undo
 
@@ -236,6 +269,29 @@ did on stderr. A default is never moved back to older content than the
 newest shipped version installed. A changed one, or one a person moved to
 another version, is never replaced on its own: `apb doctor` and
 `apb setup plan` report an update as available and name the option.
+
+The notice says how the changed copy differs from the new shipped
+content, in one line, in the reconcile note, in the `defaults` line of
+`apb doctor` and in the detail of the plan's `update_available` warning.
+The warning's `diff` holds the change itself with its `base`: for a
+playbook the definition diff (`nodes_added`, `nodes_removed`,
+`nodes_changed`, `edges_added`, `edges_removed`, `edges`,
+`edge_order_changed`, `yaml_diff`), for a skill the paths `added`,
+`removed` and `changed`. The line's words follow the base:
+
+- `base: shipped`: a playbook is compared from the newest version that
+  still holds apb's own shipped content to the new shipped one, so the
+  person's own versions and edits are left out. The line reads
+  `shipped changes: nodes +1 -0 ~2, edges +1 -0 ~0` (added, removed,
+  changed).
+- `base: current`: every version apb wrote was edited in place, so the
+  comparison starts at the person's `current` and holds those edits,
+  reversed. The line reads `differs from the shipped version: nodes ...`.
+- `base: installed_copy`: a skill keeps no copy of the files it was
+  installed from, so its paths are those that differ between the
+  installed copy and the new shipped files, the person's own changes
+  included. The line reads `differs from the shipped version: files +1 -0
+  ~2`.
 
 To take the shipped content over a changed default, on the person's
 request: `apb setup plan --replace-modified <name>` (several names separated

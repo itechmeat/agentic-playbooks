@@ -55,6 +55,22 @@ pub fn role_skills(name: &str) -> &'static [&'static str] {
         .map_or(&[], |(_, skills)| skills)
 }
 
+/// The code every surface names a same-agent reviewer by: the setup plan's
+/// warning, the doctor, the fit report and a run's limits.
+pub const SAME_AGENT_REVIEWER: &str = "same_agent_reviewer";
+
+/// The one sentence every surface says about a same-agent reviewer.
+pub const SAME_AGENT_REVIEWER_DETAIL: &str = "the reviewer runs on the same agent as the main role, in a fresh session; reviews are less independent";
+
+/// Whether the reviewer (`apb-reviewer`) runs on the same agent as the main
+/// role (`apb-main`): the one rule the setup plan, the doctor, the fit
+/// report and a run's limits share. Only the primary executor agent of each
+/// profile is compared; fallbacks are not, so a reviewer that falls back to
+/// the main agent is not reported.
+pub fn same_agent_reviewer(main_agent: &str, reviewer_agent: &str) -> bool {
+    main_agent == reviewer_agent
+}
+
 /// Whether the reviewer runs on another agent than the main profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -234,12 +250,12 @@ pub fn plan_role_profiles(
         .iter()
         .filter(|u| u.agent != main.agent)
         .min_by_key(|u| u.rank_away(&builder));
-    let independence = if reviewer.is_some() {
-        Independence::SeparateAgent
-    } else {
-        Independence::SameAgent
-    };
     let reviewer = reviewer.unwrap_or(main);
+    let independence = if same_agent_reviewer(&main.agent, &reviewer.agent) {
+        Independence::SameAgent
+    } else {
+        Independence::SeparateAgent
+    };
     let fallbacks = |primary: &Usable, exclude: Option<&str>| -> Vec<RoleFallback> {
         let away = [primary.family.as_deref(), main.family.as_deref()];
         let mut rest: Vec<&Usable> = usable

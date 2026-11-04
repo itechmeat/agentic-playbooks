@@ -30,8 +30,8 @@ use apb_engine::scenario::report::{ScenarioReport, Subject, Verdict};
 use apb_engine::scenario::store::{self, DriveRequest};
 pub(crate) use apb_mcp::tools::scenario::ScenarioChild as ChildArgs;
 use apb_mcp::tools::scenario::{
-    DEFAULT_MAX_DECISION_REQUESTS, MAX_DECISION_REQUESTS, ScenarioVersion as Version, load_version,
-    play, scenario_errors as errors, shown, smoke_trust, timeout,
+    DEFAULT_MAX_DECISION_REQUESTS, MAX_DECISION_REQUESTS, ScenarioVersion as Version, Scope,
+    load_version, play, scenario_errors as errors, shown, smoke_trust, timeout,
 };
 use serde_json::json;
 
@@ -41,6 +41,8 @@ use crate::util::print_json;
 pub(crate) struct ScenarioArgs {
     pub id: String,
     pub version: Option<String>,
+    /// Where the playbook is read; the runs land in the project either way.
+    pub scope: Scope,
     pub level: ScenarioLevel,
     /// Only these scenarios (all when empty).
     pub scenarios: Vec<String>,
@@ -119,7 +121,13 @@ fn smoke_checks(args: &ScenarioArgs, v: &Version, count: usize) -> Result<u32, (
 /// (deep). A flag of another level is refused, never ignored.
 pub(crate) fn eval_entry(root: &Path, args: crate::eval::EvalArgs) -> ExitCode {
     if args.list_scenarios {
-        return list_cmd(root, &args.id, args.version.as_deref(), args.json);
+        return list_cmd(
+            root,
+            args.scope,
+            &args.id,
+            args.version.as_deref(),
+            args.json,
+        );
     }
     if let Some(flag) = crate::eval::misplaced_flag(&args) {
         let level = args.level.scenario().map_or("deep", ScenarioLevel::as_str);
@@ -130,6 +138,13 @@ pub(crate) fn eval_entry(root: &Path, args: crate::eval::EvalArgs) -> ExitCode {
         );
     }
     let Some(level) = args.level.scenario() else {
+        if args.scope == Scope::Global {
+            return refuse(
+                args.json,
+                "bad_flag",
+                "--scope global applies to --level quick|smoke and --scenarios: deep eval cases run for project playbooks only".into(),
+            );
+        }
         return crate::eval::eval_cmd(root, args);
     };
     scenario_cmd(
@@ -137,6 +152,7 @@ pub(crate) fn eval_entry(root: &Path, args: crate::eval::EvalArgs) -> ExitCode {
         ScenarioArgs {
             id: args.id,
             version: args.version,
+            scope: args.scope,
             level,
             scenarios: args.scenarios,
             max_decision_requests: args.max_decision_requests,
@@ -156,7 +172,7 @@ pub(crate) fn scenario_cmd(root: &Path, args: ScenarioArgs) -> ExitCode {
             "--max-decision-requests is for --level smoke: a quick run sends no request".into(),
         );
     }
-    let v = match load_version(root, &args.id, args.version.as_deref()) {
+    let v = match load_version(root, args.scope, &args.id, args.version.as_deref()) {
         Ok(v) => v,
         Err((code, msg)) => return refuse(args.json, &code, msg),
     };
@@ -224,7 +240,7 @@ pub(crate) fn scenario_cmd(root: &Path, args: ScenarioArgs) -> ExitCode {
     };
     for s in &to_run {
         let subject = Subject::of(args.level, s, &args.id, &v.version, &v.digest);
-        let child = ChildArgs::of(root, &args.id, &v, s, args.level, cap);
+        let child = ChildArgs::of(root, args.scope, &args.id, &v, s, args.level, cap);
         let mut cmd = Command::new(&exe);
         cmd.args(child.argv());
         reports.push(play(
@@ -305,9 +321,15 @@ fn print_reports(args: &ScenarioArgs, version: &str, reports: &[ScenarioReport])
 }
 
 /// `apb eval <id> --scenarios`: every scenario of the version with its
-/// latest result per level, and whether it is stale now.
-pub(crate) fn list_cmd(root: &Path, id: &str, version: Option<&str>, json_out: bool) -> ExitCode {
-    let v = match load_version(root, id, version) {
+/// latest result per level in this project, and whether it is stale now.
+pub(crate) fn list_cmd(
+    root: &Path,
+    scope: Scope,
+    id: &str,
+    version: Option<&str>,
+    json_out: bool,
+) -> ExitCode {
+    let v = match load_version(root, scope, id, version) {
         Ok(v) => v,
         Err((code, msg)) => return refuse(json_out, &code, msg),
     };
@@ -423,7 +445,8 @@ pub(crate) fn child_cmd(a: ChildArgs) -> ExitCode {
 fn child_request(root: &Path, a: &ChildArgs) -> Result<DriveRequest, Box<ScenarioReport>> {
     let unread =
         |why: String| Box::new(ScenarioReport::not_run(&a.subject(), Verdict::Invalid, why));
-    let v = load_version(root, &a.playbook, Some(&a.version)).map_err(|(_, m)| unread(m))?;
+    let v =
+        load_version(root, a.scope, &a.playbook, Some(&a.version)).map_err(|(_, m)| unread(m))?;
     let s = apb_core::scenario::load(&v.dir, &a.scenario).map_err(unread)?;
     if s.digest != a.scenario_digest || v.digest != a.playbook_digest {
         return Err(unread(
@@ -436,6 +459,7 @@ fn child_request(root: &Path, a: &ChildArgs) -> Result<DriveRequest, Box<Scenari
     }
     Ok(DriveRequest {
         root: root.to_path_buf(),
+        scope: a.scope,
         playbook_id: a.playbook.clone(),
         version: v.version,
         playbook_digest: v.digest,
@@ -476,6 +500,7 @@ mod tests {
         ScenarioArgs {
             id: "pb".into(),
             version: None,
+            scope: Scope::Project,
             level,
             scenarios: Vec::new(),
             max_decision_requests: None,
@@ -645,10 +670,11 @@ mod tests {
     fn the_child_refuses_a_scenario_that_changed_after_the_check() {
         let p = project(&[("green", GREEN)]);
         let root = p.path();
-        let v = load_version(root, "pb", None).unwrap();
+        let v = load_version(root, Scope::Project, "pb", None).unwrap();
         let s = apb_core::scenario::load(&v.dir, "green").unwrap();
         let child = ChildArgs {
             root: root.to_path_buf(),
+            scope: Scope::Project,
             playbook: "pb".into(),
             version: v.version.clone(),
             scenario: "green".into(),

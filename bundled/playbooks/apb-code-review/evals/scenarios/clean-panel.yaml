@@ -1,0 +1,41 @@
+schema: 1
+id: clean-panel
+title: Three reviewers and the project checks run side by side and the report merges them
+instruction: "Review the export change."
+params: { target: "HEAD", base: "main" }
+answers:
+  scope:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { candidate: "abc123..def456", files: "[\"src/export.rs\"]", summary: "streams the export", intent: "stream the export", checks: "cargo test" }
+  review_correctness:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { role: correctness, coverage: "the whole diff", findings: "[]" }
+  review_security:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { role: security, coverage: "the whole diff", findings: "[]" }
+  review_tests:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { role: tests, coverage: "the whole diff", findings: "[]" }
+  native_checks:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { results: "[{\"command\": \"cargo test\", \"result\": \"passed\"}]", fresh: "true" }
+  report:
+    - visit: 1
+      attempts:
+        - { status: succeeded, output: "REVIEW REPORT: no defect or design concern is open." }
+expect:
+  run: { outcome: [succeeded] }
+  finish: report
+  visits: { scope: 1, review_correctness: 1, review_security: 1, review_tests: 1, native_checks: 1, report: 1 }
+  edges:
+    taken: { "e:review_correctness>report#1": 1, "e:review_security>report#1": 1, "e:review_tests>report#1": 1, "e:native_checks>report#1": 1 }

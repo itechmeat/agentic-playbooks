@@ -1,0 +1,32 @@
+schema: 1
+id: judge-rejects-every-item
+title: The judge rejects every classification, each item is classified again once, then needs a look, and nothing is labelled
+instruction: "Triage the new issues."
+params: { owner: acme, repo: site, label_filter: "new" }
+answers:
+  list_open:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { issues: '[{"number": 1, "title": "issue 1", "url": "https://github.com/acme/site/issues/1", "body": "text"}, {"number": 2, "title": "issue 2", "url": "https://github.com/acme/site/issues/2", "body": "text"}]', index: '[{"number": 1, "title": "issue 1"}, {"number": 2, "title": "issue 2"}]', truncated: "false" }
+  classify:
+    - visit: 1
+      items:
+        "1":
+          - status: succeeded
+            outputs: { category: bug, reason: "the issue says so", duplicate_of: "", missing_info: "" }
+          - status: succeeded
+            outputs: { category: bug, reason: "the issue says so", duplicate_of: "", missing_info: "" }
+        "2":
+          - status: succeeded
+            outputs: { category: feature, reason: "the issue says so", duplicate_of: "", missing_info: "" }
+          - status: succeeded
+            outputs: { category: feature, reason: "the issue says so", duplicate_of: "", missing_info: "" }
+      judge: { verdict: { value: reject, p: 0.9, confidence: 0.9 } }
+expect:
+  # Every list criterion of the enforced goal must pass, and classify
+  # left items that need a look, so the run ends failed.
+  run: { outcome: [failed] }
+  finish: done
+  visits: { classify: 1 }
+  route: { not_visits: [approve_comments, ask_info] }

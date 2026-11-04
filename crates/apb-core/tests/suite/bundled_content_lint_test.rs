@@ -646,3 +646,308 @@ fn bug_fixes_go_through_the_diagnosis_skill() {
         );
     }
 }
+
+/// Every shipped playbook carries its scenarios in the embedded `evals/`,
+/// and every scenario file parses and holds to the scenario rules against
+/// its playbook (V146 to V150 clean), so setup installs a suite that plays.
+#[test]
+fn every_shipped_playbook_ships_valid_scenarios() {
+    let shipped = apb_core::bundled::playbooks();
+    assert!(!shipped.is_empty());
+    for pb in shipped {
+        let playbook = Playbook::from_yaml(&pb.yaml).unwrap();
+        let scenarios: Vec<(&String, &Vec<u8>)> = pb
+            .evals
+            .iter()
+            .filter(|(path, _)| path.starts_with("scenarios/") && path.ends_with(".yaml"))
+            .collect();
+        assert!(
+            scenarios.len() >= 2,
+            "{}: ships {} scenario(s) in evals/, at least 2 are required",
+            pb.id,
+            scenarios.len()
+        );
+        for (path, bytes) in scenarios {
+            let name = path
+                .trim_start_matches("scenarios/")
+                .trim_end_matches(".yaml");
+            let raw = std::str::from_utf8(bytes).unwrap();
+            let scenario = apb_core::scenario::parse(raw, name)
+                .unwrap_or_else(|e| panic!("{}/{name}: {e}", pb.id));
+            let errors: Vec<String> =
+                apb_core::scenario::validate_scenario(name, &scenario, &playbook)
+                    .into_iter()
+                    .filter(|i| i.severity == apb_core::validate::Severity::Error)
+                    .map(|i| format!("{} {}", i.code, i.message))
+                    .collect();
+            assert!(errors.is_empty(), "{}/{name}: {errors:#?}", pb.id);
+        }
+    }
+}
+
+/// The connector function names a playbook binds: node grants and item
+/// checks, per connector.
+fn bound_functions(doc: &yaml_serde::Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for node in doc.get("nodes").and_then(|n| n.as_sequence()).unwrap() {
+        for c in node
+            .get("connectors")
+            .and_then(|c| c.as_sequence())
+            .into_iter()
+            .flatten()
+        {
+            let name = c.get("name").and_then(|v| v.as_str()).unwrap().to_string();
+            for f in c
+                .get("functions")
+                .and_then(|f| f.as_sequence())
+                .into_iter()
+                .flatten()
+            {
+                out.push((name.clone(), f.as_str().unwrap().to_string()));
+            }
+        }
+        if let Some(check) = node
+            .get("list")
+            .and_then(|l| l.get("check"))
+            .and_then(|c| c.get("connector"))
+        {
+            out.push((
+                check
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap()
+                    .to_string(),
+                check
+                    .get("function")
+                    .and_then(|v| v.as_str())
+                    .unwrap()
+                    .to_string(),
+            ));
+        }
+    }
+    out
+}
+
+fn inbox_digest() -> yaml_serde::Value {
+    let yaml =
+        std::fs::read_to_string(bundled_root().join("playbooks/apb-inbox-digest/playbook.yaml"))
+            .unwrap();
+    yaml_serde::from_str(&yaml).unwrap()
+}
+
+/// The mail digest only reads: every imap function it binds is
+/// `read_only: true` in the official connector, and its effects hold
+/// neither `external` nor `irreversible`.
+#[test]
+fn inbox_digest_binds_only_read_only_mail_functions() {
+    let doc = inbox_digest();
+    let manifest: yaml_serde::Value = yaml_serde::from_str(
+        &std::fs::read_to_string(bundled_root().join("../connectors/imap/connector.yaml")).unwrap(),
+    )
+    .unwrap();
+    let read_only: BTreeSet<String> = manifest
+        .get("functions")
+        .and_then(|f| f.as_sequence())
+        .unwrap()
+        .iter()
+        .filter(|f| f.get("read_only").and_then(|v| v.as_bool()) == Some(true))
+        .map(|f| f.get("name").and_then(|v| v.as_str()).unwrap().to_string())
+        .collect();
+    let bound = bound_functions(&doc);
+    assert!(!bound.is_empty(), "the digest binds the imap connector");
+    for (connector, function) in bound {
+        assert_eq!(
+            connector, "imap",
+            "the digest binds only the imap connector"
+        );
+        assert!(
+            read_only.contains(&function),
+            "imap `{function}` is bound but not read_only"
+        );
+    }
+    let effects: Vec<&str> = doc
+        .get("effects")
+        .and_then(|e| e.as_sequence())
+        .unwrap()
+        .iter()
+        .filter_map(|e| e.as_str())
+        .collect();
+    for denied in ["external", "irreversible"] {
+        assert!(!effects.contains(&denied), "the digest declares `{denied}`");
+    }
+}
+
+/// The step that reads message text binds no connector.
+#[test]
+fn inbox_digest_classify_binds_no_connector() {
+    let doc = inbox_digest();
+    let classify = doc
+        .get("nodes")
+        .and_then(|n| n.as_sequence())
+        .unwrap()
+        .iter()
+        .find(|n| n.get("id").and_then(|v| v.as_str()) == Some("classify"))
+        .expect("the digest has a classify step");
+    assert!(classify.get("connectors").is_none());
+    assert!(
+        classify
+            .get("list")
+            .and_then(|l| l.get("check"))
+            .and_then(|c| c.get("connector"))
+            .is_none()
+    );
+}
+
+/// The cuts the search prompt names (`<field> cut to its first N
+/// characters`) keep one message item under the item byte limit, even when
+/// every character is one JSON writes as six bytes, with the largest uid.
+#[test]
+fn inbox_digest_cuts_keep_every_item_under_the_item_byte_limit() {
+    use apb_core::list::ITEM_MAX_BYTES;
+    use apb_core::list::items::{Item, item_bytes};
+
+    let doc = inbox_digest();
+    let prompt = doc
+        .get("nodes")
+        .and_then(|n| n.as_sequence())
+        .unwrap()
+        .iter()
+        .find(|n| n.get("id").and_then(|v| v.as_str()) == Some("search"))
+        .and_then(|n| n.get("prompt"))
+        .and_then(|p| p.as_str())
+        .unwrap()
+        .to_string();
+    let words: Vec<&str> = prompt.split_whitespace().collect();
+    let cut_of = |field: &str| -> usize {
+        let at = words
+            .windows(6)
+            .position(|w| w[0] == field && w[1] == "cut" && w[3] == "its" && w[4] == "first")
+            .unwrap_or_else(|| panic!("the prompt names the cut of `{field}`"));
+        words[at + 5].parse().unwrap()
+    };
+    let (from, subject) = (cut_of("from"), cut_of("subject"));
+    // The snippet is "the message text cut to its first N characters".
+    let at = words
+        .windows(5)
+        .position(|w| w[0] == "text" && w[1] == "cut" && w[3] == "its" && w[4] == "first")
+        .expect("the prompt names the snippet cut");
+    let snippet: usize = words[at + 5].parse().unwrap();
+
+    let long = |c: char, n: usize| std::iter::repeat_n(c, n).collect::<String>();
+    for c in ['\u{4e2d}', '\u{1f600}', '"', '\\', '\n', '\u{1}'] {
+        let item = Item {
+            id: "1".into(),
+            value: serde_json::json!({
+                "uid": u64::MAX,
+                "date": "Wed, 04 Nov 2026 10:00:00 +0000 (Coordinated Universal Time)",
+                "from": long(c, from),
+                "subject": long(c, subject),
+                "snippet": long(c, snippet),
+            }),
+            digest: String::new(),
+        };
+        let bytes = item_bytes(&item);
+        assert!(
+            bytes <= ITEM_MAX_BYTES,
+            "cuts {from}/{subject}/{snippet} of {c:?} give {bytes} bytes, over {ITEM_MAX_BYTES}"
+        );
+    }
+}
+
+/// The delivery report describes the candidate the panel reviewed: every
+/// agent step on a route from `collect` to `report` that does not pass
+/// through `fix` is read-only (`protect: ["**"]` or `read_only`), and so is
+/// `report` itself. Nothing after the last review changes the tree, which
+/// is why the playbook no longer calls itself "assessment only".
+#[test]
+fn the_delivery_report_follows_only_read_only_nodes() {
+    let yaml = std::fs::read_to_string(
+        bundled_root().join("playbooks/apb-feature-delivery/playbook.yaml"),
+    )
+    .unwrap();
+    let doc: yaml_serde::Value = yaml_serde::from_str(&yaml).unwrap();
+    let edges: Vec<(String, String)> = doc
+        .get("edges")
+        .and_then(|e| e.as_sequence())
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e.get("from").and_then(|v| v.as_str()).unwrap().to_string(),
+                e.get("to").and_then(|v| v.as_str()).unwrap().to_string(),
+            )
+        })
+        .collect();
+    let reach = |from: &str, forward: bool| -> BTreeSet<String> {
+        let mut seen = BTreeSet::from([from.to_string()]);
+        let mut stack = vec![from.to_string()];
+        while let Some(n) = stack.pop() {
+            for (a, b) in &edges {
+                let (src, dst) = if forward { (a, b) } else { (b, a) };
+                if *src == n && dst != "fix" && seen.insert(dst.clone()) {
+                    stack.push(dst.clone());
+                }
+            }
+        }
+        seen
+    };
+    let after_collect = reach("collect", true);
+    let before_report = reach("report", false);
+    let on_route: BTreeSet<&String> = after_collect.intersection(&before_report).collect();
+    assert!(
+        on_route.contains(&"report".to_string()),
+        "collect reaches report"
+    );
+    let nodes = doc.get("nodes").and_then(|n| n.as_sequence()).unwrap();
+    for id in on_route {
+        let node = nodes
+            .iter()
+            .find(|n| n.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+            .unwrap();
+        if node.get("type").and_then(|t| t.as_str()) != Some("agent_task") {
+            continue;
+        }
+        let protected = node
+            .get("protect")
+            .and_then(|p| p.as_sequence())
+            .is_some_and(|p| p.iter().any(|g| g.as_str() == Some("**")));
+        let read_only = node.get("read_only").and_then(|r| r.as_bool()) == Some(true);
+        assert!(
+            protected || read_only,
+            "`{id}` runs between the last review and the report and may change the tree"
+        );
+    }
+}
+
+/// Message text reaches the listing step, which must bind the connector and
+/// so cannot be isolated, and every later agent step through its item
+/// section or a `{{nodes...}}` reference. Every such later step binds no
+/// connector and is isolated, so outside the listing step the text reaches
+/// only sandboxed steps where this machine has a sandbox.
+#[test]
+fn inbox_digest_steps_that_read_mail_text_are_isolated() {
+    let doc = inbox_digest();
+    let nodes = doc.get("nodes").and_then(|n| n.as_sequence()).unwrap();
+    let mut readers = Vec::new();
+    for node in nodes {
+        let id = node.get("id").and_then(|v| v.as_str()).unwrap();
+        let prompt = node.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+        if node.get("connectors").is_some() {
+            assert_eq!(id, "search", "only the listing step binds a connector");
+            continue;
+        }
+        if !(prompt.contains("{{nodes.") || node.get("list").is_some()) {
+            continue;
+        }
+        readers.push(id.to_string());
+        let level = node
+            .get("isolation")
+            .and_then(|i| i.get("level"))
+            .and_then(|v| v.as_str());
+        assert!(
+            matches!(level, Some("best_effort" | "full")),
+            "`{id}` reads message text and is not isolated"
+        );
+    }
+    assert_eq!(readers, ["classify", "digest"]);
+}

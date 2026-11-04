@@ -260,6 +260,12 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
     if apb_engine::run_view::run_unattended(&dir) {
         out["unattended"] = json!(true);
     }
+    // The limits the run recorded at start (`run_provenance.limits`):
+    // absent for a run without any.
+    let limits = apb_engine::run_view::run_limits(&view.events);
+    if !limits.is_empty() {
+        out["limits"] = json!(limits);
+    }
     if let Some(p) = progress.filter(|p| !p.pending_tasks.is_empty()) {
         out["pending_tasks"] = json!(p.pending_tasks);
     }
@@ -1486,6 +1492,46 @@ mod progress_tests {
             run_status(tmp.path(), "r1")
                 .unwrap()
                 .get("isolation")
+                .is_none()
+        );
+    }
+
+    /// The limits a run journaled on `run_provenance` reach `run_status`; a
+    /// run without any carries no `limits` key.
+    #[test]
+    fn run_status_lists_the_run_limits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let journal = |provenance: &str| {
+            format!(
+                "{}\n{provenance}\n",
+                r#"{"seq":0,"ts":0,"type":"run_started","playbook":"p","version":"1.0.0"}"#
+            )
+        };
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            journal(
+                r#"{"seq":1,"ts":1,"type":"run_provenance","limits":[{"code":"same_agent_reviewer","detail":"the reviewer runs on the same agent"}]}"#,
+            ),
+        )
+        .unwrap();
+        let out = run_status(tmp.path(), "r1").unwrap();
+        assert_eq!(out["limits"][0]["code"], "same_agent_reviewer");
+        assert_eq!(
+            out["limits"][0]["detail"],
+            "the reviewer runs on the same agent"
+        );
+
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            journal(r#"{"seq":1,"ts":1,"type":"run_provenance"}"#),
+        )
+        .unwrap();
+        assert!(
+            run_status(tmp.path(), "r1")
+                .unwrap()
+                .get("limits")
                 .is_none()
         );
     }

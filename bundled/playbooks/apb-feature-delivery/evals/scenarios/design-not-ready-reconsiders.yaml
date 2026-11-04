@@ -1,0 +1,28 @@
+schema: 1
+id: design-not-ready-reconsiders
+title: The design has an unresolved question for the issuer, so nothing is implemented
+instruction: "Keep the change small."
+params: { change_kind: feature, task: "Add a --json flag to the export command" }
+baseline: skip
+answers:
+  intake:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { original_request: "Add a --json flag to the export command", expected: "[\"the export prints JSON with --json\"]", exclusions: "none", must_preserve: "the text output", assumptions: "[]", issuer: "the person at the terminal", risk_triggers: "public CLI contract", checks: "cargo test" }
+  design:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { ready: "false", design: "add the flag and a JSON writer", advisor: "a fresh subagent", assumptions: "[]", question: "which JSON shape the consumers expect" }
+  reconsider:
+    - visit: 1
+      attempts:
+        - { status: succeeded, output: "The run stopped before a converged review." }
+expect:
+  run: { outcome: [failed] }
+  finish: reconsider
+  route: { path: [start, intake, design, design_route, reconsider] }
+  # The prompts name both implementation paths, every repair round and
+  # the panel's earlier state; the ones this route never runs render empty.
+  templates_empty: report

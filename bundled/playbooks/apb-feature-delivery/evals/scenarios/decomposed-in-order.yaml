@@ -1,0 +1,64 @@
+schema: 1
+id: decomposed-in-order
+title: A large change is split into two subtasks that pass one at a time, then the panel finds nothing open
+instruction: "Keep the change small."
+params: { change_kind: feature, task: "Add a --json flag to the export command" }
+baseline: skip
+answers:
+  intake:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { original_request: "Add a --json flag to the export command", expected: "[\"the export prints JSON with --json\"]", exclusions: "none", must_preserve: "the text output", assumptions: "[]", issuer: "the person at the terminal", risk_triggers: "public CLI contract", checks: "cargo test" }
+  design:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { ready: "true", design: "add the flag and a JSON writer", advisor: "a fresh subagent", assumptions: "[]", question: "" }
+  decompose:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { triggers: "several layers", decomposed: "true", subtasks: '[{"id": "s1", "summary": "the JSON writer"}, {"id": "s2", "summary": "the --json flag", "depends_on": ["s1"]}]' }
+  implement_subtasks:
+    - visit: 1
+      items:
+        s1:
+          - status: succeeded
+            outputs: { changed_paths: "[]", evidence: "cargo test", review: "self review, nothing open", gaps: "", self_check: "pass" }
+        s2:
+          - status: succeeded
+            outputs: { changed_paths: "[]", evidence: "cargo test", review: "self review, nothing open", gaps: "", self_check: "pass" }
+  review_correctness:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { role: correctness, blocking: "0", findings: "[]" }
+  review_security:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { role: security, blocking: "0", findings: "[]" }
+  review_tests:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { role: tests, blocking: "0", findings: "[]" }
+  collect:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { open_count: "0", findings: "[]", roles: "correctness, security, tests" }
+  report:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { outcomes: "DELIVERY REPORT: the export prints JSON with --json, delivered.", conformance: "every stage done", findings: "none open", measurements: "feature" }
+expect:
+  run: { outcome: [succeeded] }
+  finish: assessed
+  visits: { implement_subtasks: 1, collect: 1, report: 1 }
+  route: { not_visits: [implement, fix, reconsider] }
+  # The prompts name both implementation paths, every repair round and
+  # the panel's earlier state; the ones this route never runs render empty.
+  templates_empty: report

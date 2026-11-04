@@ -1,0 +1,34 @@
+schema: 1
+id: empty-decomposition-reconsiders
+title: The decomposition says decomposed but names no subtask, so nothing is implemented
+instruction: "Keep the change small."
+params: { change_kind: feature, task: "Add a --json flag to the export command" }
+baseline: skip
+answers:
+  intake:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { original_request: "Add a --json flag to the export command", expected: "[\"the export prints JSON with --json\"]", exclusions: "none", must_preserve: "the text output", assumptions: "[]", issuer: "the person at the terminal", risk_triggers: "public CLI contract", checks: "cargo test" }
+  design:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { ready: "true", design: "add the flag and a JSON writer", advisor: "a fresh subagent", assumptions: "[]", question: "" }
+  decompose:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { triggers: "several layers", decomposed: "true", subtasks: '[]' }
+  reconsider:
+    - visit: 1
+      attempts:
+        - { status: succeeded, output: "The run stopped before a converged review." }
+expect:
+  run: { outcome: [failed] }
+  finish: reconsider
+  visits: { implement_subtasks: 1 }
+  route: { not_visits: [implement, candidate_ready, review_correctness, report] }
+  # The prompts name both implementation paths, every repair round and
+  # the panel's earlier state; the ones this route never runs render empty.
+  templates_empty: report

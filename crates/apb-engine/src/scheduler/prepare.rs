@@ -532,10 +532,31 @@ pub fn run_scenario(
     version: Option<&str>,
     prep: &crate::scenario::session::ScenarioPrep,
 ) -> Result<crate::scenario::session::ScenarioRun, EngineError> {
-    let t = PrepareTarget {
-        definition_parent: root.join(".apb"),
-        execution_root: root.to_path_buf(),
-        origin_label: "project",
+    run_scenario_of(root, apb_core::scope::Scope::Project, id, version, prep)
+}
+
+/// [`run_scenario`] of a playbook of `scope`: a global playbook is read
+/// from the global store and its scenario run still lives under the
+/// project at `root`, as a global playbook's run does.
+pub fn run_scenario_of(
+    root: &Path,
+    scope: apb_core::scope::Scope,
+    id: &str,
+    version: Option<&str>,
+    prep: &crate::scenario::session::ScenarioPrep,
+) -> Result<crate::scenario::session::ScenarioRun, EngineError> {
+    let t = match scope {
+        apb_core::scope::Scope::Project => PrepareTarget {
+            definition_parent: root.join(".apb"),
+            execution_root: root.to_path_buf(),
+            origin_label: "project",
+        },
+        apb_core::scope::Scope::Global => PrepareTarget {
+            definition_parent: apb_core::store::global_playbooks_parent()
+                .ok_or_else(|| EngineError::Invalid("no global config dir".into()))?,
+            execution_root: root.to_path_buf(),
+            origin_label: "global",
+        },
     };
     let place = Placement {
         runs: crate::scenario::RunsDir::Scenario.under(root),
@@ -742,15 +763,19 @@ pub(crate) fn prepare_placed(
     // Isolation, with the run's real execution mode: the gate's check again,
     // so no start path (a trial, a child, a resume of a fresh start) runs a
     // `full` node this machine cannot isolate. Nothing is written yet.
-    let contracts = crate::gate::isolation::node_contracts(
-        root,
-        &playbook,
-        origin,
-        execution.mode == apb_core::execution::ExecutionMode::Host,
-    );
+    // A scenario run spawns nothing to isolate: not evaluated, and the host
+    // is not probed (the probe starts a program the scenario guard refuses).
+    let contracts = match scenario {
+        Some(_) => Vec::new(),
+        None => crate::gate::isolation::node_contracts(
+            root,
+            &playbook,
+            origin,
+            execution.mode == apb_core::execution::ExecutionMode::Host,
+        ),
+    };
     let refused = crate::gate::isolation::refused(&contracts);
-    // A scenario run spawns nothing to isolate: not evaluated.
-    if !refused.is_empty() && scenario.is_none() {
+    if !refused.is_empty() {
         return Err(EngineError::Invalid(format!(
             "{}: {}",
             apb_core::isolation::contract::UNAVAILABLE,
@@ -1222,6 +1247,7 @@ pub(crate) fn prepare_placed(
         profiles: profiles_prov,
         remembered,
         apb: crate::event::apb_version(),
+        limits: run_limits(&manifest),
     })?;
     // A definition using a feature an older apb would drop is guarded from
     // here on: every checkpoint carries the guard, so such an apb refuses
@@ -1511,4 +1537,31 @@ pub(crate) fn run_guard(playbook: &Playbook) -> Option<EventPayload> {
         .map(|f| f.as_str().to_string())
         .collect();
     (!requires.is_empty()).then_some(EventPayload::RunGuard { requires })
+}
+
+/// The limits a run journals on `run_provenance`, from the profiles its
+/// manifest resolved: `same_agent_reviewer` when it binds both `apb-main`
+/// and `apb-reviewer` and the reviewer's primary executor runs on the main
+/// role's agent ([`apb_core::bundled::same_agent_reviewer`]; fallbacks are
+/// not compared). Recorded at start only: a later
+/// `supervisor_rebind_profile` does not update it.
+fn run_limits(manifest: &crate::manifest::RunExecutionManifest) -> Vec<crate::event::RunLimit> {
+    use apb_core::bundled::{self, ROLE_MAIN, ROLE_REVIEWER};
+    let agent = |name: &str| {
+        manifest
+            .profiles
+            .iter()
+            .find(|p| p.name == name)
+            .and_then(|p| p.chain.first())
+            .map(|i| i.agent_id.as_str())
+    };
+    match (agent(ROLE_MAIN), agent(ROLE_REVIEWER)) {
+        (Some(main), Some(reviewer)) if bundled::same_agent_reviewer(main, reviewer) => {
+            vec![crate::event::RunLimit {
+                code: bundled::SAME_AGENT_REVIEWER.to_string(),
+                detail: bundled::SAME_AGENT_REVIEWER_DETAIL.to_string(),
+            }]
+        }
+        _ => Vec::new(),
+    }
 }

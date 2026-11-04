@@ -958,6 +958,26 @@ fn one_usable_agent_reviews_as_the_same_agent_and_says_so() {
 }
 
 #[test]
+fn the_same_agent_reviewer_rule_compares_the_primary_agents_and_matches_the_plan() {
+    assert!(same_agent_reviewer("claude", "claude"));
+    assert!(!same_agent_reviewer("claude", "codex"));
+    assert_eq!(SAME_AGENT_REVIEWER, "same_agent_reviewer");
+    assert!(SAME_AGENT_REVIEWER_DETAIL.contains("same agent as the main role"));
+    let table = crate::models_table::builtin();
+    let (a, b) = two_vendor_agents();
+    for agents in [
+        vec![agent(&a, true)],
+        vec![agent(&a, true), agent(&b, true)],
+    ] {
+        let plan = plan_role_profiles(&agents, &table).unwrap();
+        assert_eq!(
+            plan.independence == Independence::SameAgent,
+            same_agent_reviewer(&plan.profiles[0].agent, &plan.profiles[1].agent)
+        );
+    }
+}
+
+#[test]
 fn subscriptions_order_the_agents() {
     let mut table = crate::models_table::builtin();
     let (a, b) = two_vendor_agents();
@@ -1221,4 +1241,174 @@ fn the_reviewer_and_the_fallbacks_rank_families_by_the_model() {
     let order: Vec<&str> = main.fallbacks.iter().map(|f| f.agent.as_str()).collect();
     assert_eq!(order, [b.as_str(), m.as_str()], "another family first");
     assert_eq!(plan.profiles[2].fallbacks, main.fallbacks);
+}
+
+/// [`yaml`] with a finish node per name in `finishes`, each reached from
+/// the start.
+fn yaml_with(version: &str, title: &str, finishes: &[&str]) -> String {
+    let nodes: String = finishes
+        .iter()
+        .map(|f| format!("  - {{ id: {f}, type: finish, outcome: success }}\n"))
+        .collect();
+    let edges: String = finishes
+        .iter()
+        .map(|f| format!("  - {{ from: s, to: {f} }}\n"))
+        .collect();
+    let edges = if edges.is_empty() {
+        "edges: []\n".to_string()
+    } else {
+        format!("edges:\n{edges}")
+    };
+    format!(
+        "schema: 2\nid: {ID}\nname: {title}\nversion: {version}\nnodes:\n  - {{ id: s, type: start }}\n{nodes}{edges}"
+    )
+}
+
+/// [`shipped`] whose definition is [`yaml_with`].
+fn shipped_with(version: &str, title: &str, finishes: &[&str]) -> BundledPlaybook {
+    let mut files = BTreeMap::new();
+    files.insert(
+        "playbook.yaml".to_string(),
+        yaml_with(version, title, finishes).into_bytes(),
+    );
+    files.insert(
+        "scripts/check.sh".to_string(),
+        b"#!/bin/sh\necho ok\n".to_vec(),
+    );
+    BundledPlaybook::from_files(ID, &files).expect("fixture parses")
+}
+
+#[test]
+fn an_update_notice_names_what_the_shipped_content_changed_and_not_the_persons_edit() {
+    let _cfg = crate::test_config();
+    let store = tempfile::tempdir().unwrap();
+    install_playbook_in(store.path(), &shipped_with("1.0.0", "One", &[]), false).unwrap();
+    // The person's own version, with a node of theirs, made current.
+    crate::versioning::write_version_in(
+        store.path(),
+        PlaybookOrigin::Global,
+        ID,
+        &crate::versioning::ShippedVersion {
+            yaml: &yaml_with("1.0.1", "Mine", &["mine"]),
+            version: "1.0.1",
+            scripts: &[],
+            created_by: "user",
+        },
+        crate::launch::floor::SaveChannel::Person,
+    )
+    .unwrap();
+    current::move_current(
+        &dir(store.path()),
+        &MoveCurrent::new(
+            "1.0.1",
+            MovedBy::Person {
+                surface: Surface::Cli,
+            },
+        ),
+    )
+    .unwrap();
+    let next = shipped_with("1.1.0", "One", &["extra"]);
+
+    let (base, diff) = update_diff::playbook_update_diff_in(store.path(), &next).expect("modified");
+    assert_eq!(base, update_diff::DiffBase::Shipped);
+    assert_eq!(diff.nodes_added, ["extra"]);
+    assert!(diff.nodes_removed.is_empty(), "{diff:?}");
+    assert!(diff.nodes_changed.is_empty(), "{diff:?}");
+    assert_eq!(diff.edges_added, ["s->extra"]);
+    assert_eq!(
+        update_diff::diff_summary(&diff),
+        "nodes +1 -0 ~0, edges +1 -0 ~0"
+    );
+
+    let notes = report::playbook_notes(store.path(), std::slice::from_ref(&next));
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0]
+            .text
+            .ends_with("; shipped changes: nodes +1 -0 ~0, edges +1 -0 ~0"),
+        "{notes:?}"
+    );
+    assert!(notes[0].text.contains("the built-in 1.1.0 is available"));
+
+    // Nothing to say for a copy that is not modified.
+    let pristine = tempfile::tempdir().unwrap();
+    install_playbook_in(pristine.path(), &shipped_with("1.0.0", "One", &[]), false).unwrap();
+    assert!(update_diff::playbook_update_diff_in(pristine.path(), &next).is_none());
+}
+
+#[test]
+fn without_an_apb_written_version_left_the_diff_starts_at_current() {
+    let _cfg = crate::test_config();
+    let store = tempfile::tempdir().unwrap();
+    install_playbook_in(store.path(), &shipped_with("1.0.0", "One", &[]), false).unwrap();
+    // A hand edit of the only shipped version: no untouched apb content left.
+    let file = dir(store.path()).join("1.0.0/playbook.yaml");
+    std::fs::write(&file, yaml_with("1.0.0", "One", &["mine"])).unwrap();
+    let next = shipped_with("1.1.0", "One", &["extra"]);
+
+    let (base, diff) = update_diff::playbook_update_diff_in(store.path(), &next).expect("modified");
+    assert_eq!(base, update_diff::DiffBase::Current);
+    assert_eq!(diff.nodes_added, ["extra"]);
+    assert_eq!(diff.nodes_removed, ["mine"], "from the person's current");
+    assert_eq!(
+        update_diff::diff_summary(&diff),
+        "nodes +1 -1 ~0, edges +1 -1 ~0"
+    );
+    // The person's own edit shows up reversed, so the line does not call
+    // it a shipped change.
+    let notes = report::playbook_notes(store.path(), std::slice::from_ref(&next));
+    assert!(
+        notes[0]
+            .text
+            .ends_with("; differs from the shipped version: nodes +1 -1 ~0, edges +1 -1 ~0"),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn a_diff_without_node_or_edge_changes_says_so() {
+    let from = yaml_with("1.0.0", "One", &["a"]);
+    let to = yaml_with("1.0.0", "Two", &["a"]);
+    let diff = crate::versioning::diff_definitions(&from, &to).unwrap();
+    assert_eq!(
+        update_diff::diff_summary(&diff),
+        "nodes +0 -0 ~0, edges +0 -0 ~0 (text only)"
+    );
+    let same = crate::versioning::diff_definitions(&from, &from).unwrap();
+    assert_eq!(
+        update_diff::diff_summary(&same),
+        "no change to the definition"
+    );
+}
+
+#[test]
+fn a_changed_skill_names_the_paths_that_differ_from_the_shipped_files() {
+    let root = tempfile::tempdir().unwrap();
+    let dirs = skill_dirs(root.path());
+    install_skill_in(&dirs, &skill("1.0.0", "one"), false).unwrap();
+    std::fs::write(dirs.skills.join("apb-skill/NOTES.md"), "mine").unwrap();
+    let mut files = skill("1.1.0", "two").files;
+    files.insert("references/b.md".to_string(), b"new\n".to_vec());
+    let next = BundledSkill::from_files("apb-skill", files).unwrap();
+
+    let diff = update_diff::skill_update_diff_in(&dirs.skills, &next).expect("modified");
+    assert_eq!(diff.added, ["references/b.md"]);
+    assert_eq!(diff.removed, ["NOTES.md"]);
+    assert_eq!(diff.changed, ["SKILL.md"]);
+    assert_eq!(diff.summary(), "files +1 -1 ~1");
+
+    let (notes, updated) = report::skill_notes(&dirs, std::slice::from_ref(&next));
+    assert!(updated.is_empty());
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0]
+            .text
+            .ends_with("; differs from the shipped version: files +1 -1 ~1"),
+        "{notes:?}"
+    );
+
+    // An unchanged copy has no diff to report.
+    let fresh = skill_dirs(&root.path().join("fresh"));
+    install_skill_in(&fresh, &skill("1.0.0", "one"), false).unwrap();
+    assert!(update_diff::skill_update_diff_in(&fresh.skills, &next).is_none());
 }

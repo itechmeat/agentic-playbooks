@@ -364,6 +364,27 @@ pub(crate) fn state_in(parent: &Path, shipped: &BundledPlaybook) -> InstallState
     .into()
 }
 
+/// The version of the modified copy in `playbook_dir` that the shipped
+/// changes of `shipped` are counted from: the newest version that still
+/// holds apb's own shipped content (written by apb, unedited), else the
+/// person's `current`, with whether it holds the shipped content. `None`
+/// when the copy is not [`InstallState::Modified`]. Read-only, like
+/// [`playbook_state`].
+pub(super) fn update_base(
+    playbook_dir: &Path,
+    shipped: &BundledPlaybook,
+) -> Option<(String, bool)> {
+    let trust = TrustStore::load();
+    let State::Modified { current } = read_state(playbook_dir, shipped, &trust) else {
+        return None;
+    };
+    let installed = Installed::read(playbook_dir, &trust, shipped);
+    Some(match installed.newest_bundled() {
+        Some((stored, _)) => (stored, true),
+        None => (current, false),
+    })
+}
+
 /// Moves the installed shipped playbook `id` to the global trash
 /// (`<config_dir>/trash/<id>-<ts_millis>`, restorable like any trash
 /// entry). Only a playbook that holds nothing but the versions apb shipped

@@ -60,6 +60,38 @@ fn runs_with_an_id_shows_the_usage_totals_and_the_note() {
         .stdout(predicate::str::contains("  1 unknown event (newer apb?)"));
 }
 
+/// A limit the run journaled at start is one line of `apb runs <id>`; a
+/// run without one has no such line.
+#[test]
+fn runs_with_an_id_shows_the_run_limits() {
+    let dir = project();
+    let run = dir.path().join(".apb/runs/limits-1");
+    fs::create_dir_all(&run).unwrap();
+    let journal = JOURNAL.replacen(
+        "\n",
+        &format!(
+            "\n{}\n",
+            r#"{"seq":100,"ts":1790000000000,"type":"run_provenance","limits":[{"code":"same_agent_reviewer","detail":"the reviewer runs on the same agent as the main role, in a fresh session; reviews are less independent"}]}"#
+        ),
+        1,
+    );
+    fs::write(run.join("events.jsonl"), journal).unwrap();
+    apb()
+        .args(["runs", "limits-1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "  limit: the reviewer runs on the same agent as the main role",
+        ));
+    apb()
+        .args(["runs", "demo-1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("limit:").not());
+}
+
 #[test]
 fn runs_with_an_unknown_id_fails() {
     let dir = project();

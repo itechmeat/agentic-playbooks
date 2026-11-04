@@ -52,6 +52,12 @@ mod billing_cli_test;
 #[cfg(unix)]
 #[path = "suite/budget_cli_test.rs"]
 mod budget_cli_test;
+// Unix-only: a shell script stands in for the codex CLI setup detects.
+#[cfg(unix)]
+#[path = "suite/bundled_global_scenario_test.rs"]
+mod bundled_global_scenario_test;
+#[path = "suite/bundled_scenarios_test.rs"]
+mod bundled_scenarios_test;
 #[path = "suite/cache_cli.rs"]
 mod cache_cli;
 #[path = "suite/cli_test.rs"]

@@ -320,6 +320,7 @@ mod tests {
     fn request(root: &Path, body: &str) -> DriveRequest {
         DriveRequest {
             root: root.to_path_buf(),
+            scope: apb_core::scope::Scope::Project,
             playbook_id: "loop".into(),
             version: "1.0.0".into(),
             playbook_digest: "sha256:pb".into(),

@@ -1,0 +1,30 @@
+schema: 1
+id: digest-written
+title: Three unread messages are classified, the judge accepts each, and the digest is written
+instruction: "What needs me this week."
+params: { mail_folder: INBOX, since_days: 7 }
+answers:
+  search:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { messages: '[{"uid": 101, "date": "2026-11-02", "from": "sender@example.com", "subject": "message 101", "snippet": "text"}, {"uid": 102, "date": "2026-11-02", "from": "sender@example.com", "subject": "message 102", "snippet": "text"}, {"uid": 103, "date": "2026-11-02", "from": "sender@example.com", "subject": "message 103", "snippet": "text"}]', total: "3", truncated: "false" }
+  classify:
+    - visit: 1
+      items:
+        "101":
+          - { status: succeeded, outputs: { category: action_needed, summary: "The landlord asks for the meter reading by Friday." } }
+        "102":
+          - { status: succeeded, outputs: { category: reply_needed, summary: "A colleague asks whether Tuesday works for the review." } }
+        "103":
+          - { status: succeeded, outputs: { category: newsletter, summary: "The weekly digest of a mailing list." } }
+      judge: { verdict: { value: accept, p: 0.9, confidence: 0.9 } }
+  digest:
+    - visit: 1
+      attempts:
+        - { status: succeeded, outputs: { digest: "INBOX DIGEST: INBOX, the last 7 days" } }
+expect:
+  run: { outcome: [succeeded] }
+  finish: done
+  route: { path: [start, search, classify, any_mail, digest, done] }
+  outputs: [ { node: digest, matches: "INBOX DIGEST:" } ]

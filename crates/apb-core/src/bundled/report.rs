@@ -31,6 +31,19 @@ pub fn describe(
     hint: impl Fn(&str) -> String,
     outcome: Vec<Reconciled>,
 ) -> Vec<ReconcileNote> {
+    describe_changes(kind, hint, |_| None, outcome)
+}
+
+/// [`describe`] with what the shipped content changed: `changes` gives the
+/// labelled one-line summary for the item `name` an update is available
+/// for (`shipped changes: <summary>` or `differs from the shipped version:
+/// <summary>`, see [`super::DiffBase::line`]), added to its line after `; `.
+pub(crate) fn describe_changes(
+    kind: &str,
+    hint: impl Fn(&str) -> String,
+    changes: impl Fn(&str) -> Option<String>,
+    outcome: Vec<Reconciled>,
+) -> Vec<ReconcileNote> {
     outcome
         .into_iter()
         .map(|r| match r {
@@ -51,8 +64,11 @@ pub fn describe(
             } => ReconcileNote {
                 failed: false,
                 text: format!(
-                    "{kind} `{name}` stays at {installed_version}, which was changed or chosen locally; the built-in {embedded_version} is available ({})",
-                    hint(&name)
+                    "{kind} `{name}` stays at {installed_version}, which was changed or chosen locally; the built-in {embedded_version} is available ({}){}",
+                    hint(&name),
+                    changes(&name)
+                        .map(|c| format!("; {c}"))
+                        .unwrap_or_default()
                 ),
             },
             Reconciled::NewerInstalled {
@@ -92,24 +108,13 @@ pub fn reconcile_defaults() -> Vec<ReconcileNote> {
         }
     };
     let mut notes = match super::playbook_store() {
-        Some(parent) => describe(
-            "default playbook",
-            defaults_hint,
-            super::playbooks::reconcile_playbooks_in(&parent, &super::playbooks()),
-        ),
+        Some(parent) => playbook_notes(&parent, &super::playbooks()),
         None => Vec::new(),
     };
     if let Some(dirs) = super::SkillDirs::global() {
         let held = super::role_trust::snapshot();
-        let outcome = super::skills::reconcile_skills_in(&dirs, &super::skills());
-        let updated: Vec<String> = outcome
-            .iter()
-            .filter_map(|r| match r {
-                Reconciled::Updated { name, .. } => Some(name.clone()),
-                _ => None,
-            })
-            .collect();
-        notes.extend(describe("skill", defaults_hint, outcome));
+        let (skill_notes, updated) = skill_notes(&dirs, &super::skills());
+        notes.extend(skill_notes);
         notes.extend(
             super::role_trust::carry(held, &updated)
                 .into_iter()
@@ -117,6 +122,46 @@ pub fn reconcile_defaults() -> Vec<ReconcileNote> {
         );
     }
     notes
+}
+
+/// Reconciles the shipped playbooks `shipped` in the store `parent` and
+/// describes it, with the shipped changes of each copy left alone.
+pub(crate) fn playbook_notes(
+    parent: &std::path::Path,
+    shipped: &[super::BundledPlaybook],
+) -> Vec<ReconcileNote> {
+    let outcome = super::playbooks::reconcile_playbooks_in(parent, shipped);
+    let changes = |name: &str| {
+        let p = shipped.iter().find(|p| p.id == name)?;
+        super::update_diff::playbook_update_diff_in(parent, p)
+            .map(|(base, d)| base.line(&super::update_diff::diff_summary(&d)))
+    };
+    describe_changes("default playbook", defaults_hint, changes, outcome)
+}
+
+/// Reconciles the shipped skills `skills` in `dirs` and describes it, with
+/// the shipped changes of each copy left alone; also the skills it updated.
+pub(crate) fn skill_notes(
+    dirs: &super::SkillDirs,
+    skills: &[super::BundledSkill],
+) -> (Vec<ReconcileNote>, Vec<String>) {
+    let outcome = super::skills::reconcile_skills_in(dirs, skills);
+    let updated: Vec<String> = outcome
+        .iter()
+        .filter_map(|r| match r {
+            Reconciled::Updated { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let changes = |name: &str| {
+        let s = skills.iter().find(|s| s.name == name)?;
+        super::update_diff::skill_update_diff_in(&dirs.skills, s)
+            .map(|d| super::SkillDiff::BASE.line(&d.summary()))
+    };
+    (
+        describe_changes("skill", defaults_hint, changes, outcome),
+        updated,
+    )
 }
 
 /// Prints the notes, each behind `prefix`. A failure goes to stderr; a

@@ -1,0 +1,64 @@
+schema: 1
+id: labelled-and-comments-approved
+title: One issue per category is classified and labelled, and a person approves the comment for the issue that needs information
+instruction: "Triage the new issues."
+params: { owner: acme, repo: site, label_filter: "new" }
+answers:
+  list_open:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { issues: '[{"number": 1, "title": "issue 1", "url": "https://github.com/acme/site/issues/1", "body": "text"}, {"number": 2, "title": "issue 2", "url": "https://github.com/acme/site/issues/2", "body": "text"}, {"number": 3, "title": "issue 3", "url": "https://github.com/acme/site/issues/3", "body": "text"}, {"number": 4, "title": "issue 4", "url": "https://github.com/acme/site/issues/4", "body": "text"}, {"number": 5, "title": "issue 5", "url": "https://github.com/acme/site/issues/5", "body": "text"}]', index: '[{"number": 1, "title": "issue 1"}, {"number": 2, "title": "issue 2"}, {"number": 3, "title": "issue 3"}, {"number": 4, "title": "issue 4"}, {"number": 5, "title": "issue 5"}]', truncated: "false" }
+  classify:
+    - visit: 1
+      items:
+        "1":
+          - status: succeeded
+            outputs: { category: bug, reason: "the issue says so", duplicate_of: "", missing_info: "" }
+        "2":
+          - status: succeeded
+            outputs: { category: feature, reason: "the issue says so", duplicate_of: "", missing_info: "" }
+        "3":
+          - status: succeeded
+            outputs: { category: question, reason: "the issue says so", duplicate_of: "", missing_info: "" }
+        "4":
+          - status: succeeded
+            outputs: { category: duplicate, reason: "the issue says so", duplicate_of: "1", missing_info: "" }
+        "5":
+          - status: succeeded
+            outputs: { category: needs_info, reason: "the issue says so", duplicate_of: "", missing_info: "Which browser shows the error?" }
+      judge: { verdict: { value: accept, p: 0.9, confidence: 0.9 } }
+  label_bug:
+    - visit: 1
+      items:
+        "1": [ { status: succeeded, outputs: { applied: "triage:bug" }, check: pass } ]
+  label_feature:
+    - visit: 1
+      items:
+        "2": [ { status: succeeded, outputs: { applied: "triage:feature" }, check: pass } ]
+  label_question:
+    - visit: 1
+      items:
+        "3": [ { status: succeeded, outputs: { applied: "triage:question" }, check: pass } ]
+  label_duplicate:
+    - visit: 1
+      items:
+        "4": [ { status: succeeded, outputs: { applied: "triage:duplicate" }, check: pass } ]
+  label_needs_info:
+    - visit: 1
+      items:
+        "5": [ { status: succeeded, outputs: { applied: "triage:needs-info" }, check: pass } ]
+  approve_comments:
+    - { visit: 1, review: { decision: post, note: "The question is fine." } }
+  ask_info:
+    - visit: 1
+      items:
+        "5": [ { status: succeeded, outputs: { comment: "Which browser shows the error?" } } ]
+      judge: { verdict: { value: accept, p: 0.9, confidence: 0.9 } }
+expect:
+  run: { outcome: [succeeded] }
+  finish: done
+  visits: { classify: 1, label_bug: 1, label_needs_info: 1, approve_comments: 1, ask_info: 1 }
+  edges:
+    taken: { "e:approve_comments>ask_info#1": 1, "e:ask_info>done#1": 1 }
+    not_taken: ["e:approve_comments>done_without_comments#1", "e:any_questions>done#1"]

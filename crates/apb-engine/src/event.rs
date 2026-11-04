@@ -38,6 +38,17 @@ pub struct ProfileProvenance {
     pub bundle_digest: String,
 }
 
+/// A limit of the run as it started, from the profiles it resolved: what
+/// the run cannot do as well as the playbook intends. Today the one code is
+/// `same_agent_reviewer` (`apb_core::bundled::same_agent_reviewer`), with
+/// its fixed detail sentence. Recorded once at start: a later
+/// `supervisor_rebind_profile` does not update it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunLimit {
+    pub code: String,
+    pub detail: String,
+}
+
 /// The `action` names of [`EventPayload::SupervisorAction`] that more than
 /// one site writes or reads: the drive writes them, the progress fold and the
 /// context assembler read them, so each is spelled once.
@@ -105,6 +116,11 @@ pub enum EventPayload {
         /// that drove a run). Absent in older journals. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         apb: Option<String>,
+        /// The limits of the run from the profiles it resolved at start
+        /// ([`RunLimit`]; display only). A later profile rebind does not
+        /// update them. Absent in older journals. Additive.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        limits: Vec<RunLimit>,
     },
     NodeStarted {
         node: String,

@@ -25,8 +25,12 @@ use crate::event::EventPayload;
 /// What the scenario drive is asked to play.
 #[derive(Debug, Clone)]
 pub struct DriveRequest {
-    /// The project root (absolute).
+    /// The project root (absolute): the run is written under its
+    /// `.apb/scenario-runs/`.
     pub root: PathBuf,
+    /// Where the playbook is read: the project's registry or the global
+    /// store.
+    pub scope: apb_core::scope::Scope,
     pub playbook_id: String,
     pub version: String,
     /// The version's trust digest.
@@ -58,9 +62,14 @@ pub fn drive(req: &DriveRequest) -> Result<DriveOutcome, String> {
         sent: Default::default(),
     };
     let before = apb_core::process_mode::scenario_refusals().len();
-    let run =
-        crate::scheduler::run_scenario(&req.root, &req.playbook_id, Some(&req.version), &prep)
-            .map_err(|e| e.to_string())?;
+    let run = crate::scheduler::run_scenario_of(
+        &req.root,
+        req.scope,
+        &req.playbook_id,
+        Some(&req.version),
+        &prep,
+    )
+    .map_err(|e| e.to_string())?;
     let refused: Vec<String> = apb_core::process_mode::scenario_refusals()
         .into_iter()
         .skip(before)

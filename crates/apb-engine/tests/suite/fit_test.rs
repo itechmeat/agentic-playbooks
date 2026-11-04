@@ -234,3 +234,54 @@ fn an_isolated_node_this_machine_cannot_isolate_blocks_the_fit() {
     assert_eq!(item.severity, FitSeverity::Note);
     assert!(item.detail.contains("without a sandbox"), "{}", item.detail);
 }
+
+/// A playbook that binds `apb-main` (here as `defaults.profile`) and
+/// `apb-reviewer` gets one `same_agent_reviewer` note when both run on one
+/// agent; never on two agents, never without the reviewer role, and never
+/// a blocking item.
+#[test]
+fn a_reviewer_on_the_main_agent_is_a_note() {
+    use crate::common::seed_profile;
+    let _env = env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let _cfg = EnvVar::set("APB_CONFIG_DIR", cfg.path());
+    let root = tempfile::tempdir().unwrap();
+    init_project(root.path()).unwrap();
+    let both = "defaults:\n  profile: apb-main\n";
+    let review = "  - { id: a, type: agent_task, prompt: hi, profile: apb-reviewer }\n";
+    write_playbook(
+        &root.path().join(".apb"),
+        "both",
+        &linear("both", both, review),
+    );
+    let work = "  - { id: a, type: agent_task, prompt: hi, profile: apb-main }\n";
+    write_playbook(&root.path().join(".apb"), "main", &linear("main", "", work));
+    let notes = |id: &str| {
+        let fit = assess(root.path(), &wref(project(), id)).unwrap();
+        fit.setup
+            .into_iter()
+            .filter(|i| i.code == "same_agent_reviewer")
+            .collect::<Vec<_>>()
+    };
+
+    seed_profile(root.path(), "apb-main", "claude", "claude-opus-4-7", &[]);
+    seed_profile(
+        root.path(),
+        "apb-reviewer",
+        "claude",
+        "claude-opus-4-7",
+        &[],
+    );
+    let same = notes("both");
+    assert_eq!(same.len(), 1, "{same:?}");
+    assert_eq!(same[0].subject.as_deref(), Some("apb-reviewer"));
+    assert_eq!(same[0].severity, FitSeverity::Note);
+    assert_eq!(
+        same[0].detail,
+        apb_core::bundled::SAME_AGENT_REVIEWER_DETAIL
+    );
+    assert!(notes("main").is_empty(), "no reviewer role, no note");
+
+    seed_profile(root.path(), "apb-reviewer", "codex", "gpt-5.5", &[]);
+    assert!(notes("both").is_empty(), "two agents, no note");
+}

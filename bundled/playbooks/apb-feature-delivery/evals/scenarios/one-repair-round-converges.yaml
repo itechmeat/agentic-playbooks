@@ -1,0 +1,81 @@
+schema: 1
+id: one-repair-round-converges
+title: The panel finds one defect, one repair round fixes it and the second panel is clean
+instruction: "Keep the change small."
+params: { change_kind: feature, task: "Add a --json flag to the export command" }
+baseline: skip
+answers:
+  intake:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { original_request: "Add a --json flag to the export command", expected: "[\"the export prints JSON with --json\"]", exclusions: "none", must_preserve: "the text output", assumptions: "[]", issuer: "the person at the terminal", risk_triggers: "public CLI contract", checks: "cargo test" }
+  design:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { ready: "true", design: "add the flag and a JSON writer", advisor: "a fresh subagent", assumptions: "[]", question: "" }
+  decompose:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { triggers: "none", decomposed: "false", subtasks: '[]' }
+  implement:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { changed_paths: "[\"src/export.rs\"]", evidence: "cargo test passed", gaps: "" }
+  review_correctness:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { role: correctness, blocking: "1", findings: "[{\"id\": \"c1\", \"class\": \"defect\", \"disposition\": \"open\"}]" }
+    - visit: 2
+      attempts:
+        - status: succeeded
+          outputs: { role: correctness, blocking: "0", findings: "[]" }
+  review_security:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { role: security, blocking: "0", findings: "[]" }
+    - visit: 2
+      attempts:
+        - status: succeeded
+          outputs: { role: security, blocking: "0", findings: "[]" }
+  review_tests:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { role: tests, blocking: "0", findings: "[]" }
+    - visit: 2
+      attempts:
+        - status: succeeded
+          outputs: { role: tests, blocking: "0", findings: "[]" }
+  collect:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { open_count: "1", findings: "[c1 open]", roles: "correctness, security, tests" }
+    - visit: 2
+      attempts:
+        - status: succeeded
+          outputs: { open_count: "0", findings: "[]", roles: "correctness, security, tests" }
+  fix:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { dispositions: "[c1 fixed]", changed_paths: "[\"src/export.rs\"]", evidence: "cargo test passed" }
+  report:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { outcomes: "DELIVERY REPORT: the export prints JSON with --json, delivered.", conformance: "every stage done", findings: "none open", measurements: "feature" }
+expect:
+  run: { outcome: [succeeded] }
+  finish: assessed
+  visits: { review_correctness: 2, collect: 2, fix: 1, report: 1 }
+  route: { not_visits: [reconsider] }
+  # The prompts name both implementation paths, every repair round and
+  # the panel's earlier state; the ones this route never runs render empty.
+  templates_empty: report

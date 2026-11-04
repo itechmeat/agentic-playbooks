@@ -1,0 +1,24 @@
+schema: 1
+id: answered
+title: The question is framed, investigated and answered with a report
+instruction: "Answer it from the code."
+params: { question: "Does the export stream its rows?" }
+answers:
+  frame:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { question: "Does the export stream its rows?", out_of_scope: "other formats", method: "read the export code", stop_rule: "answer found" }
+  investigate:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { findings: "[]", negative_results: "[]", open: "none" }
+  report:
+    - visit: 1
+      attempts:
+        - { status: succeeded, output: "RESEARCH REPORT: yes, the export streams its rows." }
+expect:
+  run: { outcome: [succeeded] }
+  finish: report
+  route: { path: [start, frame, investigate, report] }

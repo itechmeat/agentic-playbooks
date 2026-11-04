@@ -1353,6 +1353,7 @@ fn a_guard_refusal_during_a_drive_makes_the_scenario_invalid() {
             crate::scenario::store::enter(ScenarioLevel::Smoke, &root).unwrap();
             let req = crate::scenario::bind::DriveRequest {
                 root: root.clone(),
+                scope: apb_core::scope::Scope::Project,
                 playbook_id: "loop".into(),
                 version: "1.0.0".into(),
                 playbook_digest: "sha256:test".into(),
@@ -1473,5 +1474,31 @@ fn a_guarded_smoke_run_asks_only_its_providers_and_writes_only_below_its_root() 
                 "a file changed outside the write root"
             );
         },
+    );
+}
+
+/// A finish with a prompt composes the run answer through the scripted
+/// agent, as an agent node does: its attempt takes the scenario's answer
+/// and starts nothing.
+#[test]
+fn a_finish_with_a_prompt_takes_its_scripted_attempt() {
+    let yaml = "schema: 2\nid: fin\nname: fin\nversion: 1.0.0\ndefaults: { profile: main }\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: agent_task, prompt: \"Do it.\" }\n  - { id: done, type: finish, outcome: success, prompt: \"Summarize {{nodes.work.output}}.\" }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n";
+    let dir = project(yaml);
+    let (r, events) = run(
+        dir.path(),
+        "fin",
+        "schema: 1\nid: x\nanswers:\n  work:\n    - { visit: 1, attempts: [ { status: succeeded, output: worked } ] }\n  done:\n    - { visit: 1, attempts: [ { status: succeeded, output: \"SUMMARY: worked\" } ] }\n",
+    );
+    assert_eq!(r.outcome, RunStatus::Succeeded, "{events:#?}");
+    assert_eq!(
+        finished(&events, "done"),
+        vec![("succeeded", "SUMMARY: worked")]
+    );
+    let started = attempts_of(&events, "done");
+    assert_eq!(started.len(), 1);
+    assert!(
+        matches!(started[0], EventPayload::AttemptStarted { agent, exec: Some(x), .. } if agent == "scenario" && x.executed_by == "scenario"),
+        "{:?}",
+        started[0]
     );
 }

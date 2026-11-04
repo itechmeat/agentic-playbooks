@@ -616,11 +616,18 @@ enum Command {
     /// store the result per configuration and compare it with the previous
     /// one. Opt-in and paid: every repetition is a full agent run
     Eval {
-        /// Playbook id (a project playbook)
+        /// Playbook id
         id: String,
         /// Version to evaluate (default: current)
         #[arg(long)]
         version: Option<String>,
+        /// Where the playbook is read for --level quick|smoke and
+        /// --scenarios: project (default) or global (the global store, where
+        /// the shipped defaults keep their scenarios). The scenario run is
+        /// written in the current project either way. Deep evals are
+        /// project-only
+        #[arg(long, value_parser = ["project", "global"])]
+        scope: Option<String>,
         /// Only these cases (repeatable)
         #[arg(long = "case", value_name = "NAME")]
         cases: Vec<String>,
@@ -891,6 +898,9 @@ enum Command {
         /// Project root (absolute).
         #[arg(long)]
         root: PathBuf,
+        /// Where the playbook is read: project or global.
+        #[arg(long, value_parser = ["project", "global"], default_value = "project")]
+        scope: String,
         #[arg(long)]
         playbook: String,
         #[arg(long)]
@@ -1277,6 +1287,7 @@ fn main() -> ExitCode {
         Some(Command::Eval {
             id,
             version,
+            scope,
             cases,
             tags,
             repeat,
@@ -1300,6 +1311,10 @@ fn main() -> ExitCode {
             eval::EvalArgs {
                 id,
                 version,
+                scope: scope
+                    .as_deref()
+                    .and_then(apb_core::scope::Scope::parse)
+                    .unwrap_or(apb_core::scope::Scope::Project),
                 cases,
                 tags,
                 repeat,
@@ -1442,6 +1457,7 @@ fn main() -> ExitCode {
         ),
         Some(Command::ScenarioRun {
             root: run_root,
+            scope,
             playbook,
             version,
             scenario: name,
@@ -1452,6 +1468,8 @@ fn main() -> ExitCode {
         }) => match level.scenario() {
             Some(level) => scenario::child_cmd(scenario::ChildArgs {
                 root: run_root,
+                scope: apb_core::scope::Scope::parse(&scope)
+                    .unwrap_or(apb_core::scope::Scope::Project),
                 playbook,
                 version,
                 scenario: name,

@@ -289,7 +289,7 @@ playbook policy. Details: [docs/MCP.md](docs/MCP.md).
 
 ## Status
 
-The current release is the `1.0.0-beta.3` pre-release (the latest stable
+The current release is the `1.0.0-beta.4` pre-release (the latest stable
 release is `0.25.0`); each tagged release has its notes in
 [docs/release-notes/](docs/release-notes/) and on the GitHub releases page.
 The engine, web editor, versioning, MCP surface, and supervisor are

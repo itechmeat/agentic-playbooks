@@ -1733,6 +1733,12 @@ fn run_detail_text(
             "  unattended: every wait without an unattended outcome fails the run (hitl_required)"
         );
     }
+    for limit in apb_engine::run_view::run_limits(&view.events) {
+        say!(
+            "  limit: {}",
+            sanitize_for_terminal(&limit.detail, QUESTION_TEXT_MAX)
+        );
+    }
     if view.driver_dead() {
         say!("  driver dead");
     }

@@ -13,25 +13,43 @@ pub type DoctorLine = (bool, &'static str, String);
 
 /// The setup lines of `apb doctor`.
 pub fn doctor_lines(root: &Path) -> Vec<DoctorLine> {
-    let mut states: Vec<(String, InstallState)> = bundled::playbooks()
+    // Each default with its state and, for a changed one, the labelled
+    // summary of how it differs from the shipped content.
+    let mut states: Vec<(String, InstallState, Option<String>)> = bundled::playbooks()
         .iter()
-        .map(|p| (p.id.clone(), bundled::playbook_state(p)))
+        .map(|p| {
+            let state = bundled::playbook_state(p);
+            let changes = matches!(state, InstallState::Modified { .. })
+                .then(|| {
+                    bundled::playbook_update_diff(p)
+                        .map(|(base, d)| base.line(&bundled::diff_summary(&d)))
+                })
+                .flatten();
+            (p.id.clone(), state, changes)
+        })
         .collect();
-    states.extend(
-        bundled::skills()
-            .iter()
-            .map(|s| (s.name.clone(), bundled::skill_state(s))),
-    );
-    let installed = states.iter().filter(|(_, s)| s.is_installed()).count();
-    let updates: Vec<&str> = states
+    states.extend(bundled::skills().iter().map(|s| {
+        let state = bundled::skill_state(s);
+        let changes = matches!(state, InstallState::Modified { .. })
+            .then(|| {
+                bundled::skill_update_diff(s).map(|d| bundled::SkillDiff::BASE.line(&d.summary()))
+            })
+            .flatten();
+        (s.name.clone(), state, changes)
+    }));
+    let installed = states.iter().filter(|(_, s, _)| s.is_installed()).count();
+    let updates: Vec<String> = states
         .iter()
-        .filter(|(_, s)| {
+        .filter(|(_, s, _)| {
             matches!(
                 s,
                 InstallState::Pristine { .. } | InstallState::Modified { .. }
             )
         })
-        .map(|(n, _)| n.as_str())
+        .map(|(n, _, changes)| match changes {
+            Some(c) => format!("{n} ({c})"),
+            None => n.clone(),
+        })
         .collect();
     let mut out = Vec::new();
     out.push(if installed == 0 {
@@ -59,13 +77,14 @@ pub fn doctor_lines(root: &Path) -> Vec<DoctorLine> {
     if let (Some(main), Some(reviewer)) = (
         existing_profile(root, ROLE_MAIN),
         existing_profile(root, ROLE_REVIEWER),
-    ) && main == reviewer
+    ) && bundled::same_agent_reviewer(&main, &reviewer)
     {
         out.push((
             true,
             "reviewer",
             format!(
-                "{ROLE_REVIEWER} uses the same agent as {ROLE_MAIN} ({main}): reviews run in a fresh session but are less independent; install another agent and run apb setup plan"
+                "{ROLE_REVIEWER} on {main}: {}; install another agent and run apb setup plan",
+                bundled::SAME_AGENT_REVIEWER_DETAIL
             ),
         ));
     }

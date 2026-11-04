@@ -10,7 +10,8 @@
 //! skills directory with a sidecar of its shipped digest ([`skills`]). An
 //! upgrade moves an unmodified copy to the new shipped content and leaves a
 //! modified one alone, reporting an update instead. [`roles`] plans the role
-//! profiles the shipped playbooks name.
+//! profiles the shipped playbooks name. [`update_diff`] says what newer
+//! shipped content changes over a copy a person changed.
 //!
 //! The id prefix `apb-` is reserved for this content: no other playbook may
 //! be created with it ([`refuse_reserved_id`]).
@@ -36,6 +37,7 @@ mod roles;
 mod skills;
 #[cfg(test)]
 mod tests;
+mod update_diff;
 
 pub use playbooks::{
     BundledError, CREATED_BY, PlaybookInstalled, install_playbook, playbook_state, playbook_store,
@@ -45,11 +47,16 @@ pub use report::{DEFAULTS_HINT, ReconcileNote, describe, print_notes, reconcile_
 pub use role_trust::note_role_profile;
 pub use roles::{
     Independence, PlanError, ROLE_MAIN, ROLE_RESEARCHER, ROLE_REVIEWER, RoleFallback, RolePlan,
-    RoleProfile, SkippedAgent, default_model, plan_role_profiles, role_skills,
+    RoleProfile, SAME_AGENT_REVIEWER, SAME_AGENT_REVIEWER_DETAIL, SkippedAgent, default_model,
+    plan_role_profiles, role_skills, same_agent_reviewer,
 };
 pub use skills::{
     SkillDirs, SkillError, SkillInstalled, SkillUpdates, install_skill, remove_skill,
     replace_modified_skill, restore_replaced_skill, skill_state,
+};
+pub use update_diff::{
+    DiffBase, SkillDiff, diff_summary, playbook_diff_value, playbook_update_diff, skill_diff_value,
+    skill_update_diff,
 };
 
 /// Seams for the tests of other crates: shipped content of a test's own,

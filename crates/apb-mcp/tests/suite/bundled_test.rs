@@ -339,6 +339,10 @@ impl SetupMachine {
                 "APB_TEST_GITHUB_TOKEN",
                 Some(std::ffi::OsStr::new("not-a-real-token-value")),
             ),
+            (
+                "APB_TEST_IMAP_PASSWORD",
+                Some(std::ffi::OsStr::new("not-a-real-password-value")),
+            ),
         ]);
         let project = tempfile::tempdir().unwrap();
         apb_core::registry::init_project(project.path()).unwrap();
@@ -475,29 +479,11 @@ fn every_shipped_playbook_runs_on_what_setup_wrote() {
     }
     assert_ne!(main, reviewer, "the reviewer is the other agent");
 
-    // The issue triage reads and labels issues through the official
-    // connector, which a person installs and gives an account (setup does
+    // The issue triage and the mail digest read through official
+    // connectors, which a person installs and gives an account (setup does
     // not): installed here, as AGENT-SETUP says.
-    apb_core::connector::install::install_official("github", false).unwrap();
-    let accounts = apb_core::connector::config::global_config_path("github").unwrap();
-    std::fs::create_dir_all(accounts.parent().unwrap()).unwrap();
-    std::fs::write(
-        &accounts,
-        "accounts:\n  - name: default\n    default: true\n    api_base: https://api.github.com\n    token: \"{{env.APB_TEST_GITHUB_TOKEN}}\"\n",
-    )
-    .unwrap();
-    // The person approves that account, as the approve surface records it.
-    let account = apb_core::connector::config::load_merged(project.path(), "github")
-        .unwrap()
-        .remove(0);
-    TrustStore::load()
-        .approve_kind(
-            &apb_core::connector::config::account_digest(&account),
-            &apb_core::trust::account_trust_id("github", "default"),
-            Kind::ConnectorAccount,
-            OriginKind::LocallyApproved,
-        )
-        .unwrap();
+    connector_with_account(project.path(), "github", GITHUB_ACCOUNT);
+    connector_with_account(project.path(), "imap", IMAP_ACCOUNT);
     let shipped = apb_core::bundled::playbooks();
     assert!(!shipped.is_empty());
     for p in &shipped {
@@ -545,4 +531,165 @@ fn setup_plan_is_read_inside_a_run_step_and_apply_is_refused() {
     );
     let removed = apb_mcp::setup::remove(project.path()).unwrap_err();
     assert!(removed.contains("r-step"), "{removed}");
+}
+
+/// A shipped fixture that declares `agent_launch: ask`, as every default does.
+fn asking_fixture() -> BundledPlaybook {
+    let yaml = format!(
+        "schema: 2\nid: {ID}\nname: Fixture\nversion: 1.0.0\nagent_launch: ask\nnodes:\n  - {{ id: s, type: start }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: s, to: done }}\n"
+    );
+    let mut files = BTreeMap::new();
+    files.insert("playbook.yaml".to_string(), yaml.into_bytes());
+    playbook_from_files(ID, &files).expect("fixture parses")
+}
+
+/// Loosening a default's `agent_launch` never keeps the shipped trust: an
+/// edit in place is a new digest no `Bundled` entry covers, an agent may
+/// not publish a looser version of the shipped id (install raised its
+/// floor), and a copy under the person's own id is the person's playbook,
+/// approved as locally authored with its own launch policy.
+#[test]
+fn a_loosened_agent_launch_never_keeps_bundled_trust() {
+    let _cfg = crate::common::config_sandbox();
+    let project = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(project.path()).unwrap();
+    testing::install_playbook(&asking_fixture(), false).unwrap();
+    assert!(
+        gate(project.path(), ID).is_ok(),
+        "the shipped digest passes"
+    );
+    let store = apb_core::store::global_playbooks_parent()
+        .unwrap()
+        .join("playbooks");
+    let file = store.join(ID).join("1.0.0/playbook.yaml");
+    let shipped = std::fs::read_to_string(&file).unwrap();
+    let loosened = shipped.replace("agent_launch: ask", "agent_launch: allow");
+    assert_ne!(shipped, loosened);
+
+    // 1. Only `agent_launch` changed, in place: refused as untrusted, and
+    // no `Bundled` entry names the new digest.
+    std::fs::write(&file, &loosened).unwrap();
+    assert!(untrusted(project.path(), ID), "a loosened copy is refused");
+    let digest = apb_core::scope::definition_digest(&loosened, &store.join(ID).join("1.0.0"))
+        .expect("the edited version has a digest");
+    assert!(
+        !TrustStore::load()
+            .entries()
+            .into_iter()
+            .any(|e| e.kind == Kind::Playbook
+                && e.origin_kind == OriginKind::Bundled
+                && e.digest == digest),
+        "no Bundled entry covers the loosened digest"
+    );
+    std::fs::write(&file, &shipped).unwrap();
+
+    // 2. An agent channel publishing a looser version of the shipped id:
+    // the install raised the global floor to `ask`.
+    let authority = apb_core::launch::floor::SaveAuthority {
+        key: apb_core::launch::floor::FloorKey::global(ID),
+        channel: apb_core::launch::floor::SaveChannel::Agent,
+    };
+    let refused = apb_core::launch::floor::publish(
+        &authority,
+        &store.join(ID),
+        Some(apb_core::launch::LaunchPolicy::Allow),
+        || Ok::<(), std::io::Error>(()),
+    )
+    .expect_err("an agent may not loosen a shipped default");
+    assert!(
+        refused.to_string().contains("launch_policy_loosened"),
+        "{refused}"
+    );
+
+    // 3. A copy under the person's own id with `allow`, saved through the
+    // agent channel: approved as locally authored, never `Bundled`, and its
+    // launch policy is its own.
+    let copy = loosened.replace(ID, "my-loose-copy");
+    apb_core::versioning::save_definition_by(
+        project.path(),
+        "my-loose-copy",
+        &copy,
+        None,
+        true,
+        apb_core::launch::floor::SaveChannel::Agent,
+    )
+    .unwrap();
+    let origins: Vec<OriginKind> = TrustStore::load()
+        .entries()
+        .into_iter()
+        .filter(|e| e.kind == Kind::Playbook && e.id.contains("my-loose-copy"))
+        .map(|e| e.origin_kind)
+        .collect();
+    assert!(!origins.is_empty(), "the copy is approved");
+    assert!(
+        origins.iter().all(|o| *o != OriginKind::Bundled),
+        "{origins:?}"
+    );
+    let key = apb_core::launch::floor::FloorKey::project_of(project.path(), "my-loose-copy").ok();
+    let floor = apb_core::launch::floor::floor_of(
+        key.as_ref(),
+        Some(&project.path().join(".apb/playbooks/my-loose-copy")),
+    )
+    .unwrap();
+    assert_eq!(
+        floor,
+        Some(apb_core::launch::LaunchPolicy::Allow),
+        "the copy's floor is its own declared policy, not the default's"
+    );
+}
+
+const GITHUB_ACCOUNT: &str = "accounts:\n  - name: default\n    default: true\n    api_base: https://api.github.com\n    token: \"{{env.APB_TEST_GITHUB_TOKEN}}\"\n";
+const IMAP_ACCOUNT: &str = "accounts:\n  - name: default\n    default: true\n    host: imap.example.com\n    port: \"993\"\n    use_tls: \"true\"\n    auth_method: password\n    username: mailbox@example.com\n    password: \"{{env.APB_TEST_IMAP_PASSWORD}}\"\n";
+
+/// Installs the official connector `name` and writes its global accounts.
+fn connector_without_approval(name: &str, accounts_yaml: &str) {
+    apb_core::connector::install::install_official(name, false).unwrap();
+    let accounts = apb_core::connector::config::global_config_path(name).unwrap();
+    std::fs::create_dir_all(accounts.parent().unwrap()).unwrap();
+    std::fs::write(&accounts, accounts_yaml).unwrap();
+}
+
+/// Installs the official connector `name` with its `default` account, and
+/// the person approves that account, as the approve surface records it.
+fn connector_with_account(project: &Path, name: &str, accounts_yaml: &str) {
+    connector_without_approval(name, accounts_yaml);
+    approve_default_account(project, name);
+}
+
+fn approve_default_account(project: &Path, name: &str) {
+    let account = apb_core::connector::config::load_merged(project, name)
+        .unwrap()
+        .remove(0);
+    TrustStore::load()
+        .approve_kind(
+            &apb_core::connector::config::account_digest(&account),
+            &apb_core::trust::account_trust_id(name, "default"),
+            Kind::ConnectorAccount,
+            OriginKind::LocallyApproved,
+        )
+        .unwrap();
+}
+
+/// The mail digest is refused at the gate until the imap connector is
+/// installed and its account approved; then the shipped digest passes.
+#[test]
+fn the_mail_digest_is_refused_until_the_imap_connector_and_account_exist() {
+    let _cfg = crate::common::config_sandbox();
+    // Setup installed every default and wrote the role profiles.
+    let m = SetupMachine::applied();
+    let project = &m.project;
+    assert!(apb_core::bundled::playbook("apb-inbox-digest").is_some());
+
+    let refusal = |why: &str| {
+        let v = gate(project.path(), "apb-inbox-digest").expect_err(why);
+        let policy = v["policy"].as_str().unwrap_or_default().to_string();
+        assert!(policy.contains("connector"), "{why}: {v}");
+    };
+    refusal("refused without the imap connector");
+    connector_without_approval("imap", IMAP_ACCOUNT);
+    refusal("refused while the account is not approved");
+    approve_default_account(project.path(), "imap");
+    if let Err(v) = gate(project.path(), "apb-inbox-digest") {
+        panic!("the digest is refused once the connector is set up: {v}");
+    }
 }

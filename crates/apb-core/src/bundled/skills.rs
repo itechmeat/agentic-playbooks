@@ -205,6 +205,14 @@ pub fn skill_state(skill: &BundledSkill) -> InstallState {
     }
 }
 
+/// Whether the copy of `skill` in `skills_dir` is changed by someone and
+/// not newer shipped content: the copy an upgrade reports as an update
+/// available.
+pub(super) fn is_modified(skills_dir: &Path, skill: &BundledSkill) -> bool {
+    let state = state(skills_dir, skill);
+    newer_installed(&state, skill).is_none() && matches!(state, State::Modified(_))
+}
+
 /// Removes the installed shipped skill `name`, its sidecar and its claude
 /// bridge (only a link that points at the copy). Only a copy nobody changed
 /// goes: a modified one is refused ([`SkillError::Modified`]) and one apb
