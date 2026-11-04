@@ -40,7 +40,7 @@ rustls-platform-verifier.workspace = true
 sha2.workspace = true
 base64 = "0.23"
 ciborium = "0.2"
-p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
+p256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 
 # Group termination of agent process tree on cancellation/timeout (Unix):

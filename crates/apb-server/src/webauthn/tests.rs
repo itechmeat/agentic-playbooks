@@ -38,8 +38,7 @@ fn es256_signing_key() -> p256::ecdsa::SigningKey {
 fn es256_xy() -> ([u8; 32], [u8; 32]) {
     let key = es256_signing_key();
     let vk = key.verifying_key();
-    let public = elliptic_curve::PublicKey::<p256::NistP256>::from(*vk);
-    let point = elliptic_curve::sec1::ToEncodedPoint::to_encoded_point(&public, false);
+    let point = vk.to_sec1_point(false);
     let mut x = [0u8; 32];
     let mut y = [0u8; 32];
     x.copy_from_slice(point.x().expect("non-identity point").as_ref());

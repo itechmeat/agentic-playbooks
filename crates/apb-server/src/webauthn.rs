@@ -587,13 +587,12 @@ fn verify_signature(
             let y: &[u8; 32] = map.y.as_slice().try_into().map_err(|_| {
                 WebAuthnError::BadPublicKey("P-256 y coordinate must be 32 bytes".to_string())
             })?;
-            let point =
-                elliptic_curve::sec1::EncodedPoint::<p256::NistP256>::from_affine_coordinates(
-                    x.into(),
-                    y.into(),
-                    false,
-                );
-            let verifying_key = p256::ecdsa::VerifyingKey::from_encoded_point(&point)
+            // The uncompressed SEC1 form: 0x04, then x, then y.
+            let mut point = [0u8; 65];
+            point[0] = 0x04;
+            point[1..33].copy_from_slice(x);
+            point[33..].copy_from_slice(y);
+            let verifying_key = p256::ecdsa::VerifyingKey::from_sec1_bytes(&point)
                 .map_err(|_| WebAuthnError::BadPublicKey("P-256 point not on curve".to_string()))?;
             let signature = p256::ecdsa::Signature::from_der(signature)
                 .map_err(|_| WebAuthnError::BadSignature)?;

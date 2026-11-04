@@ -99,7 +99,7 @@ const KEY_SEED: [u8; 32] = [
 fn enroll_real_passkey(file: &Path) -> p256::ecdsa::SigningKey {
     let signing = p256::ecdsa::SigningKey::from_bytes(&KEY_SEED.into()).unwrap();
     let vk = signing.verifying_key();
-    let point = vk.to_encoded_point(false);
+    let point = vk.to_sec1_point(false);
     let x = point.x().unwrap().as_slice().to_vec();
     let y = point.y().unwrap().as_slice().to_vec();
     let map = ciborium::Value::Map(vec![

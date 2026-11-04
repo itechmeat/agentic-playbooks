@@ -15,6 +15,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine as _;
 use ciborium::Value;
+use ed25519_dalek::Signer as _;
 use http_body_util::BodyExt;
 use p256::ecdsa::signature::Signer as _;
 use sha2::{Digest, Sha256};
@@ -31,7 +32,7 @@ const DEADLINE: Duration = Duration::from_secs(60);
 
 /// The canonical COSE EC2 key (ES256) for a P-256 verifying key.
 fn cose_es256(vk: &p256::ecdsa::VerifyingKey) -> Vec<u8> {
-    let point = vk.to_encoded_point(false);
+    let point = vk.to_sec1_point(false);
     let x = point.x().unwrap().as_slice().to_vec();
     let y = point.y().unwrap().as_slice().to_vec();
     let map = Value::Map(vec![

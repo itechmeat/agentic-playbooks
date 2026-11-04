@@ -276,13 +276,12 @@ fn verify_signature(
                 coords.y.as_slice().try_into().map_err(|_| {
                     ProofError::Store("P-256 y coordinate is not 32 bytes".to_string())
                 })?;
-            let point =
-                p256::elliptic_curve::sec1::EncodedPoint::<p256::NistP256>::from_affine_coordinates(
-                    (&x).into(),
-                    (&y).into(),
-                    false,
-                );
-            let vk = p256::ecdsa::VerifyingKey::from_encoded_point(&point)
+            // The uncompressed SEC1 form: 0x04, then x, then y.
+            let mut point = [0u8; 65];
+            point[0] = 0x04;
+            point[1..33].copy_from_slice(&x);
+            point[33..].copy_from_slice(&y);
+            let vk = p256::ecdsa::VerifyingKey::from_sec1_bytes(&point)
                 .map_err(|_| ProofError::Store("P-256 point not on curve".to_string()))?;
             let sig = p256::ecdsa::Signature::from_der(signature)
                 .map_err(|_| ProofError::Signature("the signature is not DER".to_string()))?;

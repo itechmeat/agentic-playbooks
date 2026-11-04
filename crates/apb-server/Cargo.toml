@@ -32,9 +32,9 @@ apb-mcp = { version = "1.0.0-beta.5", path = "../apb-mcp" }
 # attestation object, and SHA-256 for the authenticator data hash. No
 # webauthn-rs: the dashboard verifies passkey assertions directly with these
 # primitives.
-p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
-ecdsa = { version = "0.16", default-features = false, features = ["der", "std"] }
-elliptic-curve = { version = "0.13", default-features = false, features = ["sec1", "std"] }
+p256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
+ecdsa = { version = "0.17", default-features = false, features = ["der", "std"] }
+elliptic-curve = { version = "0.14", default-features = false, features = ["sec1", "std"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 # The machine name in the passkey enrollment and removal notices.
 hostname = "0.4"
