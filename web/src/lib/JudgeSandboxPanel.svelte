@@ -4,6 +4,7 @@
   import { authState } from './auth.svelte'
   import { Button } from '$lib/components/ui/button'
   import { judgeInputsOf, judgeSlots, slotValuesOf } from './judgefields'
+  import { shownNumber } from './format'
 
   // One judge node evaluated outside any run: inputs typed or filled from a
   // judge execution of a run, answers given by the person (free, nothing is
@@ -54,7 +55,7 @@
 
   // A number as recorded (a 32-bit float reads 0.8999999761581421) shown
   // as a person would write it: at most six significant digits.
-  const shown = (n: number) => String(Number(n.toPrecision(6)))
+  const shown = shownNumber
   const shownOf = (x: unknown) => (typeof x === 'number' ? shown(x) : String(x))
 
   let values = $state<Record<string, string>>({})
@@ -73,19 +74,26 @@
   let runId = $state('')
   let execution = $state('')
   let recorded = $state<RecordedValue[]>([])
+  // The run the recorded values came from, as the server named it.
+  let recordedRun = $state('')
   let placeTarget = $state<Record<number, string>>({})
 
   // A reload hands the page a new node object for the same node: only
-  // another node starts the sandbox afresh.
+  // another node starts the sandbox afresh. `page` counts those starts: an
+  // evaluation or a fill answers only on the node it was asked for.
   const nodeId = $derived(node.id)
+  let page = 0
   $effect(() => {
     void nodeId
+    page += 1
+    busy = false
     values = {}
     given = {}
     exact = {}
     result = null
     error = null
     recorded = []
+    recordedRun = ''
     placeTarget = {}
     // A live ask is chosen per node, never carried over to the next one.
     source = 'given'
@@ -129,17 +137,19 @@
   async function evaluate() {
     busy = true
     error = null
+    const on = page
     try {
       const inputs = judgeInputsOf(slots, values)
       const req =
         source === 'given'
           ? { ...(version ? { version } : {}), inputs, answers: answers(), emulate: false }
           : { ...(version ? { version } : {}), inputs, emulate }
-      result = await evaluateJudge(id, node.id, req, workspace)
+      const out = await evaluateJudge(id, node.id, req, workspace)
+      if (on === page) result = out
     } catch (e) {
-      error = refusalText(e)
+      if (on === page) error = refusalText(e)
     } finally {
-      busy = false
+      if (on === page) busy = false
     }
   }
 
@@ -147,11 +157,14 @@
     if (!runId.trim()) return
     busy = true
     error = null
+    const on = page
     try {
       const n = Number(execution)
       const v = await fetchJudgeRunValues(runId.trim(), node.id, execution && n > 0 ? n : undefined, workspace)
+      if (on !== page) return
       values = slotValuesOf(slots, v.inputs)
       recorded = v.recorded
+      recordedRun = v.run_id
       placeTarget = {}
       // The answers go with the inputs they were given for: an execution
       // without observed answers leaves none.
@@ -171,21 +184,25 @@
       given = g
       exact = e
     } catch (e) {
-      error = refusalText(e)
+      if (on === page) error = refusalText(e)
     } finally {
-      busy = false
+      if (on === page) busy = false
     }
   }
 
+  const targetOf = (i: number) => placeTarget[i] ?? slots[0]?.key
+  const slotLabel = (key: string | undefined) => slots.find((s) => s.key === key)?.refs.join(', ') ?? ''
+  const fromText = (r: RecordedValue) => `${r.label} of run ${recordedRun}`
+
   function place(i: number) {
-    const key = placeTarget[i] ?? slots[0]?.key
+    const key = targetOf(i)
     if (key) values[key] = recorded[i].text
   }
 
   function rawText(a: DecisionAnswer): string {
     if (a.invalid) return `invalid: ${a.invalid}`
     const parts: string[] = []
-    if (a.value !== undefined && a.value !== null) parts.push(String(a.value))
+    if (a.value !== undefined && a.value !== null) parts.push(shownOf(a.value))
     if (a.p !== undefined) parts.push(`p ${a.p.toFixed(2)}`)
     if (a.confidence !== undefined) parts.push(`confidence ${a.confidence.toFixed(2)}`)
     return parts.join(', ') || 'no answer'
@@ -247,23 +264,34 @@
         data-testid="sandbox-execution"
       />
       <Button variant="outline" size="xs" disabled={busy || !runId.trim()} onclick={fill} data-testid="sandbox-fill">
-        Fill from the run
+        Fill the inputs and answers from this run
       </Button>
     </div>
     {#if recorded.length}
+      <p class="muted" data-testid="sandbox-recorded-note">
+        Other values run <span class="mono">{recordedRun}</span> recorded: copy one into an input to try it there.
+      </p>
       <ul class="list">
         {#each recorded as r, i (i)}
           <li class="row">
-            <span class="mono">{r.label}</span>
+            <span data-testid={`sandbox-place-from-${i}`}>copy <span class="mono">{r.label}</span></span>
             <span class="clip" title={r.text}>{r.text}</span>
+            <span class="muted">into</span>
             <select
-              value={placeTarget[i] ?? slots[0]?.key ?? ''}
+              value={targetOf(i) ?? ''}
+              aria-label={`the input ${r.label} is copied into`}
               onchange={(e) => (placeTarget[i] = e.currentTarget.value)}
               data-testid={`sandbox-place-target-${i}`}
             >
               {#each slots as s (s.key)}<option value={s.key}>{s.refs.join(', ')}</option>{/each}
             </select>
-            <Button variant="outline" size="xs" onclick={() => place(i)} data-testid={`sandbox-place-${i}`}>Use</Button>
+            <Button
+              variant="outline"
+              size="xs"
+              title={`Copy ${fromText(r)} into ${slotLabel(targetOf(i))}`}
+              onclick={() => place(i)}
+              data-testid={`sandbox-place-${i}`}>Copy into the input</Button
+            >
           </li>
         {/each}
       </ul>

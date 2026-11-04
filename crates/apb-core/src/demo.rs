@@ -2,9 +2,9 @@
 //! playbook shipped in the binary that runs on any machine with nothing to
 //! set up. A script node writes `report.md` with `printf`, a person
 //! approves or rejects it at a review gate; no agent, no connector, no
-//! decision model, no key. The script reaches nothing outside the demo
-//! directory, though its effects list network and external as any
-//! script's do.
+//! decision model, no key. The script node declares that it reads and
+//! writes files in the demo directory; network and external, which a run
+//! counts for any script, show as assumed (`effects::assumed`).
 //!
 //! It lives in `<config dir>/demo/`, a project of its own, with the
 //! playbook `demo-report` 1.0.0 current and one quick scenario (`approve`).
@@ -244,6 +244,25 @@ mod tests {
             assert!(!text.contains("no network"), "{text}");
             assert!(text.contains("network and external"), "{text}");
         }
+    }
+
+    /// The script node declares what it really does (it reads and writes
+    /// files in the demo directory), so the surfaces mark network and
+    /// external as assumed, not as effects the demo has; the run policy
+    /// still counts them.
+    #[test]
+    fn the_demo_script_declares_its_real_effects() {
+        use crate::schema::Effect;
+        let p = Playbook::from_yaml(PLAYBOOK).expect("the shipped demo parses");
+        let script = p.node("write_report").expect("the script node");
+        assert_eq!(script.effects, vec![Effect::FsRead, Effect::FsWrite]);
+        assert_eq!(
+            crate::effects::assumed(&p),
+            std::collections::BTreeSet::from([Effect::Network, Effect::External])
+        );
+        let text = p.description.to_lowercase();
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(text.contains("assumed"), "{text}");
     }
 
     /// The trust digest of the installed demo, and whether anything

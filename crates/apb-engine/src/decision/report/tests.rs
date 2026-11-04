@@ -771,3 +771,68 @@ fn retry_advice_rows_split_by_rule_and_read_the_threshold_of_their_file() {
     assert!(text.contains("rule exec/1"), "{text}");
     assert!(text.contains("rule exec/0"), "{text}");
 }
+
+/// Right after an upgrade only the legacy file holds a retry advice
+/// threshold: the `exec/1` row of the same provider and model names the
+/// rule as the reason it does not apply, never a model change. The
+/// carry-over note is for another model only, found among the thresholds
+/// of the row's own rule.
+#[test]
+fn an_exec1_row_with_only_a_legacy_threshold_names_the_rule_not_the_model() {
+    use apb_core::decision_thresholds::{RETRY_ADVICE_RULE, StoredThreshold, VersionedThreshold};
+    let journals = vec![retry_run("new", true)];
+    let legacy = StoredThreshold {
+        use_name: "retry_advice".into(),
+        provider: "main".into(),
+        model: "jev-1.13.0".into(),
+        threshold: 0.5,
+        set_at_ms: 0,
+    };
+    let settings = ReportSettings {
+        stored: vec![legacy.clone()],
+        ..Default::default()
+    };
+    let r = build(&journals, &ReportFilter::default(), &settings);
+    let row = r
+        .groups
+        .iter()
+        .find(|g| g.rule.as_deref() == Some(RETRY_ADVICE_RULE))
+        .expect("the exec/1 row");
+    assert!(
+        row.notes.iter().any(|n| n
+            == "the legacy threshold for main/jev-1.13.0 is not enforced: re-measure under rule exec/1"),
+        "{:?}",
+        row.notes
+    );
+    assert!(
+        !row.notes.iter().any(|n| n.contains("does not carry over")),
+        "{:?}",
+        row.notes
+    );
+
+    // A threshold of the same rule for another model carries over to none.
+    let settings = ReportSettings {
+        stored: vec![legacy],
+        stored_v2: vec![VersionedThreshold {
+            use_name: "retry_advice".into(),
+            provider: "main".into(),
+            model: "jev-1.12.0".into(),
+            rule: RETRY_ADVICE_RULE.into(),
+            threshold: 0.7,
+            set_at_ms: 0,
+        }],
+        ..Default::default()
+    };
+    let r = build(&journals, &ReportFilter::default(), &settings);
+    let row = r
+        .groups
+        .iter()
+        .find(|g| g.rule.as_deref() == Some(RETRY_ADVICE_RULE))
+        .expect("the exec/1 row");
+    assert!(
+        row.notes.iter().any(|n| n
+            == "the threshold stored for main/jev-1.12.0 does not carry over to model jev-1.13.0: a new shadow period is needed"),
+        "{:?}",
+        row.notes
+    );
+}

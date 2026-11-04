@@ -22,13 +22,7 @@ use super::{ToolError, redacted_answer, resolve_run_dir};
 /// Every stamped snapshot of `run_id` (only `node`'s, when given) and the
 /// artifact refs recorded without stored bytes, redacted.
 pub fn run_results(root: &Path, run_id: &str, node: Option<&str>) -> Result<Value, ToolError> {
-    let dir = resolve_run_dir(root, run_id)?;
-    let mut view = ResultsView::load(&dir).map_err(|e| ToolError::Engine(e.to_string()))?;
-    if let Some(node) = node {
-        view.rows.retain(|r| r.execution.node == node);
-        view.legacy.retain(|r| r.execution.node == node);
-        view.not_stored.retain(|r| r.node == node);
-    }
+    let (dir, view) = results_view(root, run_id, node)?;
     let mut evidence = apb_engine::evidence::rows(&dir);
     if let Some(node) = node {
         evidence.retain(|r| r.node == node);
@@ -41,6 +35,24 @@ pub fn run_results(root: &Path, run_id: &str, node: Option<&str>) -> Result<Valu
         "evidence": evidence,
     });
     Ok(redacted_answer(root, &dir, answer))
+}
+
+/// The run directory of `run_id` and its results view, verified once and
+/// narrowed to `node`: what [`run_results`] answers before its redaction,
+/// for a surface that renders the view itself.
+pub fn results_view(
+    root: &Path,
+    run_id: &str,
+    node: Option<&str>,
+) -> Result<(std::path::PathBuf, ResultsView), ToolError> {
+    let dir = resolve_run_dir(root, run_id)?;
+    let mut view = ResultsView::load(&dir).map_err(|e| ToolError::Engine(e.to_string()))?;
+    if let Some(node) = node {
+        view.rows.retain(|r| r.execution.node == node);
+        view.legacy.retain(|r| r.execution.node == node);
+        view.not_stored.retain(|r| r.node == node);
+    }
+    Ok((dir, view))
 }
 
 /// A citation as a caller passes it: `r:<snapshot_id>/<entry>` with an

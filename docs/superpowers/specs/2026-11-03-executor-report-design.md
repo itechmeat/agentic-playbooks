@@ -51,7 +51,7 @@ digest, and reports per executor what each chain step did.
    `supervisor_interrupted`); a host closure other than succeeded and
    failed; `unstartable`; `protected_paths`; `check_rejected`; `quota`,
    `auth`, `budget`, `transient` from the failure classification;
-   `timed_out`; `agent_failed`; `failed`. A reason the drive cannot
+   `timed_out`; `interrupted`; `agent_failed`; `failed`. A reason the drive cannot
    establish reads `failed`, never a guess; agent text never chooses it.
 3. The first attempt of every step after the first one walked journals
    `exec.entered: { from_step, closed_attempt, reason }` at spawn, where

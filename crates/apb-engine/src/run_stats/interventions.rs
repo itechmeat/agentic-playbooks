@@ -326,13 +326,11 @@ pub fn interventions(
                 if !it.is_empty() {
                     items.insert((n, it));
                 }
-                if *applied
-                    && use_site == "review_triage"
-                    && let Some(v) = visits.get_mut(n).and_then(|q| q.first_mut())
-                {
-                    v.triaged = true;
-                } else if *applied && use_site == "review_triage" {
-                    // The triage decision came before the visit it advises.
+                if *applied && use_site == "review_triage" {
+                    // Triage always precedes the `review_requested` it
+                    // advises; hold it until that visit opens, so an
+                    // earlier visit still open on the node is never marked
+                    // with it.
                     pending_triage.insert(n.to_string());
                 }
             }

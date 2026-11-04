@@ -4019,6 +4019,30 @@ mod tests {
         assert_eq!(serde_json::to_string(&e).unwrap(), line);
     }
 
+    /// An `entered` in a shape a newer apb wrote reads as absent and keeps
+    /// the rest of `exec`: the binding, step, source and executor survive.
+    #[test]
+    fn attempt_started_keeps_exec_whose_entry_has_another_shape() {
+        for entered in [
+            r#"{"from_step":0,"closed_attempt":"two","reason":"failed"}"#,
+            r#""a string from a newer apb""#,
+        ] {
+            let line = format!(
+                r#"{{"seq":3,"ts":1,"type":"attempt_started","node":"a","attempt":1,"agent":"claude","pid":null,"spawn_ms":null,"exec":{{"binding":"ab","step":1,"source":{{"kind":"primary"}},"executed_by":"cli","entered":{entered}}}}}"#
+            );
+            let e: Event = serde_json::from_str(&line).unwrap();
+            match &e.payload {
+                EventPayload::AttemptStarted { exec: Some(x), .. } => {
+                    assert_eq!(x.binding, "ab");
+                    assert_eq!(x.step, 1);
+                    assert_eq!(x.executed_by, "cli");
+                    assert_eq!(x.entered, None);
+                }
+                other => panic!("expected AttemptStarted with exec, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn attempt_finished_with_session_round_trips() {
         let payload = EventPayload::AttemptFinished {

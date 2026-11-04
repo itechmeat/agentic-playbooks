@@ -84,6 +84,13 @@ export function chosenName(names: string[], name: string): string {
   return names.includes(name) ? name : (names[0] ?? '')
 }
 
+// A 4xx answer is the only thing that can refuse a search; a network or
+// 5xx failure is a plain load failure.
+export function isSearchRefusal(e: unknown): boolean {
+  const status = (e as { status?: number } | undefined)?.status
+  return typeof status === 'number' && status >= 400 && status < 500
+}
+
 // A refused search's readable reason: the server's detail when it sent one,
 // otherwise the message without the request URL.
 export function searchErrorText(e: unknown): string {

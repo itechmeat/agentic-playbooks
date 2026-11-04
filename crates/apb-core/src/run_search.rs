@@ -115,10 +115,11 @@ pub fn normalize(kind: &str, raw: &str) -> Result<String, FieldState> {
             _ => Err(FieldState::Invalid),
         },
         "enum" => {
-            if raw.chars().count() > MAX_VALUE_CHARS {
+            let t = raw.trim();
+            if t.chars().count() > MAX_VALUE_CHARS {
                 Err(FieldState::TooLong)
             } else {
-                Ok(raw.to_string())
+                Ok(t.to_string())
             }
         }
         _ => {
@@ -297,6 +298,15 @@ mod tests {
             Match::Yes
         );
         assert_eq!(matches(&[e], &[term("tier", "gold")]), Match::No);
+        // A stored enum value is trimmed like the int, bool and text
+        // branches, so the value the listing shows is the value a query
+        // matches.
+        let padded = field(&param("tier", "enum"), Some(" Gold "), true);
+        assert_eq!(padded.shown.as_deref(), Some("Gold"));
+        assert_eq!(
+            matches(std::slice::from_ref(&padded), &[term("tier", "Gold")]),
+            Match::Yes
+        );
         let b = field(&param("urgent", "bool"), Some("true"), true);
         assert_eq!(
             matches(std::slice::from_ref(&b), &[term("urgent", "true")]),

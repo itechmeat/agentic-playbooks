@@ -114,6 +114,10 @@ pub enum ExampleStatus {
     Stale,
     /// The node is unchanged but the inputs render to another state.
     StateChanged,
+    /// Asked live, the node got no answer to compare (the sandbox's daily
+    /// cap was spent or every provider failed): no label of it counts. An
+    /// answer of an invalid shape is `checked`, its labels disagreeing.
+    Unanswered,
 }
 
 /// One labelled question of a checked example.
@@ -824,6 +828,15 @@ fn check_one(
         if let Some(c) = asked.evaluation.cost_usd {
             totals.cost_usd = Some(totals.cost_usd.unwrap_or(0.0) + c);
         }
+        // An ask that got no answer says nothing about the labels: what
+        // the node then outputs is its fallback, not a disagreement. An
+        // answer of an invalid shape is an answer, and its labels disagree.
+        if asked.evaluation.raw.is_empty() {
+            return Ok(JudgeExampleResult {
+                evaluation: Some(asked.evaluation),
+                ..unchecked(ExampleStatus::Unanswered)
+            });
+        }
         asked.evaluation
     } else {
         rendered
@@ -1305,6 +1318,108 @@ mod tests {
         std::fs::write(&current, PLAYBOOK.replace("title: Triage", "title: Sort")).unwrap();
         let checked = check(root.path(), "j", &ExamplesCheckRequest::default()).unwrap();
         assert_eq!(checked[0].examples[0].status, ExampleStatus::Checked);
+    }
+
+    /// A live check whose ask got no answer (the day's sandbox requests are
+    /// spent) has nothing to compare: the example reads `unanswered` and
+    /// none of its labels counts as a disagreement.
+    #[test]
+    fn a_live_check_without_an_answer_counts_no_disagreement() {
+        apb_core::process_mode::testing::in_plain_child(
+            "judge_eval::example::tests::a_live_check_without_an_answer_counts_no_disagreement",
+            || {
+                let cfg = tempfile::tempdir().unwrap();
+                std::fs::write(
+                    cfg.path().join(apb_core::decisions::DECISIONS_FILE),
+                    "version: 1\nmode: enforce\nproviders:\n  - id: fake\n    kind: fake\n    answers:\n      verdict: { type: choice, choice: clean, probabilities: { clean: 0.9, needs_fix: 0.1 }, confidence: 0.9 }\nuses:\n  judge_node: { mode: enforce }\n",
+                )
+                .unwrap();
+                // SAFETY: a plain child process runs this one test on one thread.
+                unsafe {
+                    std::env::set_var("APB_CONFIG_DIR", cfg.path());
+                    std::env::set_var("APB_DECISIONS_ALLOW_FAKE", "1");
+                }
+                let root = project("Fix the parser");
+                save_from_run(
+                    root.path(),
+                    "r1",
+                    "triage",
+                    &expect(&[("verdict", "clean")]),
+                    "cli",
+                )
+                .unwrap();
+                // The day's sandbox requests are spent.
+                let now = apb_core::clock::now_ms_u64();
+                let line = serde_json::json!({ "ts_ms": now, "use_site": "judge_node", "provider": "fake", "cached": false, "use": super::super::sandbox::USE_JUDGE_SANDBOX });
+                let log = root
+                    .path()
+                    .join(".apb")
+                    .join(crate::decision::standalone::DECISIONS_LOG);
+                let body: String = (0..super::super::sandbox::SANDBOX_DAILY_CAP)
+                    .map(|_| format!("{line}\n"))
+                    .collect();
+                std::fs::write(&log, body).unwrap();
+                let live = check(
+                    root.path(),
+                    "j",
+                    &ExamplesCheckRequest {
+                        node: Some("triage".into()),
+                        live: true,
+                    },
+                )
+                .unwrap();
+                assert_eq!(live[0].examples[0].status, ExampleStatus::Unanswered);
+                assert!(live[0].examples[0].questions.is_empty());
+                assert_eq!((live[0].agree, live[0].disagree), (0, 0));
+                assert!(live[0].confusion.is_empty());
+            },
+        );
+    }
+
+    /// A live ask the provider answered with an invalid shape did get an
+    /// answer: the example is checked, and its label counts as a
+    /// disagreement rather than `unanswered`.
+    #[test]
+    fn a_live_check_with_an_invalid_answer_counts_a_disagreement() {
+        apb_core::process_mode::testing::in_plain_child(
+            "judge_eval::example::tests::a_live_check_with_an_invalid_answer_counts_a_disagreement",
+            || {
+                let cfg = tempfile::tempdir().unwrap();
+                std::fs::write(
+                    cfg.path().join(apb_core::decisions::DECISIONS_FILE),
+                    "version: 1\nmode: enforce\nproviders:\n  - id: fake\n    kind: fake\n    answers:\n      verdict: { type: choice, choice: bogus, probabilities: { bogus: 0.9 }, confidence: 0.9 }\nuses:\n  judge_node: { mode: enforce }\n",
+                )
+                .unwrap();
+                // SAFETY: a plain child process runs this one test on one thread.
+                unsafe {
+                    std::env::set_var("APB_CONFIG_DIR", cfg.path());
+                    std::env::set_var("APB_DECISIONS_ALLOW_FAKE", "1");
+                }
+                let root = project("Fix the parser");
+                save_from_run(
+                    root.path(),
+                    "r1",
+                    "triage",
+                    &expect(&[("verdict", "clean")]),
+                    "cli",
+                )
+                .unwrap();
+                let live = check(
+                    root.path(),
+                    "j",
+                    &ExamplesCheckRequest {
+                        node: Some("triage".into()),
+                        live: true,
+                    },
+                )
+                .unwrap();
+                let ex = &live[0].examples[0];
+                let raw = &ex.evaluation.as_ref().unwrap().raw;
+                assert!(raw["verdict"].invalid.is_some(), "{raw:?}");
+                assert_eq!(ex.status, ExampleStatus::Checked);
+                assert_eq!((live[0].agree, live[0].disagree), (0, 1));
+            },
+        );
     }
 
     /// `live` asks the sandbox again inside its daily cap: the request is

@@ -148,7 +148,11 @@ Before you report the delivery done, and again after a merge:
 - After the merge, remove the task's worktrees, delete its merged branches
   and prune the stale worktree records (in git: `git worktree remove`,
   `git branch -d`, `git worktree prune`), with the build output directories
-  those worktrees used.
+  those worktrees used. A squash merge leaves the branch unreachable from
+  the base, so `git branch -d` refuses it: delete such a branch with
+  `git branch -D` only after you checked that the base holds its work
+  (a commit on the base with the branch's tree, or every one of its
+  patches on the base).
 - Delete the temporary and scratch files the task created: temporary home
   directories, logs, downloaded archives, built binaries, browser profiles.
   What must survive goes into a named cache directory, not a temporary one.

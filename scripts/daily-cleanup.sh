@@ -114,7 +114,7 @@ worktree_branches() {
 
 # The main checkout (the first -z record, parsed the same way as the loop
 # below) and the checkout running this script are never removed.
-main_wt="$(git worktree list --porcelain -z 2>/dev/null | {
+main_wt="$({ git worktree list --porcelain -z 2>/dev/null || true; } | {
   IFS= read -r -d '' first || true
   printf '%s' "${first#worktree }"
 })"

@@ -182,11 +182,14 @@ export function recommendationNote(r: ReviewRecommendation | null | undefined): 
 // quoted for the shell: what a dashboard without keys offers for a
 // person-only gate instead of its buttons. A bound gate's command carries
 // the binding nonce, and the request the page showed when it knows it.
-export function reviewCommand(r: ReviewEntry, option: string): string {
+// `apb review` finds the run in the project of the directory it runs in,
+// so with the run's project directory the command starts there.
+export function reviewCommand(r: ReviewEntry, option: string, projectDir?: string): string {
   const words = ['apb', 'review', r.runId, r.node, '--decision', option]
   if (r.nonce) words.push('--nonce', r.nonce)
   if (r.request !== undefined) words.push('--request', `review:${r.request}`)
-  return words.map(shellWord).join(' ')
+  const command = words.map(shellWord).join(' ')
+  return projectDir ? `cd ${shellWord(projectDir)} && ${command}` : command
 }
 
 // The key a refused decision is kept under: the gate's run, its node and

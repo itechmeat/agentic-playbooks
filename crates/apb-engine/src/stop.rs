@@ -60,6 +60,12 @@ use crate::state::{RunState, RunStatus};
 /// operator reading the journal can tell it from a supervisor abort.
 const STOP_REASON: &str = "stop requested";
 
+/// The reason `abort_children` journals on every child of an aborted
+/// parent (the interventions fold counts it as an engine action, not an
+/// operator action of the child). Public so the interventions test can pin
+/// its spelling to this constant without an import between the modules.
+pub const PARENT_ABORTED_REASON: &str = "parent aborted";
+
 /// Serializes `stop_run`'s read-check-append over the run journal against
 /// another `stop_run` racing it: without it two concurrent stops of the same
 /// dead run could both observe a non-terminal state and both append
@@ -222,7 +228,7 @@ pub(crate) fn abort_children(root: &Path, run_id: &str, by: PauseBy) -> Result<(
                 if let Err(e) = crate::control::post_control(
                     &child_dir,
                     Control::Abort {
-                        reason: "parent aborted".into(),
+                        reason: PARENT_ABORTED_REASON.into(),
                         by: Some(by),
                     },
                 ) {

@@ -62,7 +62,7 @@ pub struct JudgeExamplesArgs {
     /// One judge node; every node with examples when absent.
     #[serde(default)]
     pub node: Option<String>,
-    /// Check each example against `current`: stale, state_changed or the
+    /// Check each example against `current`: stale, state_changed, unanswered or the
     /// agreement of each label.
     #[serde(default)]
     pub check: bool,
@@ -166,7 +166,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "List a playbook's labelled judge examples (stored under .apb/playbooks/<id>/evals/judge/<node>/), and with check: true say for each whether it is stale (the node changed since labelling), state_changed (its inputs render another state) or how each label agrees with what the node outputs now, with counts and a confusion table per node. live: true asks the sandbox again (inside its daily cap; refused from a run step), so it may spend this machine's decision requests. Nothing is tuned from it.",
+        description = "List a playbook's labelled judge examples (stored under .apb/playbooks/<id>/evals/judge/<node>/), and with check: true say for each whether it is stale (the node changed since labelling), state_changed (its inputs render another state), unanswered (a live ask got no answer, so no label counts) or how each label agrees with what the node outputs now, with counts and a confusion table per node. live: true asks the sandbox again (inside its daily cap; refused from a run step), so it may spend this machine's decision requests. Nothing is tuned from it.",
         annotations(destructive_hint = false)
     )]
     pub(crate) async fn judge_examples(

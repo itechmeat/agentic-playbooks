@@ -306,10 +306,15 @@ export const fetchScenarioRun = (id: string, runId: string, workspace = '') =>
   getJson<ScenarioRunView>(`${pb(id)}/scenario-runs/${encodeURIComponent(runId)}${qs({ workspace })}`)
 
 /** A failed request as a person reads it: the server's own sentence (the
- * `error` of its JSON body) without the request's address, else the
- * error as it stands. */
+ * `error` of its JSON body, or a plain-text body) without the error's name
+ * or the request's address (absolute, as a browser reports it, relative,
+ * or none), else the error's own message. */
 export function refusalText(e: unknown): string {
-  return e instanceof ApiError && typeof e.body?.error === 'string' ? e.body.error : String(e)
+  if (e instanceof ApiError) {
+    if (typeof e.body?.error === 'string') return e.body.error
+    return e.message.replace(/^(?:(?:[a-z][a-z0-9+.-]*:\/\/[^/\s]+)?\/api\/\S*)?: /i, '')
+  }
+  return e instanceof Error ? e.message : String(e)
 }
 
 // The judge sandbox: one judge node evaluated outside any run, "fill from a

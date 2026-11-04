@@ -31,3 +31,12 @@ export function shortModel(model: string): string {
   if (!m) return model
   return `${m[1]} ${m[2]}${m[3] ? `.${m[3]}` : ''}`
 }
+
+/**
+ * A number a run recorded, as a person would write it: at most six
+ * significant digits, so a 32-bit float such as 0.8999999761581421 reads
+ * `0.9`. For display only; the stored value stays exact.
+ */
+export function shownNumber(n: number): string {
+  return String(Number(n.toPrecision(6)))
+}

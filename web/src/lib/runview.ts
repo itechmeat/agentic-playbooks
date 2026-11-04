@@ -9,7 +9,7 @@ import { profileColor, accentVar } from './profilecolor'
 import { decisionRows } from './rundecisions'
 import { runEventJournal } from './journal'
 import type { PlaybookNode, WfEvent } from './types'
-import { formatDuration } from './format'
+import { formatDuration, shownNumber } from './format'
 import { profileModelKey, usesDefaultProfile, type ProfileScope } from './profileref'
 
 /** `just now`, `5m ago`, `2h 21m ago`, `3d ago`. */
@@ -449,7 +449,8 @@ export function decisionBars(events: WfEvent[]): DecisionBar[] {
         const p = typeof first.p === 'number' ? first.p : undefined
         const conf = typeof first.confidence === 'number' ? first.confidence : undefined
         strength = conf ?? (p !== undefined ? Math.max(p, 1 - p) : 0)
-        if (first.value !== undefined && first.value !== null) value = String(first.value)
+        if (typeof first.value === 'number') value = shownNumber(first.value)
+        else if (first.value !== undefined && first.value !== null) value = String(first.value)
         else if (p !== undefined) value = `p=${p.toFixed(2)}`
       }
       const error = str(r.error)

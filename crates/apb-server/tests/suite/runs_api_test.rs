@@ -2667,3 +2667,51 @@ async fn lists_runs_by_search_field_like_runs_list() {
     let (status, _) = get_json(app, "/api/runs?field=nothing").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+/// A workspace whose listing fails must not look like one with no matching
+/// runs: the filtered search surfaces the failure with the workspace id
+/// (500), the way the unfiltered listing reports its errors.
+#[tokio::test]
+async fn a_failing_workspace_listing_is_an_error_not_an_empty_result() {
+    let _cfg = common::config_sandbox().await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    apb_core::registry::init_project(root).unwrap();
+    // A workspace whose `.apb/runs` cannot be listed at all.
+    let runs = root.join(".apb/runs");
+    fs::set_permissions(&runs, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+
+    let app = build_router(AppState::new(root.to_path_buf()));
+    // The 500 body is plain text, not JSON, so read it raw.
+    let res = app
+        .oneshot(
+            Request::get("/api/runs?field=customer:acme")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    let text = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    // The modes are put back so the tempdir can be removed.
+    fs::set_permissions(&runs, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{text}");
+    assert!(
+        text.contains("workspace"),
+        "the failure must name the workspace: {status} {text:?}"
+    );
+
+    // A workspace with no runs dir at all is simply no runs, not an error.
+    let dir2 = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir2.path()).unwrap();
+    let app2 = build_router(AppState::new(dir2.path().to_path_buf()));
+    let (status, body) = get_json(app2, "/api/runs?field=customer:acme").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["runs"].as_array().unwrap().len(), 0);
+}

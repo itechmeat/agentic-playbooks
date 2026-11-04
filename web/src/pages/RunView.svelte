@@ -76,7 +76,7 @@
   import ListProgressPanel from '../lib/ListProgressPanel.svelte'
   import RunOutputsPanel from '../lib/RunOutputsPanel.svelte'
   import RunResultsPanel from '../lib/RunResultsPanel.svelte'
-  import type { ResultsView } from '../lib/results'
+  import { resultsKey, type ResultsView } from '../lib/results'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
@@ -112,6 +112,8 @@
   let reviewRefusals = $state<Record<string, string>>({})
   let answering = $state(false)
   let projectName = $state('')
+  // The run's project directory, where a terminal command for it runs.
+  let projectDir = $state('')
   let now = $state(Date.now())
   let logBox = $state<HTMLElement | null>(null)
   // Run quality: the stored grades, a rules grade in flight, and the journal
@@ -421,6 +423,8 @@
 
   // Bumped on every route change: a response for the previous run is dropped.
   let routeSeq = 0
+  // The `resultsKey` the shown results were fetched for.
+  let resultsFetchedFor: string | null = null
 
   async function load() {
     const seq = routeSeq
@@ -473,11 +477,19 @@
     } catch {
       if (seq === routeSeq && !reloadFailed) grades = []
     }
-    try {
-      const r = await fetchRunResults(id, workspace)
-      if (seq === routeSeq) results = r
-    } catch {
-      if (seq === routeSeq && !reloadFailed) results = null
+    // Results change only at a settlement or the run's end: any other
+    // journal notice leaves them, so the server re-hashes nothing for it.
+    const key = detail ? resultsKey(detail.events, detail.run_status) : null
+    if (key === null || key !== resultsFetchedFor) {
+      try {
+        const r = await fetchRunResults(id, workspace)
+        if (seq === routeSeq) {
+          results = r
+          resultsFetchedFor = key
+        }
+      } catch {
+        if (seq === routeSeq && !reloadFailed) results = null
+      }
     }
   }
 
@@ -506,6 +518,7 @@
     flowEdges = []
     grades = []
     results = null
+    resultsFetchedFor = null
     grading = false
     citedSeq = null
     load()
@@ -532,11 +545,15 @@
   $effect(() => {
     const ws = workspace
     projectName = ''
+    projectDir = ''
     if (!ws) return
     let cancelled = false
     fetchProjects()
       .then((ps) => {
-        if (!cancelled) projectName = ps.find((p) => p.workspace_id === ws)?.name ?? ''
+        if (cancelled) return
+        const p = ps.find((p) => p.workspace_id === ws)
+        projectName = p?.name ?? ''
+        projectDir = p?.path ?? ''
       })
       .catch(() => {})
     return () => {
@@ -772,7 +789,13 @@
 
       <PublishPanel runId={id} views={detail.publish} gates={publishes} posting={deciding} onDecide={decidePublish} />
 
-      <ReviewPanel reviews={pending} posting={deciding} refusals={reviewRefusals} onDecide={(r, o) => decide(r, o)} />
+      <ReviewPanel
+        reviews={pending}
+        posting={deciding}
+        refusals={reviewRefusals}
+        {projectDir}
+        onDecide={(r, o) => decide(r, o)}
+      />
 
       {#if supervisor}
         <section class="box glow flex flex-col gap-2 px-4 pt-4 pb-3 text-xs" style:--k="var(--c-amber)">

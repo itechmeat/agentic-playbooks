@@ -395,7 +395,8 @@ fn stats_reports_interventions_and_where_they_are_unknown() {
     for (id, apb_version, via) in [
         ("gate-1", "1.0.0-beta.3", true),
         // The older writer records no surface, so its decision is not
-        // known: the run-origin key itself is enough, apb creates it.
+        // known: the run-origin key itself is enough, and the shared
+        // sandbox config dir already writes one before any test runs.
         ("gate-2", "1.0.0-beta.1", false),
     ] {
         let run = dir.path().join(".apb/runs").join(id);

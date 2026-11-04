@@ -78,7 +78,7 @@ source; say what you could not verify.
 
 A proof may need scratch inputs, a local server, a browser session or a test
 account. Create scratch files under one directory named for the audit, and
-before you report delete them, stop the servers and close the sessions you
+before you report, or when the audit stops early on a failure, delete them, stop the servers and close the sessions you
 started, and remove a test account you created where you are allowed to.
 Delete only what the audit created. The finding keeps its evidence as text.
 

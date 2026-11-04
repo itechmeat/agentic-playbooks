@@ -96,6 +96,7 @@ have found a real defect: report it as such.
 
 List the findings, then one line per test that passed the bar. Say which
 tests you ran and their result, or that you ran none and why. A test you did
-not read is not covered. Before you report, delete the scratch output of
+not read is not covered. Before you report, and also when a run fails and
+the audit stops early, delete the scratch output of
 the runs you made (temporary directories, logs) and stop any process they
 left running, only your own.

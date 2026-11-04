@@ -823,3 +823,97 @@ fn a_move_past_a_person_only_gate_is_refused_at_a_failed_node() {
     assert_eq!(status, RunStatus::Succeeded);
     assert!(root.join("acted.txt").is_file());
 }
+
+/// A finish that requires an approval and is refused settles failed with
+/// the approval's reason and ends the run there: the reason is the run's
+/// error, the run finishes failed, and no other branch goes on.
+#[test]
+fn a_refused_finish_ends_the_run_failed_with_the_approval_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // The finish composes its answer with an agent, so it names a
+    // profile; refused, it never starts one.
+    let yaml = "schema: 2\nid: ap\nname: ap\nversion: 1.0.0\ndefaults:\n  profile: writer\nnodes:\n  - { id: start, type: start }\n  - { id: w, type: script, script: scripts/w.sh, runner: sh, results: [ { path: report.md } ] }\n  - { id: g, type: human_review, options: [approve, reject], approves: { results: [w] } }\n  - { id: done, type: finish, outcome: success, prompt: Sum up the report, requires_approval: { gate: g } }\nedges:\n  - { from: start, to: w }\n  - { from: w, to: g }\n  - { from: g, to: done }\n";
+    seed(
+        root,
+        yaml,
+        &[("w.sh", "printf 'draft one\\n' > report.md\necho ok\n")],
+    );
+    crate::common::seed_profile(root, "writer", "claude", "haiku", &[]);
+    let rx = start(root, RunOptions::default());
+    let rd = the_run_dir(root);
+    request(&rd, 1);
+    decide(&rd, "reject", None).unwrap();
+    let (status, events) = finish(&rx);
+    assert_eq!(status, RunStatus::Failed);
+    let (st, out) = output_of(&events, "done").unwrap();
+    assert_eq!(st, "failed");
+    assert!(
+        out.starts_with("approval_missing: gate `g` decided `reject`"),
+        "{out}"
+    );
+    assert!(!attempted(&events, "done"));
+    let error = events.iter().rev().find_map(|e| match &e.payload {
+        EventPayload::RunError { node, reason } => Some((node.clone(), reason.clone())),
+        _ => None,
+    });
+    assert_eq!(error, Some((Some("done".to_string()), out)));
+    // The run guard follows every checkpoint, so the outcome is looked up.
+    let outcomes: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::RunFinished { outcome } => Some(outcome.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(outcomes, ["failed"]);
+}
+
+/// In a supervised run a refused finish parks like every other refused
+/// node: it raises a wake on the finish and waits for the supervisor,
+/// which may still act on it (here it stops the run).
+#[test]
+fn a_refused_finish_in_a_supervised_run_raises_a_wake() {
+    use apb_engine::control::{Control, post_control};
+    use apb_engine::scheduler::RunMode;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let yaml = "schema: 2\nid: ap\nname: ap\nversion: 1.0.0\ndefaults:\n  profile: writer\nnodes:\n  - { id: start, type: start }\n  - { id: w, type: script, script: scripts/w.sh, runner: sh, results: [ { path: report.md } ] }\n  - { id: g, type: human_review, options: [approve, reject], approves: { results: [w] } }\n  - { id: done, type: finish, outcome: success, prompt: Sum up the report, requires_approval: { gate: g } }\nedges:\n  - { from: start, to: w }\n  - { from: w, to: g }\n  - { from: g, to: done }\n";
+    seed(
+        root,
+        yaml,
+        &[("w.sh", "printf 'draft one\\n' > report.md\necho ok\n")],
+    );
+    crate::common::seed_profile(root, "writer", "claude", "haiku", &[]);
+    let rx = start(
+        root,
+        RunOptions {
+            mode: RunMode::Supervised,
+            ..Default::default()
+        },
+    );
+    let rd = the_run_dir(root);
+    request(&rd, 1);
+    decide(&rd, "reject", None).unwrap();
+    let node = poll("the wake on the finish", || {
+        read_all(&rd)
+            .ok()?
+            .into_iter()
+            .find_map(|e| match e.payload {
+                EventPayload::WakeRaised { node, .. } => Some(node),
+                _ => None,
+            })
+    });
+    assert_eq!(node, "done");
+    post_control(
+        &rd,
+        Control::Abort {
+            reason: "stop".into(),
+            by: None,
+        },
+    )
+    .unwrap();
+    let (status, events) = finish(&rx);
+    assert_eq!(status, RunStatus::Aborted);
+    assert!(!attempted(&events, "done"));
+}

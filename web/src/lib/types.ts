@@ -108,6 +108,9 @@ export interface PlaybookDetail {
   // Inferred plus declared (playbook and node) effects, the set the run
   // policy uses; absent from an older server.
   effective_effects?: string[]
+  // The part of `effective_effects` only assumed for a script or agent node
+  // that declared its own effects; absent from an older server.
+  assumed_effects?: string[]
   layout: WfLayout | null
   validation: ValidationIssue[]
   frozen: boolean

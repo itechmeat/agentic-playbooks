@@ -64,7 +64,9 @@ nothing of it ran again, its snapshots verify and are complete, and with
 `live: check` every bound file still hashes to its approved digest); a
 failure finishes the node failed with the approval code (for example
 `approval_stale: implement ran again after approval`) before anything is
-planned. When `from` is among the approved nodes, `HEAD` must be the
+planned. When `from` is among the nodes the approval covers (those
+`requires_approval.of` names, or every node of the gate's
+`approves.results` when `of` is absent), `HEAD` must be the
 commit its bound snapshot recorded, else the plan refuses with
 `approval_mismatch`; a bound snapshot that recorded no commit (its tree
 had none yet when it settled) refuses it too, since there is nothing

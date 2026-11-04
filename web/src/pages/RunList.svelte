@@ -4,6 +4,7 @@
   import {
     fieldNames,
     fieldsText,
+    isSearchRefusal,
     searchErrorText,
     searchFooter,
     type SearchTerm,
@@ -73,16 +74,23 @@
       if (seq !== loadSeq) return
       items = groupRunsByParent(answer.runs)
       counts = { not_indexed: answer.not_indexed, withheld: answer.withheld }
-      // The names come from an unfiltered answer, so a filter never hides
-      // the other fields.
+      // The names come from the unfiltered answer; while a filter is on,
+      // new field names the filtered runs offer are merged in, so the
+      // picker never waits for every term to be removed.
       if (!wanted.length) names = fieldNames(answer.runs)
+      else names = [...new Set([...names, ...fieldNames(answer.runs)])]
       now = Date.now()
       terms = wanted
     } catch (e) {
       if (seq !== loadSeq) return
       // A refused search keeps the committed terms and says why, instead of
-      // showing the request URL.
-      toast.error('Search refused', { description: searchErrorText(e) })
+      // showing the request URL. Only a filtered request can be refused:
+      // a first load, a websocket reload or a network failure is a plain
+      // load failure, never a refusal.
+      const refused = wanted.length > 0 && isSearchRefusal(e)
+      toast.error(refused ? 'Search refused' : 'Failed to load runs', {
+        description: searchErrorText(e),
+      })
     } finally {
       if (seq === loadSeq) loaded = true
     }

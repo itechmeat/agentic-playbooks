@@ -26,14 +26,7 @@ import type {
   SnapshotProvenance,
   Verified,
 } from './api.gen'
-import type { ClaimRow, EvidenceFlag, EvidenceRow, EvidenceVerdict, ViewSummary } from './api.gen'
-import {
-  COLLECTOR_COMPLETE_WORDING,
-  RESULT_DISPLAY_CAP,
-  RESULT_INCOMPLETE_REASONS,
-  RESULT_OMISSION_REASONS,
-  RESULT_OUTPUT_OMITTED,
-} from './consts.gen'
+import { RESULT_DISPLAY_CAP, RESULT_INCOMPLETE_REASONS, RESULT_OMISSION_REASONS, RESULT_OUTPUT_OMITTED } from './consts.gen'
 
 // Every reason this apb writes is a name the generated unions know; a
 // newer apb's name reads as `unknown` there.
@@ -259,10 +252,26 @@ export function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MiB`
 }
 
+/**
+ * What the run's result snapshots can have changed by: the settlements of
+ * nodes and list items it journaled (a snapshot is stamped only at one, and
+ * a capture that failed is recorded there too) and the run's status. The
+ * run page fetches the results again only when this changes, so an
+ * ordinary journal notice re-hashes no snapshot on the server.
+ */
+export function resultsKey(events: { type: string }[], runStatus: string): string {
+  const settled = events.filter((e) => e.type === 'node_finished' || e.type === 'list_item_settled').length
+  return `${settled}:${runStatus}`
+}
+
 // ---- evidence claims ------------------------------------------------------
 
-export type { CitedFragment, ClaimRow, EvidenceFlag, EvidenceRow, EvidenceVerdict, ViewSummary } from './api.gen'
-export { COLLECTOR_COMPLETE_WORDING, FLAGS_WORDING, STRUCTURALLY_VALID_WORDING, UNSUPPORTED_WORDING } from './consts.gen'
+import type { CitedFragment, ClaimRow, EvidenceFlag, EvidenceRow, EvidenceVerdict, ViewSummary } from './api.gen'
+export type { CitedFragment, ClaimRow, EvidenceFlag, EvidenceRow, EvidenceVerdict, ViewSummary }
+// Imported first, then re-exported: `collectorLine` reads the collector
+// wording itself, and a plain re-export would leave the name undefined here.
+import { COLLECTOR_COMPLETE_WORDING, FLAGS_WORDING, STRUCTURALLY_VALID_WORDING, UNSUPPORTED_WORDING } from './consts.gen'
+export { COLLECTOR_COMPLETE_WORDING, FLAGS_WORDING, STRUCTURALLY_VALID_WORDING, UNSUPPORTED_WORDING }
 
 /** `GET /api/runs/{id}/results` as served: the snapshot view and the
  * claims each evidence session checked. */

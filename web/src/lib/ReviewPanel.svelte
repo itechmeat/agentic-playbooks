@@ -22,12 +22,15 @@
     reviews,
     posting = null,
     refusals = {},
+    projectDir = '',
     onDecide,
   }: {
     reviews: ReviewEntry[]
     /** `<node>:<option>` of the decision in flight. */
     posting?: string | null
     refusals?: Record<string, string>
+    /** The run's project directory, where a terminal command must run. */
+    projectDir?: string
     onDecide: (review: ReviewEntry, option: string) => void | Promise<void>
   } = $props()
 
@@ -107,7 +110,7 @@
               in:
             </p>
             {#each pr.options as opt (opt)}
-              <code class="mono" data-testid="review-cli-command">{reviewCommand(pr, opt)}</code>
+              <code class="mono" data-testid="review-cli-command">{reviewCommand(pr, opt, projectDir)}</code>
             {/each}
           </div>
         {:else}

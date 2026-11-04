@@ -2288,8 +2288,14 @@ fn drive_inner(
         let mut node_cache_hit = false;
         // A node refused before it ran settles without a snapshot.
         let mut node_unsnapshotted = false;
+        // A refused finish ends the run with its reason once it settled:
+        // it has no edge out, so nothing could route its failure.
+        let mut finish_refused: Option<String> = None;
         let (status, output) = if let Some(reason) = approval_refused.take() {
             steps += 1;
+            if matches!(node_kind, NodeKind::Finish { .. }) {
+                finish_refused = Some(reason.clone());
+            }
             log.append(EventPayload::NodeStarted {
                 node: current.clone(),
                 attempt: 1,
@@ -3441,6 +3447,15 @@ fn drive_inner(
                     continue;
                 }
             }
+        }
+
+        // A refused finish of a supervised run parked above like every
+        // other refused node; without a supervisor it ends the run here.
+        if let Some(reason) = finish_refused {
+            return Ok(RunResult {
+                run_id,
+                outcome: stop_with_reason(log, &current, reason, &mut frontier)?,
+            });
         }
 
         // Check max_loops budget only for condition-nodes and only after

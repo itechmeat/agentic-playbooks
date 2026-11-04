@@ -80,6 +80,7 @@
   import ScenarioRunPanel from '../lib/ScenarioRunPanel.svelte'
   import JudgeSandboxPanel from '../lib/JudgeSandboxPanel.svelte'
   import { DEMO_PLAYBOOK } from '../lib/api'
+  import { effectTags, type EffectTag } from '../lib/effecttags'
   import FlaskConical from '@lucide/svelte/icons/flask-conical'
   import KnownProblemsCard from '../lib/KnownProblemsCard.svelte'
   import { groupProblems, recheckResult } from '../lib/knownproblems'
@@ -490,15 +491,16 @@
 
   interface PlaybookMeta {
     description?: string
-    effects?: string[]
+    effects?: EffectTag[]
     requires?: { files?: string[]; commands?: string[] } | null
     trigger?: { when?: string[]; avoid_when?: string[] } | null
     defaults?: { max_parallel?: number | null; on_failure?: string | null } | null
   }
 
   // `effective`: the server's effective effects; the declared list (deduped)
-  // only when an older server sends none.
-  function metaOf(pb: PlaybookDetail['playbook'], effective?: string[]): PlaybookMeta {
+  // only when an older server sends none. `assumed`: those of them marked
+  // assumed.
+  function metaOf(pb: PlaybookDetail['playbook'], effective?: string[], assumed?: string[]): PlaybookMeta {
     const raw = pb as unknown as Record<string, unknown>
     const list = (v: unknown) => (Array.isArray(v) ? v.map(String) : [])
     const obj = (v: unknown) => (v && typeof v === 'object' ? (v as Record<string, unknown>) : null)
@@ -507,7 +509,7 @@
     const def = obj(raw.defaults)
     return {
       description: typeof raw.description === 'string' ? raw.description.trim() : '',
-      effects: [...new Set(effective ?? list(raw.effects))],
+      effects: effectTags(effective ?? list(raw.effects), assumed),
       requires: req ? { files: list(req.files), commands: list(req.commands) } : null,
       trigger: trig ? { when: list(trig.when), avoid_when: list(trig.avoid_when) } : null,
       defaults: def
@@ -711,7 +713,7 @@
       baseEdges = flow.edges
       playbookNodes = detail.playbook.nodes
       playbookEdges = detail.playbook.edges
-      meta = metaOf(detail.playbook, detail.effective_effects)
+      meta = metaOf(detail.playbook, detail.effective_effects, detail.assumed_effects)
       publishOnly = detail.playbook.publish_only === true
       yamlText = detail.yaml
       name = detail.playbook.name || detail.id
@@ -1229,8 +1231,16 @@
           <span class="box-cap">effects</span>
           {#if meta.effects?.length}
             <div class="flex flex-wrap gap-1.5">
-              {#each meta.effects as e (e)}
-                <span class={['tag', effectTone[e] ?? 'text-muted-foreground']}>{e}</span>
+              {#each meta.effects as t (t.effect)}
+                {#if t.assumed}
+                  <span
+                    class="tag effect-assumed"
+                    title="Assumed: apb does not read what a script or an agent does, so a run still counts this effect, though the node declares it does not have it"
+                    data-testid="effect-assumed">{t.effect} (assumed)</span
+                  >
+                {:else}
+                  <span class={['tag', effectTone[t.effect] ?? 'text-muted-foreground']}>{t.effect}</span>
+                {/if}
               {/each}
             </div>
           {/if}
@@ -1662,6 +1672,11 @@
 />
 
 <style>
+  /* An effect a run counts though the node declares it does not have it. */
+  .effect-assumed {
+    border-style: dashed;
+    color: var(--muted-foreground);
+  }
   .issues-slot {
     margin-top: 12px;
     border-top: 1px solid var(--c-line);

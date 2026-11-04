@@ -174,6 +174,28 @@ fn gates_split_by_channel_automatic_and_withdrawn() {
     assert_eq!(r.automatic["review_triage"].applied, 1);
 }
 
+/// A triage that arrives while an earlier visit of the node is still open
+/// advises the next `review_requested`, never the open visit: the open
+/// visit stays a person's channel decision, the advised one is automatic.
+#[test]
+fn a_triage_while_a_visit_is_open_marks_the_next_visit_not_the_open_one() {
+    let r = current(vec![
+        request("gate"),
+        decision("review_triage", "gate", 1, true, false),
+        request("gate"),
+        decided("gate", "approve", json!({"via": "terminal"})),
+        decided("gate", "approve", json!({})),
+    ]);
+    assert_eq!(r.reviews.channel, 1);
+    assert_eq!(r.reviews.automatic, 1);
+    assert_eq!(r.reviews.via["terminal"], 1);
+    assert!(
+        !r.reviews.via.contains_key("not_recorded"),
+        "the open visit was marked with the later triage: {:?}",
+        r.reviews.via
+    );
+}
+
 #[test]
 fn an_engine_decision_without_via_on_a_current_writer_is_automatic() {
     let r = current(vec![
@@ -557,6 +579,9 @@ fn three_runs_give_counts_and_denominators() {
 fn the_propagated_abort_reason_matches_the_stop_side() {
     assert_eq!(
         apb_engine::run_stats::interventions::PROPAGATED_ABORT,
-        "parent aborted"
+        apb_engine::stop::PARENT_ABORTED_REASON,
+        "the interventions fold and the stop side must spell the propagated
+         abort reason identically, or an operator stop is silently counted
+         on the child too"
     );
 }

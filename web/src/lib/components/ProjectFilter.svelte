@@ -17,12 +17,19 @@
     $props()
 
   // The registry read only orders the options (worktrees under their parent);
-  // when it fails the picker falls back to the flat list.
+  // when it fails the picker falls back to the flat list, and the failure is
+  // only logged: an unmounted picker must not take the late answer either.
   let projects = $state<Project[]>([])
   $effect(() => {
+    let cancelled = false
     fetchProjects()
-      .then((p) => (projects = p))
-      .catch(() => {})
+      .then((p) => {
+        if (!cancelled) projects = p
+      })
+      .catch((e) => console.debug('project registry unavailable', e))
+    return () => {
+      cancelled = true
+    }
   })
 
   const options = $derived(projectOptions(items))

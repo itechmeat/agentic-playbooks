@@ -4,6 +4,7 @@ import { flushSync, mount, tick, unmount } from 'svelte'
 import { SvelteMap } from 'svelte/reactivity'
 import DecisionsPanel from './DecisionsPanel.svelte'
 import { runEventJournal } from './journal'
+import { decisionBars } from './runview'
 import { decisionRows, decisionsSummary, decisionUseLines, exampleDraftOf } from './rundecisions'
 import type { RunDecisions } from './api.gen'
 import type { WfEvent } from './types'
@@ -84,6 +85,24 @@ describe('decisionRows', () => {
     expect(rows[1]).toMatchObject({ latency: 'cached', outcome: 'shadow' })
     expect(rows[2]).toMatchObject({ answer: 'error: timeout', source: 'main', outcome: 'error' })
     expect(rows[3]).toMatchObject({ answer: 'verdict pass (p=0.97)', outcome: 'applied' })
+  })
+
+  it('rounds a recorded confidence and a score level for display, never showing float noise', () => {
+    const judged: WfEvent[] = [
+      {
+        seq: 3,
+        ts: 1,
+        type: 'decision_made',
+        use_site: 'judge_node',
+        answers: {
+          verdict: { value: 'clear', confidence: 0.8999999761581421 },
+          depth: { value: 1.4999999701976776, confidence: 0.6200000047683716 },
+        },
+      },
+    ]
+    expect(decisionRows(judged)[0].answer).toBe('verdict clear (confidence 0.9), depth 1.5 (confidence 0.62)')
+    expect(decisionBars(judged)[0].value).toBe('clear')
+    expect(decisionBars([{ ...judged[0], answers: { depth: { value: 1.4999999701976776 } } }])[0].value).toBe('1.5')
   })
 
   it('survives a shape a newer apb wrote', () => {
@@ -214,6 +233,30 @@ describe('DecisionsPanel saving an example', () => {
     flushSync()
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ error: 'saving an example is refused by a dashboard without keys' }), { status: 409 }),
+    )
+    ;(document.querySelector('[data-testid="example-save"]') as HTMLButtonElement).click()
+    for (let i = 0; i < 4; i++) {
+      await Promise.resolve()
+      await tick()
+    }
+    expect(document.querySelector('[data-testid="example-save-error"]')!.textContent).toBe(
+      'saving an example is refused by a dashboard without keys',
+    )
+    unmount(app)
+  })
+
+  it('shows a refusal the server sent as plain text in its own sentence, never as the raw error', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+    vi.stubGlobal('fetch', fetchMock)
+    const app = mount(DecisionsPanel, {
+      target: document.body,
+      props: { decisions: totals, events: judged, runId: 'r1', workspace: 'w1' },
+    })
+    flushSync()
+    ;(document.querySelector('[data-testid="decision-save-example"]') as HTMLButtonElement).click()
+    flushSync()
+    fetchMock.mockResolvedValueOnce(
+      new Response('saving an example is refused by a dashboard without keys', { status: 409 }),
     )
     ;(document.querySelector('[data-testid="example-save"]') as HTMLButtonElement).click()
     for (let i = 0; i < 4; i++) {

@@ -14,6 +14,8 @@ const api = vi.hoisted(() => ({
 }))
 vi.mock('../lib/api', () => api)
 vi.mock('../lib/ws', () => ({ subscribeChanges: (_cb: () => void) => () => {} }))
+const toast = vi.hoisted(() => ({ error: vi.fn() }))
+vi.mock('svelte-sonner', () => ({ toast }))
 
 let app: ReturnType<typeof mount> | null = null
 afterEach(() => {
@@ -26,7 +28,7 @@ afterEach(() => {
 type Gate = { resolve: (v: unknown) => void; reject: (e: unknown) => void }
 let gates: Gate[] = []
 
-const answer = (run_id: string) => ({
+const answer = (run_id: string, fields = [{ name: 'customer', state: 'value', value: 'Acme' }]) => ({
   runs: [
     {
       workspace_id: 'w',
@@ -37,7 +39,7 @@ const answer = (run_id: string) => ({
       project: 'proj',
       search: {
         state: 'indexed',
-        fields: [{ name: 'customer', state: 'value', value: 'Acme' }],
+        fields,
       },
     },
   ],
@@ -45,9 +47,13 @@ const answer = (run_id: string) => ({
   withheld: 0,
 })
 
-const httpError = (detail: string) => {
-  const e = new Error(`/api/runs?search=1&field=customer%3Av: HTTP 400`) as Error & { detail?: string }
+const httpError = (detail: string, status = 400) => {
+  const e = new Error(`/api/runs?search=1&field=customer%3Av: HTTP ${status}`) as Error & {
+    detail?: string
+    status?: number
+  }
   e.detail = detail
+  e.status = status
   return e
 }
 
@@ -124,6 +130,46 @@ describe('RunList search loading', () => {
     await settle(1, answer('r-old'))
     expect(document.body.textContent).toContain('r-new')
     expect(document.body.textContent).not.toContain('r-old')
+  })
+
+  it('says a filtered 4xx was refused but an ordinary load failure was not', async () => {
+    await mountList()
+    await settle(0, answer('r1'))
+    applyTerm('v')
+    await settle(1, httpError('too many terms'), true)
+    expect(toast.error).toHaveBeenLastCalledWith(
+      'Search refused',
+      expect.objectContaining({ description: 'too many terms' }),
+    )
+
+    // With no terms nothing was refused: the first load, a websocket
+    // reload or a network error is a plain load failure.
+    const fresh = async () => {
+      app = mount(RunList, { target: document.body })
+      flushSync()
+      await new Promise((r) => setTimeout(r))
+      flushSync()
+    }
+    await fresh()
+    await settle(2, httpError('boom', 503), true)
+    expect(toast.error).toHaveBeenLastCalledWith(
+      'Failed to load runs',
+      expect.objectContaining({ description: expect.anything() }),
+    )
+  })
+
+  it('merges the field names of a filtered answer into the picker', async () => {
+    await mountList()
+    await settle(0, answer('r1'))
+    applyTerm('v')
+    await settle(1, answer('r2', [{ name: 'region', state: 'value', value: 'eu' }]))
+    // The picker now offers the field only the filtered runs carried.
+    const input = document.body.querySelector(
+      '[data-testid="run-search-field"]',
+    ) as HTMLSelectElement
+    const names = [...(input?.options ?? [])].map((o) => o.value)
+    expect(names).toContain('customer')
+    expect(names).toContain('region')
   })
 
   it('scopes the not searchable footer to the visible listing', async () => {

@@ -149,6 +149,18 @@ describe('ReviewPanel bound and person-only gates', () => {
     ])
   })
 
+  it('starts the terminal command in the run\'s project directory, since apb review reads the project from there', () => {
+    auth.set({ required: false, authenticated: true, checked: true })
+    app = mount(ReviewPanel, {
+      target: document.body,
+      props: { reviews: entries([bound]), onDecide: () => {}, projectDir: '/home/me/my project' },
+    })
+    flushSync()
+    expect(document.querySelector('[data-testid="review-cli-command"]')?.textContent).toBe(
+      "cd '/home/me/my project' && apb review r1 review --decision approve --nonce approval-3fcd30582598bd5fa956cc2f0ea538ed --request review:41",
+    )
+  })
+
   it('with a signed-in session decides a person-only gate by its buttons with the binding nonce, and shows the server refusal', () => {
     const onDecide = vi.fn()
     const reviews = entries([bound])

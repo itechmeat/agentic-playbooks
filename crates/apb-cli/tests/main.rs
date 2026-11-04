@@ -60,11 +60,15 @@ mod cli_test;
 mod connector_cli;
 #[path = "suite/demo_playbooks_test.rs"]
 mod demo_playbooks_test;
+// Unix-only: a shell script stands in for git on PATH.
+#[cfg(unix)]
+#[path = "suite/daily_cleanup_script_test.rs"]
+mod daily_cleanup_script_test;
+#[path = "suite/decisions_cli_test.rs"]
+mod decisions_cli_test;
 // Unix-only: the module drives process groups through
 // `std::os::unix::process::CommandExt` and inspects them with `ps`/`kill`.
 #[cfg(unix)]
-#[path = "suite/decisions_cli_test.rs"]
-mod decisions_cli_test;
 #[path = "suite/detached_driver_test.rs"]
 mod detached_driver_test;
 #[path = "suite/discover_cli_test.rs"]

@@ -12,7 +12,9 @@ use std::process::ExitCode;
 use apb_core::result_store::SnapshotOmission;
 use apb_engine::result_view::{EntryView, ResultRow, ResultsView, Verified};
 use apb_mcp::tools::ToolError;
-use apb_mcp::tools::results::{parse_ref, run_result_raw, run_results, run_results_clean};
+use apb_mcp::tools::results::{
+    parse_ref, results_view, run_result_raw, run_results, run_results_clean,
+};
 use clap::Subcommand;
 
 use crate::util::{QUESTION_TEXT_MAX, sanitize_for_terminal};
@@ -92,23 +94,12 @@ fn list(root: &Path, run_id: &str, node: Option<&str>, json: bool) -> ExitCode {
             Err(e) => fail("results", &e),
         };
     }
-    // The same lookup and refusal as the JSON answer.
-    if let Err(e) = run_results(root, run_id, node) {
-        return fail("results", &e);
-    }
-    let run_dir = root.join(".apb/runs").join(run_id);
-    let mut view = match ResultsView::load(&run_dir) {
+    // The same lookup, refusal and narrowing as the JSON answer, loaded
+    // and verified once.
+    let (run_dir, view) = match results_view(root, run_id, node) {
         Ok(v) => v,
-        Err(e) => {
-            eprintln!("results: {e}");
-            return ExitCode::from(1);
-        }
+        Err(e) => return fail("results", &e),
     };
-    if let Some(node) = node {
-        view.rows.retain(|r| r.execution.node == node);
-        view.legacy.retain(|r| r.execution.node == node);
-        view.not_stored.retain(|r| r.node == node);
-    }
     let mut evidence = apb_engine::evidence::rows(&run_dir);
     if let Some(node) = node {
         evidence.retain(|r| r.node == node);

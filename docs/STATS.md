@@ -307,16 +307,16 @@ over the runs where the total is known.
 ```
   interventions: 4 over 3 finished runs, median 1 and mean 1.33 per run, runs without any 1 of 3
     decided through the review channel: 2 over 3 gate visits (automatic 1, channel 2, option:approve 2, option:reject 1, via:dashboard_session 1, via:not_recorded 1)
-
-The `via` split names the surface a gate decision came through. A gate
-with `approves` or `person_only` stamps it; ordinary gates never stamp a
-surface, so their decisions read `via:not_recorded` (the surface is not
-stamped, not unknown).
     operator actions: 1 over 3 runs (pause 1)
     run corrections through the supervisor channel: 1 over 3 runs (context_append 1)
     automatic total: 1
     engine actions (not interventions): infra_retry 1
 ```
+
+The `via` split names the surface a gate decision came through. A gate
+with `approves` or `person_only` stamps it; ordinary gates never stamp a
+surface, so their decisions read `via:not_recorded` (the surface is not
+stamped, not unknown).
 
 ## The run estimate
 
