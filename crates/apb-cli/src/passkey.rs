@@ -104,19 +104,17 @@ fn enroll(label: String) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if passkey::count() > 0 {
+    if passkey::count_strict().unwrap_or(1) > 0 {
         eprintln!(
             "a passkey is already enrolled on this machine: every later passkey needs an assertion from one that exists. Use the Add button on the dashboard's Passkeys page."
         );
         return ExitCode::from(2);
     }
-    let code = match passkey::write_enroll_code(&dir) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("passkey enroll failed: {e}");
-            return ExitCode::from(2);
-        }
-    };
+    // The code is minted here but only becomes live after a person at this
+    // terminal typed it back: an agent that runs this command with a piped
+    // stdout and a captured code cannot activate it, because it cannot
+    // answer the typed confirmation (the same gate as --feedback-loop yes).
+    let code = passkey::new_enroll_code();
     println!("Enrolling the first passkey for person-only gates and approvals.");
     println!(
         "Open the dashboard's Passkeys page and enter this one-time code within five minutes:"
@@ -128,6 +126,19 @@ fn enroll(label: String) -> ExitCode {
         "The page then asks your authenticator to register a passkey with the label `{}`.",
         sanitize_for_terminal(&label, 100)
     );
+    let typed = crate::consent::ask_typed(
+        &["Only a person at this terminal may enroll the first passkey.".to_string()],
+        "Type the one-time code shown above to activate it (anything else cancels):",
+    );
+    if typed.as_deref() != Some(code.as_str()) {
+        eprintln!("not confirmed: the code was not written, so nothing can enroll with it");
+        return ExitCode::from(2);
+    }
+    if let Err(e) = passkey::store_enroll_code(&dir, &code) {
+        eprintln!("passkey enroll failed: {e}");
+        return ExitCode::from(2);
+    }
+    println!("The code is live. Finish the registration on the dashboard within five minutes.");
     println!("Until a passkey is enrolled, person-only gates and approvals decide as before.");
     ExitCode::SUCCESS
 }
@@ -148,10 +159,10 @@ fn remove(root: &Path, label: &str) -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    // The last passkey comes off only with a code typed back at the
-    // terminal: a process that can run commands cannot quietly take the
-    // passkey gate off the machine.
-    if all.len() == 1 {
+    // Every removal, last or not, needs a code typed back at the terminal:
+    // the same rule the dashboard enforces with an assertion, so a process
+    // that can run commands cannot quietly take a passkey off the machine.
+    {
         let mut code_bytes = [0u8; 6];
         if getrandom::fill(&mut code_bytes).is_err() {
             eprintln!("passkey remove failed: no randomness from the operating system");
@@ -163,11 +174,11 @@ fn remove(root: &Path, label: &str) -> ExitCode {
             .map(|b| alphabet[(*b as usize) % alphabet.len()] as char)
             .collect();
         let question = format!(
-            "Remove the last passkey `{}` from this machine? Type this code to confirm: {code}",
+            "Remove the passkey `{}` from this machine? Type this code to confirm: {code}",
             sanitize_for_terminal(label, 100)
         );
         match crate::consent::ask_typed(
-            &["Only a person at this terminal removes the last passkey.".to_string()],
+            &["Only a person at this terminal removes a passkey.".to_string()],
             &question,
         ) {
             Some(typed) if typed == code => {}
@@ -177,7 +188,7 @@ fn remove(root: &Path, label: &str) -> ExitCode {
             }
         }
     }
-    match passkey::remove_by_label_into(&path, label) {
+    match passkey::remove_by_label_into(&path, label, true) {
         Ok(r) => {
             println!("removed passkey `{}` from this machine", r.label);
             send_notice(
@@ -188,7 +199,7 @@ fn remove(root: &Path, label: &str) -> ExitCode {
                     r.label
                 ),
             );
-            if passkey::count() == 0 {
+            if passkey::count_strict().unwrap_or(1) == 0 {
                 println!(
                     "no passkey is enrolled now: person-only gates and approvals decide as before (a signed-in dashboard session alone)."
                 );

@@ -249,13 +249,16 @@ about other `apb` binaries on `PATH`.
 
 A channel refusal proves a caller type, not a person: whoever holds a
 server key can sign in to the dashboard and decide. When at least one
-passkey is enrolled on the machine, apb raises the bar: a person-only
+passkey is enforced on the machine, apb raises the bar: a person-only
 gate's decision and an approval (a gate with `approves` or
 `requires_approval`, and a publish consent) then need a fresh WebAuthn
 assertion, made through the dashboard and bound to the run, the gate, the
 request and the chosen option. Without a passkey enrolled, behavior is
 exactly as before; `apb doctor` shows a warning row recommending
-`apb passkey enroll`. Ordinary review gates are unchanged.
+`apb passkey enroll`. When the store exists but does not read, nothing
+falls back: the requirement stands and every person-only decision refuses
+until the file is fixed (fail closed), and `apb doctor` reports it as a
+failure. Ordinary review gates are unchanged.
 
 **What apb stores.** Passkeys live per machine in
 `<config_dir>/passkeys.yaml` (0600, atomic write through
@@ -274,37 +277,53 @@ and apb refuses it with a clear message. Verification uses `p256`,
 `webauthn-rs` (its license is not compatible).
 
 **Enrollment and management.** `apb passkey enroll` (a person only,
-refused inside a run step like the other person-only commands) prints a
-one-time code, valid five minutes, that the dashboard's Passkeys page
-asks for. Every later passkey is added through the dashboard with an
-assertion from an existing one. `apb passkey list` shows them; `apb
-passkey remove <label>` removes one, and removing the LAST passkey needs
-a one-time code typed back at the terminal. Enrollment and removal
+refused inside a run step like the other person-only commands, and only
+at an interactive terminal) prints a one-time code and asks the person to
+type it back; only then is the code written, so a piped stdout leaks
+nothing usable. The code is valid five minutes, and the dashboard's
+Passkeys page asks for it. Every later passkey is added through the
+dashboard with an assertion from an existing one. `apb passkey list`
+shows them; `apb passkey remove <label>` removes one, and every removal,
+last or not, needs a one-time code typed back at the terminal (the same
+rule the dashboard enforces with an assertion), under a store lock, so
+two removals cannot race the count down to zero. Enrollment and removal
 journal nothing into runs, but each sends a notice to the machine's
 notify target when one is set ("a passkey was added on `<machine>`").
 
-**Deciding.** With a passkey enrolled, `apb review` (and `apb publish
+**Deciding.** With a passkey enforced, `apb review` (and `apb publish
 approve`) prints the dashboard link and refuses with `passkey_required`
 (a new code in the closed `CallerRefusal` list); the person decides on
 the dashboard, which runs `navigator.credentials.get` and posts the
-assertion. MCP and bearer stay refused as before. The engine stamps the
-credential id prefix (`passkey`) on the consumed channel entry, and a
-person-only or bound gate consumes nothing else while a passkey is
-enrolled; `apb doctor --run` lists an unstamped entry as "no passkey
-assertion". An unattended run's declared `decide` and a scenario run's
-script are exempt: they are not a person's consent anyway, and V156
-already refuses them on a person-only gate.
+assertion. MCP is refused as before, and a bearer-key request is refused
+even when it carries a valid token: a key-made client is never a person.
+The engine stamps the credential id prefix (`passkey`) and the full
+assertion (`passkey_proof`) on the consumed channel entry, and
+re-verifies the proof against the store when it consumes the decision:
+the challenge is derived from the run, the gate, the decision, the
+request and the nonce, so a hand-written line with a made-up prefix, or
+a proof replayed onto another request, is refused, and `apb doctor
+--run` names it. What the proof does not re-check is the browser's
+origin (the engine cannot see the request's Host); that check happens
+where the assertion is first accepted, in the server. An unattended
+run's declared `decide` and a scenario run's script are exempt: they are
+not a person's consent anyway, and V156 already refuses them on a
+person-only gate.
 
 **What the gate buys.** An agent that reads the config dir and the
-dashboard key file can sign in to the dashboard but still cannot decide,
-because it cannot produce the assertion: that is exactly what the gate
-buys, the authenticator holding the private key the agent does not have.
+dashboard key file can sign in to the dashboard but still cannot decide:
+it cannot sign an assertion with the authenticator's private key, which
+never leaves it, and a `passkey` stamp it writes into the channel file
+by hand carries no assertion, so the drive refuses it.
 
-**Limits.** A same-user agent that drives the person's own browser (for
-example through remote debugging) or a virtual authenticator is out of
-scope: it can sign in and it can produce the assertion. Enrollment is the
-protected step (a person at a terminal), and an agent that enrolled its
-own passkey would be visible, in the notify notice and in `apb passkey
+**Limits.** The server cannot tell a browser from a plain HTTP client,
+so whoever holds a valid credential can assert with a script instead of
+a browser; that is no loss, the assertion is the proof either way. Out
+of scope, and documented as such: a same-user agent that drives the
+person's own browser through remote debugging, or a virtual
+authenticator plugged in during the person's own enrollment, can produce
+assertions it should not. Enrollment is the protected step (a person at
+a terminal, typing the code back), and an agent that enrolled its own
+passkey would be visible, in the notify notice and in `apb passkey
 list`. The design is
 `docs/superpowers/specs/2026-11-04-passkeys-design.md`.
 

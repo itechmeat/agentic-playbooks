@@ -26,15 +26,23 @@ pub fn refuse_for_person_only(
     run_dir: &Path,
     node: &str,
     channel: Option<DecisionChannel>,
+    has_proof: bool,
 ) -> Result<(), EngineError> {
-    // The dashboard session stays open: its route stamps the entry only
-    // after it verified the assertion, and the append-time check enforces
-    // that stamp. The terminal has no assertion to give, so with a passkey
-    // enrolled it is refused like any other channel.
-    let stamped_dashboard = channel == Some(DecisionChannel::DashboardSession);
-    if decides_person_only(run_dir, channel)
-        && (stamped_dashboard || !passkey_required_for_person_only(run_dir, node))
-    {
+    // A dashboard request stays open: its route stamps the entry with the
+    // full assertion only after it verified it, and the append-time check
+    // enforces that stamp. The terminal has no assertion to give, so with
+    // a passkey enrolled it is refused like any other channel. A dashboard
+    // request that carries a proof decides a person-only gate even where
+    // the channel alone would not: the assertion is the person.
+    let dashboard_proof = has_proof
+        && matches!(
+            channel,
+            Some(DecisionChannel::DashboardSession) | Some(DecisionChannel::DashboardKeyless)
+        );
+    if dashboard_proof {
+        return Ok(());
+    }
+    if decides_person_only(run_dir, channel) && !passkey_required_for_person_only(run_dir, node) {
         return Ok(());
     }
     let refusal = channel
@@ -84,7 +92,14 @@ pub fn refuse_for_person_only(
 /// ([`super::passkey_required`] covers bound approvals too). A playbook
 /// that does not read fails closed: the requirement stands.
 fn passkey_required_for_person_only(run_dir: &Path, node: &str) -> bool {
-    apb_core::passkey::count() > 0
+    // At least one passkey enrolled, or a store that exists but does not
+    // read (fail closed); kept here, off the parent module, so this leaf
+    // never depends back on it.
+    let enforced = match apb_core::passkey::count_strict() {
+        Ok(n) => n > 0,
+        Err(_) => true,
+    };
+    enforced
         && crate::progress::load_run_playbook(run_dir)
             .and_then(|p| {
                 p.node(node).map(|n| {
@@ -92,14 +107,6 @@ fn passkey_required_for_person_only(run_dir: &Path, node: &str) -> bool {
                 })
             })
             .unwrap_or(true)
-}
-
-/// Whether a channel entry carries the passkey stamp this machine demands:
-/// any entry at all when no passkey is enrolled, else only an entry a
-/// dashboard decision posted with a verified assertion. The drive
-/// consumes nothing else, and `apb doctor --run` names the reason.
-pub fn passkey_stamp_ok(passkey: &Option<String>) -> bool {
-    apb_core::passkey::count() == 0 || passkey.is_some()
 }
 
 /// The open request of gate `gate`: the seq of its latest

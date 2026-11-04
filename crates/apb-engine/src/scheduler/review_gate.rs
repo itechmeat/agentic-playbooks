@@ -53,8 +53,8 @@ fn queued_decision(
         } => for_node
             .filter(|e| e.nonce.as_deref() == Some(*nonce))
             .filter(|e| {
-                (!*person_only || crate::review::channel::decides_person_only(run_dir, e.channel))
-                    && crate::review::channel::passkey_stamp_ok(&e.passkey)
+                (!*person_only || crate::review::decides_person_only_entry(run_dir, e))
+                    && crate::review::passkey_stamp_ok(run_dir, e)
             })
             .nth(*consumed),
         Consume::Stamped { person_only } => {
@@ -92,7 +92,7 @@ pub(crate) struct AutoDecision {
 pub(crate) enum GateStep {
     /// A decision answers the open request. Nothing is journaled yet: the
     /// caller records `ReviewDecided` in its own order.
-    Decided(ReviewEntry),
+    Decided(Box<ReviewEntry>),
     /// No decision yet; the caller sleeps and spins the loop.
     Waiting,
     /// A supervisor directive moved the run off the gate: the request was
@@ -132,7 +132,7 @@ pub(crate) fn await_decision(
     let (run_dir, playbook) = (*run_dir, *playbook);
     let events = read_all(run_dir)?;
     if let Some(entry) = queued_decision(run_dir, &events, current, &consume)? {
-        return Ok(GateStep::Decided(entry));
+        return Ok(GateStep::Decided(Box::new(entry)));
     }
     // No decision yet: declare the request once, then wait (poll). The event
     // carries an owner-facing pending instruction (issue #42 finding 4) so a
@@ -163,7 +163,7 @@ pub(crate) fn await_decision(
                 && let Some(entry) =
                     queued_decision(run_dir, &read_all(run_dir)?, current, &consume)?
             {
-                return Ok(GateStep::Decided(entry));
+                return Ok(GateStep::Decided(Box::new(entry)));
             }
         }
     }

@@ -170,14 +170,27 @@ pub fn diagnose(root: &Path) -> DoctorReport {
     // A passkey is what makes a person-only gate decision or an approval
     // provably a person's on this machine; without one, a signed-in
     // dashboard session decides as before.
-    let passkeys = crate::passkey::count();
-    if passkeys == 0 {
+    // A store that exists but does not read is a Fail, not a warning:
+    // every decision path refuses while it stays broken (fail closed), so
+    // the person has to fix the file.
+    let passkeys = match crate::passkey::count_strict() {
+        Ok(n) => Some(n),
+        Err(e) => {
+            r.push(
+                CheckStatus::Fail,
+                "passkeys",
+                format!("the passkey store does not read, so every person-only gate and approval refuses until it is fixed: {e}"),
+            );
+            None
+        }
+    };
+    if passkeys == Some(0) {
         r.push(
             CheckStatus::Warn,
             "passkeys",
             "no passkey is enrolled, so a person-only gate or an approval decides from a signed-in dashboard session alone; run `apb passkey enroll` to require a passkey",
         );
-    } else {
+    } else if let Some(passkeys) = passkeys {
         r.push(
             CheckStatus::Ok,
             "passkeys",

@@ -48,10 +48,16 @@ export interface DecisionCeremony {
   secureContext?: () => boolean
   assertChallenge: (purpose: AssertPurpose) => Promise<{ challenge: string }>
   getAssertion: (challenge: string) => Promise<AssertionResult>
-  verifyAssertion: (purpose: AssertPurpose, challenge: string) => Promise<{ token: string }>
+  verifyAssertion: (
+    purpose: AssertPurpose,
+    challenge: string,
+    assertion: AssertionResult,
+  ) => Promise<{ token: string }>
 }
 
-function b64u(buf: ArrayBuffer): string {
+/** Base64url of an ArrayBuffer: the string shape every passkey route
+ * reads out of the browser API's binary fields (no +, / or padding). */
+export function b64u(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf)
   let s = ''
   for (const b of bytes) s += String.fromCharCode(b)
@@ -82,8 +88,8 @@ function realCeremony(): DecisionCeremony {
   return {
     assertChallenge: (purpose) => post<{ challenge: string }>('/api/passkeys/assert/challenge', { purpose }),
     getAssertion: realGetAssertion,
-    verifyAssertion: (purpose, challenge) =>
-      post<{ token: string }>('/api/passkeys/assert/verify', { purpose, challenge }),
+    verifyAssertion: (purpose, challenge, assertion) =>
+      post<{ token: string }>('/api/passkeys/assert/verify', { purpose, challenge, ...assertion }),
   }
 }
 
@@ -103,7 +109,15 @@ export async function postDecision(
     {
       postReview: async (runId, b) => {
         try {
-          const got = await postReview(runId, b.node, b.decision, b.note ?? '', workspace, b.nonce, b.request, b.passkey_token)
+          const assertion = b.assertionId
+            ? {
+                assertionId: b.assertionId,
+                assertionClientDataJSON: b.assertionClientDataJSON,
+                assertionAuthenticatorData: b.assertionAuthenticatorData,
+                assertionSignature: b.assertionSignature,
+              }
+            : undefined
+          const got = await postReview(runId, b.node, b.decision, b.note ?? '', workspace, b.nonce, b.request, b.passkey_token, assertion)
           postedSeq = got.posted_seq
           return { ok: true }
         } catch (e) {

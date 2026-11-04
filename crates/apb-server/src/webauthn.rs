@@ -18,7 +18,6 @@
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ciborium::Value;
-use ed25519_dalek::Verifier;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -134,11 +133,29 @@ struct ClientData {
     typ: String,
     challenge: String,
     origin: String,
+    /// A browser that was embedded by another page says so; the server
+    /// accepts none.
+    #[serde(default, rename = "crossOrigin")]
+    cross_origin: Option<bool>,
 }
 
-fn parse_client_data(json: &str) -> Result<ClientData, WebAuthnError> {
-    serde_json::from_str(json)
-        .map_err(|e| WebAuthnError::BadClientData(format!("clientDataJSON is not valid JSON: {e}")))
+/// Decodes the `clientDataJSON` the browser posted (base64url of the exact
+/// bytes the authenticator produced) and parses it. The decoded bytes are
+/// what every clientDataHash covers, so callers hash the bytes this
+/// returns, never a re-serialization.
+fn decode_and_parse_client_data(
+    client_data_json_b64u: &str,
+) -> Result<(ClientData, Vec<u8>), WebAuthnError> {
+    let raw = b64url_decode(client_data_json_b64u)?;
+    let client: ClientData = serde_json::from_slice(&raw).map_err(|e| {
+        WebAuthnError::BadClientData(format!("clientDataJSON is not valid JSON: {e}"))
+    })?;
+    if client.cross_origin == Some(true) {
+        return Err(WebAuthnError::BadClientData(
+            "clientDataJSON names crossOrigin: true, which this server never accepts".to_string(),
+        ));
+    }
+    Ok((client, raw))
 }
 
 /// The parsed authenticator data of a registration or an assertion.
@@ -191,7 +208,32 @@ fn parse_auth_data(bytes: &[u8]) -> Result<AuthData, WebAuthnError> {
         }
         let credential_id = after_len[..cred_len].to_vec();
         let cose_bytes = &after_len[cred_len..];
-        let (cose_key, alg) = parse_and_canonicalize_cose_key(cose_bytes)?;
+        // The ED flag (0x80) puts a CBOR extension map after the COSE key:
+        // parse and skip it, and refuse trailing bytes only after it.
+        let cose_end = if flags & 0x80 != 0 {
+            let mut reader = CountingReader::new(cose_bytes);
+            let key: Value = ciborium::from_reader(&mut reader).map_err(|e| {
+                WebAuthnError::BadPublicKey(format!("COSE key is not valid CBOR: {e}"))
+            })?;
+            let _ = key; // re-parsed canonically below
+            let rest = &cose_bytes[reader.position()..];
+            let mut ext_reader = CountingReader::new(rest);
+            let extensions: Value = ciborium::from_reader(&mut ext_reader).map_err(|e| {
+                WebAuthnError::BadAuthenticatorData(format!(
+                    "the extension map after the COSE key does not parse: {e}"
+                ))
+            })?;
+            let _ = extensions;
+            if ext_reader.position() != rest.len() {
+                return Err(WebAuthnError::BadAuthenticatorData(
+                    "trailing bytes after the extension map".to_string(),
+                ));
+            }
+            reader.position()
+        } else {
+            cose_bytes.len()
+        };
+        let (cose_key, alg) = parse_and_canonicalize_cose_key(&cose_bytes[..cose_end])?;
         Some(AttestedCredentialData {
             credential_id,
             cose_key,
@@ -358,12 +400,12 @@ pub struct NewCredential {
 /// required, attested credential data present). On success returns the
 /// credential to store.
 pub fn verify_registration(
-    client_data_json: &str,
+    client_data_json_b64u: &str,
     attestation_object: &[u8],
     expected_challenge: &str,
     rp: &RpConfig,
 ) -> Result<NewCredential, WebAuthnError> {
-    let client = parse_client_data(client_data_json)?;
+    let (client, _raw) = decode_and_parse_client_data(client_data_json_b64u)?;
     if client.typ != "webauthn.create" {
         return Err(WebAuthnError::BadClientData(format!(
             "expected ceremony type \"webauthn.create\", got {:?}",
@@ -381,9 +423,11 @@ pub fn verify_registration(
     if auth_data.flags & FLAG_UV == 0 {
         return Err(WebAuthnError::UvRequired);
     }
-    let attested = auth_data
-        .attested
-        .ok_or(WebAuthnError::AttestationNotNone)?;
+    let attested = auth_data.attested.ok_or_else(|| {
+        WebAuthnError::BadAuthenticatorData(
+            "a registration without attested credential data (the AT flag is unset)".to_string(),
+        )
+    })?;
     Ok(NewCredential {
         credential_id: b64url_encode(&attested.credential_id),
         cose_key: attested.cose_key,
@@ -402,7 +446,7 @@ pub fn verify_registration(
 /// `authenticator_data || sha256(client_data_json)` with the stored COSE
 /// key.
 pub fn verify_assertion(
-    client_data_json: &str,
+    client_data_json_b64u: &str,
     authenticator_data: &[u8],
     signature: &[u8],
     expected_challenge: &str,
@@ -410,7 +454,7 @@ pub fn verify_assertion(
     stored_cose_key: &[u8],
     stored_sign_count: u32,
 ) -> Result<u32, WebAuthnError> {
-    let client = parse_client_data(client_data_json)?;
+    let (client, raw_client_data) = decode_and_parse_client_data(client_data_json_b64u)?;
     if client.typ != "webauthn.get" {
         return Err(WebAuthnError::BadClientData(format!(
             "expected ceremony type \"webauthn.get\", got {:?}",
@@ -427,7 +471,9 @@ pub fn verify_assertion(
     if auth_data.flags & FLAG_UV == 0 {
         return Err(WebAuthnError::UvRequired);
     }
-    if auth_data.sign_count < stored_sign_count {
+    // WebAuthn L2 section 7.2 step 21: a counter that does not increase
+    // while either value is non-zero is a possible cloned authenticator.
+    if stored_sign_count != 0 && auth_data.sign_count <= stored_sign_count {
         return Err(WebAuthnError::CounterRegressed {
             stored: stored_sign_count,
             got: auth_data.sign_count,
@@ -435,7 +481,7 @@ pub fn verify_assertion(
     }
     let mut signed = Vec::with_capacity(authenticator_data.len() + 32);
     signed.extend_from_slice(authenticator_data);
-    signed.extend_from_slice(&Sha256::digest(client_data_json.as_bytes()));
+    signed.extend_from_slice(&Sha256::digest(&raw_client_data));
     verify_signature(stored_cose_key, &signed, signature)?;
     Ok(auth_data.sign_count)
 }
@@ -478,8 +524,14 @@ struct AttestationObject {
 }
 
 fn parse_attestation_object(bytes: &[u8]) -> Result<AttestationObject, WebAuthnError> {
-    let value: Value = ciborium::from_reader(&mut CountingReader::new(bytes))
+    let mut reader = CountingReader::new(bytes);
+    let value: Value = ciborium::from_reader(&mut reader)
         .map_err(|e| WebAuthnError::BadAttestation(format!("not valid CBOR: {e}")))?;
+    if reader.position() != bytes.len() {
+        return Err(WebAuthnError::BadAttestation(
+            "trailing bytes after the attestation object".to_string(),
+        ));
+    }
     let map = value
         .into_map()
         .map_err(|_| WebAuthnError::BadAttestation("not a CBOR map".to_string()))?;
@@ -558,8 +610,10 @@ fn verify_signature(
                 .map_err(|_| WebAuthnError::BadPublicKey("Ed25519 key rejected".to_string()))?;
             let signature = ed25519_dalek::Signature::from_slice(signature)
                 .map_err(|_| WebAuthnError::BadSignature)?;
+            // Strict verification rejects small-order and malleable
+            // signatures a plain cofactorless verify would accept.
             verifying_key
-                .verify(message, &signature)
+                .verify_strict(message, &signature)
                 .map_err(|_| WebAuthnError::BadSignature)
         }
         other => Err(WebAuthnError::UnsupportedAlgorithm(other)),
@@ -604,7 +658,7 @@ fn parse_cose_key_fields(cose_key: &[u8]) -> Result<CoseKeyFields, WebAuthnError
 /// `127.0.0.1`: passkeys cannot bind to an IP address, so the operator must
 /// serve the dashboard under a loopback name or an https name.
 pub fn rp_for_origin(origin: &str) -> Result<RpConfig, WebAuthnError> {
-    let (scheme, host, port) =
+    let (scheme, host, _port) =
         parse_origin(origin).ok_or_else(|| WebAuthnError::BadOrigin(origin.to_string()))?;
     let loopback =
         matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") || host.ends_with(".localhost");
@@ -617,14 +671,12 @@ pub fn rp_for_origin(origin: &str) -> Result<RpConfig, WebAuthnError> {
             )));
         }
     }
-    let default_port =
-        port == Some(80) && scheme == "http" || port == Some(443) && scheme == "https";
-    let rp_id_host = if default_port { host.clone() } else { host };
-    if is_ip_literal(&rp_id_host) {
-        return Err(WebAuthnError::IpLiteralRpId(rp_id_host));
+    // The RP id is the host, whatever the port: a port never narrows an RP.
+    if is_ip_literal(&host) {
+        return Err(WebAuthnError::IpLiteralRpId(host));
     }
     Ok(RpConfig {
-        rp_id: rp_id_host,
+        rp_id: host,
         origin: origin.to_string(),
     })
 }
@@ -641,11 +693,13 @@ fn parse_origin(origin: &str) -> Option<(String, String, Option<u16>)> {
     {
         return None;
     }
-    let authority = rest.split(['/', '?', '#']).next()?;
-    let authority = authority
-        .rsplit_once('@')
-        .map(|(_, a)| a)
-        .unwrap_or(authority);
+    // Exact origins only: a browser never sends userinfo, a path, a query
+    // or a fragment in clientDataJSON.origin, and stripping them would
+    // normalize an attacker-chosen string onto the dashboard's origin.
+    if rest.contains(['/', '?', '#', '@']) {
+        return None;
+    }
+    let authority = rest;
     let (host, port) = if let Some(stripped) = authority.strip_prefix('[') {
         let (v6, after) = stripped.split_once(']')?;
         if v6.is_empty() {

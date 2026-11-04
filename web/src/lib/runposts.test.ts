@@ -8,7 +8,18 @@ vi.mock('./api', async () => {
 
 import { ApiError } from './api/http'
 import { PASSKEYS_MESSAGE } from './passkeys'
-import { postDecision } from './runposts'
+import { b64u, postDecision } from './runposts'
+
+describe('the browser wire format', () => {
+  it('encodes the authenticator fields as base64url', () => {
+    // 0xFB 0xFF 0xEF would be "+/+8A" with padding in standard base64;
+    // base64url is "-__vAA" with none, exactly what the routes decode.
+    const bytes = new Uint8Array([0xfb, 0xff, 0xef, 0x00])
+    const encoded = b64u(bytes.buffer)
+    expect(encoded).toBe('-__vAA')
+    expect(encoded).not.toMatch(/[+/=]/)
+  })
+})
 
 const target = { runId: 'r1', node: 'gate', request: 7 }
 
@@ -44,7 +55,18 @@ describe('postDecision with a passkey enrolled', () => {
     expect(deps.assertChallenge).toHaveBeenCalledWith({
       decision: { run: 'r1', node: 'gate', decision: 'approve', request: 7, nonce: null },
     })
-    expect(postReview).toHaveBeenLastCalledWith('r1', 'gate', 'approve', '', 'w', undefined, 7, 'TOKEN')
+    // The verify step gets the assertion the authenticator returned.
+    expect(deps.verifyAssertion).toHaveBeenCalledWith(
+      { decision: { run: 'r1', node: 'gate', decision: 'approve', request: 7, nonce: null } },
+      'A'.repeat(43),
+      { id: 'cred-1', clientDataJSON: 'CDA', authenticatorData: 'AUTHDATA', signature: 'SIG' },
+    )
+    expect(postReview).toHaveBeenLastCalledWith('r1', 'gate', 'approve', '', 'w', undefined, 7, 'TOKEN', {
+      assertionId: 'cred-1',
+      assertionClientDataJSON: 'CDA',
+      assertionAuthenticatorData: 'AUTHDATA',
+      assertionSignature: 'SIG',
+    })
   })
 
   it('shows PASSKEYS_MESSAGE without a ceremony when not a secure context', async () => {

@@ -34,6 +34,14 @@ imap-proto.workspace = true
 mail-parser.workspace = true
 rustls.workspace = true
 rustls-platform-verifier.workspace = true
+# The passkey assertion proof a dashboard decision carries is re-verified at
+# consumption (module `review/passkey_proof`): the same ES256 and EdDSA
+# verifiers the server's webauthn module uses, plus the digests.
+sha2.workspace = true
+base64 = "0.23"
+ciborium = "0.2"
+p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 
 # Group termination of agent process tree on cancellation/timeout (Unix):
 # kill(-pgid, SIGKILL). libc already in tree transitively, direct dependency

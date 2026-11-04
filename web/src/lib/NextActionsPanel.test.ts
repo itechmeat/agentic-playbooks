@@ -106,7 +106,7 @@ describe('NextActionsPanel', () => {
     show({ actions: runActions([review()]), onchange })
     allByTestId('next-action-option')[0].click()
     await tick()
-    expect(postReview).toHaveBeenCalledWith('parent', 'gate', 'approve', '', 'w', undefined, 7, undefined)
+    expect(postReview).toHaveBeenCalledWith('parent', 'gate', 'approve', '', 'w', undefined, 7, undefined, undefined)
     expect(onchange).toHaveBeenCalled()
   })
 
@@ -142,7 +142,7 @@ describe('NextActionsPanel', () => {
     const skip = allByTestId('next-action-option').find((b) => b.textContent?.trim() === 'skip')!
     skip.click()
     await tick()
-    expect(postReview).toHaveBeenCalledWith('parent', 'ship', 'skip', '', 'w', 'n-1', 9, undefined)
+    expect(postReview).toHaveBeenCalledWith('parent', 'ship', 'skip', '', 'w', 'n-1', 9, undefined, undefined)
   })
 
   it('disables a not-ready action and says why, and shows when it continues by itself', () => {

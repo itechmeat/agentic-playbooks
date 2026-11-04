@@ -73,11 +73,15 @@ fn ignored_because(
     if binding.is_some_and(|b| e.nonce.as_deref() != Some(b.nonce.as_str())) {
         return Some("not the request's binding");
     }
-    if person_only && !crate::review::channel::decides_person_only(run_dir, e.channel) {
+    if person_only && !crate::review::decides_person_only_entry(run_dir, e) {
         return Some("not a person's channel");
     }
-    if person_only && !crate::review::channel::passkey_stamp_ok(&e.passkey) {
-        return Some("no passkey assertion");
+    if person_only && !crate::review::passkey_stamp_ok(run_dir, e) {
+        return Some(if e.passkey_proof.is_some() {
+            "a passkey assertion that does not verify"
+        } else {
+            "no passkey assertion"
+        });
     }
     None
 }

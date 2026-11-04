@@ -72,6 +72,8 @@ mod meta_api_test;
 mod next_actions_api_test;
 #[path = "suite/notify_api_test.rs"]
 mod notify_api_test;
+#[path = "suite/passkeys_flow_test.rs"]
+mod passkeys_flow_test;
 #[path = "suite/problems_api_test.rs"]
 mod problems_api_test;
 #[path = "suite/profiles_api_test.rs"]

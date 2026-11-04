@@ -619,6 +619,16 @@ pub(crate) struct ReviewBody {
     /// decide flow runs the assertion first).
     #[serde(default)]
     passkey_token: Option<String>,
+    /// The assertion the token was minted from, carried on the retried
+    /// post so the drive can re-verify the stamp at consumption.
+    #[serde(default, rename = "assertionId")]
+    assertion_id: String,
+    #[serde(default, rename = "assertionClientDataJSON")]
+    assertion_client_data: String,
+    #[serde(default, rename = "assertionAuthenticatorData")]
+    assertion_auth_data: String,
+    #[serde(default, rename = "assertionSignature")]
+    assertion_signature: String,
 }
 
 /// The answer to a gate's engine refusal: 404 for a node or request that
@@ -710,16 +720,28 @@ pub(crate) async fn post_review_handler(
             )
                 .into_response();
         };
-        let purpose = serde_json::json!({
-            "decision": {
-                "run": id,
-                "node": cmd.node,
-                "decision": cmd.decision,
-                "request": body.request,
-                "nonce": body.nonce,
-            }
-        });
-        let digest = crate::passkeys::purpose_digest(&purpose);
+        // The purpose must name the request and nonce the entry will be
+        // stamped with, or the drive's re-verification refuses the proof:
+        // the same resolution the assertion ceremony used, so the
+        // assertion's challenge equals the derived challenge the drive
+        // recomputes from the stamped entry.
+        let decision_purpose = crate::routes::passkeys::DecisionPurpose {
+            run: id.clone(),
+            node: cmd.node.clone(),
+            decision: cmd.decision.clone(),
+            request: body.request,
+            nonce: body.nonce.clone(),
+        };
+        let purpose = match crate::routes::passkeys::AssertPurpose::resolved_decision(
+            root.as_path(),
+            &decision_purpose,
+        ) {
+            Ok(p) => p,
+            Err(why) => return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response(),
+        };
+        let request = purpose.request_of();
+        let nonce = purpose.nonce_of();
+        let digest = purpose.digest();
         let Some(credential) = state.passkeys.take_token(token, &digest) else {
             return (
                 StatusCode::FORBIDDEN,
@@ -727,12 +749,16 @@ pub(crate) async fn post_review_handler(
             )
                 .into_response();
         };
+        // The browser posted clientDataJSON base64url; the proof the drive
+        // re-verifies is exactly what it posted.
+        let proof = apb_engine::review::passkey_proof::PasskeyProof {
+            credential_id: body.assertion_id.clone(),
+            client_data_json: body.assertion_client_data.clone(),
+            authenticator_data: body.assertion_auth_data.clone(),
+            signature: body.assertion_signature.clone(),
+        };
         match apb_engine::review::post_decision_passkey(
-            &run_dir,
-            cmd,
-            body.nonce,
-            body.request,
-            credential,
+            &run_dir, cmd, nonce, request, channel, credential, proof,
         ) {
             Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
             Err(e) => gate_refusal(e),

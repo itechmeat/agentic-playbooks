@@ -82,6 +82,10 @@ pub enum PasskeyError {
     DuplicateCredential,
     #[error("no passkey with label `{0}`; see `apb passkey list`")]
     UnknownLabel(String),
+    #[error(
+        "the last passkey on this machine is removed only with `apb passkey remove` and its one-time code typed at the terminal"
+    )]
+    LastPasskey,
 }
 
 /// `<config_dir>/passkeys.yaml`.
@@ -204,14 +208,25 @@ fn validate_label(path: &Path, label: &str) -> Result<(), PasskeyError> {
     Ok(())
 }
 
-/// Removes the passkey labeled `label` from `path` under the lock and returns
-/// the removed record.
-pub fn remove_by_label_into(path: &Path, label: &str) -> Result<PasskeyRecord, PasskeyError> {
+/// Removes the passkey labeled `label` from `path` under the lock and
+/// returns the removed record. `allow_last: false` refuses to remove the
+/// last passkey on the machine: the rule lives here, inside the lock, so
+/// two concurrent removals can never race the count down to zero. Only the
+/// CLI, where a person types a one-time code at a terminal, may remove the
+/// last one.
+pub fn remove_by_label_into(
+    path: &Path,
+    label: &str,
+    allow_last: bool,
+) -> Result<PasskeyRecord, PasskeyError> {
     let _lock = lock_for(path)?;
     let mut file = load_from(path)?;
     let Some(pos) = file.passkeys.iter().position(|k| k.label == label) else {
         return Err(PasskeyError::UnknownLabel(label.to_string()));
     };
+    if !allow_last && file.passkeys.len() <= 1 {
+        return Err(PasskeyError::LastPasskey);
+    }
     let removed = file.passkeys.remove(pos);
     save_to(path, &file)?;
     Ok(removed)
@@ -249,20 +264,26 @@ pub struct EnrollCodeFile {
     pub expires_at_ms: u64,
 }
 
-/// Mints a fresh one-time enrollment code into `path` (the config dir),
-/// replacing any code still there, and returns it. Eight characters from
-/// an unambiguous alphabet, so a person can read it off a terminal.
-pub fn write_enroll_code(dir: &Path) -> Result<String, PasskeyError> {
+/// Mints a fresh one-time enrollment code. Eight characters from an
+/// unambiguous alphabet, so a person can read it off a terminal. The CLI
+/// prints it, asks the person to type it back, and only stores it through
+/// [`store_enroll_code`] once the person at the terminal confirmed, so the
+/// code a piped stdout leaks is inert.
+pub fn new_enroll_code() -> String {
     let alphabet = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let mut bytes = [0u8; 8];
-    getrandom::fill(&mut bytes)
-        .map_err(|e| PasskeyError::Io(dir.display().to_string(), e.to_string()))?;
-    let code: String = bytes
+    getrandom::fill(&mut bytes).expect("the operating system provides randomness");
+    bytes
         .iter()
         .map(|b| alphabet[(*b as usize) % alphabet.len()] as char)
-        .collect();
+        .collect()
+}
+
+/// Writes `code` into `dir` as the live one-time enrollment code, replacing
+/// any code still there.
+pub fn store_enroll_code(dir: &Path, code: &str) -> Result<(), PasskeyError> {
     let file = EnrollCodeFile {
-        code: code.clone(),
+        code: code.to_string(),
         expires_at_ms: crate::clock::now_ms_u64().saturating_add(ENROLL_CODE_TTL_MS as u64),
     };
     let path = dir.join(ENROLL_CODE_FILE);
@@ -272,6 +293,16 @@ pub fn write_enroll_code(dir: &Path) -> Result<String, PasskeyError> {
         .map_err(|e| PasskeyError::Invalid(path.display().to_string(), e.to_string()))?;
     crate::fsutil::atomic_write_private(&path, yaml.as_bytes())
         .map_err(|e| PasskeyError::Io(path.display().to_string(), e.to_string()))?;
+    Ok(())
+}
+
+/// Mints a fresh one-time enrollment code into `dir` and returns it. The
+/// one-call form behind the test helpers; `apb passkey enroll` uses
+/// [`new_enroll_code`] and [`store_enroll_code`] so the code only becomes
+/// live after the person typed it back at the terminal.
+pub fn write_enroll_code(dir: &Path) -> Result<String, PasskeyError> {
+    let code = new_enroll_code();
+    store_enroll_code(dir, &code)?;
     Ok(code)
 }
 
@@ -290,14 +321,7 @@ pub fn consume_enroll_code(dir: &Path, code: &str) -> Result<bool, PasskeyError>
     let file: EnrollCodeFile = yaml_serde::from_str(&raw)
         .map_err(|e| PasskeyError::Invalid(path.display().to_string(), e.to_string()))?;
     let expired = crate::clock::now_ms() >= u128::from(file.expires_at_ms);
-    let ok = !expired
-        && file
-            .code
-            .as_bytes()
-            .iter()
-            .zip(code.as_bytes())
-            .all(|(a, b)| a == b)
-        && file.code.len() == code.len();
+    let ok = !expired && crate::secret::ct_eq_str(&file.code, code);
     // Single use: consumed or expired, the code is gone. A wrong guess
     // leaves the live code where it is.
     if ok || expired {
@@ -329,12 +353,20 @@ pub fn bump_sign_count(path: &Path, id: &str, new_count: u32) -> Result<(), Pass
     save_to(path, &file)
 }
 
-/// The number of passkeys registered on this machine. Called on decision
-/// paths, so it never fails: a missing config dir, a missing file and an
-/// unparsable file all count as 0. A person notices an unparsable file
-/// through `apb passkey list`.
+/// The number of passkeys registered on this machine, for display: a
+/// missing config dir, a missing file and an unparsable file all count as
+/// 0. Decision paths call [`count_strict`] instead, so an unreadable store
+/// never switches the passkey gate off.
 pub fn count() -> usize {
     try_load().map(|f| f.passkeys.len()).unwrap_or(0)
+}
+
+/// The number of passkeys registered on this machine, strict: `Ok(0)` only
+/// when there are genuinely no passkeys (no config dir, no file), an error
+/// when the file exists but does not read. Decision paths treat the error
+/// as "passkeys required, none usable" and refuse.
+pub fn count_strict() -> Result<usize, PasskeyError> {
+    try_load().map(|f| f.passkeys.len())
 }
 
 #[cfg(test)]
@@ -428,11 +460,51 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = tmp_path(&dir);
         add_into(&path, "yubi", ID_A, COSE_A, ALG_ES256, 0).unwrap();
-        let removed = remove_by_label_into(&path, "yubi").unwrap();
+        let removed = remove_by_label_into(&path, "yubi", true).unwrap();
         assert_eq!(removed.id, ID_A);
         assert!(list_from(&path).unwrap().is_empty());
-        let err = remove_by_label_into(&path, "yubi").unwrap_err();
+        let err = remove_by_label_into(&path, "yubi", true).unwrap_err();
         assert!(matches!(err, PasskeyError::UnknownLabel(_)));
+    }
+
+    #[test]
+    fn removing_the_last_one_needs_allow_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = tmp_path(&dir);
+        add_into(&path, "yubi", ID_A, COSE_A, ALG_ES256, 0).unwrap();
+        let err = remove_by_label_into(&path, "yubi", false).unwrap_err();
+        assert!(matches!(err, PasskeyError::LastPasskey));
+        assert!(list_from(&path).unwrap().len() == 1, "nothing was removed");
+        remove_by_label_into(&path, "yubi", true).unwrap();
+        assert!(list_from(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn count_strict_refuses_an_unparsable_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("apb");
+        let prev = std::env::var_os("APB_CONFIG_DIR");
+        unsafe { std::env::set_var("APB_CONFIG_DIR", &cfg) };
+        assert_eq!(count_strict().unwrap(), 0);
+        add_into(
+            &passkey_file_path().unwrap(),
+            "yubi",
+            ID_A,
+            COSE_A,
+            ALG_ES256,
+            0,
+        )
+        .unwrap();
+        assert_eq!(count_strict().unwrap(), 1);
+        std::fs::write(passkey_file_path().unwrap(), "passkeys: [broken").unwrap();
+        assert!(
+            count_strict().is_err(),
+            "a store that does not read is an error"
+        );
+        match prev {
+            Some(v) => unsafe { std::env::set_var("APB_CONFIG_DIR", v) },
+            None => unsafe { std::env::remove_var("APB_CONFIG_DIR") },
+        }
     }
 
     #[test]

@@ -76,10 +76,18 @@ pub fn caller_refusal(
     }
     let gate = matches!(a.code, ActionCode::DecideReview | ActionCode::DecidePublish);
     if gate && a.person_only {
-        // With a passkey enrolled on this machine, even a person's channel
-        // needs a fresh assertion, which only the dashboard can give.
-        if apb_core::passkey::count() > 0
+        // One predicate with the engine's (`review::passkey_required`): a
+        // person-only gate, a publish consent and a bound approval all need
+        // a fresh assertion while a passkey is enforced, which only the
+        // dashboard can give.
+        let cmd = crate::review::ReviewCommand {
+            node: a.target.node.clone().unwrap_or_default(),
+            decision: String::new(),
+            note: String::new(),
+        };
+        if crate::review::passkey_required(run_dir, &cmd)
             && channel != crate::decision_channel::DecisionChannel::DashboardSession
+            && channel != crate::decision_channel::DecisionChannel::DashboardKeyless
         {
             return Some(CallerRefusal::PasskeyRequired);
         }

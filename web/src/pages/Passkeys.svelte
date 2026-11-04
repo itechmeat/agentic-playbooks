@@ -204,18 +204,17 @@
     }
   }
 
-  const algName = (alg: number) =>
-    alg === -7 ? 'ES256' : alg === -257 ? 'RS256' : alg === -8 ? 'EdDSA' : `alg ${alg}`
+  const algName = (alg: number) => (alg === -7 ? 'ES256' : alg === -8 ? 'EdDSA' : `alg ${alg}`)
 </script>
 
 <Topbar active="passkeys" />
 
 <PageScroll>
   <div class="wrap">
-    <PageHead title="Passkeys" class="mb-2">
+    <PageHead title="Passkeys">
       {#snippet meta()}
         {#if loaded}
-          <span class="text-muted-foreground">{count} enrolled</span>
+          <span class="count">{count} enrolled</span>
         {/if}
       {/snippet}
     </PageHead>
@@ -262,7 +261,7 @@
 
       {#if !loaded}
         <div class="list">
-          {#each Array(2) as _, i (i)}<Skeleton class="h-14 w-full" />{/each}
+          {#each Array(2) as _, i (i)}<Skeleton style="height: 3.5rem; width: 100%" />{/each}
         </div>
       {:else if items.length === 0}
         <Empty.Root class="empty-box">
@@ -308,6 +307,9 @@
 
 <style>
   /* Plain CSS over the app's variables; no utility framework. */
+  .count {
+    color: var(--c-muted);
+  }
   .wrap {
     margin: 0 auto;
     width: 100%;
@@ -402,22 +404,22 @@
   .tabular {
     font-variant-numeric: tabular-nums;
   }
-  .empty-box {
+  .list :global(.empty-box) {
     border: 1px dashed var(--c-line-2);
     background: var(--c-panel);
   }
-  .empty-icon {
+  .list :global(.empty-icon) {
     border: 1px solid var(--c-line-2);
     background: transparent;
     color: var(--c-muted);
   }
-  .empty-title {
+  .list :global(.empty-title) {
     font-size: 0.875rem;
     font-weight: 600;
   }
   @media (max-width: 640px) {
     /* The remove label collapses on a narrow window; the icon stays. */
-    .remove .remove-label {
+    .list :global(.remove-label) {
       position: absolute;
       width: 1px;
       height: 1px;

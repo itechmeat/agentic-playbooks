@@ -4,7 +4,8 @@
 // every effect injected, so tests run without a real navigator or network.
 //
 // All strings the browser WebAuthn API hands back (clientDataJSON,
-// attestationObject, authenticatorData, signature) are posted verbatim.
+// attestationObject, authenticatorData, signature) are posted as base64url
+// of the exact bytes the API produced, which is what the routes decode.
 
 /** The exact message the UI shows when the page is not a secure context. */
 export const PASSKEYS_MESSAGE = 'Passkeys need https or localhost'
@@ -79,6 +80,11 @@ export interface ReviewBody {
   nonce?: string
   request?: number
   passkey_token?: string
+  /** The assertion the token was minted from, so the drive re-verifies it. */
+  assertionId?: string
+  assertionClientDataJSON?: string
+  assertionAuthenticatorData?: string
+  assertionSignature?: string
 }
 
 export interface AssertionResult {
@@ -91,7 +97,11 @@ export interface AssertionResult {
 export interface DecisionDeps {
   postReview: (runId: string, body: ReviewBody) => Promise<PostOutcome>
   assertChallenge: (purpose: AssertPurpose) => Promise<{ challenge: string }>
-  verifyAssertion: (purpose: AssertPurpose, challenge: string) => Promise<{ token: string }>
+  verifyAssertion: (
+    purpose: AssertPurpose,
+    challenge: string,
+    assertion: AssertionResult,
+  ) => Promise<{ token: string }>
   getAssertion: (challenge: string) => Promise<AssertionResult>
   /** Injectable so the not-secure-context path is testable. */
   secureContext?: () => boolean
@@ -115,11 +125,18 @@ export async function runDecisionWithPasskey(
   const purpose = decisionPurpose(runId, body.node, body.decision, body.request, body.nonce)
   const { challenge } = await deps.assertChallenge(purpose)
   const assertion = await deps.getAssertion(challenge)
-  const { token } = await deps.verifyAssertion(purpose, challenge)
-  // The assertion itself was verified above; the retry carries only the
-  // token the verify step handed back.
-  void assertion
-  return deps.postReview(runId, { ...body, passkey_token: token })
+  const { token } = await deps.verifyAssertion(purpose, challenge, assertion)
+  // The retry carries the token the verify step handed back and the
+  // assertion it was minted from, so the drive re-verifies the stamp when
+  // it consumes the decision.
+  return deps.postReview(runId, {
+    ...body,
+    passkey_token: token,
+    assertionId: assertion.id,
+    assertionClientDataJSON: assertion.clientDataJSON,
+    assertionAuthenticatorData: assertion.authenticatorData,
+    assertionSignature: assertion.signature,
+  })
 }
 
 export interface EnrollStart {

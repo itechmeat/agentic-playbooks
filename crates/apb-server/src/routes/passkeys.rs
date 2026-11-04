@@ -26,28 +26,70 @@ use crate::webauthn::{self, RpConfig};
 pub(crate) struct AssertPurpose {
     /// Deciding one gate: run, node, the chosen option, the request seq
     /// and, for a publish consent or an approval, the binding nonce.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     decision: Option<DecisionPurpose>,
     /// Adding another passkey (an assertion from an existing one).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     enroll_new: Option<serde_json::Value>,
     /// Removing one passkey by label.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     remove: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct DecisionPurpose {
-    run: String,
-    node: String,
-    decision: String,
-    #[serde(default)]
-    request: Option<u64>,
-    #[serde(default)]
-    nonce: Option<String>,
+    pub(crate) run: String,
+    pub(crate) node: String,
+    pub(crate) decision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) request: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) nonce: Option<String>,
 }
 
 impl AssertPurpose {
+    /// The purpose of deciding gate `node` of run `run` with `decision`.
+    /// Every digest over a decision purpose is taken from this one value,
+    /// so the challenge request, the verify request and the review route
+    /// can never disagree on the bytes.
+    pub(crate) fn decision(
+        run: &str,
+        node: &str,
+        decision: &str,
+        request: Option<u64>,
+        nonce: Option<&str>,
+    ) -> AssertPurpose {
+        AssertPurpose {
+            decision: Some(DecisionPurpose {
+                run: run.to_string(),
+                node: node.to_string(),
+                decision: decision.to_string(),
+                request,
+                nonce: nonce.map(str::to_string),
+            }),
+            enroll_new: None,
+            remove: None,
+        }
+    }
+
+    /// The purpose of adding another passkey, asserted from one that exists.
+    pub(crate) fn enroll_new() -> AssertPurpose {
+        AssertPurpose {
+            decision: None,
+            enroll_new: Some(serde_json::json!({})),
+            remove: None,
+        }
+    }
+
+    /// The purpose of removing the passkey labeled `label`.
+    pub(crate) fn remove(label: &str) -> AssertPurpose {
+        AssertPurpose {
+            decision: None,
+            enroll_new: None,
+            remove: Some(label.to_string()),
+        }
+    }
+
     fn value(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }
@@ -68,8 +110,72 @@ impl AssertPurpose {
         Ok(())
     }
 
-    fn digest(&self) -> String {
+    pub(crate) fn digest(&self) -> String {
         passkeys::purpose_digest(&self.value())
+    }
+
+    /// The request seq a resolved decision purpose names.
+    pub(crate) fn request_of(&self) -> Option<u64> {
+        self.decision.as_ref().and_then(|d| d.request)
+    }
+
+    /// The nonce a resolved decision purpose names.
+    pub(crate) fn nonce_of(&self) -> Option<String> {
+        self.decision.as_ref().and_then(|d| d.nonce.clone())
+    }
+
+    /// The decision purpose a dashboard decide flow names, resolved to the
+    /// request and nonce the engine will stamp on the entry: the open
+    /// request's seq and binding nonce when the client left them out. Both
+    /// the challenge and the review route resolve the same way, so the
+    /// assertion's challenge equals the derived challenge the drive
+    /// re-verifies at consumption. `None` when the run or its journal does
+    /// not read (500 territory, not a client fault).
+    pub(crate) fn resolved_decision(
+        root: &std::path::Path,
+        d: &DecisionPurpose,
+    ) -> Result<AssertPurpose, String> {
+        let run_dir = root.join(".apb/runs").join(&d.run);
+        let events = apb_engine::event::read_all(&run_dir)
+            .map_err(|e| format!("the journal of run `{}` does not read: {e}", d.run))?;
+        let open = apb_engine::review::channel::open_request(&events, &d.node);
+        let request = d.request.or(open.map(|(seq, _)| seq));
+        let nonce = d
+            .nonce
+            .clone()
+            .or_else(|| open.and_then(|(_, b)| b.map(|b| b.nonce.clone())))
+            .or_else(|| {
+                apb_engine::publish::latest_plan(&events, &d.node).and_then(|e| match &e.payload {
+                    apb_engine::event::EventPayload::PublishPlanned { nonce, .. } => {
+                        Some(nonce.clone())
+                    }
+                    _ => None,
+                })
+            });
+        Ok(AssertPurpose::decision(
+            &d.run,
+            &d.node,
+            &d.decision,
+            request,
+            nonce.as_deref(),
+        ))
+    }
+
+    /// The challenge an assertion for this purpose is issued with: a
+    /// decision's challenge is derived deterministically from the run, the
+    /// gate, the decision, the request and the nonce, so the drive can
+    /// recompute it from the stamped entry alone.
+    pub(crate) fn challenge_for(&self) -> Result<String, String> {
+        match &self.decision {
+            Some(d) => Ok(apb_engine::review::passkey_proof::decision_challenge(
+                &d.run,
+                &d.node,
+                &d.decision,
+                d.request,
+                d.nonce.as_deref(),
+            )),
+            None => apb_core::server_auth::random_token().map_err(|e| e.to_string()),
+        }
     }
 }
 
@@ -93,7 +199,8 @@ pub(crate) struct EnrollFinishBody {
     /// keyed by it on every later assertion, so it is kept in the request
     /// for symmetry and checked against the attested id.
     id: String,
-    /// The client data JSON, verbatim.
+    /// The client data JSON, base64url of the exact bytes the browser's
+    /// authenticator produced.
     #[serde(rename = "clientDataJSON")]
     client_data_json: String,
     /// The attestation object, base64url.
@@ -136,15 +243,21 @@ fn rp_for_request(headers: &HeaderMap) -> Result<RpConfig, String> {
     // the operator set one, else the request's own host on http (a local
     // dashboard). The client's origin must normalize-match this at verify
     // time, so a dashboard reached on another name is refused there.
-    let cfg = apb_core::config::GlobalConfig::load().ok();
-    if let Some(origin) = cfg.as_ref().and_then(|c| c.server.public_base_url.clone()) {
+    let cfg = apb_core::config::GlobalConfig::load().map_err(|e| {
+        format!("the global config does not read, so the relying party is unknown: {e}")
+    })?;
+    if let Some(origin) = cfg.server.public_base_url.clone() {
         return webauthn::rp_for_origin(&origin).map_err(|e| e.to_string());
     }
     let (name, port) = host
         .rsplit_once(':')
-        .filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit()) && *p != "80")
-        .map_or((host.as_str(), ""), |(n, p)| (n, p));
-    webauthn::rp_for_origin(&format!("http://{}{}", name, port)).map_err(|e| e.to_string())
+        .filter(|(_, p)| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) && *p != "80")
+        .map_or((host.as_str(), None), |(n, p)| (n, Some(p.to_string())));
+    let origin = match port {
+        Some(p) => format!("http://{name}:{p}"),
+        None => format!("http://{name}"),
+    };
+    webauthn::rp_for_origin(&origin).map_err(|e| e.to_string())
 }
 
 /// The config dir the ceremony state reads the store through: the same
@@ -220,7 +333,7 @@ pub(crate) async fn enroll_start_handler(
             )
                 .into_response();
         };
-        let digest = passkeys::purpose_digest(&json!({ "enroll_new": {} }));
+        let digest = AssertPurpose::enroll_new().digest();
         if state.passkeys.take_token(token, &digest).is_none() {
             return (
                 StatusCode::FORBIDDEN,
@@ -332,6 +445,7 @@ pub(crate) async fn enroll_finish_handler(
             machine_name(),
             record.label
         ),
+        state.root.as_deref().map(|p| p.as_path()),
     );
     Json(json!({
         "label": record.label,
@@ -350,14 +464,45 @@ pub(crate) async fn assert_challenge_handler(
     if let Err(why) = body.purpose.validate() {
         return (StatusCode::BAD_REQUEST, why).into_response();
     }
-    if apb_core::passkey::count() == 0 {
-        return (
-            StatusCode::CONFLICT,
-            "no passkey is enrolled on this machine; nothing can assert",
-        )
-            .into_response();
+    let purpose = match &body.purpose.decision {
+        Some(d) => {
+            let Some(root) = state.root.as_deref() else {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "no workspace root").into_response();
+            };
+            match AssertPurpose::resolved_decision(root, d) {
+                Ok(p) => p,
+                Err(why) => return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response(),
+            }
+        }
+        None => body.purpose,
+    };
+    match apb_core::passkey::count_strict() {
+        Ok(0) => {
+            return (
+                StatusCode::CONFLICT,
+                "no passkey is enrolled on this machine; nothing can assert",
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "the passkey store of this machine does not read, so no assertion is issued: {e}"
+                ),
+            )
+                .into_response();
+        }
+        Ok(_) => {}
     }
-    match state.passkeys.issue_challenge(body.purpose.digest()) {
+    let challenge = match purpose.challenge_for() {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    match state
+        .passkeys
+        .issue_challenge_for(purpose.digest(), challenge)
+    {
         Ok(challenge) => Json(json!({ "challenge": challenge })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
@@ -374,6 +519,18 @@ pub(crate) async fn assert_verify_handler(
     if let Err(why) = body.purpose.validate() {
         return (StatusCode::BAD_REQUEST, why).into_response();
     }
+    let purpose = match &body.purpose.decision {
+        Some(d) => {
+            let Some(root) = state.root.as_deref() else {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "no workspace root").into_response();
+            };
+            match AssertPurpose::resolved_decision(root, d) {
+                Ok(p) => p,
+                Err(why) => return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response(),
+            }
+        }
+        None => body.purpose,
+    };
     let rp = match rp_for_request(&headers) {
         Ok(rp) => rp,
         Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
@@ -382,7 +539,18 @@ pub(crate) async fn assert_verify_handler(
         Ok(p) => p,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    let all = apb_core::passkey::list_from(&file_path).unwrap_or_default();
+    let all = match apb_core::passkey::list_from(&file_path) {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "the passkey store of this machine does not read, so no assertion is verified: {e}"
+                ),
+            )
+                .into_response();
+        }
+    };
     let Some(record) = all.iter().find(|p| p.id == body.id) else {
         return (
             StatusCode::FORBIDDEN,
@@ -392,7 +560,7 @@ pub(crate) async fn assert_verify_handler(
     };
     if !state
         .passkeys
-        .consume_challenge(&body.challenge, &body.purpose.digest())
+        .consume_challenge(&body.challenge, &purpose.digest())
     {
         return (
             StatusCode::FORBIDDEN,
@@ -440,10 +608,10 @@ pub(crate) async fn assert_verify_handler(
     {
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
-    let token = match state.passkeys.issue_token(
-        body.purpose.digest(),
-        passkeys::credential_prefix(&record.id),
-    ) {
+    let token = match state
+        .passkeys
+        .issue_token(purpose.digest(), passkeys::credential_prefix(&record.id))
+    {
         Ok(t) => t,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
@@ -459,17 +627,7 @@ pub(crate) async fn remove_handler(
     AxPath(label): AxPath<String>,
     Json(body): Json<RemoveBody>,
 ) -> Response {
-    let all =
-        apb_core::passkey::list_from(&apb_core::passkey::passkey_file_path().unwrap_or_default())
-            .unwrap_or_default();
-    if all.len() <= 1 {
-        return (
-            StatusCode::FORBIDDEN,
-            "the last passkey is removed with `apb passkey remove`, which asks for a one-time code at the terminal",
-        )
-            .into_response();
-    }
-    let digest = passkeys::purpose_digest(&json!({ "remove": label }));
+    let digest = AssertPurpose::remove(&label).digest();
     if state.passkeys.take_token(&body.token, &digest).is_none() {
         return (
             StatusCode::FORBIDDEN,
@@ -481,7 +639,9 @@ pub(crate) async fn remove_handler(
         Ok(p) => p,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    match apb_core::passkey::remove_by_label_into(&file_path, &label) {
+    // The never-the-last rule lives in the locked core function, so two
+    // concurrent removals cannot race the count down to zero.
+    match apb_core::passkey::remove_by_label_into(&file_path, &label, false) {
         Ok(_) => {
             notify_passkey(
                 "a passkey was removed",
@@ -490,9 +650,15 @@ pub(crate) async fn remove_handler(
                     machine_name(),
                     label
                 ),
+                state.root.as_deref().map(|p| p.as_path()),
             );
             StatusCode::OK.into_response()
         }
+        Err(apb_core::passkey::PasskeyError::LastPasskey) => (
+            StatusCode::FORBIDDEN,
+            "the last passkey is removed with `apb passkey remove`, which asks for a one-time code at the terminal",
+        )
+            .into_response(),
         Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     }
 }
@@ -511,9 +677,12 @@ pub(crate) fn machine_name() -> String {
 /// Best-effort notice through the machine's notify target: quiet when
 /// notifications are off, never a fault of the enrollment or the removal
 /// itself. Journaled nowhere: no run owns it.
-fn notify_passkey(subject: &str, text: &str) {
-    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    if let Err(why) = apb_engine::notify::trial::send_notice(&root, subject, text) {
+fn notify_passkey(subject: &str, text: &str, root: Option<&std::path::Path>) {
+    // The notify target resolves the way every other notify use does: from
+    // the project root the server was started for when there is one.
+    let fall_back = std::path::PathBuf::from(".");
+    let root = root.unwrap_or(&fall_back);
+    if let Err(why) = apb_engine::notify::trial::send_notice(root, subject, text) {
         eprintln!("apb: passkey notice not sent: {why}");
     }
 }

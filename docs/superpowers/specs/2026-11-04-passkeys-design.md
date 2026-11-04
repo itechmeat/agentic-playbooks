@@ -44,14 +44,19 @@ produce a WebAuthn assertion.
 ### Enrollment
 
 - `apb passkey enroll` (`passkey.rs` in `apb-cli`): person only, refused
-  inside a run step like the other person-only commands. It prints a
-  one-time code, valid five minutes; the dashboard's Passkeys page asks
-  for it and runs the registration ceremony.
+  inside a run step like the other person-only commands, and only at an
+  interactive terminal. It prints a one-time code, valid five minutes,
+  and asks the person to type it back; the code is written only after
+  that confirmation, so a piped stdout leaks nothing usable. The
+  dashboard's Passkeys page asks for the code and runs the registration
+  ceremony.
 - Every later passkey is added through the dashboard with an assertion
   from an existing passkey.
-- `apb passkey list`; `apb passkey remove <label>`. Removing the LAST
-  passkey needs a one-time code typed back at the terminal, so an agent
-  channel cannot empty the store.
+- `apb passkey list`; `apb passkey remove <label>`. Every removal, last
+  passkey or not, needs a one-time code typed back at the terminal (the
+  same rule the dashboard enforces with an assertion), and the
+  never-the-last rule lives inside the store's lock, so two concurrent
+  removals cannot race the count down to zero.
 - Enrollment and removal journal nothing into runs. Each sends a notice
   to the machine's notify target when one is set ("a passkey was added
   on `<machine>`"), so an enrollment a person did not make is visible.
@@ -65,15 +70,27 @@ produce a WebAuthn assertion.
   publish consent.
 - The CLI (`apb review`, `apb publish approve`) prints the dashboard link
   and refuses with `passkey_required`, a new code in the closed
-  `CallerRefusal` list, rendered by the facades like the others. MCP and
-  bearer stay refused as before.
-- The engine stamps the credential id prefix (`passkey`) on the consumed
-  channel entry, and a person-only or bound gate consumes nothing else
-  while a passkey is enrolled. `apb doctor --run` lists an unstamped
-  entry as "no passkey assertion".
-- Exempt: an unattended run's declared `decide` and a scenario run's
-  script. They are not a person's consent anyway, and V156 already
-  refuses them on a person-only gate.
+  `CallerRefusal` list, rendered by the facades like the others. MCP is
+  refused as before, and a bearer-key request is refused even when it
+  carries a valid token: a key-made client is never a person.
+- The assertion challenge for a decision is not random: it is derived
+  from the run, the gate, the decision, the request seq and the binding
+  nonce (`review::passkey_proof::decision_challenge`). The engine stamps
+  the credential id prefix (`passkey`) and the full assertion
+  (`passkey_proof`) on the consumed channel entry and re-verifies the
+  proof against the store when it consumes the decision, so a hand
+  written line with a made-up prefix, or a proof replayed onto another
+  request, is refused; `apb doctor --run` names it. What the proof does
+  not re-check is the browser's origin (the engine cannot see the
+  request's Host); that check happens where the assertion is first
+  accepted, in the server.
+- A person-only or bound gate consumes nothing else while a passkey is
+  enforced, and an unreadable store enforces too (fail closed): every
+  decision path refuses until the file is fixed, and `apb doctor`
+  reports it as a failure, not a warning.
+- Exempt, at consumption as at append: an unattended run's declared
+  `decide` and a scenario run's script. They are not a person's consent
+  anyway, and V156 already refuses them on a person-only gate.
 - When no passkey exists, behavior is exactly as before. `apb doctor`
   shows a warning row recommending `apb passkey enroll`.
 
@@ -100,7 +117,8 @@ not on the machine's disk and not in its memory.
 | a dashboard at an IP literal | no RP ID possible; refused with a clear message |
 | an agent enrolling its own passkey | enroll is person only at a terminal; the notice and `apb passkey list` show it |
 | an agent removing every passkey | the last removal needs a code typed back at the terminal |
-| a silently emptied store | the gate falls back to the old behavior; the doctor row and the notice say what happened |
+| a forged stamp in the channel file | the entry carries the assertion; the drive re-verifies it at consumption |
+| a corrupt or half-written store | fail closed: person-only decisions refuse until the file reads; `apb doctor` reports a failure |
 
 **Limits, stated honestly.**
 

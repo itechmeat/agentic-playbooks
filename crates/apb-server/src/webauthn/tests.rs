@@ -20,8 +20,11 @@ fn challenge() -> String {
     b64url_encode(&CHALLENGE_BYTES)
 }
 
+/// The clientDataJSON exactly as a browser posts it: base64url of the
+/// bytes the authenticator produced.
 fn client_data(typ: &str, challenge: &str, origin: &str) -> String {
-    format!(r#"{{"type":"{typ}","challenge":"{challenge}","origin":"{origin}"}}"#)
+    let json = format!(r#"{{"type":"{typ}","challenge":"{challenge}","origin":"{origin}"}}"#);
+    crate::webauthn::b64url_encode(json.as_bytes())
 }
 
 /// The fixed ES256 signing key of the vectors.
@@ -84,6 +87,9 @@ fn cbor_bytes(value: &Value) -> Vec<u8> {
     out
 }
 
+const FLAG_UP: u8 = 0x01;
+const FLAG_UV: u8 = 0x04;
+const FLAG_ATTESTED_CREDENTIAL_DATA: u8 = 0x40;
 const UP_UV_AT: u8 = FLAG_UP | FLAG_UV | FLAG_ATTESTED_CREDENTIAL_DATA;
 const UP_UV: u8 = FLAG_UP | FLAG_UV;
 
@@ -120,7 +126,18 @@ fn valid_eddsa_registration() -> (String, Vec<u8>, RpConfig) {
 
 /// Signs `authenticator_data || sha256(client_data_json)` with the fixed
 /// ES256 key and returns the DER signature.
-fn es256_sign(ad: &[u8], client_data_json: &str) -> Vec<u8> {
+fn es256_sign(ad: &[u8], client_data_json_b64u: &str) -> Vec<u8> {
+    let client_data_json: String = String::from_utf8(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(
+                client_data_json_b64u
+                    .trim_end_matches('=')
+                    .replace('-', "+")
+                    .replace('_', "/"),
+            )
+            .unwrap(),
+    )
+    .unwrap();
     use p256::ecdsa::signature::Signer;
     let mut message = ad.to_vec();
     message.extend_from_slice(&Sha256::digest(client_data_json.as_bytes()));
@@ -128,7 +145,18 @@ fn es256_sign(ad: &[u8], client_data_json: &str) -> Vec<u8> {
     signature.to_der().as_bytes().to_vec()
 }
 
-fn eddsa_sign(ad: &[u8], client_data_json: &str) -> Vec<u8> {
+fn eddsa_sign(ad: &[u8], client_data_json_b64u: &str) -> Vec<u8> {
+    let client_data_json: String = String::from_utf8(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(
+                client_data_json_b64u
+                    .trim_end_matches('=')
+                    .replace('-', "+")
+                    .replace('_', "/"),
+            )
+            .unwrap(),
+    )
+    .unwrap();
     use ed25519_dalek::Signer;
     let mut message = ad.to_vec();
     message.extend_from_slice(&Sha256::digest(client_data_json.as_bytes()));
@@ -146,7 +174,7 @@ fn valid_es256_assertion() -> (String, Vec<u8>, Vec<u8>, RpConfig) {
 fn valid_eddsa_assertion() -> (String, Vec<u8>, Vec<u8>, RpConfig) {
     let origin = "https://passkeys.example.com";
     let cd = client_data("webauthn.get", &challenge(), origin);
-    let ad = auth_data("passkeys.example.com", UP_UV, 7, None);
+    let ad = auth_data("passkeys.example.com", UP_UV, 8, None);
     let sig = eddsa_sign(&ad, &cd);
     (cd, ad, sig, test_rp())
 }
@@ -186,7 +214,7 @@ fn eddsa_assertion_verifies_and_returns_counter() {
     let cose = cose_eddsa(eddsa_public());
     let new_count =
         verify_assertion(&cd, &ad, &sig, &challenge(), &rp, &cose, 7).expect("valid assertion");
-    assert_eq!(new_count, 7);
+    assert_eq!(new_count, 8);
 }
 
 #[test]
@@ -489,9 +517,30 @@ fn missing_at_flag_refused() {
     let err = verify_registration(&cd, &attestation_object(&ad), &challenge(), &rp)
         .expect_err("no attested credential data");
     assert!(
-        matches!(err, WebAuthnError::AttestationNotNone),
+        matches!(err, WebAuthnError::BadAuthenticatorData(_)),
         "got {err:?}"
     );
+}
+
+#[test]
+fn assertion_up_and_uv_missing_refused() {
+    let (x, y) = es256_xy();
+    let cose = cose_es256(x, y);
+    let rp = test_rp();
+    for flags in [0u8, UP_UV ^ FLAG_UP, UP_UV ^ FLAG_UV] {
+        let ad = auth_data("passkeys.example.com", flags, 5, None);
+        let cd = client_data("webauthn.get", &challenge(), &rp.origin);
+        let sig = es256_sign(&ad, &cd);
+        let err = verify_assertion(&cd, &ad, &sig, &challenge(), &rp, &cose, 0)
+            .expect_err("assertion without UP or UV");
+        assert!(
+            matches!(
+                err,
+                WebAuthnError::UserPresenceRequired | WebAuthnError::UvRequired
+            ),
+            "flags {flags:#x}: {err:?}"
+        );
+    }
 }
 
 #[test]

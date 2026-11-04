@@ -92,6 +92,26 @@ impl PasskeyState {
         Ok(challenge)
     }
 
+    /// Issues `challenge` itself (already derived by the caller) as the
+    /// single-use challenge for `purpose`.
+    pub fn issue_challenge_for(
+        &self,
+        purpose: String,
+        challenge: String,
+    ) -> Result<String, String> {
+        let mut inner = self.inner.lock().expect("passkey state lock");
+        prune(&mut inner.challenges, now_ms());
+        inner.challenges.insert(
+            challenge.clone(),
+            Entry {
+                purpose,
+                expires: now_ms() + CHALLENGE_TTL_MS,
+                credential: None,
+            },
+        );
+        Ok(challenge)
+    }
+
     /// Whether `challenge` is the live, unconsumed challenge for
     /// `purpose`, consuming it. A second use, another purpose and an
     /// expired challenge all read `false`.

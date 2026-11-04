@@ -215,8 +215,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   file with one link only, capped reads that never cut, 0700 and 0600 at
   creation, `flock` locks closed on exec), the machine's passkey store
   (`passkey.rs`: `<config_dir>/passkeys.yaml`, 0600 and atomic through
-  fsutil, the one-time enrollment code file, `count` on the decision
-  paths), the single wall-clock source (`clock.rs`), the agent-neutral
+  fsutil, the one-time enrollment code file (typed back at the terminal
+  before it is stored), `count_strict` on the decision paths, which fails
+  closed on a store that does not read, and the locked never-the-last
+  removal rule), the single wall-clock source (`clock.rs`), the agent-neutral
   entry to each agent's output reader: reply and reported token usage
   (`agent_output.rs`), the execution mode resolution (`execution.rs`: the
   `execution` config section, `cli` or `host` per run, the fallback rule),
@@ -695,8 +697,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `apb eval`, the terminal question and `apb launch floor`,
   `pipe.rs` the panic hook that ends the binary quietly on a closed stdout.
   `passkey.rs` is `apb passkey enroll|list|remove` (person only, refused
-  inside a run step; removing the last passkey needs the one-time code
-  typed back at the terminal).
+  inside a run step, at an interactive terminal; the enrollment code is
+  stored only after the person typed it back, and every removal needs a
+  typed code, last passkey or not).
   `eval.rs` is `apb eval` and holds `EvalLevel` (`deep`, `quick`, `smoke`);
   `scenario.rs` is `apb eval --level quick|smoke` (the version's validator
   errors refused first, the smoke checks, one bounded `apb __scenario-run`
@@ -713,7 +716,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   promotion that names what it saw, `judge` for the judge sandbox and
   labelled examples, `scenario` for scenario runs, `demo` for the keyless
   demo, `passkeys` for the enrollment and assertion ceremonies over the
-  machine's passkey store, `problems` for
+  machine's passkey store (the assertion challenge for a decision
+  derived from the run, gate, decision, request and nonce the engine
+  re-derives), `problems` for
   a playbook's known problems, `results` for a run's result snapshots
   (the listing, one entry, the raw download and the live comparison),
   `discover` for history discovery, loopback
@@ -853,9 +858,12 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   never decides or answers for its own run tree (siblings included; a tree
   that does not read refuses) on any gate. A server key signs in, so it is
   a person's credential and the bearer refusal guards against mistakes
-  only. With a passkey enrolled, a person-only gate and an approval decide
-  only with a fresh assertion through the dashboard, `passkey_required`
-  otherwise (`apb_core::passkey` the store, see
+  only. With a passkey enforced (an unreadable store enforces too), a
+  person-only gate and an approval decide only with a fresh assertion
+  through the dashboard, `passkey_required` otherwise; the decision
+  carries the full assertion and the drive re-verifies it at consumption
+  (`apb_engine::review::passkey_proof`, `apb_core::passkey` the store,
+  see
   `docs/superpowers/specs/2026-11-04-passkeys-design.md`). A supervisor
   patch, in-run or forward, never weakens these fields,
   and an in-run one never re-points such a gate's options

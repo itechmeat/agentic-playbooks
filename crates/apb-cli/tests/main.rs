@@ -189,6 +189,8 @@ mod stats_cli_test;
 #[path = "suite/eval_cli_test.rs"]
 mod eval_cli_test;
 // --- end 0.24.0 eval suites ---
+#[path = "suite/passkey_cli_test.rs"]
+mod passkey_cli_test;
 #[path = "suite/read_only_unattended_cli_test.rs"]
 mod read_only_unattended_cli_test;
 #[cfg(unix)]

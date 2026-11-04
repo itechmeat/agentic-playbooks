@@ -43,7 +43,7 @@ function enrollDeps(overrides: Partial<EnrollDeps> = {}): EnrollDeps {
       rpId: 'example.com',
       userVerification: 'required',
       attestation: 'none',
-      algorithms: [-7, -257],
+      algorithms: [-7, -8],
     })),
     finishEnroll: vi.fn(async () => ({ label: 'laptop', created_at: '2026-01-01T00:00:00Z', id_prefix: 'abcd' })),
     createCredential: vi.fn(async () => ({
@@ -145,8 +145,15 @@ describe('runDecisionWithPasskey', () => {
     expect(deps.verifyAssertion).toHaveBeenCalledWith(
       { decision: { run: 'r1', node: 'gate', decision: 'approve', request: 3, nonce: 'plan-n' } },
       'CHALLENGE',
+      { id: 'cred-1', clientDataJSON: 'eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0', authenticatorData: 'AUTHDATA', signature: 'SIG' },
     )
     expect(posts[1]?.passkey_token).toBe('TOKEN')
+    // The retry carries the assertion the token was minted from, so the
+    // drive re-verifies the stamp at consumption.
+    expect(posts[1]?.assertionId).toBe('cred-1')
+    expect(posts[1]?.assertionClientDataJSON).toBe('eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0')
+    expect(posts[1]?.assertionAuthenticatorData).toBe('AUTHDATA')
+    expect(posts[1]?.assertionSignature).toBe('SIG')
   })
 
   it('surfaces a 403 without the passkey message and never starts a ceremony', async () => {
@@ -193,7 +200,7 @@ describe('runEnroll', () => {
       rpId: 'example.com',
       userVerification: 'required',
       attestation: 'none',
-      algorithms: [-7, -257],
+      algorithms: [-7, -8],
     })
     expect(deps.finishEnroll).toHaveBeenCalledWith({
       challenge: 'ENROLL-CHALLENGE',
