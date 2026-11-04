@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import type { OutcomeSummary } from './api.gen'
-import { evidenceTone, gapIsWarning, gapLabel, goalReachedText, needsLookCounts, resultText } from './runverdict'
+import { evidenceBasis, evidenceTone, freshnessText, gapIsWarning, gapLabel, goalReachedText, needsLookCounts, resultText } from './runverdict'
 
 const outcome: OutcomeSummary = {
   headline: 'Run succeeded; 1 of 2 checks passed; 3 not verified; needs a look (1 finding)',
   needs_look: { reasons: ['findings'], regressions: 0, findings: 1, warnings: 0 },
   done: ['succeeded: fix', 'twenty.update_opportunity: 3 writes went through'],
   verified: [
-    { source: 'goal', subject: 'the fix script passes', result: 'passed' },
-    { source: 'baseline', subject: 'unowned/count', result: 'not_met', detail: '37 -> 20, equals 0' },
+    { source: 'goal', subject: 'the fix script passes', result: 'passed', basis: 'executed' },
+    { source: 'baseline', subject: 'unowned/count', result: 'not_met', detail: '37 -> 20, equals 0', basis: 'read' },
   ],
   unverified: [
     { kind: 'manual_criterion', subject: 'a person spot-checks five deals' },
@@ -27,6 +27,35 @@ describe('verdict wording', () => {
   it('tells a held check from one that did not hold', () => {
     expect(outcome.verified.map(evidenceTone)).toEqual(['pass', 'fail'])
     expect(resultText('not_met')).toBe('not met')
+  })
+
+  it('shows a pass that is no longer current as a gap, with its basis and reason', () => {
+    const stale = {
+      source: 'success_check' as const,
+      subject: 'implement',
+      result: 'passed',
+      basis: 'executed' as const,
+      freshness: { state: 'stale' as const, reason: 'a file in its scope (src/**) changed after the check' },
+    }
+    expect(evidenceTone(stale)).toBe('gap')
+    expect(evidenceBasis(stale)).toBe('executed')
+    expect(freshnessText(stale)).toBe('stale: a file in its scope (src/**) changed after the check')
+    const current = { ...stale, freshness: { state: 'current' as const } }
+    expect(evidenceTone(current)).toBe('pass')
+    expect(freshnessText(current)).toBeNull()
+    expect(evidenceBasis({ ...stale, basis: 'agent_text' })).toBe("agent's own text")
+  })
+
+  it('keeps a failed check in the fail tone whatever its freshness', () => {
+    const failed = {
+      source: 'item_check' as const,
+      subject: 'rows',
+      result: 'failed',
+      basis: 'executed' as const,
+      freshness: { state: 'unknown' as const, reason: 'node edit ran after the check' },
+    }
+    expect(evidenceTone(failed)).toBe('fail')
+    expect(evidenceTone({ ...failed, result: 'not_met' })).toBe('fail')
   })
 
   it('names why something is not verified, and warns about what the run missed', () => {

@@ -363,7 +363,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_cache(playbook, &mut r); // V27, V28, V29
     check_edges(playbook, &mut r); // V30, V34
     check_interactive(playbook, &mut r); // V31, V32
-    check_success_check(playbook, &mut r); // V33
+    check_success_check(playbook, &mut r); // V33, V163
     nodes::check_protect(playbook, &mut r); // V75 (C6)
     check_start_finish(playbook, &mut r); // V03, V04, V05
     check_edges_exist(playbook, &mut r); // V06
@@ -801,6 +801,27 @@ edges:
         let c = error_codes(&pb);
         assert!(!c.contains(&"V33"), "got {c:?}");
         assert!(!c.contains(&"V12"), "got {c:?}");
+    }
+
+    /// V163: a declared check scope names a glob, and each compiles; the
+    /// scoped form is the script form (V12 applies to its path).
+    #[test]
+    fn v159_a_check_scope_names_valid_globs() {
+        let with = |check: &str| {
+            error_codes(&pb_yaml(&format!(
+                "\ndefaults: {{ profile: x }}\nnodes:\n  - {{ id: s, type: start }}\n  - {{ id: a, type: agent_task, prompt: hi, success_check: {check} }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: s, to: a }}\n  - {{ from: a, to: done }}"
+            )))
+        };
+        let ok = with(r#"{ script: scripts/check.sh, scope: ["src/**", "Cargo.toml"] }"#);
+        assert!(!ok.contains(&"V163") && !ok.contains(&"V12"), "got {ok:?}");
+        for bad in [
+            r#"{ script: scripts/check.sh, scope: [] }"#,
+            r#"{ script: scripts/check.sh, scope: [" "] }"#,
+            r#"{ script: scripts/check.sh, scope: ["src/[" ] }"#,
+        ] {
+            assert!(with(bad).contains(&"V163"), "{bad}: {:?}", with(bad));
+        }
+        assert!(with(r#"{ script: ../check.sh, scope: ["src/**"] }"#).contains(&"V12"));
     }
 
     #[test]

@@ -57,6 +57,12 @@ export const AGENT_ALIASES: Readonly<Record<string, string>> = { 'claude-code': 
 /** What checked a piece of evidence, in words. */
 export const EVIDENCE_SOURCE_LABELS = { goal: "goal", success_check: "success check", baseline: "baseline", item_check: "item check" } as const
 
+/** What decided a piece of evidence, in words. */
+export const EVIDENCE_BASIS_LABELS = { executed: "executed", read: "read by apb", agent_text: "agent's own text", model: "model judgment" } as const
+
+/** Whether a check still describes the tree the run left, in words. */
+export const FRESHNESS_LABELS = { current: "current", stale: "stale", unknown: "not known to be current" } as const
+
 /** Why something is not verified, in words. */
 export const GAP_LABELS = { manual_criterion: "to confirm by hand", self_reported_node: "self-reported", goal_not_checked: "goal not checked", unknown_call: "call outcome unknown", incomplete_response: "response cut short", inbox_gap: "inbox gap", output_truncated: "output cut", baseline_unknown: "baseline unknown", item_needs_look: "item needs a look", self_reported_items: "items self-reported" } as const
 

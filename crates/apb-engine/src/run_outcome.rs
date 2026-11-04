@@ -6,7 +6,8 @@
 //! absent when the run journaled nothing for it, so a run without them reads
 //! exactly as before.
 //!
-//! Submodules: `claims` (evidence and gaps), `baseline` (the baseline check's view), `notes` (findings and
+//! Submodules: `claims` (evidence and gaps), `freshness` (whether a
+//! check still describes the tree the run left), `baseline` (the baseline check's view), `notes` (findings and
 //! warnings), `calls` (connector calls by what they say about the outcome),
 //! `commits` (the commits and their `Apb-Run` trailers), `graph` (what the
 //! journal proves about every node and edge, over `route_evidence`, with
@@ -21,6 +22,7 @@ pub mod baseline;
 pub mod calls;
 pub mod claims;
 pub mod commits;
+pub mod freshness;
 pub mod graph;
 pub mod intents;
 pub mod judge_answers;

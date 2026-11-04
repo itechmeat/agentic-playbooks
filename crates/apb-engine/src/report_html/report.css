@@ -9,6 +9,10 @@
   --bad: #b3261e;
   --warn: #8a5a00;
   --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --g-ok: rgba(30, 122, 60, 0.14);
+  --g-bad: rgba(179, 38, 30, 0.13);
+  --g-warn: rgba(138, 90, 0, 0.15);
+  --g-off: rgba(95, 99, 104, 0.12);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -21,6 +25,10 @@
     --ok: #6fcf8c;
     --bad: #f28b82;
     --warn: #f3c56b;
+    --g-ok: rgba(111, 207, 140, 0.16);
+    --g-bad: rgba(242, 139, 130, 0.14);
+    --g-warn: rgba(243, 197, 107, 0.14);
+    --g-off: rgba(160, 163, 166, 0.1);
   }
 }
 
@@ -137,4 +145,127 @@ details pre {
   margin-top: 0.75rem;
   max-height: 40rem;
   overflow: auto;
+}
+
+/* The playbook graph: the definition the run executed, one SVG. The
+   drawing keeps its intrinsic scale; the panel scrolls sideways when the
+   graph is wider than the page. */
+.graph-scroll {
+  overflow-x: auto;
+}
+
+.graph-svg {
+  display: block;
+}
+
+.graph-box {
+  fill: var(--panel);
+  stroke: var(--line);
+  stroke-width: 1.5;
+}
+
+.graph-st-succeeded .graph-box {
+  fill: var(--g-ok);
+  stroke: var(--ok);
+}
+
+.graph-st-failed .graph-box {
+  fill: var(--g-bad);
+  stroke: var(--bad);
+}
+
+.graph-st-running .graph-box {
+  fill: var(--g-warn);
+  stroke: var(--warn);
+}
+
+.graph-st-skipped .graph-box {
+  fill: var(--g-off);
+  stroke: var(--muted);
+}
+
+.graph-nlabel {
+  fill: var(--fg);
+  font-size: 12.5px;
+}
+
+.graph-nkind,
+.graph-elabel {
+  fill: var(--muted);
+  font-size: 11px;
+}
+
+.graph-nkind {
+  font-size: 10.5px;
+}
+
+.graph-edge {
+  fill: none;
+  stroke-width: 1.6;
+}
+
+.graph-edge-taken {
+  stroke: var(--fg);
+}
+
+.graph-edge-skip {
+  stroke: var(--muted);
+  stroke-dasharray: 5 4;
+}
+
+.graph-arrow-taken {
+  fill: var(--fg);
+}
+
+.graph-arrow-skip {
+  fill: var(--muted);
+}
+
+.graph-legend {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0.75rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.graph-legend span {
+  margin-right: 4px;
+}
+
+.graph-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  vertical-align: text-top;
+}
+
+.graph-dot-succeeded {
+  background: var(--g-ok);
+  border-color: var(--ok);
+}
+
+.graph-dot-failed {
+  background: var(--g-bad);
+  border-color: var(--bad);
+}
+
+.graph-dot-running {
+  background: var(--g-warn);
+  border-color: var(--warn);
+}
+
+.graph-dot-skipped {
+  background: var(--g-off);
+  border-color: var(--muted);
+}
+
+.graph-dot-norun {
+  background: var(--panel);
+  border-color: var(--line);
+}
+
+.graph-legend-note {
+  margin-left: 12px;
 }

@@ -31,7 +31,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
   V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130, `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`); `nodes` also holds V68, ids that start with `@`
-  are the engine's, and V101, `audience` on a finish without a prompt), the
+  are the engine's, V101, `audience` on a finish without a prompt, and
+  V163, a `success_check` `scope` that names no glob or one that does not
+  compile), the
   "Notify me" settings (`notify/`: the machine target, the project's
   narrowing, a run's request, the outcome classes and the journal names of
   a filtered `finished` (`Coverage`), and `precedence` combining them),
@@ -271,7 +273,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `unattended` the drive's outcome of each wait in an unattended run (the
   mode from the manifest, a gate's decision, a child's stop), `goal` the
   goal criteria
-  checked at run end, `provenance` the run id in the agent env and the
+  checked at run end, `evidence` the binding of a passing script
+  `success_check` to its scope's fingerprint (`evidence_bound`) and the
+  same fingerprints at the finish (`evidence_observed`), `provenance` the run id in the agent env and the
   commits a node made with the head each attempt left, `result` the
   snapshot capture at every settlement of a declaring node's work (scrub,
   limits, fail closed, the stamp journaled before the transaction ends),
@@ -295,7 +299,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   read-only goal and commits blocks of the
   run surfaces (`run_outcome.rs`; `run_outcome/`: `baseline` and `notes` the
   baseline and findings views, `calls` connector calls by what they say about
-  the outcome, `claims` the evidence and gap types, `commits` the commits, their `Apb-Run` trailers and the attempt that made each, `intents`
+  the outcome, `claims` the evidence and gap types with each evidence's
+  basis (executed, read, agent text, model) and freshness, `freshness` the
+  one reading of a check's bindings: current, stale or unknown, `commits` the commits, their `Apb-Run` trailers and the attempt that made each, `intents`
   the send intents and the unknown ones a person resolves, `publish` the
   publish nodes' lines and done lines, `lists` the list
   nodes' counts, item-check evidence and items that need a look, `summary` the
@@ -398,8 +404,11 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `resume_kind.rs`), the text apb writes for people (`people/`: `brief` the writing
   brief and where it applies, `instruction` the review and supervisor
   instructions with `gate_how_to_decide` for a person-only or bound gate,
-  `link` a run's dashboard link), the run report as one
-  self-contained HTML page (`report_html/`), run quality (`grade/`:
+  `link` a run's dashboard link), the run report as one self-contained
+  HTML page (`report_html/`: `markup` the escaping, `model` the outcome
+  model and caps, `sections` the sections, `quality` the quality
+  sections, `graph` the layered SVG graph of the definition the run
+  executed), run quality (`grade/`:
   `sources` every view of a run a grader reads, `reader` the bounded,
   redacting, traced reader, `evidence` the one validator every grader's
   output goes through, over `citation/`, generic over the view kind and
@@ -840,6 +849,24 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   it; an older apb that starts such a playbook drops the fields, and one
   that stopped such a run can resume it past its gates (its stop leaves no
   guard), which is documented, not prevented.
+
+- **Evidence freshness** (spec
+  `docs/superpowers/specs/2026-11-03-evidence-freshness-design.md`): a
+  passing script `success_check` journals `evidence_bound` with the node
+  cache's fingerprint of its declared `scope` (`files_fingerprint`; none
+  without a scope), and the finish node journals `evidence_observed` with
+  the same fingerprints before the goal criteria (`scheduler/evidence`,
+  observing the binding the outcome reads,
+  `run_outcome::freshness::latest_binding`). `run_outcome::freshness`
+  reads them: equal is `current`, different is `stale`; without a finish,
+  without a scope, for a pass restored from the node cache and for a
+  list's script item check, a node that can act (not `read_only`) that
+  started after the check or was still running when it passed makes it
+  `unknown`. Only a pass carries a freshness, and one that is not current
+  is not counted as passed. Every evidence also names its basis,
+  so executed commands stay apart from an agent's own text and a model's
+  judgment. Display only: it never steers a run. Both events are safe to
+  skip before the next `node_finished`.
 
 - **Edge addresses and route facts** (spec
   `docs/superpowers/specs/2026-11-01-edge-identity-design.md`): every edge

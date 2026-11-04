@@ -20,16 +20,18 @@ pub const ROLE_REVIEWER: &str = "apb-reviewer";
 pub const ROLE_RESEARCHER: &str = "apb-researcher";
 
 /// The shipped skills each role profile carries, as the shipped playbooks
-/// use them: the main profile designs, delivers, gates its own tests,
-/// self-reviews subtasks, chooses executors and runs apb itself in
-/// `apb-setup`; the reviewer reviews, with the test and security audits its
-/// roles always run; the researcher gathers sources and needs none of them.
+/// use them: the main profile designs, delivers, diagnoses bugs before a
+/// fix, gates its own tests, self-reviews subtasks, chooses executors and
+/// runs apb itself in `apb-setup`; the reviewer reviews, with the test and
+/// security audits its roles always run; the researcher gathers sources and
+/// needs none of them.
 const ROLE_SKILLS: &[(&str, &[&str])] = &[
     (
         ROLE_MAIN,
         &[
             "apb-brainstorm",
             "apb-delivery",
+            "apb-diagnosis",
             "apb-review",
             "apb-test-audit",
             "apb-security-audit",

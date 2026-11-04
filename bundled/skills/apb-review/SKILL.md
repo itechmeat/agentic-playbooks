@@ -2,7 +2,7 @@
 name: apb-review
 description: Independent, role-based, read-only review of a concrete change against its original request, with verified findings and at most two repair rounds. Use for substantive changes, review findings or an explicit review request. It grants no authority to merge or publish.
 metadata:
-  version: "1.2.0"
+  version: "1.3.0"
 ---
 
 # Review a change
@@ -10,6 +10,27 @@ metadata:
 Review the actual candidate against the original request and its
 expected-result card. A review is evidence that a review ran. It is not
 acceptance.
+
+## 0. Depth by risk
+
+Pick the depth before the roles, from what the change can break:
+
+- **Lightweight:** prose or a mechanical change with no risk trigger that
+  adds or changes no test. The project's native checks, the installed
+  review helpers (section 3a) and one diff reading by a reviewer in a
+  context that did not write the change. Report it as a lightweight
+  review, not as a full one.
+- **Standard:** a substantive change with no risk trigger. The roles of
+  section 1.
+- **High risk:** the change hits a risk trigger (persisted data or formats,
+  a public API or CLI contract, security or secrets, concurrency or
+  recovery, the release or check machinery, a guarantee other code relies
+  on). The roles of section 1, a role that covers each trigger hit, and the
+  protected boundary listed before the review starts.
+
+File count alone neither sets nor lowers the depth. A lower depth needs a
+written reason based on consequences, and never waives a check the project
+requires.
 
 ## 1. Pick the roles
 
@@ -39,7 +60,8 @@ Prefer a fix that makes the unsafe use impossible (a type or a refusing
 API) over one that patches call sites. Agree the protected boundary before
 the fix; widening it later turns one finding into a long chain.
 
-Two roles always run their audit skill, on every review:
+Two roles always run their audit skill, on every standard or high-risk
+review:
 
 - The tests role runs the apb-test-audit skill in audit mode on every test
   the change adds or changes, and reports behavior the change makes without
@@ -50,8 +72,7 @@ A general reviewer does not replace them. When the skill is not available to
 the executor, the role reports a capability gap; it never reports clean.
 
 The project may add roles. A risk trigger (see apb-delivery) needs the role
-that covers it. A routine prose or mechanical change may use the native
-checks and a diff reading only.
+that covers it.
 
 Partial role coverage is reported as partial. It never certifies the roles
 that did not run.
@@ -81,6 +102,8 @@ that did not run.
 - Each reviewer starts in a clean context with only the packet: the card, the
   design, the diff and the source. No implementer reasoning, no other
   reviewer's conclusions.
+- Hand a reviewer the code, not your conclusion. A reviewer told what you
+  expect it to find tends to confirm it.
 - Reviewers are read-only. They never edit files or run checks that change
   the tree.
 - Missing review capability is a failure, never a clean result.
@@ -125,6 +148,19 @@ Every finding gets one class:
 - Dispose each one: fixed with evidence, rejected with a reason, or open.
 - Never relabel a material risk to claim readiness.
 
+## 4a. Evidence before claims
+
+- A claim of "passes", "clean" or "fixed" names the check, the candidate it
+  ran on (commit, tree or file set) and its result. A claim with no evidence
+  is a verification gap, never a pass.
+- Evidence holds only for the candidate it ran on. A fix, a rebase or a
+  changed base makes the affected evidence stale: rerun it or say it is
+  stale. An unchanged patch on a changed base is a new candidate.
+- A clean review names what it read and what it did not read. Silence on a
+  part of the diff is not a pass for that part.
+- A reviewer's output proves that a review ran. Whether it was adequate
+  needs its scope, findings and evidence read by the integrator.
+
 ## 5. Converge
 
 - One initial review, then at most two repair rounds.
@@ -132,6 +168,9 @@ Every finding gets one class:
   Then the affected roles review again with fresh context.
 - Recheck what a change affected. Do not rerun everything, and do not keep
   old evidence without a reason it is still valid.
+- A repair round judges the fixes and what they touched. It does not reopen
+  findings already rejected with a reason, unless new evidence appears.
+- A regression a fix introduces counts toward the bound.
 - After the second repair round, or after repeated regressions, stop and
   reconsider the approach with the task issuer. Do not loop again.
 

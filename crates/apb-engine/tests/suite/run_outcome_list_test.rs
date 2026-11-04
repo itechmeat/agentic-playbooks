@@ -63,8 +63,12 @@ fn finished(node: &str) -> Value {
 }
 
 fn seed(dir: &Path, events: &[Value]) {
+    seed_with(dir, PLAYBOOK, events);
+}
+
+fn seed_with(dir: &Path, playbook: &str, events: &[Value]) {
     std::fs::create_dir_all(dir).unwrap();
-    std::fs::write(dir.join("playbook.yaml"), PLAYBOOK).unwrap();
+    std::fs::write(dir.join("playbook.yaml"), playbook).unwrap();
     let journal: String = events
         .iter()
         .enumerate()
@@ -250,5 +254,50 @@ fn a_list_criterion_not_checked_yet_says_where_its_list_stands() {
     assert_eq!(
         c.detail.as_deref(),
         Some("list `check_rows`: 1 of 2 processed, 1 passed, 0 need a look")
+    );
+}
+
+/// A script item check that rejected an item, then a node that can act: the
+/// check failed, and a failure is told as failed, never as "not current".
+#[test]
+fn a_failed_script_item_check_is_failed_not_stale() {
+    let playbook = PLAYBOOK.replace(
+        r#"check: { output: { field: ok, equals: "1" } }"#,
+        "check: { script: scripts/check.sh }",
+    );
+    assert!(playbook.contains("scripts/check.sh"));
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("r1");
+    let node_started = |node: &str| json!({ "type": "node_started", "node": node, "attempt": 1 });
+    seed_with(
+        &dir,
+        &playbook,
+        &[
+            node_started("check_rows"),
+            started("check_rows", 2),
+            settled("check_rows", "a", "passed", Some("accept"), None),
+            settled("check_rows", "b", "needs_look", None, Some("rejected")),
+            finished("check_rows"),
+            node_started("note_rows"),
+            started("note_rows", 2),
+            settled("note_rows", "a", "passed", Some("accept"), None),
+            settled("note_rows", "b", "passed", Some("accept"), None),
+            finished("note_rows"),
+        ],
+    );
+    let view = RunView::load(&dir, "r1").unwrap();
+    let o = OutcomeSummary::build(&view, &dir);
+    let check = o
+        .verified
+        .iter()
+        .find(|e| e.source == EvidenceSource::ItemCheck)
+        .unwrap();
+    assert_eq!(check.result, "failed");
+    assert!(check.freshness.is_none(), "{check:?}");
+    assert!(check.is_current());
+    assert!(
+        o.headline.contains("0 of 1 check passed") && !o.headline.contains("not current"),
+        "{}",
+        o.headline
     );
 }

@@ -382,6 +382,23 @@ pub(crate) fn check_success_check(playbook: &Playbook, r: &mut ValidationReport)
                 "success_check marker must not be empty".to_string(),
             );
         }
+        // V163: a declared check scope names at least one glob, and each
+        // compiles; an empty one would bind the pass to nothing.
+        if let SuccessCheck::Scoped { scope, .. } = sc {
+            if scope.is_empty() || scope.iter().any(|g| g.trim().is_empty()) {
+                r.error(
+                    "V163",
+                    Some(&n.id),
+                    "success_check scope must name at least one non-empty glob".to_string(),
+                );
+            } else if let Err(glob) = build_globset(scope) {
+                r.error(
+                    "V163",
+                    Some(&n.id),
+                    format!("success_check scope glob `{glob}` is not a valid glob"),
+                );
+            }
+        }
     }
 }
 

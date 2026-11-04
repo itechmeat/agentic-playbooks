@@ -10,7 +10,7 @@ description: >-
   reports how the candidate was reviewed; it does not certify that the
   reviewed candidate is the final one. No commit, push or pull request is
   made by the run.
-version: 1.1.1
+version: 1.1.2
 agent_launch: ask
 params:
   - name: change_kind
@@ -123,10 +123,16 @@ nodes:
       an independent advisor through its fallback chain (another family,
       any other available family, then a fresh clean-context subagent with
       only the question packet); a usage limit routes to the next rung and
-      never stops the work. For a bugfix, reproduce the failure and give a
-      causal explanation before any fix is planned. For a refactor, list
-      what must be preserved and the realistic benefit. Do not edit
-      product files. Write the outputs ready (true or false), design (the
+      never stops the work. For a bugfix, run sections 1 to 4 of the
+      apb-diagnosis skill: reproduce the failure, isolate it and name the
+      root cause with evidence before any fix is planned; keep
+      reproductions and scratch input outside the working tree, bisect or
+      revert only in a separate worktree or copy, and leave the tree and
+      HEAD as found. For a refactor, list what must be preserved and the
+      realistic benefit. Do not edit product files. Before you write the
+      outputs, delete the temporary files, worktrees and scratch output
+      this step created and stop the background processes it started,
+      only those. Write the outputs ready (true or false), design (the
       decisions, or the causal explanation, or the preservation plan),
       advisor (who advised, at which rung, or why none was possible),
       assumptions (a JSON array) and question (the one unresolved question
@@ -174,8 +180,9 @@ nodes:
       {{params.change_kind}}. Card: {{nodes.intake.output}}. Design:
       {{nodes.design.output.design}}. Define how each expected outcome is
       observed before the code that depends on it. Implement end to end
-      through the real entry points. A bugfix shows the failing
-      observation before and the passing one after; a refactor shows
+      through the real entry points. A bugfix follows sections 5 and
+      6 of the apb-diagnosis skill: a regression test that fails for the
+      named cause before the fix and passes after it; a refactor shows
       preservation. Gate every test you add or change with the authoring
       mode of the apb-test-audit skill. Run the project's own checks. Do
       not commit, push or
@@ -203,7 +210,9 @@ nodes:
       it depends on ran before it; build on what is in the working tree. If
       a dependency is missing or broken, do not work around it: write
       self_check blocked and say why in gaps. Otherwise implement only this
-      subtask, end to end through the real entry points, gate every test
+      subtask, end to end through the real entry points. A bugfix follows
+      sections 5 and 6 of the apb-diagnosis skill for the cause the design
+      named. Gate every test
       you add or change with the authoring mode of the apb-test-audit
       skill, and run its checks
       and the project's own checks. Then review your change against the

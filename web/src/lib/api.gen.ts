@@ -153,11 +153,28 @@ dropped: number, };
 
 export type EvidenceSource = "goal" | "success_check" | "baseline" | "item_check";
 
+export type EvidenceBasis = "executed" | "read" | "agent_text" | "model";
+
+export type FreshnessState = "current" | "stale" | "unknown";
+
+export type Freshness = { state: FreshnessState, reason?: string, };
+
 export type Evidence = { source: EvidenceSource, subject: string, 
 /**
  * `passed`, `failed`, `error`, `met` or `not_met`.
  */
-result: string, detail?: string, };
+result: string, detail?: string, 
+/**
+ * What decided it.
+ */
+basis: EvidenceBasis, 
+/**
+ * Whether it still describes the tree the run left; absent for
+ * evidence nothing later in the run can change (a goal criterion, a
+ * baseline comparison, an agent's text) and for a check an older apb
+ * bound to nothing.
+ */
+freshness?: Freshness, };
 
 export type GapKind = "manual_criterion" | "self_reported_node" | "goal_not_checked" | "unknown_call" | "incomplete_response" | "inbox_gap" | "output_truncated" | "baseline_unknown" | "item_needs_look" | "self_reported_items";
 

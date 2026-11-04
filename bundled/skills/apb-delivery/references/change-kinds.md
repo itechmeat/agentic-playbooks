@@ -2,6 +2,7 @@
 
 ## Bug fix
 
+- Follow the apb-diagnosis skill; this list is the evidence it must leave.
 - Keep symptom, hypothesis, cause and mitigation apart.
 - Reproduce at the boundary that owns the failure when you can.
 - Show the failure happens for the reason you claim before the fix, and that
@@ -11,7 +12,8 @@
   observations with stated uncertainty beat a contrived test.
 - Fix the responsible boundary. Verify the original scenario and the
   guarantees around it.
-- Add a regression check when it protects something distinct.
+- Write the regression test before the fix and see it fail for the named
+  cause; gate it with the apb-test-audit skill.
 - A containment without a known cause is a mitigation, not a verified fix.
   Label it so.
 

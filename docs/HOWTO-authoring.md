@@ -425,7 +425,61 @@ its output, so an attempt that reports success while its output only contains
 interim text is rejected with `success report rejected: completion marker
 <marker> not found in output`. A `success_check` on any node other than
 `agent_task`, or a marker that is empty, is a V33 validation error; a script
-path outside `scripts/` is a V12 error.
+path outside `scripts/` is a V12 error. The script form also takes a map,
+`{ script, scope }`, described below.
+
+### What a check reads, and when its pass goes stale
+
+A check's pass is a fact about the tree it ran on. When a later node of
+the run changes that tree, the run outcome stops showing the pass as
+current. Say which files the script reads with the map form:
+
+```yaml
+  - { id: build, type: agent_task, prompt: "build", profile: dev,
+      success_check: { script: scripts/verify.sh, scope: ["src/**", "Cargo.toml"] } }
+```
+
+When the check passes, the engine journals `evidence_bound` with the
+fingerprint of its scope, taken right after the script exited (the node
+cache's file fingerprint, ignored files included; no fingerprint without a
+scope). The finish node journals `evidence_observed` with the
+same fingerprints again, after the baseline's after snapshot and before the
+goal criteria. Every outcome surface (`run_status`, `run_report`, `apb runs
+<id>`, the dashboard, the HTML report) then marks the pass:
+
+- `current`: nothing the check reads changed after it ran;
+- `stale`: a file in the declared scope changed;
+- `not known to be current`: a node that can act (not a `read_only` one)
+  ran after the check, or was still running when it passed, and the check
+  declares no scope, the run has not reached a finish node, or the pass
+  was restored from the node cache (its line names the run the cache came
+  from).
+
+A pass that is not current is not counted as passed in the headline
+(`0 of 1 check passed, 1 not current`). The node running again and its
+check passing again rebinds it. An edit outside a declared scope leaves the
+pass current; without a scope nothing tells whether the check reads what
+changed, so any node that can act after it makes it unknown, never stale
+and never current. Declare a scope for a check that reads gitignored
+files (a build output, a `.env`): only a declared scope fingerprints
+them. A scope is relative to the directory the check runs in, so a check
+that reads files above it (a sibling package of a node `workdir`) cannot
+be shown current after a later node; run it from a directory that holds
+what it reads. A map naming keys of two forms (`{ marker, scope }`) or an
+unknown key is a parse error. Only a pass is marked; a failed check stays
+failed.
+A list's script item checks are read by the same later-node rule. Goal
+criteria and baseline comparisons need no binding: they run at the finish,
+after every node. Freshness never fails, pauses or reroutes a run; to make
+the final state decide the run, repeat the check as a goal criterion with
+`enforce: true`. An empty `scope` or a glob that does not compile is a V163
+error.
+
+Each line of the outcome's Verified section also names what decided it:
+`executed` (a command apb ran), `read by apb` (a connector response, the
+run's own journal), `agent's own text` (a marker or an output field the
+agent wrote) or `model judgment` (a judge item check). The design is in
+`docs/superpowers/specs/2026-11-03-evidence-freshness-design.md`.
 
 A rejected success report consumes a retry like any other failure, so
 `max_retries` is honored: the attempt is spent, and the node retries or takes

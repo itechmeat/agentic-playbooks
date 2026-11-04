@@ -734,7 +734,20 @@ switches.
   run), the connector writes that went through, per function, and the sends
   apb's lookup found or a person confirmed went out.
 - `verified`: what the engine itself checked, each `{ source, subject,
-  result, detail? }`. `source` is `goal` (a script, marker or list criterion,
+  result, detail?, basis, freshness? }`. `basis` says what decided it:
+  `executed` (a command apb ran: a script criterion, check or baseline
+  source), `read` (a connector response or the run's own journal),
+  `agent_text` (a marker or an output field the agent wrote, so the
+  agent's own word) or `model` (a judge item check). `freshness` is
+  `{ state, reason? }` for a check a later node could change: `current`,
+  `stale` (a file in the check's declared `scope` changed after it ran) or
+  `unknown` (a node that can act ran after it or was still running when
+  it passed, and the check declares no scope, no finish compared the tree
+  again, or the pass was restored from the node cache); absent for a
+  failed result, a goal criterion, a baseline comparison, a marker and a
+  check an older apb bound to nothing. A pass that is not `current` is not counted
+  as passed in `headline` (`0 of 1 check passed, 1 not current`); see
+  "Success checks" in `docs/HOWTO-authoring.md`. `source` is `goal` (a script, marker or list criterion,
   `result` `passed`, `failed` or `error`), `success_check` (a node whose
   `success_check` passed), `baseline` (a compared observation, `result`
   `met` or `not_met`) or `item_check` (a list node's item check once an

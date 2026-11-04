@@ -4137,3 +4137,112 @@ fn e9_evidence_guard_old_binaries_read_refuse_resume_stop() {
         case.stop(&reader, &run);
     }
 }
+
+/// Row F1's playbook: `work` is an agent step whose script `success_check`
+/// passes (in the bare form every binary parses), `edit` rewrites the file
+/// it checked, and the gate holds the run.
+const F1_FRESHNESS: &str = r#"schema: 2
+id: corpus-fresh
+name: Journal corpus evidence freshness
+version: 1.0.0
+defaults:
+  profile: corpus
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: agent_task, prompt: "WORK", max_retries: 0, success_check: "scripts/check.sh" }
+  - { id: edit, type: script, script: "scripts/edit.sh", runner: sh }
+  - { id: gate, type: human_review, options: [approved, rejected] }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: edit }
+  - { from: edit, to: gate }
+  - { from: gate, to: ok, condition: { type: review_status, equals: approved } }
+  - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
+"#;
+
+/// Row F1: evidence freshness. The new binary binds `work`'s passing check
+/// (`evidence_bound` before its `node_finished`) and waits at the gate.
+/// Both old binaries read the run, skipping the record with the count
+/// shown, and resume it with the new binary's routing; the new binary's
+/// own resume journals no `evidence_observed` at the finish, since the bare
+/// form declares no scope to fingerprint (the in-binary compatibility test
+/// covers that event's skip). The new binary then
+/// reads a run an old binary finished: the bound check, which `edit` ran
+/// after, is not shown as a plain pass.
+#[test]
+fn f1_evidence_records_old_binaries_skip_them_and_route_the_same() {
+    let new = new_binary();
+    let mut case = Case::new("row F1");
+    case.seed_inline(
+        &new,
+        "corpus-fresh",
+        F1_FRESHNESS,
+        &[
+            ("check.sh", "grep -q A lib.txt\n"),
+            ("edit.sh", "printf 'B\\n' > lib.txt\necho ok\n"),
+        ],
+    );
+    let stub = case.dir.path().join("fresh-agent.sh");
+    fs::write(&stub, "#!/bin/sh\nprintf 'A\\n' > lib.txt\necho ok\n").unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    case.env.retain(|(k, _)| *k != "APB_AGENT_CMD");
+    case.env.push(("APB_AGENT_CMD", stub.display().to_string()));
+    let run = case.start_inline(&new, "corpus-fresh", &[]);
+    let journal = case.wait_journal(&run, "the gate", |j| {
+        j.iter().any(|e| e["type"] == "review_requested")
+    });
+    case.kill_driver(&run);
+    case.save();
+    let bound = journal
+        .iter()
+        .position(|e| e["type"] == "evidence_bound" && e["node"] == "work")
+        .unwrap_or_else(|| panic!("row F1: {}", summary(&journal)));
+    let finished_at = journal
+        .iter()
+        .position(|e| e["type"] == "node_finished" && e["node"] == "work")
+        .expect("row F1: work finished");
+    assert!(bound < finished_at, "row F1: {}", summary(&journal));
+
+    let from = journal.len();
+    let ran = case.read(&new, &run);
+    assert!(!ran.stdout.contains("unknown event"), "row F1: {ran:?}");
+    case.approve_and_resume(&new, &run);
+    let after = case.journal(&run);
+    assert!(
+        !after[from..]
+            .iter()
+            .any(|e| e["type"] == "evidence_observed"),
+        "row F1: an unscoped check is not observed at the finish: {}",
+        summary(&after)
+    );
+    let expected = routing(&after, from);
+    let Some((beta1, v025)) = old_readers(&case) else {
+        return;
+    };
+    for reader in [beta1, v025] {
+        let ran = case.read(&reader, &run);
+        assert!(
+            ran.stdout.contains("unknown event"),
+            "row F1: {} skips the evidence record: {ran:?}",
+            label(&reader)
+        );
+        case.approve_and_resume(&reader, &run);
+        assert_eq!(
+            routing(&case.journal(&run), from),
+            expected,
+            "row F1: {} routes as the new binary",
+            label(&reader)
+        );
+        let ran = case.run(&new, &["runs", &run]);
+        assert!(
+            ran.stdout.contains("success check: work")
+                && ran.stdout.contains("[not known to be current"),
+            "row F1: the new binary reads the run {} finished: {ran:?}",
+            label(&reader)
+        );
+        case.stop(&reader, &run);
+    }
+}

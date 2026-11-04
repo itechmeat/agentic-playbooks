@@ -8,7 +8,7 @@ use apb_core::list::{CheckSource, ListSpec};
 use apb_core::schema::Playbook;
 use serde::Serialize;
 
-use super::claims::{Evidence, EvidenceSource, Gap, GapKind};
+use super::claims::{Evidence, EvidenceBasis, EvidenceSource, Gap, GapKind};
 use crate::list::{RunList, RunListItem};
 
 /// The most item gaps an outcome lists; the rest is one "and N more" line.
@@ -34,6 +34,11 @@ pub struct ListOutcome {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub check: Option<String>,
+    /// What decided each item's check (`CheckSource::kind`); absent
+    /// without a check.
+    #[serde(skip)]
+    #[cfg_attr(feature = "ts", ts(skip))]
+    pub check_kind: Option<&'static str>,
 }
 
 impl ListOutcome {
@@ -75,6 +80,13 @@ impl ListOutcome {
                 "{} of {} items passed, {check}",
                 self.passed, self.processed
             )),
+            basis: match self.check_kind {
+                Some("script") => EvidenceBasis::Executed,
+                Some("connector") => EvidenceBasis::Read,
+                Some("judge") => EvidenceBasis::Model,
+                _ => EvidenceBasis::AgentText,
+            },
+            freshness: None,
         })
     }
 }
@@ -100,6 +112,10 @@ fn item_check_failed(item: &RunListItem) -> bool {
     by_reason || (item.check_rejected && item.state == ItemState::NeedsLook.as_str())
 }
 
+fn spec_of<'a>(playbook: Option<&'a Playbook>, node: &str) -> Option<&'a ListSpec> {
+    playbook.and_then(|p| p.node(node)).and_then(|n| n.list())
+}
+
 /// One [`ListOutcome`] per list in `lists`, the check read from the run's
 /// playbook snapshot.
 pub fn list_outcomes(playbook: Option<&Playbook>, lists: &[RunList]) -> Vec<ListOutcome> {
@@ -113,10 +129,10 @@ pub fn list_outcomes(playbook: Option<&Playbook>, lists: &[RunList]) -> Vec<List
             passed_with_note: l.passed_with_note,
             needs_look: l.needs_look,
             check_failed: l.items.iter().filter(|i| item_check_failed(i)).count() as u32,
-            check: playbook
-                .and_then(|p| p.node(&l.node))
-                .and_then(|n| n.list())
-                .and_then(check_words),
+            check: spec_of(playbook, &l.node).and_then(check_words),
+            check_kind: spec_of(playbook, &l.node)
+                .and_then(|s| s.check.as_ref()?.source())
+                .map(|c| c.kind()),
         })
         .collect()
 }

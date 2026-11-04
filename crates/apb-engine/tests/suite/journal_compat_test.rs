@@ -1030,3 +1030,58 @@ fn an_unattended_start_records_the_mode_in_the_manifest_and_the_config() {
     let config = fs::read_to_string(dir.join("run.yaml")).unwrap();
     assert!(!config.contains("unattended"), "{config}");
 }
+
+/// Evidence freshness: `evidence_bound` and `evidence_observed` round trip,
+/// change no run state, and an older binary that knows neither skips both
+/// while the `node_finished` checkpoint follows each, so it reads the run
+/// with the same node states.
+#[test]
+fn evidence_records_round_trip_and_are_skippable_before_a_checkpoint() {
+    let bound = r#"{"seq":2,"ts":3,"type":"evidence_bound","node":"a","attempt":1,"check":"success_check","root":"/w","scope":["src/**"],"fingerprint":"f1"}"#;
+    let observed = r#"{"seq":5,"ts":6,"type":"evidence_observed","observations":[{"root":"/w","scope":["src/**"],"fingerprint":"f2"}]}"#;
+    for line in [bound, observed] {
+        let e: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&e).unwrap(), line);
+        assert!(!e.payload.is_checkpoint());
+    }
+    // A shape with only the type still reads (every field defaults).
+    let bare: Event = serde_json::from_str(r#"{"seq":2,"ts":3,"type":"evidence_bound"}"#).unwrap();
+    assert!(matches!(
+        bare.payload,
+        EventPayload::EvidenceBound {
+            fingerprint: None,
+            ..
+        }
+    ));
+
+    let lines = |bound: &str, observed: &str| {
+        [
+            r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#.to_string(),
+            r#"{"seq":1,"ts":2,"type":"node_started","node":"a","attempt":1}"#.to_string(),
+            bound.to_string(),
+            r#"{"seq":3,"ts":4,"type":"node_finished","node":"a","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#.to_string(),
+            r#"{"seq":4,"ts":5,"type":"node_started","node":"done","attempt":1}"#.to_string(),
+            observed.to_string(),
+            r#"{"seq":6,"ts":7,"type":"node_finished","node":"done","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#.to_string(),
+            String::new(),
+        ]
+        .join("\n")
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let new = read_all(&write_run(tmp.path(), "new", &lines(bound, observed))).unwrap();
+    // As an older binary sees it: both types unknown.
+    let old = lines(
+        &bound.replace("evidence_bound", "evidence_bound_from_the_future"),
+        &observed.replace("evidence_observed", "evidence_observed_from_the_future"),
+    );
+    let dir = write_run(tmp.path(), "old", &old);
+    let journal = read_journal(&dir).unwrap();
+    assert_eq!(journal.unknown.len(), 2);
+    let events = read_all(&dir).unwrap();
+    assert_eq!(
+        events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        [0, 1, 3, 4, 6]
+    );
+    let state = |ev: &[Event]| apb_engine::state::RunState::fold(ev).nodes;
+    assert_eq!(state(&events), state(&new));
+}

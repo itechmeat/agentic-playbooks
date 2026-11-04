@@ -17,7 +17,9 @@ use serde::Serialize;
 
 use super::baseline::{RunBaseline, observation_line};
 use super::calls::{CallClass, ClassifiedCall, classified_calls};
-pub use super::claims::{Evidence, EvidenceSource, Gap, GapKind};
+pub use super::claims::{
+    Evidence, EvidenceBasis, EvidenceSource, Freshness, FreshnessState, Gap, GapKind,
+};
 use super::intents::{RunIntent, outcome_intents};
 use super::lists::{ListOutcome, list_evidence, list_gaps, list_outcomes};
 use super::notes::{RunFinding, RunNotes, RunWarning, finding_line, warning_line};
@@ -285,7 +287,13 @@ impl OutcomeSummary {
                         .as_deref()
                         .map(|d| format!(" ({d})"))
                         .unwrap_or_default();
-                    format!("[{}] {}: {}{detail}", e.result, e.source.label(), e.subject)
+                    format!(
+                        "[{}] {}: {}{detail}{}",
+                        e.result,
+                        e.source.label(),
+                        e.subject,
+                        e.tags()
+                    )
                 })
                 .collect(),
         );
@@ -413,6 +421,12 @@ impl Inputs<'_> {
                         subject: c.description.clone(),
                         result: c.status.clone(),
                         detail: c.detail.clone(),
+                        basis: match c.check.as_str() {
+                            "script" => EvidenceBasis::Executed,
+                            "marker" => EvidenceBasis::AgentText,
+                            _ => EvidenceBasis::Read,
+                        },
+                        freshness: None,
                     }),
             );
         }
@@ -422,18 +436,40 @@ impl Inputs<'_> {
                 .and_then(|p| p.node(id))
                 .and_then(|n| n.success_check.as_ref());
             if let Some(check) = check {
+                let script = check.script_path();
+                let cached =
+                    script.and_then(|_| super::freshness::cache_source(&self.view.events, id));
                 out.push(Evidence {
                     source: EvidenceSource::SuccessCheck,
                     subject: id.to_string(),
                     result: "passed".into(),
-                    detail: Some(match check.script_path() {
-                        Some(path) => format!("script {path}"),
-                        None => "marker".to_string(),
+                    detail: Some(match (script, cached) {
+                        (Some(path), Some(run)) => {
+                            format!("script {path}, from the cache of run {run}")
+                        }
+                        (Some(path), None) => format!("script {path}"),
+                        (None, _) => "marker".to_string(),
+                    }),
+                    basis: match script {
+                        Some(_) => EvidenceBasis::Executed,
+                        None => EvidenceBasis::AgentText,
+                    },
+                    // A marker is in the journaled output: nothing later
+                    // changes it.
+                    freshness: script.and_then(|_| {
+                        super::freshness::success_check(self.playbook, &self.view.events, id)
                     }),
                 });
             }
         }
-        out.extend(list_evidence(&self.list_outcomes));
+        out.extend(list_evidence(&self.list_outcomes).into_iter().map(|mut e| {
+            // Only a pass can go out of date: a failed check stays failed.
+            if e.basis == EvidenceBasis::Executed && e.result_passes() {
+                e.freshness =
+                    super::freshness::item_check(self.playbook, &self.view.events, &e.subject);
+            }
+            e
+        }));
         if let Some(b) = self.baseline {
             out.extend(
                 b.observations()
@@ -445,6 +481,11 @@ impl Inputs<'_> {
                         subject: format!("{}/{}", c.id, o.id),
                         result: o.verdict.clone(),
                         detail: Some(observation_detail(o)),
+                        basis: match c.source.as_str() {
+                            "connector" => EvidenceBasis::Read,
+                            _ => EvidenceBasis::Executed,
+                        },
+                        freshness: None,
                     }),
             );
         }
@@ -652,11 +693,19 @@ fn headline(
     let mut parts = vec![format!("Run {}", status.as_str())];
     if !verified.is_empty() {
         let passed = verified.iter().filter(|e| e.passed()).count();
-        parts.push(format!(
+        let mut line = format!(
             "{passed} of {} {} passed",
             verified.len(),
             plural(verified.len(), "check", "checks")
-        ));
+        );
+        let not_current = verified
+            .iter()
+            .filter(|e| e.result_passes() && !e.is_current())
+            .count();
+        if not_current > 0 {
+            line.push_str(&format!(", {not_current} not current"));
+        }
+        parts.push(line);
     } else {
         parts.push("nothing checked by the engine".into());
     }

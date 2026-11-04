@@ -51,6 +51,7 @@ mod deadline;
 pub mod deferred;
 mod dispatch;
 mod entry;
+mod evidence;
 mod finish_answer;
 mod finish_hooks;
 mod fork;
@@ -1290,6 +1291,9 @@ fn drive_inner(
                 (Outcome::Success, None) => RunStatus::Succeeded,
                 _ => RunStatus::Failed,
             };
+            // What the run's passing checks were bound to, fingerprinted
+            // again now that every node before the finish ran.
+            evidence::observe(log, &read_all(run_dir)?)?;
             // The goal criteria (C1): after every earlier node and the
             // finish answer, before the finish node's checkpoint.
             let goal_failure = goal::check(

@@ -249,6 +249,7 @@ fn success_check_rejection(
     sandbox: Option<&crate::sandbox::SandboxPlan>,
     output: &str,
     key: &crate::exec_key::ExecKey,
+    bind: (&Journal, u32),
 ) -> Result<Option<Rejection>, EngineError> {
     // A protected file the attempt changed (C6) rejects the report before
     // any check runs: the check would judge a tree the engine just restored.
@@ -274,7 +275,11 @@ fn success_check_rejection(
         // per-attempt directory, otherwise the shared workdir), otherwise the
         // check would validate a directory the agent never wrote to. A
         // sandboxed attempt's check runs inside the same sandbox.
-        Some(apb_core::schema::SuccessCheck::Script(check)) => {
+        Some(
+            sc @ (apb_core::schema::SuccessCheck::Script(_)
+            | apb_core::schema::SuccessCheck::Scoped { .. }),
+        ) => {
+            let check = sc.script_path().unwrap_or_default();
             // A scenario run's check is the attempt's scripted verdict.
             if let crate::scenario::Resolution::Answer(crate::scenario::Answer::Check(c)) =
                 crate::scenario::session::at_run(
@@ -297,8 +302,21 @@ fn success_check_rejection(
                     failure_kind: None,
                 }));
             }
-            Ok((r.status != NodeStatus::Succeeded)
-                .then(|| Rejection::retry(format!("success_check `{check}` failed"))))
+            if r.status != NodeStatus::Succeeded {
+                return Ok(Some(Rejection::retry(format!(
+                    "success_check `{check}` failed"
+                ))));
+            }
+            // The pass is a fact about this tree: bind it to the scope's
+            // fingerprint now, so the outcome can tell when a later node
+            // changed what it checked. A list item is never bound: the
+            // outcome reads a list by the nodes after it, and V85 refuses
+            // a `success_check` on a list node anyway.
+            if key.item.is_none() {
+                let (journal, attempt) = bind;
+                super::evidence::bind(journal, key.node, attempt, attempt_workdir, sc.scope())?;
+            }
+            Ok(None)
         }
         // Completion-marker check (issue 45 finding 1): the literal marker must
         // appear in the node output, else the reported success is rejected. This
@@ -336,10 +354,10 @@ fn completion_check(
     item: Option<&str>,
 ) -> Result<crate::decision::completion::Verdict, EngineError> {
     if node.completion_check == Some(apb_core::schema::CompletionCheckSetting::Off)
-        || matches!(
-            node.success_check,
-            Some(apb_core::schema::SuccessCheck::Script(_))
-        )
+        || node
+            .success_check
+            .as_ref()
+            .is_some_and(|c| c.script_path().is_some())
     {
         return Ok(Default::default());
     }
@@ -2708,6 +2726,7 @@ fn execute_node_kind(
                                     place.sandbox.as_deref(),
                                     &report.output,
                                     &key,
+                                    (journal, attempt),
                                 )?;
                                 match rejection {
                                     // Rejected: this is an attempt FAILURE, not a
@@ -2983,6 +3002,7 @@ fn execute_node_kind(
                                         place.sandbox.as_deref(),
                                         &output,
                                         &key,
+                                        (journal, attempt),
                                     )? {
                                         None => {
                                             let check = if item.is_some_and(|i| i.checked) {

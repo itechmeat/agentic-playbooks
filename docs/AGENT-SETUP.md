@@ -13,7 +13,8 @@ are local, listed in the plan and reversible with `apb setup remove`:
 1. Install the default playbooks apb ships (ids starting with `apb-`) into the
    global store. Only their exact shipped digests are trusted.
 2. Install the process skills apb ships (`apb-usage`, `apb-brainstorm`,
-   `apb-delivery`, `apb-review`) into the global skills directory
+   `apb-delivery`, `apb-diagnosis`, `apb-review`, `apb-test-audit`,
+   `apb-security-audit`, `apb-model-selection`) into the global skills directory
    (`~/.agents/skills`, linked into `~/.claude/skills`).
 3. Write the role profiles the defaults bind to (`apb-main`, `apb-reviewer`,
    `apb-researcher`) from the agents this machine actually has and the

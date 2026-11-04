@@ -44,6 +44,9 @@ pub(super) struct Report {
     pub(super) known_problems: Option<crate::known_problems::RunKnownProblems>,
     /// What the journal proves about every node and edge.
     pub(super) graph: crate::run_outcome::RunGraph,
+    /// The definition the run actually executed: the shown segment's
+    /// stored definition.
+    pub(super) definition: Option<apb_core::schema::Playbook>,
 }
 
 /// One node of the playbook, in playbook order.
@@ -89,7 +92,7 @@ impl Report {
         let notify = RunNotify::for_run(run_dir, &view.events, now);
         let known_problems = crate::known_problems::of_run(&view.events);
         let (trusted, grades_left_out) = crate::grade::split_grades_of(run_dir);
-        let graph = view.graph(run_dir);
+        let (graph, definition) = view.graph_and_definition(run_dir);
         let mut events = view.events;
         let journal = events.split_off(journal_cut);
         Ok(Report {
@@ -108,6 +111,7 @@ impl Report {
             grades_left_out,
             known_problems,
             graph,
+            definition,
             run_id,
         })
     }

@@ -605,3 +605,44 @@ fn review_roles_always_run_their_audit_skills() {
         );
     }
 }
+
+/// A bug fix goes through the diagnosis skill: it ships, the delivery skill
+/// and the delivery playbook's design and implement stages name it, and the
+/// main profile, which runs those stages, carries it.
+#[test]
+fn bug_fixes_go_through_the_diagnosis_skill() {
+    let root = bundled_root();
+    assert!(
+        root.join("skills/apb-diagnosis/SKILL.md").is_file(),
+        "apb-diagnosis is not shipped"
+    );
+    let delivery = std::fs::read_to_string(root.join("skills/apb-delivery/SKILL.md")).unwrap();
+    assert!(
+        delivery.contains("apb-diagnosis"),
+        "apb-delivery does not name apb-diagnosis"
+    );
+    assert!(
+        apb_core::bundled::role_skills("apb-main").contains(&"apb-diagnosis"),
+        "apb-main does not carry apb-diagnosis"
+    );
+    let yaml =
+        std::fs::read_to_string(root.join("playbooks/apb-feature-delivery/playbook.yaml")).unwrap();
+    let doc: yaml_serde::Value = yaml_serde::from_str(&yaml).unwrap();
+    for stage in ["design", "implement", "implement_subtasks"] {
+        let prompt = doc
+            .get("nodes")
+            .and_then(|n| n.as_sequence())
+            .and_then(|nodes| {
+                nodes
+                    .iter()
+                    .find(|n| n.get("id").and_then(|v| v.as_str()) == Some(stage))
+            })
+            .and_then(|n| n.get("prompt"))
+            .and_then(|p| p.as_str())
+            .unwrap_or_else(|| panic!("apb-feature-delivery: no prompt on {stage}"));
+        assert!(
+            prompt.contains("apb-diagnosis"),
+            "apb-feature-delivery: the {stage} stage does not name apb-diagnosis"
+        );
+    }
+}
