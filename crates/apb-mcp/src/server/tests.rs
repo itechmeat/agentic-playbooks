@@ -72,12 +72,19 @@ edges:
   - { from: work, to: done }
 "#;
 
-fn seed_slowscript(root: &Path) {
+/// Seeds `slowscript`, whose one script node finishes only once `release`
+/// exists (or after about a minute, so a process nobody releases still
+/// ends): the test decides when the work can end, not a clock.
+fn seed_slowscript(root: &Path, release: &Path) {
     apb_core::registry::init_project(root).expect("init_project");
     let vdir = root.join(".apb/playbooks/slowscript/1.0.0");
     fs::create_dir_all(vdir.join("scripts")).expect("mkdir version+scripts dir");
     fs::write(vdir.join("playbook.yaml"), SLOWSCRIPT).expect("write slowscript playbook.yaml");
-    fs::write(vdir.join("scripts/slow.sh"), "#!/bin/sh\nsleep 1\n").expect("write slow.sh");
+    let script = format!(
+        "#!/bin/sh\nn=0\nwhile [ ! -e '{}' ] && [ $n -lt 1200 ]; do sleep 0.05; n=$((n+1)); done\n",
+        release.display()
+    );
+    fs::write(vdir.join("scripts/slow.sh"), script).expect("write slow.sh");
     fs::write(root.join(".apb/playbooks/slowscript/current"), "1.0.0")
         .expect("write current pointer");
 }
@@ -785,19 +792,42 @@ async fn playbook_run_remember_keeps_the_input_for_this_project() {
     assert_eq!(memory["values"][0]["value"], "world");
 }
 
-/// Non-blocking start (`background: true`): a run with a script node
-/// sleeping for 1s returns the run_id noticeably faster than a second AND
-/// is not yet terminal right after returning. A synchronous run would
-/// take >= 1s, so both facts together prove a genuinely non-blocking
-/// start, not just a fast run.
+/// Non-blocking start (`background: true`): the run's script node cannot
+/// finish until the test releases it, and the test releases it only after
+/// the start returned. A start that drove the run itself could not return
+/// before the release, so it returns only through the watchdog's late
+/// release, which the test sees; the order of the return and the release
+/// decides the verdict, not a time budget, so a slow host cannot fail it. The run is also not yet terminal right after
+/// returning, and is fully prepared on disk.
 #[tokio::test]
 async fn background_run_returns_run_id_without_blocking() {
-    use std::time::{Duration, Instant};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
     let dir = tempfile::tempdir().expect("tempdir");
-    seed_slowscript(dir.path());
+    let release = dir.path().join("release");
+    seed_slowscript(dir.path(), &release);
     let server = WfMcp::new(dir.path().to_path_buf());
 
-    let started = Instant::now();
+    // A start that blocks on the run would wait for the script forever; the
+    // watchdog releases it after a minute, a hang guard rather than a
+    // budget, so the test ends with a clear failure instead of hanging.
+    let returned = Arc::new(AtomicBool::new(false));
+    let late_release = Arc::new(AtomicBool::new(false));
+    let watchdog = {
+        let (returned, late_release, release) =
+            (returned.clone(), late_release.clone(), release.clone());
+        std::thread::spawn(move || {
+            for _ in 0..1200 {
+                if returned.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            late_release.store(true, Ordering::SeqCst);
+            fs::write(&release, "").expect("write release");
+        })
+    };
     let result = server
         .playbook_run(Parameters(PlaybookRunArgs {
             id: "slowscript".to_string(),
@@ -824,26 +854,26 @@ async fn background_run_returns_run_id_without_blocking() {
             confirm_launch: None,
         }))
         .await;
-    let elapsed = started.elapsed();
+    returned.store(true, Ordering::SeqCst);
+    watchdog.join().expect("watchdog");
+    assert!(
+        !late_release.load(Ordering::SeqCst),
+        "background start did not return before the run's script was released: it blocked on the run"
+    );
     assert_eq!(
         result.is_error,
         Some(false),
         "unexpected error: {}",
         result_text(&result)
     );
-    assert!(
-        elapsed < Duration::from_millis(500),
-        "background start blocked for {elapsed:?}"
-    );
 
     let text = result_text(&result);
     let v: serde_json::Value = serde_json::from_str(&text).expect("json body");
     let run_id = v["run_id"].as_str().expect("run_id present").to_string();
 
-    // Right after returning, the script is still sleeping (~1s), so the
-    // run must not be terminal. A status-read error at this point also
-    // means "not finished yet" - we only fail if the status is already
-    // terminal.
+    // The script is not released yet, so the run cannot have finished. A
+    // status-read error at this point also means "not finished yet" - we
+    // only fail if the status is already terminal.
     if let Ok(status) = tools::run_status(dir.path(), &run_id) {
         let st = status["run_status"].as_str().unwrap_or("").to_string();
         assert!(
@@ -865,6 +895,8 @@ async fn background_run_returns_run_id_without_blocking() {
         run_dir.is_dir(),
         "the run must be fully prepared on disk before the drive is handed off"
     );
+    // Let any script process end now rather than outlive the temp dir.
+    fs::write(&release, "").expect("write release");
 }
 
 /// A supervisor token is the only credential of the supervisor tools, and it
