@@ -430,6 +430,7 @@ describe('NextActionsPanel', () => {
           { name: 'nonce', value: { kind: 'given', value: 'n-1' }, required: true },
         ],
         command: "apb review '--decision=<publish|skip>' --nonce=n-1 --request=publish:9 parent ship",
+        caller_refusal: 'keyless_dashboard',
       })
       const line = { ...intent, command: "apb intent resolve '--sent|--not-sent' parent int-1" }
       show({ actions: runActions([publish, line]) })

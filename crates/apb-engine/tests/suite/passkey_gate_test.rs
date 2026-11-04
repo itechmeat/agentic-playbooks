@@ -844,7 +844,8 @@ fn publish_action() -> apb_engine::next_action::NextAction {
 /// append time: a publish consent needs a passkey on every gate, not only
 /// a person-only one, so the terminal and MCP are marked
 /// `passkey_required`, while the dashboard (which runs the ceremony) and a
-/// scenario's script (exempt in the engine) are not.
+/// scenario's script (exempt in the engine) are not. A dashboard without
+/// keys takes no publish consent at all, passkey or not (`keyless_dashboard`).
 #[test]
 fn a_publish_gate_is_marked_passkey_required_for_the_terminal() {
     let _guard = common::env_lock();
@@ -862,11 +863,16 @@ fn a_publish_gate_is_marked_passkey_required_for_the_terminal() {
                 "{channel:?}"
             );
         }
-        for channel in [
-            DecisionChannel::DashboardSession,
-            DecisionChannel::DashboardKeyless,
-            DecisionChannel::Scenario,
-        ] {
+        assert_eq!(
+            apb_engine::next_action::caller_refusal(
+                &a,
+                &rd,
+                DecisionChannel::DashboardKeyless,
+                &step
+            ),
+            Some(CallerRefusal::KeylessDashboard)
+        );
+        for channel in [DecisionChannel::DashboardSession, DecisionChannel::Scenario] {
             assert_eq!(
                 apb_engine::next_action::caller_refusal(&a, &rd, channel, &step),
                 None,

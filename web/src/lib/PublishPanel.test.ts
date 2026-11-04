@@ -84,10 +84,9 @@ describe('PublishPanel', () => {
     ])
   })
 
-  it('offers the terminal command instead of the consent button on a dashboard without keys', () => {
-    auth.set({ required: false, authenticated: true, checked: true })
+  it('offers the terminal command instead of the consent button where the server refuses the consent', () => {
     const onDecide = vi.fn()
-    render({ gates: [{ node: 'ship', plan }], onDecide })
+    render({ gates: [{ node: 'ship', plan, callerRefusal: 'keyless_dashboard' }], onDecide })
     expect(byTestId('publish-approve')).toBeNull()
     expect(text('publish-keyless')).toContain('apb publish approve r1 --node ship --nonce publish-0123')
     // Skipping pushes nothing and stays here.
@@ -95,8 +94,9 @@ describe('PublishPanel', () => {
     expect(onDecide.mock.calls).toEqual([['ship', 'skip', 'publish-0123']])
   })
 
-  it('keeps the consent button until the dashboard knows whether it has keys', () => {
-    auth.set({ required: false, authenticated: true, checked: false })
+  // The server's mark decides, never the page's own reading of its keys.
+  it('keeps the consent button on a keyless page the server did not mark', () => {
+    auth.set({ required: false, authenticated: true, checked: true })
     render({ gates: [{ node: 'ship', plan }] })
     expect(byTestId('publish-approve')).not.toBeNull()
     expect(byTestId('publish-keyless')).toBeNull()

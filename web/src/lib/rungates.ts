@@ -3,6 +3,7 @@ import { shellWord, type PublishGate } from './publish'
 import { ApiError } from './api/http'
 import type {
   ActionCode,
+  CallerRefusal,
   NextAction,
   PendingHostTask,
   ReviewBinding,
@@ -22,6 +23,10 @@ export interface GateRequest {
    * action; the next-actions panel leaves that action to the gate's card.
    * Absent where it does not apply. */
   unattended?: UnattendedOutcome
+  /** Why this dashboard does not take the gate's own next action, as the
+   * server marked it from the decision path's rule (a publish consent on a
+   * dashboard without keys). Absent when it takes it. */
+  callerRefusal?: CallerRefusal
 }
 
 // A pending human-review gate as the review panel renders it: one button per
@@ -165,6 +170,7 @@ export function gateRequest(detail: RunDetail, code: ActionCode, node: string): 
     runId: detail.run_id,
     ...(seq === undefined ? {} : { request: seq }),
     ...(a?.unattended ? { unattended: a.unattended } : {}),
+    ...(a?.caller_refusal ? { callerRefusal: a.caller_refusal } : {}),
   }
 }
 

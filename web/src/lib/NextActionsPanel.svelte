@@ -59,8 +59,9 @@
 
   const items = $derived(orderedActions(actions).filter(({ action }) => !shownElsewhere(action, runId, controls)))
   const authSnapshot = authState()
-  // A dashboard without keys takes no publish consent (the publish panel's
-  // rule) and no decision on a send: those give way to the command line.
+  // A dashboard without keys takes no decision on a send: that gives way to
+  // the command line. A publish consent it refuses comes marked by the
+  // server (`caller_refusal`), from the rule the decision path applies.
   const keyless = $derived(authSnapshot.checked && !authSnapshot.required)
 
   // An action's identity across reloads: the list reorders and shrinks as
@@ -216,9 +217,11 @@
   }
 
   // A publish consent is given on this page only for a plan it shows: its
-  // own run's, in the publish panel, and only with keys. A sub-playbook
-  // run's publish gate offers skip here, and its command line.
-  const noPublishHere = (a: NextAction) => a.code === 'decide_publish' && (keyless || isChild(a))
+  // own run's, in the publish panel, and only where the server did not mark
+  // it refused. A sub-playbook run's publish gate offers skip here, and its
+  // command line.
+  const noPublishHere = (a: NextAction) =>
+    a.code === 'decide_publish' && (a.caller_refusal === 'keyless_dashboard' || isChild(a))
 
   // The options a decision shows: the publish option only where the page
   // may take a publish consent.

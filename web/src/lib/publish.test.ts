@@ -107,6 +107,9 @@ describe('publishCards', () => {
     expect(cards).toHaveLength(1)
     expect(cards[0].plan?.nonce).toBe('publish-0123')
     expect(cards[0].awaiting_consent).toBe(true)
+    expect(cards[0].callerRefusal).toBeUndefined()
+    const refused = publishCards(views, [{ node: 'p', plan: plan(), callerRefusal: 'keyless_dashboard' }])
+    expect(refused[0].callerRefusal).toBe('keyless_dashboard')
   })
 
   it('offers no decision for a request no open gate holds (a stopped run)', () => {

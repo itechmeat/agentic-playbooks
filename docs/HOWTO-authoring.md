@@ -2880,7 +2880,8 @@ show both fields.
 A transcript holds whatever the agent printed or read, secrets included, so it
 must never reach git. APB keeps `<project>/.apb/.gitignore` listing its
 machine-local paths (`workspace.local`, `runs/`, `cache/`, `trash/`,
-`backup-*/`, `workdir.lock`, `locks/`): `apb init` writes it and every run makes sure of
+`backup-*/`, `workdir.lock`, `locks/`, `decisions.jsonl`, `memory/`,
+`problems/`, `scenario-runs/`, `launch-challenges/`, `handoff/`): `apb init` writes it and every run makes sure of
 it before its first node starts, adding only the lines that are missing and
 leaving your own lines as they are. Do not remove `runs/` from it.
 

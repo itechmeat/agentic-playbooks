@@ -652,32 +652,6 @@ fn gate_refusal(e: apb_engine::EngineError) -> axum::response::Response {
     }
 }
 
-/// A publish consent is a person's (decision record 0010). A dashboard
-/// without keys takes any request that reaches its loopback port, and under
-/// `network: open` a sandboxed agent shares that loopback: it could read the
-/// open plan's nonce and consent to its own push. So a keyless dashboard
-/// never takes a `publish` decision; a `skip` pushes nothing and stays open.
-/// The person approves with the CLI, or issues a dashboard key first; while
-/// a passkey is enrolled only the signed-in dashboard is left.
-fn keyless_publish_refusal(
-    auth: &crate::auth::AuthState,
-    run_id: &str,
-    body: &ReviewBody,
-) -> Option<String> {
-    (!auth.enabled() && body.decision == apb_core::publish::OPTION_PUBLISH).then(|| {
-        // While a passkey is enforced the CLI refuses a publish consent
-        // too (`passkey_required`), so the one route left is a signed-in
-        // dashboard session with a fresh assertion.
-        if apb_engine::review::passkey_enforced() {
-            return "a dashboard without keys does not take a publish consent, since anything on this machine can reach it, and while a passkey is enrolled the CLI refuses it too: issue a key with `apb server key issue`, sign in, and decide with a passkey on the run page".to_string();
-        }
-        format!(
-            "a dashboard without keys does not take a publish consent, since anything on this machine can reach it; approve with `apb publish approve {run_id} --node {} --nonce <nonce>`, or issue a key with `apb server key issue` and sign in",
-            body.node
-        )
-    })
-}
-
 pub(crate) async fn post_review_handler(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
@@ -696,9 +670,6 @@ pub(crate) async fn post_review_handler(
     if !run_dir.is_dir() {
         return (StatusCode::NOT_FOUND, format!("run `{id}` not found")).into_response();
     }
-    if let Some(why) = keyless_publish_refusal(&state.auth, &id, &body) {
-        return (StatusCode::FORBIDDEN, why).into_response();
-    }
     let cmd = apb_engine::ReviewCommand {
         node: body.node,
         decision: body.decision,
@@ -716,6 +687,18 @@ pub(crate) async fn post_review_handler(
     // session decides a person-only gate (a keyless dashboard and a bearer
     // key are 403).
     let channel = crate::auth::RequestChannel::of(channel.map(|c| c.0));
+    // A dashboard without keys gives no publish consent (decision record
+    // 0010): the engine's one rule, checked before the passkey ceremony so
+    // the refusal names the CLI rather than a passkey. The engine's entries
+    // check it again.
+    if let Err(e) = apb_engine::review::channel::refuse_publish_consent(
+        &run_dir,
+        &cmd.node,
+        &cmd.decision,
+        channel,
+    ) {
+        return gate_refusal(e);
+    }
     // While a passkey is enrolled on this machine, this gate takes its
     // decision only with a fresh assertion bound to exactly this run,
     // gate, request and option: the token `assert/verify` minted for it.
@@ -878,7 +861,8 @@ pub(crate) async fn post_intent_resolve_handler(
 /// Why a dashboard without keys refuses a decision on an unknown send:
 /// anything on this machine reaches it, a step's agent included, and the
 /// decision lets a repeat of the send go out again or answers it as sent,
-/// as a publish consent would push ([`keyless_publish_refusal`]). It points
+/// as a publish consent would push
+/// ([`apb_engine::review::channel::refuse_publish_consent`]). It points
 /// at the CLI; the ids are quoted as shell words, never trusted as written.
 fn keyless_intent_refusal(
     auth: &crate::auth::AuthState,

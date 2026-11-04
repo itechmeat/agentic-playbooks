@@ -247,7 +247,11 @@ describe('publish gates', () => {
       [
         { ...act('decide_review', 'gate', 'child-1', 99, 'review'), unattended: { kind: 'decides', option: 'reject' } },
         { ...act('decide_review', 'gate', 'r', 7, 'review'), unattended: { kind: 'fails_run', code: 'hitl_required' } },
-        { ...act('decide_publish', 'ship', 'r', 9, 'publish'), unattended: { kind: 'fails_run', code: 'hitl_required' } },
+        {
+          ...act('decide_publish', 'ship', 'r', 9, 'publish'),
+          unattended: { kind: 'fails_run', code: 'hitl_required' },
+          caller_refusal: 'keyless_dashboard',
+        },
         { ...act('answer_question', 'ask', 'r', 12, 'question'), unattended: { kind: 'answers_default' } },
       ],
     )
@@ -266,6 +270,8 @@ describe('publish gates', () => {
       request: 9,
       plan: { nonce: 'publish-0123' },
       unattended: { kind: 'fails_run', code: 'hitl_required' },
+      // The server's mark of a consent this dashboard does not take.
+      callerRefusal: 'keyless_dashboard',
     })
     expect(gates.questions[0]).toMatchObject({ node: 'ask', runId: 'r', request: 12, unattended: { kind: 'answers_default' } })
   })

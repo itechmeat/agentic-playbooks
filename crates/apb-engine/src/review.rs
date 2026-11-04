@@ -648,7 +648,9 @@ pub fn post_decision_to(
 
 /// [`post_decision_to`] stating the channel the decision came through: the
 /// entry point every decision surface uses. A person-only gate refuses a
-/// channel that is not a person's ([`EngineError::ChannelRefused`]); a
+/// channel that is not a person's ([`EngineError::ChannelRefused`]), a
+/// dashboard without keys gives no publish consent
+/// ([`channel::refuse_publish_consent`]); a
 /// decision from a step of the run's own tree is refused for every gate
 /// (`run_step_own_run`). A bound or person-only gate's entry is stamped
 /// with the open request and the channel; the drive consumes nothing else
@@ -660,6 +662,7 @@ pub fn post_decision_via(
     request: Option<u64>,
     channel: DecisionChannel,
 ) -> Result<u64, EngineError> {
+    crate::review::channel::refuse_publish_consent(run_dir, &cmd.node, &cmd.decision, channel)?;
     if channel != DecisionChannel::Scenario {
         crate::review::channel::refuse_own_run(
             run_dir,
@@ -703,6 +706,7 @@ pub fn post_decision_passkey(
             message: "a decision through an API key is never a person's, passkey assertion or not; a key-made client cannot decide a gate that needs a passkey. Sign in to the dashboard in a browser and decide there".to_string(),
         });
     }
+    crate::review::channel::refuse_publish_consent(run_dir, &cmd.node, &cmd.decision, channel)?;
     crate::review::channel::refuse_own_run(run_dir, &apb_core::step_env::StepCaller::from_env())?;
     append_decision(
         run_dir,

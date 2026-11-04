@@ -31,6 +31,21 @@ edges:
   - { from: g, to: done }
 "#;
 
+/// A review gate that offers an option named `publish`: an ordinary
+/// `human_review`, never a publish node.
+const REVIEW_PUBLISH_OPTION: &str = r#"schema: 2
+id: po
+name: po
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: g, type: human_review, options: [publish, reject] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: g }
+  - { from: g, to: done }
+"#;
+
 fn seed(root: &Path, yaml: &str) {
     init_project(root).unwrap();
     let vdir = root.join(".apb/playbooks/po/1.0.0");
@@ -50,10 +65,15 @@ fn poll<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-/// Starts the person-only run and waits for its request: the run dir, the
-/// request seq, and the receiver of the outcome.
-fn started(root: &Path) -> (PathBuf, u64, mpsc::Receiver<(RunStatus, Vec<Event>)>) {
-    seed(root, PERSON_ONLY);
+/// Starts a run of `yaml` and waits for the request on gate `node`: the
+/// run dir, the request seq, and the receiver of the outcome.
+fn started_on(
+    root: &Path,
+    yaml: &str,
+    node: &str,
+    person_only: bool,
+) -> (PathBuf, u64, mpsc::Receiver<(RunStatus, Vec<Event>)>) {
+    seed(root, yaml);
     let (tx, rx) = mpsc::channel();
     let owned = root.to_path_buf();
     std::thread::spawn(move || {
@@ -71,15 +91,23 @@ fn started(root: &Path) -> (PathBuf, u64, mpsc::Receiver<(RunStatus, Vec<Event>)
     let seq = poll("the request", || {
         read_all(&rd).ok()?.iter().find_map(|e| match &e.payload {
             EventPayload::ReviewRequested {
-                node, person_only, ..
-            } if node == "g" => {
-                assert!(person_only, "the request is marked person_only");
+                node: gate,
+                person_only: po,
+                ..
+            } if gate == node => {
+                assert_eq!(*po, person_only, "the request's person_only mark");
                 Some(e.seq)
             }
             _ => None,
         })
     });
     (rd, seq, rx)
+}
+
+/// Starts the person-only run and waits for its request: the run dir, the
+/// request seq, and the receiver of the outcome.
+fn started(root: &Path) -> (PathBuf, u64, mpsc::Receiver<(RunStatus, Vec<Event>)>) {
+    started_on(root, PERSON_ONLY, "g", true)
 }
 
 fn approve() -> ReviewCommand {
@@ -318,4 +346,50 @@ fn a_scenario_run_decides_a_person_only_bound_gate_by_its_script() {
         &e.payload,
         EventPayload::NodeFinished { node, status, .. } if node == "d" && status == "succeeded"
     )));
+}
+
+/// The keyless-dashboard rule protects consent to a publish node's push
+/// plan only: a `human_review` gate that offers an option named `publish`
+/// takes that decision from a dashboard without keys like any other
+/// review decision, while a publish node's consent is still refused, also
+/// when the run's playbook does not read (fail closed).
+#[test]
+fn a_keyless_dashboard_decides_a_publish_named_option_on_a_review_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rd, _seq, rx) = started_on(dir.path(), REVIEW_PUBLISH_OPTION, "g", false);
+    let publish = ReviewCommand {
+        node: "g".into(),
+        decision: "publish".into(),
+        note: String::new(),
+    };
+    match post_decision_via(
+        &rd,
+        publish.clone(),
+        None,
+        None,
+        DecisionChannel::DashboardKeyless,
+    ) {
+        Ok(_) => {}
+        other => panic!("a review option named `publish` was refused: {other:?}"),
+    }
+    assert!(reviews(&rd).contains("publish"), "{}", reviews(&rd));
+
+    // A publish node's consent is still the rule's, and a playbook that
+    // does not read fails closed into it.
+    let bare = dir.path().join(".apb/runs").join("bare");
+    fs::create_dir_all(&bare).unwrap();
+    match post_decision_via(
+        &bare,
+        publish,
+        None,
+        None,
+        DecisionChannel::DashboardKeyless,
+    ) {
+        Err(EngineError::ChannelRefused {
+            refusal: CallerRefusal::KeylessDashboard,
+            message,
+        }) => assert!(message.contains("publish approve"), "{message}"),
+        other => panic!("a keyless publish consent went through: {other:?}"),
+    }
+    rx.recv().unwrap();
 }

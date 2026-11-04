@@ -5,10 +5,11 @@
   // plan's nonce, and after the push its ledger state, with the resolve
   // command when nobody knows whether it arrived. Every text from the run
   // (subjects, URLs, results) renders as plain text. A dashboard without
-  // keys takes no publish consent (anything on the machine could post one),
-  // so there the panel offers the terminal command instead of the button.
+  // keys takes no publish consent (anything on the machine could post one):
+  // the server marks the gate's next action so, from the rule the decision
+  // path applies, and there the panel offers the terminal command instead
+  // of the button.
   import type { PublishView } from './api.gen'
-  import { authState } from './auth.svelte'
   import * as Card from '$lib/components/ui/card'
   import { Button } from '$lib/components/ui/button'
   import UnattendedNote from './UnattendedNote.svelte'
@@ -42,10 +43,8 @@
   } = $props()
 
   const cards = $derived(publishCards(views, gates))
-  const authSnapshot = authState()
-  // Keyless only once the status read answered: until then the button
-  // stays (the server refuses a keyless consent anyway).
-  const keyless = $derived(authSnapshot.checked && !authSnapshot.required)
+  // The consent is refused here only as the server marked it.
+  const keyless = (c: { callerRefusal?: string }) => c.callerRefusal === 'keyless_dashboard'
 </script>
 
 {#if cards.length}
@@ -107,7 +106,7 @@
               {/if}
               {#if c.awaiting_consent}
                 <p class="muted">Consent covers exactly this plan; a changed plan asks again.</p>
-                {#if keyless}
+                {#if keyless(c)}
                   <div class="look" data-testid="publish-keyless">
                     <p>
                       This dashboard has no keys, so it takes no publish consent: anything on this machine could post
@@ -118,7 +117,7 @@
                   </div>
                 {/if}
                 <div class="actions">
-                  {#if !keyless}
+                  {#if !keyless(c)}
                     <Button
                       size="sm"
                       data-testid="publish-approve"

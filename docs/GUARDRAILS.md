@@ -212,7 +212,7 @@ API and the CLI (`CALLER_REFUSALS` in the generated constants):
 | `agent_channel` | a person-only gate refuses MCP |
 | `run_step` | a person-only gate refuses a run step |
 | `no_terminal` | a person-only gate refuses the CLI without a terminal |
-| `keyless_dashboard` | a person-only gate refuses a dashboard without keys |
+| `keyless_dashboard` | a person-only gate refuses a dashboard without keys, and a dashboard without keys gives no publish consent (its `skip` still goes through) |
 | `bearer_key` | a person-only gate refuses the HTTP API with a bearer key |
 | `run_step_own_run` | a run step never decides a gate or answers a question of its own run tree |
 | `passkey_required` | a passkey is enrolled on the machine, so a person-only gate or an approval decides only with a fresh assertion through the dashboard |

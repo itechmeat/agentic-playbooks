@@ -156,7 +156,8 @@ pub enum CallerRefusal {
     RunStep,
     /// A person-only gate refuses the CLI without a terminal.
     NoTerminal,
-    /// A person-only gate refuses a dashboard without keys.
+    /// A dashboard without keys: a person-only gate refuses it, and it
+    /// never gives a publish consent (a skip still goes through).
     KeylessDashboard,
     /// A person-only gate refuses the HTTP API with a bearer key.
     BearerKey,

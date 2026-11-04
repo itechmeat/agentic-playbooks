@@ -1,7 +1,8 @@
 //! `scripts/daily-cleanup.sh`: on a git that cannot list worktrees with
 //! `--porcelain -z` (older than 2.36) the script warns, skips the worktree
 //! steps (the prune included) and still runs the rest to its end; a merged worktree goes only
-//! when every apb run in it has ended and its busy lock is not held.
+//! when every apb run in it has ended and its busy lock is not held (a lock
+//! parked by a paused run holds only while that run is paused).
 
 use std::path::Path;
 use std::process::Command;
@@ -269,14 +270,70 @@ fn a_merged_worktree_whose_busy_lock_is_held_is_kept() {
     });
     assert!(!removes(&out), "{out}");
     assert!(out.contains("busy lock"), "{out}");
-    let out = dry_run_with(|wt| {
-        std::fs::write(wt.join(".apb/workdir.lock"), "paused:r1").unwrap();
-    });
-    assert!(!removes(&out), "{out}");
     // A pid no process holds is a crash leftover.
     let out = dry_run_with(|wt| {
         run_journal(wt, "runs", "r1", &[STARTED, FINISHED]);
         std::fs::write(wt.join(".apb/workdir.lock"), "4000000000").unwrap();
     });
     assert!(removes(&out), "{out}");
+}
+
+const PAUSED: &str = r#"{"seq":5,"ts":5,"type":"run_paused","reason":"operator"}"#;
+
+fn park(wt: &Path, id: &str) {
+    std::fs::write(wt.join(".apb/workdir.lock"), format!("paused:{id}\n")).unwrap();
+}
+
+#[test]
+fn a_lock_parked_by_a_run_that_is_still_paused_keeps_the_worktree() {
+    // The run is paused: the parked lock holds it.
+    let out = dry_run_with(|wt| {
+        run_journal(wt, "runs", "r1", &[STARTED, PAUSED]);
+        park(wt, "r1");
+    });
+    assert!(!removes(&out), "{out}");
+    assert!(out.contains("busy lock"), "{out}");
+    // A journal that does not parse, and a run id that is not a plain name,
+    // keep it too.
+    let out = dry_run_with(|wt| {
+        run_journal(wt, "runs", "r1", &[STARTED, r#"{"seq":1,"#]);
+        park(wt, "r1");
+    });
+    assert!(!removes(&out), "{out}");
+    assert!(out.contains("busy lock"), "{out}");
+    let out = dry_run_with(|wt| park(wt, "../r1"));
+    assert!(!removes(&out), "{out}");
+    assert!(out.contains("busy lock"), "{out}");
+}
+
+#[test]
+fn a_lock_parked_by_a_run_that_is_no_longer_paused_is_stale() {
+    let aborted = r#"{"seq":6,"ts":6,"type":"run_aborted"}"#;
+    let resumed = r#"{"seq":6,"ts":6,"type":"run_resumed"}"#;
+    let finished = r#"{"seq":9,"ts":9,"type":"run_finished","outcome":"succeeded"}"#;
+    let cases: Vec<(&str, Vec<&str>)> = vec![
+        (
+            "finished after its pause",
+            vec![STARTED, PAUSED, resumed, finished],
+        ),
+        ("aborted while paused", vec![STARTED, PAUSED, aborted]),
+    ];
+    for (what, lines) in cases {
+        let out = dry_run_with(|wt| {
+            run_journal(wt, "runs", "r1", &lines);
+            park(wt, "r1");
+        });
+        assert!(removes(&out), "{what}: {out}");
+    }
+    // Its run directory is gone.
+    let out = dry_run_with(|wt| park(wt, "r1"));
+    assert!(removes(&out), "{out}");
+    // Another run that has not ended still keeps the worktree.
+    let out = dry_run_with(|wt| {
+        run_journal(wt, "runs", "r1", &[STARTED, PAUSED, aborted]);
+        run_journal(wt, "runs", "r2", &[STARTED]);
+        park(wt, "r1");
+    });
+    assert!(!removes(&out), "{out}");
+    assert!(out.contains("a run that has not ended"), "{out}");
 }

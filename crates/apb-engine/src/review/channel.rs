@@ -86,20 +86,84 @@ pub fn refuse_for_person_only(
     })
 }
 
+/// Whether `channel` never gives `decision` as a publish consent on a
+/// `publish` gate (`is_publish_gate`): a dashboard without keys takes no
+/// publish consent (decision record 0010). Anything on this machine
+/// reaches it, a sandboxed agent under `network: open` included, and the
+/// open plan's nonce is in the run payload, so it could consent to its own
+/// push. The rule protects consent to a publish node's push plan only: an
+/// option named `publish` on a `human_review` gate is an ordinary review
+/// decision, so the gate decides it. A `skip` pushes nothing and goes
+/// through. The one rule the decision path ([`refuse_publish_consent`])
+/// and the next actions (`next_action::caller_refusal`) share.
+pub fn refuses_publish_consent(
+    channel: DecisionChannel,
+    decision: &str,
+    is_publish_gate: bool,
+) -> bool {
+    is_publish_gate
+        && channel == DecisionChannel::DashboardKeyless
+        && decision == apb_core::publish::OPTION_PUBLISH
+}
+
+/// Whether the gate `node` of the run at `run_dir` is a `publish` node, so
+/// [`refuses_publish_consent`] applies to it. A playbook that does not
+/// read, or a node it does not have, is one: the rule fails closed, the
+/// same way `check_review_target` judges an unreadable snapshot.
+pub fn is_publish_gate(run_dir: &Path, node: &str) -> bool {
+    crate::progress::load_run_playbook(run_dir)
+        .and_then(|p| {
+            p.node(node)
+                .map(|n| matches!(n.kind, apb_core::schema::NodeKind::Publish { .. }))
+        })
+        .unwrap_or(true)
+}
+
+/// The refusal of `decision` on the publish gate `node` of the run at
+/// `run_dir` through `channel` when [`refuses_publish_consent`] holds
+/// (`keyless_dashboard`); `Ok` otherwise. The message names where the
+/// person consents instead: the CLI, or, while a passkey is enforced and
+/// the CLI refuses a publish consent too, a signed-in dashboard session.
+pub fn refuse_publish_consent(
+    run_dir: &Path,
+    node: &str,
+    decision: &str,
+    channel: DecisionChannel,
+) -> Result<(), EngineError> {
+    if !refuses_publish_consent(channel, decision, is_publish_gate(run_dir, node)) {
+        return Ok(());
+    }
+    let message = if passkey_enforced_here() {
+        "a dashboard without keys does not take a publish consent, since anything on this machine can reach it, and while a passkey is enrolled the CLI refuses it too: issue a key with `apb server key issue`, sign in, and decide with a passkey on the run page".to_string()
+    } else {
+        format!(
+            "a dashboard without keys does not take a publish consent, since anything on this machine can reach it; approve with `apb publish approve {} --node {node} --nonce <nonce>`, or issue a key with `apb server key issue` and sign in",
+            run_id_of(run_dir)
+        )
+    };
+    Err(EngineError::ChannelRefused {
+        refusal: CallerRefusal::KeylessDashboard,
+        message,
+    })
+}
+
+/// At least one passkey enrolled, or a store that exists but does not
+/// read (fail closed); kept here, off the parent module's
+/// `passkey_enforced`, so this leaf never depends back on it.
+fn passkey_enforced_here() -> bool {
+    match apb_core::passkey::count_strict() {
+        Ok(n) => n > 0,
+        Err(_) => true,
+    }
+}
+
 /// Whether a passkey assertion is required on top of a person's channel
 /// for the gate `node` of the run at `run_dir`: at least one passkey is
 /// enrolled on this machine and the gate is one only a person decides
 /// ([`super::passkey_required`] covers bound approvals too). A playbook
 /// that does not read fails closed: the requirement stands.
 fn passkey_required_for_person_only(run_dir: &Path, node: &str) -> bool {
-    // At least one passkey enrolled, or a store that exists but does not
-    // read (fail closed); kept here, off the parent module, so this leaf
-    // never depends back on it.
-    let enforced = match apb_core::passkey::count_strict() {
-        Ok(n) => n > 0,
-        Err(_) => true,
-    };
-    enforced
+    passkey_enforced_here()
         && crate::progress::load_run_playbook(run_dir)
             .and_then(|p| {
                 p.node(node).map(|n| {

@@ -55,8 +55,11 @@ pub fn for_surface(
 /// Why a caller posting through `channel` (from inside the run step
 /// `step`, if any) does not take `a`, the action of the run at `run_dir`:
 /// a step never decides a gate, answers a question or resolves a send of
-/// its own run tree (`run_step_own_run`), and a person-only gate refuses
-/// every channel that is not a person's. `None` when the caller may take
+/// its own run tree (`run_step_own_run`), a dashboard without keys gives
+/// no publish consent on a publish gate (`keyless_dashboard`, the decision
+/// path's [`crate::review::channel::refuses_publish_consent`]), and a
+/// person-only
+/// gate refuses every channel that is not a person's. `None` when the caller may take
 /// it; the path that executes it checks everything again.
 pub fn caller_refusal(
     a: &NextAction,
@@ -73,6 +76,23 @@ pub fn caller_refusal(
     );
     if decides && crate::review::channel::refuse_own_run(run_dir, step).is_err() {
         return Some(CallerRefusal::RunStepOwnRun);
+    }
+    // The decision path's own rule (`review::channel`): a dashboard
+    // without keys takes no publish consent on a publish gate, so the
+    // action is not this caller's to consent to (a skip still goes
+    // through, and an option named `publish` on a `human_review` gate is
+    // an ordinary review decision).
+    if a.code == ActionCode::DecidePublish
+        && crate::review::channel::refuses_publish_consent(
+            channel,
+            apb_core::publish::OPTION_PUBLISH,
+            crate::review::channel::is_publish_gate(
+                run_dir,
+                a.target.node.as_deref().unwrap_or_default(),
+            ),
+        )
+    {
+        return Some(CallerRefusal::KeylessDashboard);
     }
     let gate = matches!(a.code, ActionCode::DecideReview | ActionCode::DecidePublish);
     if gate {
