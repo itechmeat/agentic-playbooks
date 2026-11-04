@@ -1111,7 +1111,7 @@ fn kill_pid(pid: u32) {
 
 /// SIGKILL to a process group; the group form negates, so it needs `> 1`
 /// (`-1` would be every process this user may signal).
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub(crate) fn kill_group(pgid: u32) {
     if pgid <= 1 {
         return;
