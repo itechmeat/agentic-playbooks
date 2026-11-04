@@ -160,7 +160,15 @@ regenerable_paths=(
 # on a gate, a queued or running one, a run directory without a journal and
 # a journal that does not parse all count as not ended. The busy lock
 # (`.apb/workdir.lock`) keeps the worktree while it names a live process or
-# a paused run; a pid no process holds any more is a crash leftover.
+# a paused run that still holds it; a pid no process holds any more is a
+# crash leftover.
+#
+# A lock parked by a `--keep-lock` pause names `paused:<run id>`
+# (`apb_engine::workdir`). It holds, as the engine decides it, only while
+# that run's directory exists and the run has not ended: a run that
+# finished or was aborted after its pause, or whose directory is gone, left
+# a stale lock the next apb run takes, so it keeps nothing. A run id that is
+# not a plain name, or a journal that does not parse, keeps the worktree.
 journal_ended() {
   jq -e -s '
     ([.[] | select(.type | IN("run_started", "run_resumed", "run_queued",
@@ -173,15 +181,46 @@ journal_ended() {
   ' "$1" >/dev/null 2>&1
 }
 
+# Whether the last lifecycle event of a journal is `run_finished` or
+# `run_aborted`, sends left aside: what ends the hold of a parked lock.
+lifecycle_ended() {
+  jq -e -s '
+    [.[] | select(.type | IN("run_started", "run_resumed", "run_queued",
+        "run_paused", "run_finished", "run_aborted"))] | last | .type
+    | . == "run_finished" or . == "run_aborted"
+  ' "$1" >/dev/null 2>&1
+}
+
+# Whether the paused run a parked lock of worktree $1 names ($2) still
+# holds it; 0 holds, 1 stale. Anything unreadable holds.
+paused_run_holds() {
+  local wt="$1" id="$2" run
+  case "$id" in
+    ''|.|*/*|*\\*|*..*) return 0 ;;
+  esac
+  run="$wt/.apb/runs/$id"
+  [ -d "$run" ] || return 1
+  [ -f "$run/events.jsonl" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  lifecycle_ended "$run/events.jsonl" && return 1
+  return 0
+}
+
 runs_ended() {
   local wt="$1" d lock owner
   if [ -e "$wt/.apb/workdir.lock" ]; then
     owner="$(head -c 256 "$wt/.apb/workdir.lock" 2>/dev/null)" || return 2
+    owner="$(printf '%s' "$owner" | tr -d '[:space:]')"
     case "$owner" in
+      paused:*)
+        paused_run_holds "$wt" "${owner#paused:}" && return 2
+        ;;
       ''|*[!0-9]*) return 2 ;;
+      *)
+        kill -0 "$owner" 2>/dev/null && return 2
+        [ -d "/proc/$owner" ] && return 2
+        ;;
     esac
-    kill -0 "$owner" 2>/dev/null && return 2
-    [ -d "/proc/$owner" ] && return 2
   fi
   [ -d "$wt/.apb/runs" ] || [ -d "$wt/.apb/scenario-runs" ] || return 0
   command -v jq >/dev/null 2>&1 || return 3
