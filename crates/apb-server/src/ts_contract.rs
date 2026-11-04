@@ -59,6 +59,9 @@ fn render_types() -> String {
         apb_engine::run_outcome::notes::RunWarning::decl(&cfg),
         apb_engine::run_outcome::RunNotes::decl(&cfg),
         apb_engine::run_outcome::summary::EvidenceSource::decl(&cfg),
+        apb_engine::run_outcome::summary::EvidenceBasis::decl(&cfg),
+        apb_engine::run_outcome::summary::FreshnessState::decl(&cfg),
+        apb_engine::run_outcome::summary::Freshness::decl(&cfg),
         apb_engine::run_outcome::summary::Evidence::decl(&cfg),
         apb_engine::run_outcome::summary::GapKind::decl(&cfg),
         apb_engine::run_outcome::summary::Gap::decl(&cfg),
@@ -583,10 +586,20 @@ fn render_consts() -> String {
             .join(", ")
     ));
     {
-        use apb_engine::run_outcome::summary::{EvidenceSource, GapKind};
+        use apb_engine::run_outcome::summary::{
+            EvidenceBasis, EvidenceSource, FreshnessState, GapKind,
+        };
         out.push_str(&format!(
             "\n/** What checked a piece of evidence, in words. */\nexport const EVIDENCE_SOURCE_LABELS = {{ {} }} as const\n",
             label_entries(EvidenceSource::ALL.iter().map(|s| (serde_key(s), s.label())))
+        ));
+        out.push_str(&format!(
+            "\n/** What decided a piece of evidence, in words. */\nexport const EVIDENCE_BASIS_LABELS = {{ {} }} as const\n",
+            label_entries(EvidenceBasis::ALL.iter().map(|b| (serde_key(b), b.label())))
+        ));
+        out.push_str(&format!(
+            "\n/** Whether a check still describes the tree the run left, in words. */\nexport const FRESHNESS_LABELS = {{ {} }} as const\n",
+            label_entries(FreshnessState::ALL.iter().map(|f| (serde_key(f), f.label())))
         ));
         out.push_str(&format!(
             "\n/** Why something is not verified, in words. */\nexport const GAP_LABELS = {{ {} }} as const\n",

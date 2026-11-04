@@ -28,6 +28,32 @@ impl Markup {
         ))
     }
 
+    /// `<tag class="class" name="value">body</tag>` for the SVG the graph
+    /// draws: tag, class and attribute names are fixed names, and every
+    /// value must be one the report built from numbers and fixed tokens
+    /// (a coordinate, a marker reference). A class or value that carries a
+    /// character a quoted attribute cannot hold is dropped, so nothing from
+    /// the run can reach an attribute; text reaches the body only through
+    /// [`Markup::text`].
+    pub fn svg(tag: &'static str, class: Option<&str>, attrs: &[SvgAttr], body: Markup) -> Self {
+        let mut out = format!("<{tag}");
+        if let Some(class) = class
+            && !attr_hostile(class)
+        {
+            out.push_str(&format!(" class=\"{class}\""));
+        }
+        for SvgAttr(name, value) in attrs {
+            if attr_hostile(value) {
+                continue;
+            }
+            out.push_str(&format!(" {name}=\"{value}\""));
+        }
+        out.push('>');
+        out.push_str(&body.0);
+        out.push_str(&format!("</{tag}>"));
+        Markup(out)
+    }
+
     /// The pieces one after another.
     pub fn concat(parts: impl IntoIterator<Item = Markup>) -> Self {
         Markup(parts.into_iter().map(|m| m.0).collect())
@@ -40,6 +66,17 @@ impl Markup {
     pub fn into_string(self) -> String {
         self.0
     }
+}
+
+/// One attribute of [`Markup::svg`]: a fixed name over a value the report
+/// built itself.
+#[derive(Debug, Clone)]
+pub struct SvgAttr(pub &'static str, pub String);
+
+/// Whether `text` carries a character a quoted HTML attribute cannot hold.
+fn attr_hostile(text: &str) -> bool {
+    text.chars()
+        .any(|c| matches!(c, '&' | '<' | '>' | '"' | '\''))
 }
 
 /// `text` with the five characters HTML treats specially replaced, so it

@@ -1732,10 +1732,11 @@ pub enum DecisionOptIn {
 ///   (issue 45): the completion marker is emitted only on genuine completion.
 ///
 /// `untagged` so the bare-string form deserializes unchanged; a map is matched
-/// against the `Marker` variant. Any other shape fails to deserialize, so an
-/// unknown form is rejected at parse time.
+/// against the `Marker` and `Scoped` forms, each refusing a key it does not
+/// know, so a map mixing the forms (`{ marker, scope }`) or naming an
+/// unknown key fails to parse instead of dropping the rest.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(untagged)]
+#[serde(untagged, from = "SuccessCheckForm")]
 pub enum SuccessCheck {
     /// Deterministic sh-script check: path (relative to the version's
     /// `scripts/`) whose non-zero exit fails the node.
@@ -1743,14 +1744,65 @@ pub enum SuccessCheck {
     /// Completion-marker check: the literal `marker` string must appear in the
     /// node output, otherwise the reported success is rejected.
     Marker { marker: String },
+    /// The script form with the files it reads: `{ script, scope }`. The
+    /// script runs as in [`SuccessCheck::Script`]; `scope` (globs relative
+    /// to the tree the check runs in) is what its passing result is bound
+    /// to, so the run outcome shows the pass as stale once a later node
+    /// changes a file in it, and as still current after an edit elsewhere
+    /// (spec 2026-11-03-evidence-freshness-design, V163).
+    Scoped { script: String, scope: Vec<String> },
+}
+
+/// The shapes a `success_check` is read from: the same as [`SuccessCheck`],
+/// with the map forms closed to unknown keys.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SuccessCheckForm {
+    Script(String),
+    Marker(MarkerForm),
+    Scoped(ScopedForm),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MarkerForm {
+    marker: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopedForm {
+    script: String,
+    scope: Vec<String>,
+}
+
+impl From<SuccessCheckForm> for SuccessCheck {
+    fn from(form: SuccessCheckForm) -> Self {
+        match form {
+            SuccessCheckForm::Script(path) => SuccessCheck::Script(path),
+            SuccessCheckForm::Marker(MarkerForm { marker }) => SuccessCheck::Marker { marker },
+            SuccessCheckForm::Scoped(ScopedForm { script, scope }) => {
+                SuccessCheck::Scoped { script, scope }
+            }
+        }
+    }
 }
 
 impl SuccessCheck {
     /// The script path when this is the sh-script form, else `None`.
     pub fn script_path(&self) -> Option<&str> {
         match self {
-            SuccessCheck::Script(path) => Some(path),
+            SuccessCheck::Script(path) | SuccessCheck::Scoped { script: path, .. } => Some(path),
             SuccessCheck::Marker { .. } => None,
+        }
+    }
+
+    /// The globs a script check declares it reads; empty when it declares
+    /// none (and for the marker form).
+    pub fn scope(&self) -> &[String] {
+        match self {
+            SuccessCheck::Scoped { scope, .. } => scope,
+            _ => &[],
         }
     }
 
@@ -1758,7 +1810,7 @@ impl SuccessCheck {
     pub fn marker(&self) -> Option<&str> {
         match self {
             SuccessCheck::Marker { marker } => Some(marker),
-            SuccessCheck::Script(_) => None,
+            SuccessCheck::Script(_) | SuccessCheck::Scoped { .. } => None,
         }
     }
 }
@@ -2820,6 +2872,34 @@ edges: []
     }
 
     #[test]
+    fn success_check_scoped_form_parses_and_round_trips() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, profile: x, success_check: { script: scripts/check.sh, scope: ["src/**"] } }
+edges: []
+"#;
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        let sc = pb.node("a").unwrap().success_check.clone().unwrap();
+        assert_eq!(sc.script_path(), Some("scripts/check.sh"));
+        assert_eq!(sc.scope(), ["src/**".to_string()]);
+        assert_eq!(sc.marker(), None);
+        let out = yaml_serde::to_string(&pb).unwrap();
+        let pb2 = Playbook::from_yaml(&out).unwrap();
+        assert_eq!(pb2.node("a").unwrap().success_check, Some(sc));
+        // The bare form declares no scope.
+        assert!(
+            SuccessCheck::Script("scripts/c.sh".into())
+                .scope()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn success_check_marker_map_form_parses_and_round_trips() {
         let yaml = r#"
 schema: 2
@@ -2883,5 +2963,25 @@ edges: []
             Playbook::from_yaml(yaml).is_err(),
             "an unknown success_check shape must be rejected"
         );
+    }
+
+    #[test]
+    fn success_check_mixed_maps_are_refused() {
+        // A map naming keys of two forms used to parse as the marker form and
+        // drop the rest: the scope (or the whole script) silently ignored.
+        for check in [
+            r#"{ marker: DONE, scope: ["src/**"] }"#,
+            r#"{ script: scripts/check.sh, scope: ["src/**"], marker: DONE }"#,
+            r#"{ script: scripts/check.sh, scope: ["src/**"], extra: 1 }"#,
+            r#"{ marker: DONE, extra: 1 }"#,
+        ] {
+            let yaml = format!(
+                "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - {{ id: s, type: start }}\n  - {{ id: a, type: agent_task, prompt: hi, profile: x, success_check: {check} }}\nedges: []\n"
+            );
+            assert!(
+                Playbook::from_yaml(&yaml).is_err(),
+                "{check} must be refused"
+            );
+        }
     }
 }

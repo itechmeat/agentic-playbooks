@@ -504,6 +504,8 @@ mod run_provenance_test;
 #[path = "suite/run_retro_test.rs"]
 mod run_retro_test;
 // Unix-only: its agents are shell scripts.
+#[path = "suite/evidence_freshness_test.rs"]
+mod evidence_freshness_test;
 #[cfg(unix)]
 #[path = "suite/run_graph_test.rs"]
 mod run_graph_test;

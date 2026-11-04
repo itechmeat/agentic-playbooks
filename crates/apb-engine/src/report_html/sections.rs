@@ -24,6 +24,19 @@ impl Writer {
         Markup::text(&self.redactor.redact(text))
     }
 
+    /// `text` redacted whole, then cut to at most `max` chars, `...`
+    /// appended when cut. The graph's labels use it: the cut never splits
+    /// an escape, because escaping happens after the cut, in
+    /// [`Markup::text`].
+    pub(super) fn short(&self, text: &str, max: usize) -> String {
+        let redacted = self.redactor.redact(text);
+        let mut out: String = redacted.chars().take(max).collect();
+        if redacted.chars().count() > max {
+            out.push_str("...");
+        }
+        out
+    }
+
     pub(super) fn el(&self, tag: &'static str, class: Option<&'static str>, text: &str) -> Markup {
         Markup::el(tag, class, self.text(text))
     }

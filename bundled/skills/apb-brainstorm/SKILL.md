@@ -2,13 +2,25 @@
 name: apb-brainstorm
 description: One design pass per feature with an independent advisor before implementation. Reuses a current design on re-entry. Use before building a new feature, or when a consequential design question is asked. Design only; it does not implement, commit or publish.
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # Brainstorm a design
 
 Every new feature gets one design pass. Keep it short for a small feature.
 The result is a design record that the implementation can follow.
+
+## 0. Depth by risk
+
+- **Small and reversible** (no risk trigger, easy to undo): a short record,
+  the few questions that matter, one advisor round.
+- **Risky**: the design touches persisted data or formats, a public API or
+  CLI contract, security or secrets, concurrency or recovery, the release or
+  check machinery, or a guarantee other code relies on. Every decision on
+  that risk goes to the advisor with its consequence, and the record states
+  the protected boundary.
+- File count alone neither raises nor lowers the depth. A lower depth needs
+  a written reason based on consequences.
 
 ## 1. Reuse first
 
@@ -33,11 +45,20 @@ The result is a design record that the implementation can follow.
   - behavior that must keep working;
   - facts and assumptions, kept apart.
 - Find code facts yourself. Do not ask the issuer to read the code for you.
+- Check whether the project already solves the problem, fully or in part,
+  before you design a new mechanism. Record what exists and the real gap.
+
+Evidence before claims: every fact in the record names its source (a file
+and line, a command and its output, a document). A claim from memory or
+from a similar project is an assumption until you checked it.
 
 ## 3. Ask an independent advisor
 
 - Batch the consequential open questions. Give each real options and the
   sources behind them. Leave your own preference out of the first packet.
+- The advisor works in a context that did not write the design: its first
+  packet holds no reasoning of yours, no preference and no other advisor's
+  answer.
 - Pick the advisor by this fallback chain:
   1. an agent of a different family than yours;
   2. any other available family;
@@ -57,7 +78,10 @@ The result is a design record that the implementation can follow.
 - Compare reasons, not votes. Settle factual questions by inspection.
 - Challenge the proposed acceptance: which plausible wrong implementation
   would still pass it?
-- Allow one targeted reconciliation for a related disagreement.
+- Allow one targeted reconciliation for a related disagreement. Its packet
+  carries the conflicting facts and both sides' reasons, nothing else.
+- The pass is bounded: one advisor round and at most one reconciliation.
+  Do not ask again to get agreement.
 - Route only a still unresolved choice to the task issuer. For delegated
   work the issuer is the assigning agent.
 

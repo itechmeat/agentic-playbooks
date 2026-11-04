@@ -281,7 +281,16 @@ not a read-only tool, so a host asks before it writes), `GET
 no script, no event handler, no external resource; its one stylesheet is
 pinned by hash in its Content Security Policy, and every string from the
 run is redacted (whole, before any cut, and each journal event field by
-field before it is serialised) and escaped.
+field before it is serialised) and escaped. Near the top, after the
+outcome, the page also draws the playbook graph of the definition the run
+actually executed (from the run's stored definitions, never the current
+`playbook.yaml`), laid out top to bottom, nodes coloured by their status
+in the run (succeeded, failed, running, skipped, never ran), edges solid
+where the run traversed them and dashed where it did not; edges that
+route on an option show their label: a review status, a judge
+`output_field` route as `field: value`, and a judge question edge as its
+threshold (the question itself is too long for a label). Above 80 nodes
+the section shows a note instead of the graph.
 
 ## Older versions of apb
 

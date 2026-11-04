@@ -3,8 +3,10 @@
   import OutcomeSection from '$lib/components/OutcomeSection.svelte'
   import OutcomeTag from '$lib/components/OutcomeTag.svelte'
   import {
+    evidenceBasis,
     evidenceSource,
     evidenceTone,
+    freshnessText,
     gapIsWarning,
     gapLabel,
     goalReachedText,
@@ -48,6 +50,10 @@
               <span class="muted">{evidenceSource(e)}:</span>
               {e.subject}
               {#if e.detail}<span class="muted"> · {e.detail}</span>{/if}
+              <span class="muted" data-testid="run-verdict-basis"> · {evidenceBasis(e)}</span>
+              {#if freshnessText(e)}
+                <span class="stale" data-testid="run-verdict-freshness"> · {freshnessText(e)}</span>
+              {/if}
             </span>
           </li>
         {/each}
@@ -186,6 +192,9 @@
   }
   .muted {
     color: var(--muted-foreground);
+  }
+  .stale {
+    color: var(--warning);
   }
   code,
   pre {

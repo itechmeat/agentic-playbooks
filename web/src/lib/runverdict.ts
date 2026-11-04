@@ -1,5 +1,15 @@
-import type { Evidence, EvidenceSource, Gap, GapKind, NeedsLook, RunFinding, RunWarning } from './api.gen'
-import { EVIDENCE_SOURCE_LABELS, GAP_LABELS } from './consts.gen'
+import type {
+  Evidence,
+  EvidenceBasis,
+  EvidenceSource,
+  FreshnessState,
+  Gap,
+  GapKind,
+  NeedsLook,
+  RunFinding,
+  RunWarning,
+} from './api.gen'
+import { EVIDENCE_BASIS_LABELS, EVIDENCE_SOURCE_LABELS, FRESHNESS_LABELS, GAP_LABELS } from './consts.gen'
 
 // The run page's verdict panel: pure formatting of the run's human outcome
 // (`RunDetail.outcome`). The panel keeps what the engine checked apart from
@@ -14,15 +24,39 @@ export type Tone = 'pass' | 'fail' | 'gap' | 'neutral'
 // enums: a kind without a label fails type-checking.
 const evidenceSourceLabels: Readonly<Record<EvidenceSource, string>> = EVIDENCE_SOURCE_LABELS
 const gapLabels: Readonly<Record<GapKind, string>> = GAP_LABELS
+const basisLabels: Readonly<Record<EvidenceBasis, string>> = EVIDENCE_BASIS_LABELS
+const freshnessLabels: Readonly<Record<FreshnessState, string>> = FRESHNESS_LABELS
 
 // `goal`, `success check`, `baseline`.
 export function evidenceSource(e: Evidence): string {
   return evidenceSourceLabels[e.source] ?? e.source
 }
 
-// A goal criterion that passed or a baseline rule that was met.
+// A goal criterion that passed or a baseline rule that was met, and still
+// describes the tree the run left; a pass that is stale or not known to be
+// current is shown as a gap, never as a pass. A failed check stays failed,
+// whatever its freshness.
 export function evidenceTone(e: Evidence): Tone {
-  return e.result === 'passed' || e.result === 'met' ? 'pass' : 'fail'
+  if (e.result !== 'passed' && e.result !== 'met') return 'fail'
+  return evidenceIsCurrent(e) ? 'pass' : 'gap'
+}
+
+// Whether nothing says the result is out of date (`Evidence::is_current`).
+export function evidenceIsCurrent(e: Evidence): boolean {
+  return !e.freshness || e.freshness.state === 'current'
+}
+
+// `executed`, `agent's own text`, `model judgment`, `read by apb`.
+export function evidenceBasis(e: Evidence): string {
+  return basisLabels[e.basis] ?? e.basis
+}
+
+// `stale: a file in its scope (src/**) changed after the check`, or null
+// for a result that is current or never bound.
+export function freshnessText(e: Evidence): string | null {
+  if (!e.freshness || e.freshness.state === 'current') return null
+  const label = freshnessLabels[e.freshness.state] ?? e.freshness.state
+  return e.freshness.reason ? `${label}: ${e.freshness.reason}` : label
 }
 
 // `not met`, not `not_met`.

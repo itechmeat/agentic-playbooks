@@ -17,6 +17,8 @@ mod model;
 mod quality;
 mod sections;
 
+mod graph;
+
 use std::path::Path;
 
 use crate::error::EngineError;
@@ -46,6 +48,7 @@ pub fn render(root: &Path, run_dir: &Path) -> Result<String, EngineError> {
         Markup::concat([
             sections::header(&w, &title, &report),
             sections::outcome(&w, &report.outcome),
+            graph::run_graph(&w, &report),
             sections::goal(&w, report.goal.as_ref()),
             sections::steps(&w, &report.steps),
             sections::lists(&w, &report.outcome),

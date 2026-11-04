@@ -1370,6 +1370,40 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kept_copies: Option<String>,
     },
+    /// A script `success_check` passed: what its result is bound to (spec
+    /// 2026-11-03-evidence-freshness-design). Written right after the
+    /// script exited, inside the attempt, before its `attempt_finished`;
+    /// the next checkpoint is the node's `node_finished` (or the pause that
+    /// interrupts it), and it is safe to skip up to there: it changes no
+    /// state, only what the run outcome says about the check. Additive
+    /// variant.
+    EvidenceBound {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        attempt: u32,
+        /// `success_check`. Free text, so a check a newer apb binds reads.
+        #[serde(default)]
+        check: String,
+        /// The directory the check ran in.
+        #[serde(default)]
+        root: String,
+        /// The globs the check declares it reads; empty for the whole tree.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        scope: Vec<String>,
+        /// The workspace fingerprint of the scope after the check exited;
+        /// absent when it could not be taken.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fingerprint: Option<String>,
+    },
+    /// The same fingerprints again at the finish node, after the baseline's
+    /// after snapshot and before the goal criteria: one per distinct root
+    /// and scope the current bindings name. The finish node's
+    /// `node_finished` follows; safe to skip, no state. Additive variant.
+    EvidenceObserved {
+        #[serde(default)]
+        observations: Vec<EvidenceObservation>,
+    },
     /// How the tree of a `read_only` node is held for one attempt (a
     /// script's one run): the tier and, for a detected tier, what the
     /// before-state covered. Written right after the attempt's
@@ -2244,6 +2278,18 @@ pub struct ReadOnlyCheck {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub partial: Option<ReadOnlyLimit>,
+}
+
+/// One fingerprint of an [`EventPayload::EvidenceObserved`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceObservation {
+    #[serde(default)]
+    pub root: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope: Vec<String>,
+    /// Absent when it could not be taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
 }
 
 /// One changed path of an [`EventPayload::ReadOnlyViolated`].

@@ -321,3 +321,49 @@ fn the_report_shows_trusted_grades_with_their_cites_and_the_known_problems() {
         assert!(known.contains(shown), "{shown}: {known}");
     }
 }
+
+/// A project whose playbook runs two scripts and a finish node: a real run
+/// the report is rendered from, whose definition lives in the run's stored
+/// definitions.
+#[test]
+fn the_graph_section_draws_the_definition_the_run_executed() {
+    use apb_core::registry::init_project;
+    use apb_engine::scheduler::{RunOptions, run};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/g/1.0.0");
+    std::fs::create_dir_all(vdir.join("scripts")).unwrap();
+    std::fs::write(
+        vdir.join("playbook.yaml"),
+        "schema: 2\nid: g\nname: G\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: script, script: \"scripts/work.sh\", runner: sh }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n",
+    ).unwrap();
+    std::fs::write(vdir.join("scripts/work.sh"), "echo hi\n").unwrap();
+    std::fs::write(root.join(".apb/playbooks/g/current"), "1.0.0").unwrap();
+    let res = run(root, "g", None, RunOptions::default()).unwrap();
+    let dir = root.join(".apb/runs").join(&res.run_id);
+    // The stored definition the run executed.
+    let defs = std::fs::read_dir(dir.join("definitions")).unwrap();
+    assert_eq!(defs.count(), 1, "the run stored its definition");
+    let html = render(root, &dir).unwrap();
+    assert!(html.contains("<h2>Graph</h2>"), "{html}");
+    assert!(html.contains("<svg class=\"graph-svg\""), "{html}");
+    assert!(html.contains(">work</text>"), "{html}");
+    // Every edge was traversed: solid, not dashed.
+    assert!(html.contains("graph-edge-taken"), "{html}");
+    assert!(
+        !html.contains("<path class=\"graph-edge graph-edge-skip\""),
+        "{html}"
+    );
+    assert!(html.contains("graph-st-succeeded"), "{html}");
+    // The graph reads the stored definition, not the mutable snapshot:
+    // rename the node in the run's snapshot and the graph still draws the
+    // executed id.
+    std::fs::write(
+        dir.join("playbook.yaml"),
+        "schema: 2\nid: g\nname: G\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: moved, type: script, script: \"scripts/work.sh\", runner: sh }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: moved }\n  - { from: moved, to: done }\n",
+    ).unwrap();
+    let again = render(root, &dir).unwrap();
+    assert!(again.contains(">work</text>"), "{again}");
+    assert!(!again.contains(">moved</text>"), "{again}");
+}

@@ -2,7 +2,7 @@
 name: apb-delivery
 description: Deliver an authorized feature, bug fix or refactoring from the original request to a reviewed, checked and reported change. Use for product code changes. Inside an apb playbook, run only the stage the node names. Research and design-only tasks stay local and unpublished.
 metadata:
-  version: "1.2.0"
+  version: "1.3.0"
 ---
 
 # Deliver a change
@@ -44,12 +44,16 @@ A project may add triggers or size thresholds. File count alone neither sets
 nor lowers risk. Lower coverage needs a written reason based on consequences.
 Never waive a check the project requires.
 
+The triggers set the review depth (lightweight, standard or high risk) in
+the apb-review skill, section 0.
+
 ## 3. Change kind
 
 - **Feature.** One design pass with the apb-brainstorm skill, or reuse of a
   current advised design.
-- **Bug fix.** A failing observation first, then a causal explanation, then
-  the fix. Show the original scenario passing and a regression check.
+- **Bug fix.** Use the apb-diagnosis skill: reproduce, isolate, name the
+  root cause with evidence, and write a regression test that fails before
+  the fix. Show the original scenario passing after it.
 - **Refactoring.** State what must be preserved and the realistic benefit.
   Show preservation with tests, characterization or comparisons.
 - A behavior change hidden inside a refactoring or fix is not allowed. Name
@@ -104,8 +108,10 @@ the delivery.
   check or a written reason why it cannot interact.
 - For a substantial criterion, ask an independent role which wrong
   implementation could still pass. Combine this with design or review.
-- Test-first is a choice, not a rule. Implement end-to-end slices through the
-  real entry points.
+- Test-first is a choice for a feature or a refactoring. A bug fix writes
+  its regression test first, or records why one is not practical and what
+  stands in for it (apb-diagnosis section 5). Implement end-to-end slices
+  through the real entry points.
 - A UI claim needs real interaction with the affected UI.
 
 ## 6. Check and review
@@ -114,15 +120,28 @@ the delivery.
   real interfaces, on the actual candidate.
 - Gate every test you add or change with the authoring mode of the
   apb-test-audit skill before it lands.
-- Review with the apb-review skill. Its tests role always runs the
-  apb-test-audit skill on every added or changed test, its security role
-  always runs the apb-security-audit skill on the diff, and every installed
-  review helper runs as a required step. A general reviewer does not replace
-  these. Failed, unknown, skipped or stale evidence is not a pass.
+- Review with the apb-review skill, at the depth the risk triggers set, by
+  reviewers in a context that did not write the change, with one initial
+  round and at most two repair rounds. At standard and high-risk depth its
+  tests role always runs the apb-test-audit skill on every added or changed
+  test and its security role always runs the apb-security-audit skill on
+  the diff. Every installed review helper runs at every depth. A general
+  reviewer does not replace these. Failed, unknown, skipped or stale evidence is not a pass.
 - Choose the executors with the apb-model-selection skill: a review round by
   another family is required before integration when one is available.
 - A usage limit routes the review to the next rung of the fallback chain. It
   never stops the task.
+
+## 6a. Evidence before claims
+
+- Say "done", "passes" or "fixed" only after running the check on the
+  current candidate in this session and reading its result. Quote the
+  command and the outcome (counts, exit status).
+- "Should pass", an earlier run, a similar change or a subagent's summary
+  is not evidence. Verify a delegated result against the diff and the
+  checks yourself.
+- A check that did not run, failed, was skipped or ran on an older
+  candidate is reported as such.
 
 ## 7. Integrate
 

@@ -752,7 +752,11 @@ impl RunState {
                 // failure itself is folded there.
                 | EventPayload::ReadOnlyViolated { .. }
                 // A read-only attempt's tier: shown, never folded.
-                | EventPayload::ReadOnlyChecked { .. } => {}
+                | EventPayload::ReadOnlyChecked { .. }
+                // What a check's result is bound to and its end-of-run
+                // fingerprints: read by `run_outcome::freshness` only.
+                | EventPayload::EvidenceBound { .. }
+                | EventPayload::EvidenceObserved { .. } => {}
                 // The baseline snapshots, their comparisons and an attempt's
                 // notes are reports; `crate::baseline::BaselineState` folds
                 // the baseline for the drive.
