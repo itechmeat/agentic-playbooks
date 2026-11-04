@@ -675,12 +675,6 @@ async fn enroll_first(bench: &Bench, app: &axum::Router, auth: &Authenticator) {
 /// Without the request stamp on the entry the challenge the drive derives
 /// can never match the one the assertion signed, and the consent queues
 /// forever (the regression G2).
-/// A publish consent decided from a signed-in dashboard with a fresh
-/// assertion is consumed: the entry is stamped with the open request seq
-/// the assertion signed, the drive re-derives the same challenge and the
-/// run pushes. Without the request stamp on the entry the challenge the
-/// drive derives can never match the one the assertion signed, and the
-/// consent queues forever (the regression G2).
 #[tokio::test]
 async fn a_publish_consent_from_the_dashboard_pushes_with_a_passkey_enrolled() {
     let bench = Bench::publish().await;

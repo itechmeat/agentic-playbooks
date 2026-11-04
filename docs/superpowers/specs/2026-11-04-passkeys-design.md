@@ -146,8 +146,14 @@ not on the machine's disk and not in its memory.
   key too, and a MAC on the store keyed with the installation key would
   be re-signed by an apb-aware writer, since the key sits beside the
   store. What the feature claims is the threat table above: apb's
-  surfaces, the run files and the isolation sandbox's credential
-  locations, never the config dir against its own user.
+  surfaces, hand-written channel lines (never consumed without a
+  verified assertion; on a person-only gate nothing is exempt, and a
+  `by: model` line is bound to the exact request it answers) and the
+  isolation sandbox's credential locations, never the config dir against
+  its own user. Residual, stated: on a bound gate that is not
+  person-only, the `by` exemption for the engine's own decision is
+  corroborated from the run directory itself (manifest, definition
+  snapshot, journal), which a writer of the run directory can alter.
 
 ## 4. Deliberately out of scope
 

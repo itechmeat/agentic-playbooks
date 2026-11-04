@@ -318,12 +318,20 @@ by hand carries no assertion, so the drive refuses it.
 **What the gate buys.** An agent that acts through apb's surfaces cannot
 decide a passkey-required gate: the CLI, MCP and an HTTP caller with a
 key are refused, and a bearer-key request is refused even with a valid
-assertion token. An agent that writes run files cannot decide either: a
-hand-written channel line, whatever fields it forges (`passkey`,
-`channel`, even `by`), carries no assertion, and the drive re-verifies
-the proof against the store before it consumes anything. A run step
-whose isolation sandbox keeps `<config_dir>` out of reach cannot enroll
-or assert at all.
+assertion token. A hand-written channel line, whatever fields it forges
+(`passkey`, `channel`, even `by`), carries no assertion, and the drive
+re-verifies the proof against the store before it consumes anything: on
+a person-only gate nothing at all is exempt (the consumer's own
+`person_only` flag decides, never the run directory's copy), and a
+`by: model` line is bound to the exact request it answers, which must be
+the visit whose recommendation the engine enforced. Honest about the
+residual: on a bound gate that is not person-only, the `by` exemption
+for the engine's own decision is corroborated from the run directory
+itself (the run's manifest, the definition snapshot and the journal),
+which a writer of the run directory can alter, so such a writer can
+still decide a bound, non-person-only gate; the passkey gate does not
+claim otherwise. A run step whose isolation sandbox keeps
+`<config_dir>` out of reach cannot enroll or assert at all.
 
 **Limits.** The server cannot tell a browser from a plain HTTP client,
 so whoever holds a valid credential can assert with a script instead of

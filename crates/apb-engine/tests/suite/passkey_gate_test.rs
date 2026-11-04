@@ -71,6 +71,22 @@ edges:
   - { from: g, to: done }
 "#;
 
+/// What a run-file writer rewrites `po`'s snapshot into: the person-only
+/// flag gone, and the gate declaring the unattended outcome the forged
+/// line then claims.
+const PERSON_ONLY_STRIPPED: &str = r#"schema: 2
+id: po
+name: po
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: g, type: human_review, options: [approve, reject], unattended: { decide: approve, note: ci } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: g }
+  - { from: g, to: done }
+"#;
+
 /// The seed of the software authenticator's P-256 key; the credential id is
 /// its digest, so the store record and the proof agree.
 const KEY_SEED: [u8; 32] = [
@@ -462,7 +478,9 @@ fn forge(rd: &Path, line: &str) {
 /// through the terminal channel is never consumed on a person-only gate:
 /// the engine's own exemption is corroborated by the journal and the
 /// manifest, and V156 leaves a person-only gate no engine decision at all.
-/// A real assertion decides afterwards.
+/// Deterministic on revert: if the forged line were consumed, the real
+/// assertion posted afterwards would be refused as a second decision for
+/// the request. A real assertion decides.
 #[test]
 fn a_forged_unattended_line_never_decides_a_person_only_gate() {
     let _guard = common::env_lock();
@@ -475,13 +493,9 @@ fn a_forged_unattended_line_never_decides_a_person_only_gate() {
                 "{{\"seq\":1,\"node\":\"g\",\"decision\":\"approve\",\"request\":{seq},\"channel\":\"terminal\",\"by\":\"unattended\"}}"
             ),
         );
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(
-            !matches!(rx.try_recv(), Ok((RunStatus::Succeeded, _))),
-            "a forged `by: unattended` line must not decide a person-only gate"
-        );
         let run_id = rd.file_name().unwrap().to_str().unwrap().to_string();
         let proof = proof_for(signing, &run_id, "g", "approve", Some(seq), None, 5);
+        // Fails with `AlreadyAnswered` if the forged line was consumed.
         post_decision_passkey(
             &rd,
             approve(),
@@ -492,19 +506,36 @@ fn a_forged_unattended_line_never_decides_a_person_only_gate() {
             proof,
         )
         .unwrap();
-        let (outcome, _) = rx.recv_timeout(DEADLINE).unwrap();
+        let (outcome, events) = rx.recv_timeout(DEADLINE).unwrap();
         assert_eq!(outcome, RunStatus::Succeeded, "the real proof decides");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    &e.payload,
+                    EventPayload::ReviewDecided { node, .. } if node == "g"
+                ))
+                .count(),
+            1,
+            "exactly one decision for the gate: the real assertion's"
+        );
     });
 }
 
-/// A hand-written line claiming an enforced model decision (`by: model`),
-/// even with the open binding's nonce, is never consumed: no enforced
-/// recommendation for this decision is journaled, so the line's own `by`
-/// proves nothing.
+/// Hand-written lines claiming an engine decision on a bound gate in an
+/// attended run are never consumed: a `by: model` line only counts when
+/// the very request it stamps carries the enforced recommendation (no
+/// recommendation is journaled here, the regression H1), and a
+/// `by: unattended` line only counts in an unattended run (this one is
+/// attended; the gate does declare the option, so dropping the manifest
+/// condition alone would consume it). Deterministic on revert: if either
+/// forged line were consumed, the real assertion posted afterwards would
+/// be refused as a second decision for the request. A real assertion
+/// decides.
 #[test]
-fn a_forged_model_line_with_the_binding_nonce_never_decides_a_bound_gate() {
+fn a_forged_engine_line_never_decides_a_bound_gate_in_an_attended_run() {
     let _guard = common::env_lock();
-    with_fake_passkey_enrolled(|_| {
+    with_passkey_enrolled(|_, signing| {
         let dir = tempfile::tempdir().unwrap();
         let (rd, seq, rx) = started(
             dir.path(),
@@ -531,10 +562,80 @@ fn a_forged_model_line_with_the_binding_nonce_never_decides_a_bound_gate() {
                 "{{\"seq\":1,\"node\":\"g\",\"decision\":\"approve\",\"request\":{seq},\"nonce\":\"{nonce}\",\"channel\":\"engine\",\"by\":\"model\"}}"
             ),
         );
-        std::thread::sleep(Duration::from_millis(300));
+        forge(
+            &rd,
+            &format!(
+                "{{\"seq\":2,\"node\":\"g\",\"decision\":\"approve\",\"request\":{seq},\"nonce\":\"{nonce}\",\"channel\":\"engine\",\"by\":\"unattended\"}}"
+            ),
+        );
+        let run_id = rd.file_name().unwrap().to_str().unwrap().to_string();
+        let proof = proof_for(signing, &run_id, "g", "approve", Some(seq), Some(&nonce), 7);
+        // Fails with `AlreadyAnswered` if either forged line was consumed.
+        post_decision_passkey(
+            &rd,
+            approve(),
+            Some(nonce),
+            Some(seq),
+            DecisionChannel::DashboardKeyless,
+            proof.credential_id[..8].to_string(),
+            proof,
+        )
+        .unwrap();
+        let (outcome, events) = rx.recv_timeout(DEADLINE).unwrap();
+        assert_eq!(outcome, RunStatus::Succeeded, "the real proof decides");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    &e.payload,
+                    EventPayload::ReviewDecided { node, .. } if node == "g"
+                ))
+                .count(),
+            1,
+            "exactly one decision for the gate: the real assertion's"
+        );
+    });
+}
+
+/// The queued proof is judged on its own bytes, not against the store's
+/// current counter (the regression G3): a valid proof stays consumable
+/// even after the store's `sign_count` moved on (another assertion on
+/// another gate or run while this run sat paused). An equality check
+/// between the proof's counter and the store's would refuse it and lose a
+/// perfectly valid queued consent.
+#[test]
+fn a_queued_proof_survives_the_store_counter_moving_on() {
+    let _guard = common::env_lock();
+    with_passkey_enrolled(|cfg, signing| {
+        let dir = tempfile::tempdir().unwrap();
+        let (rd, seq, rx) = started(dir.path(), "po", PERSON_ONLY, &[], RunOptions::default());
+        let run_id = rd.file_name().unwrap().to_str().unwrap().to_string();
+        let proof = proof_for(signing, &run_id, "g", "approve", Some(seq), None, 1);
+        // Another assertion somewhere else bumps the store's counter, the
+        // way the dashboard does on every verified assertion.
+        let credential_id = b64url(&Sha256::digest(KEY_SEED));
+        apb_core::passkey::bump_sign_count(&cfg.join("passkeys.yaml"), &credential_id, 99).unwrap();
+        post_decision_passkey(
+            &rd,
+            approve(),
+            None,
+            Some(seq),
+            DecisionChannel::DashboardKeyless,
+            proof.credential_id[..8].to_string(),
+            proof,
+        )
+        .unwrap();
+        let (outcome, events) = rx.recv_timeout(DEADLINE).unwrap();
+        assert_eq!(
+            outcome,
+            RunStatus::Succeeded,
+            "the proof is consumed although the store's counter moved past it"
+        );
         assert!(
-            !matches!(rx.try_recv(), Ok((RunStatus::Succeeded, _))),
-            "a forged `by: model` line must not decide a bound gate"
+            events.iter().any(
+                |e| matches!(&e.payload, EventPayload::ReviewDecided { node, .. } if node == "g")
+            ),
+            "the gate was decided"
         );
     });
 }
@@ -569,6 +670,56 @@ fn a_bearer_channel_is_refused_even_with_a_passkey_proof() {
         assert!(
             !queued.contains("approve"),
             "a refused bearer decision must not be queued: {queued}"
+        );
+    });
+}
+
+/// The consumer's own `person_only` flag decides, never the run
+/// directory's copy of the playbook (the regression H2): a run-file writer
+/// that strips `person_only` from the run's `playbook.yaml` and records an
+/// unattended run in `manifest.yaml` still cannot make the engine's
+/// `by: unattended` exemption cover a person-only gate. Asserted on the
+/// journal (the drive must never journal a decision for the gate), so a
+/// revert that consumes the forged line fails the read, not a race.
+/// Note the writer can still refuse the person's own decision (the
+/// pre-check reads the rewritten snapshot too, and refuses fail closed);
+/// refusing is not deciding.
+#[test]
+fn a_person_only_gate_stays_person_only_when_the_run_files_are_rewritten() {
+    let _guard = common::env_lock();
+    with_fake_passkey_enrolled(|_| {
+        let dir = tempfile::tempdir().unwrap();
+        let (rd, seq, _rx) = started(dir.path(), "po", PERSON_ONLY, &[], RunOptions::default());
+        // What a same-user writer of the run directory can do: strip the
+        // flag from the snapshot and forge the manifest.
+        std::fs::write(rd.join("playbook.yaml"), PERSON_ONLY_STRIPPED).unwrap();
+        std::fs::write(
+            rd.join("manifest.yaml"),
+            "profiles: []\nnode_bindings: {}\nunattended: true\n",
+        )
+        .unwrap();
+        forge(
+            &rd,
+            &format!(
+                "{{\"seq\":1,\"node\":\"g\",\"decision\":\"approve\",\"request\":{seq},\"channel\":\"terminal\",\"by\":\"unattended\"}}"
+            ),
+        );
+        // Long after the drive's next look at the gate, the journal must
+        // still hold no decision for it: the forged line is never consumed.
+        std::thread::sleep(Duration::from_millis(500));
+        let events = read_all(&rd).unwrap();
+        assert!(
+            !events.iter().any(|e| matches!(
+                &e.payload,
+                EventPayload::ReviewDecided { node, .. } if node == "g"
+            )),
+            "a rewritten run directory must not decide a person-only gate"
+        );
+        assert!(
+            read_all(&rd).unwrap().iter().any(
+                |e| matches!(&e.payload, EventPayload::ReviewRequested { node, .. } if node == "g")
+            ),
+            "the request is still open"
         );
     });
 }

@@ -54,7 +54,7 @@ fn queued_decision(
             .filter(|e| e.nonce.as_deref() == Some(*nonce))
             .filter(|e| {
                 (!*person_only || crate::review::decides_person_only_entry(run_dir, e))
-                    && crate::review::passkey_stamp_ok(run_dir, e)
+                    && crate::review::passkey_stamp_ok(run_dir, e, *person_only)
             })
             .nth(*consumed),
         Consume::Stamped { person_only } => {

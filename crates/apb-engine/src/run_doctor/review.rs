@@ -76,7 +76,7 @@ fn ignored_because(
     if person_only && !crate::review::decides_person_only_entry(run_dir, e) {
         return Some("not a person's channel");
     }
-    if person_only && !crate::review::passkey_stamp_ok(run_dir, e) {
+    if person_only && !crate::review::passkey_stamp_ok(run_dir, e, person_only) {
         return Some(if e.passkey_proof.is_some() {
             "a passkey assertion that does not verify"
         } else {

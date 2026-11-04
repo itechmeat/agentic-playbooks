@@ -395,17 +395,18 @@ pub(crate) fn answers_stamped(
     e.request == Some(request)
         && binding.is_none_or(|b| e.nonce.as_deref() == Some(b.nonce.as_str()))
         && (!person_only || decides_person_only_entry(run_dir, e))
-        && passkey_stamp_ok(run_dir, e)
+        && passkey_stamp_ok(run_dir, e, person_only)
 }
 
 /// Whether a channel entry carries the passkey stamp this machine demands:
 /// any entry at all when no passkey is enforced, else only an entry whose
 /// assertion proof verifies against the store (the engine's own decisions
 /// and a scenario run's scripted one are exempt: they are not a person's
-/// consent). The drive consumes nothing else, and `apb doctor --run` names
-/// the reason.
-pub fn passkey_stamp_ok(run_dir: &Path, e: &ReviewEntry) -> bool {
-    let engine_own = engine_own_entry(run_dir, e);
+/// consent). `person_only` is the consumer's own flag, never read from the
+/// run directory (see [`engine_own_entry`]). The drive consumes nothing
+/// else, and `apb doctor --run` names the reason.
+pub fn passkey_stamp_ok(run_dir: &Path, e: &ReviewEntry, person_only: bool) -> bool {
+    let engine_own = engine_own_entry(run_dir, e, person_only);
     let scripted = e.channel == Some(crate::decision_channel::DecisionChannel::Scenario)
         && crate::scenario::session::is_scenario(run_dir);
     passkey_proof::stamp_ok(
@@ -429,21 +430,25 @@ pub fn passkey_stamp_ok(run_dir: &Path, e: &ReviewEntry) -> bool {
 /// so the line's own word decides nothing: a `by: unattended` entry counts
 /// only when the run's manifest records an unattended run and the gate
 /// itself declares the entry's decision as its `unattended.decide` outcome,
-/// and a `by: model` entry only when the gate's journaled request carries
+/// and a `by: model` entry only when the request the entry stamps carries
 /// the enforced recommendation (`auto_decide`, `applied`) that posts
-/// exactly this decision. A `person_only` gate takes no engine decision at
-/// all (V156 refuses one in the definition; the consumer enforces it here),
-/// and a playbook or journal that does not read is never proof of anything.
-pub(crate) fn engine_own_entry(run_dir: &Path, e: &ReviewEntry) -> bool {
+/// exactly this decision: the entry is pinned to the request by
+/// `answers_stamped`, so this is the request the engine itself would have
+/// auto-decided, not an earlier visit's.
+///
+/// `person_only` is the consumer's own flag (the drive's definition, the
+/// doctor's), never read back from the run directory: a person-only gate
+/// takes no engine decision at all (V156 refuses one in the definition; the
+/// consumer enforces it here), whatever the run directory's copy of the
+/// playbook says. A playbook or journal that does not read is never proof
+/// of anything.
+pub(crate) fn engine_own_entry(run_dir: &Path, e: &ReviewEntry, person_only: bool) -> bool {
     use crate::event::{DecidedBy, EventPayload};
-    let node = e.cmd.node.as_str();
-    let playbook = crate::progress::load_run_playbook(run_dir);
-    if playbook
-        .as_ref()
-        .is_some_and(|p| p.node(node).is_some_and(|n| n.person_only))
-    {
+    if person_only {
         return false;
     }
+    let node = e.cmd.node.as_str();
+    let playbook = crate::progress::load_run_playbook(run_dir);
     let Some(playbook) = playbook else {
         return false;
     };
@@ -457,17 +462,23 @@ pub(crate) fn engine_own_entry(run_dir: &Path, e: &ReviewEntry) -> bool {
             declared && unattended
         }
         Some(DecidedBy::Model) => {
+            let Some(request) = e.request else {
+                return false;
+            };
             let events = match crate::event::read_all(run_dir) {
                 Ok(events) => events,
                 Err(_) => return false,
             };
-            events.iter().rev().any(|ev| match &ev.payload {
-                EventPayload::ReviewRequested {
-                    node: n,
-                    recommendation: Some(r),
-                    ..
-                } if n == node => r.applied && r.option == e.cmd.decision,
-                _ => false,
+            events.iter().rev().any(|ev| {
+                ev.seq == request
+                    && match &ev.payload {
+                        EventPayload::ReviewRequested {
+                            node: n,
+                            recommendation: Some(r),
+                            ..
+                        } => n == node && r.applied && r.option == e.cmd.decision,
+                        _ => false,
+                    }
             })
         }
         _ => false,
@@ -1034,5 +1045,98 @@ mod tests {
         let after = read_reviews_after(dir.path(), Some(s0)).unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].cmd.decision, "rejected");
+    }
+
+    /// The `by: model` exemption is bound to the request the entry stamps
+    /// (the regression H1): it holds only when the request the entry
+    /// answers is the visit whose enforced recommendation posts exactly
+    /// this decision, never an earlier visit of the same gate in a loop.
+    /// The consumer's `person_only` flag rules the exemption out outright,
+    /// whatever the run directory's copy of the playbook says.
+    #[test]
+    fn a_model_line_is_engine_own_only_for_the_request_that_was_enforced() {
+        use crate::event::{EventLog, EventPayload, ReviewRecommendation};
+        let dir = tempfile::tempdir().unwrap();
+        let rd = dir.path().join("r1");
+        std::fs::create_dir_all(&rd).unwrap();
+        // A bound gate with `auto_decide`, not person-only: V156 lets the
+        // engine decide it when the recommendation is enforced.
+        std::fs::write(
+            rd.join("playbook.yaml"),
+            "schema: 2\nid: ap\nname: ap\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: g, type: human_review, options: [needs_changes, reject], auto_decide: { allow: [needs_changes], min_confidence: 0.5 } }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: g }\n  - { from: g, to: done }\n",
+        )
+        .unwrap();
+        let mut log = EventLog::create(&rd).unwrap();
+        // Visit 1: the recommendation `approve` was enforced (applied).
+        let visit1 = log
+            .append(EventPayload::ReviewRequested {
+                node: "g".into(),
+                options: vec!["approve".into(), "reject".into()],
+                title: None,
+                instruction: String::new(),
+                prompt: None,
+                recommendation: Some(ReviewRecommendation {
+                    option: "approve".into(),
+                    applied: true,
+                    ..Default::default()
+                }),
+                plan_digest: None,
+                binding: None,
+                person_only: false,
+            })
+            .unwrap()
+            .seq;
+        // Visit 2 (a gate in a loop): the recommendation is not applied
+        // this time (say, low confidence), so the person decides.
+        let visit2 = log
+            .append(EventPayload::ReviewRequested {
+                node: "g".into(),
+                options: vec!["approve".into(), "reject".into()],
+                title: None,
+                instruction: String::new(),
+                prompt: None,
+                recommendation: Some(ReviewRecommendation {
+                    option: "approve".into(),
+                    applied: false,
+                    ..Default::default()
+                }),
+                plan_digest: None,
+                binding: None,
+                person_only: false,
+            })
+            .unwrap()
+            .seq;
+        let entry = |request: u64| ReviewEntry {
+            seq: 1,
+            cmd: ReviewCommand {
+                node: "g".into(),
+                decision: "approve".into(),
+                note: String::new(),
+            },
+            nonce: None,
+            by: Some(crate::event::DecidedBy::Model),
+            request: Some(request),
+            channel: Some(crate::decision_channel::DecisionChannel::Engine),
+            passkey: None,
+            passkey_proof: None,
+        };
+        assert!(
+            engine_own_entry(&rd, &entry(visit1), false),
+            "the enforced visit's own request proves the engine decided"
+        );
+        assert!(
+            !engine_own_entry(&rd, &entry(visit2), false),
+            "a later, unenforced visit must not inherit visit 1's enforcement"
+        );
+        assert!(
+            !engine_own_entry(&rd, &entry(visit1), true),
+            "the consumer's person-only flag rules the exemption out"
+        );
+        // An entry stamped with no request at all is never engine-own.
+        let unstamped = ReviewEntry {
+            request: None,
+            ..entry(visit1)
+        };
+        assert!(!engine_own_entry(&rd, &unstamped, false));
     }
 }
