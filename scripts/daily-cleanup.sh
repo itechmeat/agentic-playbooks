@@ -127,8 +127,8 @@ main_wt="$({ git worktree list --porcelain -z 2>/dev/null || true; } | {
 # at run time (the list `apb_core::workspace::LOCAL_ENTRIES`): the
 # workspace id (minted again on first use), run and scenario-run
 # directories, the node cache, locks, the busy lock, the outside-run
-# decision log, remembered run input, the known problems store and open
-# launch challenges. Run directories and the busy lock count only once
+# decision log, remembered run input, the known problems store, open
+# launch challenges and launch handoff files. Run directories and the busy lock count only once
 # `runs_ended` below found every run ended. Remembered run input and the
 # known problems store are deliberately discarded with the worktree: they
 # belong to that worktree's workspace, which nothing reads once it is gone
@@ -143,7 +143,7 @@ regenerable_paths=(
   '\.apb/workspace\.local' '\.apb/runs' '\.apb/scenario-runs'
   '\.apb/cache' '\.apb/locks' '\.apb/workdir\.lock'
   '\.apb/decisions\.jsonl' '\.apb/memory' '\.apb/problems'
-  '\.apb/launch-challenges'
+  '\.apb/launch-challenges' '\.apb/handoff'
 )
 
 # Whether every apb run of a worktree has ended, so its run directories are
