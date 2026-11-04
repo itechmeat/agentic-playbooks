@@ -804,3 +804,77 @@ fn a_guarded_runs_mode_reads_as_its_base_mode_with_a_guard_attribute() {
     assert_eq!(out["execution"]["mode"], "cli");
     assert_eq!(out["execution"]["guarded"], true);
 }
+
+/// A journal a step forged: `run_started.playbook` and
+/// `run_provenance.origin` hold the run's declared secret value.
+fn forged_journal(value: &str) -> String {
+    format!(
+        concat!(
+            r#"{{"seq":0,"ts":1790000002000,"type":"run_started","playbook":"{v}","version":"1.0.0"}}"#,
+            "\n",
+            r#"{{"seq":1,"ts":1790000002001,"type":"run_provenance","origin":"{v}"}}"#,
+            "\n",
+            r#"{{"seq":2,"ts":1790000002002,"type":"run_finished","outcome":"succeeded"}}"#,
+            "\n",
+        ),
+        v = value
+    )
+}
+
+const SECRET_SNAPSHOT: &str = "schema: 2\nid: demo\nname: demo\nversion: 1.0.0\nparams:\n  - name: message\n    type: text\n    secret: true\nnodes:\n  - id: start\n    type: start\nedges: []\n";
+
+/// A declared secret value a step wrote into `run_started.playbook` never
+/// reaches `apb runs <id>` or a listing row: the header goes through the
+/// run's redaction like every other line, and the row of a run whose text
+/// withholds keeps a journal or manifest field only while it reads as one
+/// of apb's own tokens.
+#[test]
+fn a_secret_written_into_the_journal_never_reaches_the_header_or_a_withheld_row() {
+    let secret = "violet hedgehog";
+    let dir = project();
+    // A run whose config parses and declares the value secret.
+    let readable = dir.path().join(".apb/runs/sec-1");
+    fs::create_dir_all(&readable).unwrap();
+    fs::write(readable.join("events.jsonl"), forged_journal(secret)).unwrap();
+    fs::write(
+        readable.join("run.yaml"),
+        format!("params:\n  message: {secret}\n"),
+    )
+    .unwrap();
+    fs::write(readable.join("playbook.yaml"), SECRET_SNAPSHOT).unwrap();
+    // A run whose config does not parse: its text withholds.
+    let withheld = dir.path().join(".apb/runs/bad-2");
+    fs::create_dir_all(&withheld).unwrap();
+    fs::write(withheld.join("events.jsonl"), forged_journal(secret)).unwrap();
+    fs::write(withheld.join("run.yaml"), "mode: guarded\n").unwrap();
+    for id in ["sec-1", "bad-2"] {
+        let out = apb()
+            .args(["runs", id])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(!text.contains(secret), "{id} detail leaks:\n{text}");
+        assert!(
+            text.starts_with(&format!("{id}\t")),
+            "{id} keeps its header:\n{text}"
+        );
+    }
+    for args in [vec!["runs"], vec!["runs", "--playbook", secret]] {
+        let out = apb().args(&args).current_dir(dir.path()).output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(!text.contains(secret), "{args:?} leaks:\n{text}");
+    }
+    let out = apb().arg("runs").current_dir(dir.path()).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("bad-2\t[secrets_unresolved]\tsucceeded"),
+        "the withheld row keeps its id and state:\n{text}"
+    );
+    assert!(
+        text.contains("demo-1\tdemo\tsucceeded"),
+        "a plain row stays readable:\n{text}"
+    );
+}

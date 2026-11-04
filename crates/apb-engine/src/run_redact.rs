@@ -562,6 +562,23 @@ impl RunRedactor {
         self.workspace.scrub(text)
     }
 
+    /// One field of a line a surface prints next to withheld text (a
+    /// playbook id, a version, a scope, a mode column): read from the run's
+    /// journal or manifest, which a step can write, so never printed raw.
+    /// Scrubbed like [`RunRedactor::redact_str`]; while this redactor
+    /// withholds, kept only when it reads as one of apb's own tokens (the
+    /// rule of a withheld answer's kept positions), else [`WITHHELD`].
+    pub fn redact_token(&self, text: &str) -> String {
+        if self.withhold {
+            return if is_token(text) {
+                text.to_string()
+            } else {
+                WITHHELD.to_string()
+            };
+        }
+        self.workspace.scrub_values(text)
+    }
+
     /// Text inside a structured answer: the secret values replaced, paths
     /// and addresses kept.
     pub fn redact_str(&self, text: &str) -> String {

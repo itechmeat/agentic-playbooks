@@ -208,11 +208,10 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
     // own config while it resolved its secrets: apb's own fixed sentence,
     // never the parser's quote of the value it choked on, and it is
     // added back after the redaction below (the answer withholds, the
-    // sentence stays readable).
-    let config_error = apb_engine::run_redact::WorkspaceRedaction::new(root)
-        .run_dir(&dir)
-        .config_error()
-        .map(str::to_string);
+    // sentence stays readable). One redaction for the whole answer: each
+    // `new` resolves the workspace's connector secrets and walks the tree.
+    let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
+    let config_error = redaction.run_dir(&dir).config_error().map(str::to_string);
     let cfg = apb_engine::run_config::read_run_config(&dir).unwrap_or_default();
     // Lifted out of `progress` to the top level (spec 2026-07-20-interactive-
     // nodes, Task 8; issue #42 finding 4; issue #45 finding 4): an
@@ -301,7 +300,6 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
     if !branch_failures.is_empty() {
         out["branch_failures"] = json!(branch_failures);
     }
-    let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
     let mut actions = super::actions::of_view(&redaction, &dir, run_id, view);
     if let Some(runs) = dir.parent() {
         super::actions::mark(&mut actions, runs, caller);

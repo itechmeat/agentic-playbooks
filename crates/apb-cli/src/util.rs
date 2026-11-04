@@ -154,6 +154,17 @@ pub(crate) fn shown_value(mut value: serde_json::Value) -> serde_json::Value {
     value
 }
 
+/// One journal or manifest field (a playbook id, a version, a scope) as a
+/// run surface prints it on a line `say!` must not withhold whole:
+/// [`apb_engine::run_redact::RunRedactor::redact_token`] of the redactor in
+/// force, unchanged outside one.
+pub(crate) fn shown_token(text: &str) -> String {
+    RUN_REDACTOR.with(|r| match r.borrow().as_ref() {
+        Some(redactor) => redactor.redact_token(text),
+        None => text.to_string(),
+    })
+}
+
 /// `text` as a run surface prints it: without the secret values of the run
 /// [`with_run_redaction`] is about, unchanged outside one.
 pub(crate) fn shown(text: &str) -> String {

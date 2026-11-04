@@ -1614,12 +1614,21 @@ fn print_run_rows(root: &Path, runs: Vec<apb_engine::RunSummary>) {
         // the table. The journal-sourced detail markers (a pause, a
         // finding, search fields) are left out: their text may hold a
         // value no redactor could read.
-        let mut line = format!("{}\t{}\t{}", r.run_id, r.playbook, r.status);
-        if show_mode {
-            line.push('\t');
-            line.push_str(mode.as_deref().unwrap_or("cli"));
-        }
-        if redaction.run(&r.run_id).withholds() {
+        let redactor = redaction.run(&r.run_id);
+        if redactor.withholds() {
+            // The playbook, the mode column and the scope come from the
+            // journal and the manifest, which a step can write: each is
+            // kept only while it reads as one of apb's own tokens.
+            let mut line = format!(
+                "{}\t{}\t{}",
+                redactor.redact_token(&r.run_id),
+                redactor.redact_token(&r.playbook),
+                r.status
+            );
+            if show_mode {
+                line.push('\t');
+                line.push_str(&redactor.redact_token(mode.as_deref().unwrap_or("cli")));
+            }
             if r.driver_dead {
                 line.push_str("\tdriver dead");
             }
@@ -1628,7 +1637,7 @@ fn print_run_rows(root: &Path, runs: Vec<apb_engine::RunSummary>) {
                 line.push_str(&unknown_events_note(r.unknown_events));
             }
             if let Some(scope) = &r.scope {
-                line.push_str(&format!("\t{scope}"));
+                line.push_str(&format!("\t{}", redactor.redact_token(scope)));
             }
             if let Some(e) = &r.config_error {
                 line.push_str(&format!(
@@ -1636,12 +1645,13 @@ fn print_run_rows(root: &Path, runs: Vec<apb_engine::RunSummary>) {
                     crate::util::sanitize_plain(e, QUESTION_TEXT_MAX * 2)
                 ));
             }
-            // Printed directly: every field on the line is a fact apb
-            // wrote itself, and `say` would withhold the whole line.
+            // Printed directly: every field is a token or withheld above,
+            // the error a fixed sentence, and `say` would withhold the
+            // whole line.
             println!("{line}");
             continue;
         }
-        crate::util::with_run_redaction(redaction.run(&r.run_id), || {
+        crate::util::with_run_redaction(redactor, || {
             // The status column stays exactly as it always has (a script
             // parsing it must keep working); a dead driver and events a
             // newer apb wrote are called out as appended markers rather
@@ -1757,14 +1767,25 @@ fn run_detail_text(
         .find_map(|e| match &e.payload {
             apb_engine::event::EventPayload::RunStarted {
                 playbook, version, ..
-            } => Some(format!("{playbook} {version}")),
+            } => Some(format!(
+                "{} {}",
+                crate::util::shown_token(playbook),
+                crate::util::shown_token(version)
+            )),
             _ => None,
         })
         .unwrap_or_default();
-    // The header and the config error line print directly: they carry
-    // only facts apb wrote itself, and a run whose `run.yaml` does not
-    // parse keeps its row identifiable while its reported text withholds.
-    println!("{run_id}\t{playbook}\t{}", view.run_status.as_str());
+    // The header and the config error line print directly, so a run whose
+    // `run.yaml` does not parse keeps its row identifiable while its
+    // reported text withholds. The playbook and version come from the
+    // journal, which a step can write: each goes through the run's
+    // redaction field by field (`shown_token`), kept raw while withholding
+    // only when it reads as one of apb's own tokens.
+    println!(
+        "{}\t{playbook}\t{}",
+        crate::util::shown_token(run_id),
+        view.run_status.as_str()
+    );
     // The redactor already parsed the run's own config while it resolved
     // its secrets: its error is the one sentence, a fixed wording plus
     // the parser's line and column, never the parser's quote of the
