@@ -390,6 +390,17 @@ async fn a_keyless_dashboard_refuses_a_publish_consent() {
         nonce
     );
 
+    // The next actions say so from the decision path's own rule: the
+    // publish consent is not this dashboard's to take.
+    let publish = json["next_actions"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["code"] == "decide_publish")
+        .cloned()
+        .expect("a decide_publish action");
+    assert_eq!(publish["caller_refusal"], "keyless_dashboard", "{publish}");
+
     let uri = "/api/runs/pub-1/review";
     let (status, body) = post_as(
         app.clone(),
@@ -442,6 +453,15 @@ async fn a_publish_gate_shows_its_plan_and_takes_only_the_plans_nonce() {
     let pending = &json["progress"]["pending_reviews"][0];
     assert_eq!(pending["publish"]["nonce"], nonce);
     assert_eq!(pending["publish"]["commits"][0]["this_run"], true);
+    // A dashboard with keys takes the consent: its next action is not refused.
+    let publish = json["next_actions"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["code"] == "decide_publish")
+        .cloned()
+        .expect("a decide_publish action");
+    assert!(publish.get("caller_refusal").is_none(), "{publish}");
 
     let uri = "/api/runs/pub-1/review";
     let k = Some(key.as_str());

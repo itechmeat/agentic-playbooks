@@ -985,3 +985,59 @@ fn every_wait_says_what_an_unattended_run_does_there() {
     fx.run("op").pause(Some(now() + 600_000));
     assert_eq!(unattended_of(&fx, "op", ActionCode::ResumeRun), None);
 }
+
+/// A dashboard without keys takes no publish consent: the decision path
+/// refuses it (`keyless_dashboard`) and the next actions mark it from the
+/// same rule, while a skip, a signed-in session and a review gate pass.
+#[test]
+fn a_keyless_dashboard_is_refused_a_publish_consent_in_the_actions_as_on_the_decision_path() {
+    use crate::decision_channel::DecisionChannel;
+    let fx = Fx::new();
+    let mut r = fx.run("r");
+    r.review();
+    let a = fx.observe("r");
+    let review = primary(&a).clone();
+    let publish = NextAction {
+        code: ActionCode::DecidePublish,
+        ..review.clone()
+    };
+    let step = apb_core::step_env::StepCaller::default();
+    let refusal = |a: &NextAction, c| caller_refusal(a, &r.dir, c, &step);
+    assert_eq!(
+        refusal(&publish, DecisionChannel::DashboardKeyless),
+        Some(CallerRefusal::KeylessDashboard)
+    );
+    assert_eq!(refusal(&publish, DecisionChannel::DashboardSession), None);
+    assert_eq!(refusal(&review, DecisionChannel::DashboardKeyless), None);
+
+    let post = |decision: &str| {
+        crate::review::post_decision_via(
+            &r.dir,
+            crate::review::ReviewCommand {
+                node: "gate".into(),
+                decision: decision.into(),
+                note: String::new(),
+            },
+            Some("n".into()),
+            None,
+            DecisionChannel::DashboardKeyless,
+        )
+    };
+    match post(apb_core::publish::OPTION_PUBLISH) {
+        Err(crate::error::EngineError::ChannelRefused { refusal, message }) => {
+            assert_eq!(refusal, CallerRefusal::KeylessDashboard);
+            assert!(
+                message.contains("apb publish approve r --node gate"),
+                "{message}"
+            );
+        }
+        other => panic!("a keyless publish consent went through: {other:?}"),
+    }
+    assert!(!r.dir.join("reviews.jsonl").exists(), "nothing was queued");
+    // Anything but the consent is not this rule's (the gate's own checks
+    // answer it).
+    assert!(!matches!(
+        post(apb_core::publish::OPTION_SKIP),
+        Err(crate::error::EngineError::ChannelRefused { .. })
+    ));
+}

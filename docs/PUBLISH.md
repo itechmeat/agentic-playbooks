@@ -281,7 +281,11 @@ only when it is identical, the push the person consented to.
 refuses a `publish` decision with `403`, naming the `apb publish approve`
 command: anything on the machine reaches a keyless dashboard, a sandboxed
 agent under `network: open` included, and the open plan's nonce is in the
-run payload. A `skip` still goes through. With keys, a missing nonce or a
+run payload. A `skip` still goes through. The engine holds that rule
+(`apb_engine::review::channel::refuses_publish_consent`), and its decision
+entries check it for every channel; the run payload's next actions mark the
+gate's `decide_publish` action `caller_refusal: keyless_dashboard` from the
+same rule, so a client sees the refusal before it posts. With keys, a missing nonce or a
 decision the gate does not offer is `400`, a stale nonce or a second
 decision `409` (the body names the current plan), a node that is not a
 gate `404`. The run payload carries `publish` and the plan in
@@ -296,7 +300,8 @@ The run page shows a Publish panel for a publish gate: the node's guidance,
 the exact plan, the commit list with its tags, the remote state, and the
 buttons "Publish exactly this" (posts the plan's nonce) and "Skip". A
 dashboard without keys shows the `apb publish approve` command in place of
-the first button. After the push it shows what that push sent, the result
+the first button, wherever the server marked the gate's next action
+refused; the page never decides that from its own reading of its keys. After the push it shows what that push sent, the result
 and the intent state; an unknown result reads "Needs a look" with the
 resolve command. The node form edits `from` (a
 choice of the eligible agent tasks and scripts), `remote`, `branch`, the
