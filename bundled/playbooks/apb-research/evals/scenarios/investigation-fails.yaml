@@ -1,0 +1,26 @@
+schema: 1
+id: investigation-fails
+title: The investigation fails on every attempt; the report still runs and the run ends failed
+instruction: "Answer it from the code."
+params: { question: "Does the export stream its rows?" }
+answers:
+  frame:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { question: "Does the export stream its rows?", out_of_scope: "other formats", method: "read the export code", stop_rule: "answer found" }
+  investigate:
+    - visit: 1
+      attempts:
+        - { status: failed, failure_kind: agent, output: "the sources could not be read" }
+        - { status: failed, failure_kind: agent, output: "the sources could not be read" }
+  report:
+    - visit: 1
+      attempts:
+        - { status: succeeded, output: "RESEARCH REPORT: not settled, the investigation failed." }
+expect:
+  # The edge into the report is unconditional, so the report runs, but a
+  # success finish reached past an unhandled failure ends the run failed.
+  run: { outcome: [failed] }
+  finish: report
+  route: { path: [start, frame, investigate, report] }

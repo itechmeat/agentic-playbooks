@@ -11,12 +11,13 @@
 //! - `GET /api/playbooks/{id}/scenario-runs/{run}`: a stored scenario run's
 //!   report and graph.
 //!
-//! Every handler reads or writes files, off the async runtime.
+//! Every handler reads or writes files, off the async runtime. These routes
+//! serve project playbooks only; MCP and `apb eval` also take a global one.
 
 use apb_core::step_env::StepCaller;
 use apb_mcp::tools::ToolError;
 use apb_mcp::tools::scenario::{
-    ScenarioCaller, ScenarioRunRequest, run_scenario, scenario_run_view, scenarios,
+    ScenarioCaller, ScenarioRunRequest, Scope, run_scenario, scenario_run_view, scenarios,
 };
 use axum::Router;
 use axum::extract::{Path as AxPath, Query, State};
@@ -57,7 +58,7 @@ pub(crate) async fn get_scenarios_handler(
     let pid = id.clone();
     let version = q.version;
     answer(&state, &id, q.workspace.as_deref(), move |root| {
-        scenarios(&root, &pid, version.as_deref())
+        scenarios(&root, Scope::Project, &pid, version.as_deref())
     })
     .await
 }
@@ -78,7 +79,7 @@ pub(crate) async fn post_scenario_run_handler(
             step: &step,
             keyless_dashboard: keyless,
         };
-        run_scenario(&root, &pid, &req, caller, &exe)
+        run_scenario(&root, Scope::Project, &pid, &req, caller, &exe)
     })
     .await
 }

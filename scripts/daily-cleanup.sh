@@ -7,7 +7,9 @@
 #   1. cargo artifacts older than 7 days (cargo sweep) in the checkout's
 #      target dir and in every live worktree's, never a full clean;
 #   2. worktrees whose branch is merged into the default branch and that
-#      hold no uncommitted tracked change, with their target dirs;
+#      hold no uncommitted or untracked change, no ignored file that may be
+#      a person's work (see `regenerable` below) and no apb run that has
+#      not ended (see `runs_ended` below), with their target dirs;
 #   3. empty per-process test config dirs `apb-engine-unit-xdg-*` in the
 #      temp dir that no process holds open;
 #   4. `*.log` files of this project under the cache dir older than 7 days.
@@ -118,6 +120,79 @@ main_wt="$({ git worktree list --porcelain -z 2>/dev/null || true; } | {
   IFS= read -r -d '' first || true
   printf '%s' "${first#worktree }"
 })"
+# The ignored paths of a worktree that are output, safe to delete with
+# it: build output and tool caches, and what apb itself writes under .apb/
+# at run time (the list `apb_core::workspace::LOCAL_ENTRIES`): the
+# workspace id (minted again on first use), run and scenario-run
+# directories, the node cache, locks, the busy lock, the outside-run
+# decision log, remembered run input, the known problems store and open
+# launch challenges. Run directories and the busy lock count only once
+# `runs_ended` below found every run ended. Remembered run input and the
+# known problems store are deliberately discarded with the worktree: they
+# belong to that worktree's workspace, which nothing reads once it is gone
+# (secret params are never stored). Anything else ignored keeps the
+# worktree, in particular .apb/secrets.env, .apb/trash/ (soft-deleted
+# playbooks), .apb/backup-*/ (migration backups), .ai-notes/ and any other
+# notes; untracked files (a .env, .apb/policy.yaml) keep it through the
+# status check before this one.
+regenerable_paths=(
+  'target' 'web/dist' '(.*/)?node_modules' '\.zvec-grep' '\.code-ranker'
+  '(.*/)?\.DS_Store' 'docs/reviews/_date_time_review\.md'
+  '\.apb/workspace\.local' '\.apb/runs' '\.apb/scenario-runs'
+  '\.apb/cache' '\.apb/locks' '\.apb/workdir\.lock'
+  '\.apb/decisions\.jsonl' '\.apb/memory' '\.apb/problems'
+  '\.apb/launch-challenges'
+)
+
+# Whether every apb run of a worktree has ended, so its run directories are
+# output rather than state. apb itself is not asked: every apb command but
+# the read-only MCP server registers the directory as a workspace, and the
+# installed apb may be older than the journals. The journals are read with
+# jq instead; whatever cannot be read keeps the worktree.
+#
+# A run has ended when the last of its lifecycle events (started, resumed,
+# queued, paused, finished, aborted) is `run_finished` or `run_aborted`, and
+# every send it recorded is settled `confirmed` or `not_sent` (an `unknown`
+# send waits for a person's `apb intent resolve`, which often lands after
+# the run ended). A paused run (a pause waker may resume it), a run waiting
+# on a gate, a queued or running one, a run directory without a journal and
+# a journal that does not parse all count as not ended. The busy lock
+# (`.apb/workdir.lock`) keeps the worktree while it names a live process or
+# a paused run; a pid no process holds any more is a crash leftover.
+journal_ended() {
+  jq -e -s '
+    ([.[] | select(.type | IN("run_started", "run_resumed", "run_queued",
+        "run_paused", "run_finished", "run_aborted"))] | last | .type) as $last
+    | (reduce (.[] | select(.type == "send_intent_settled")) as $e
+        ({}; .[$e.intent] = $e.outcome)) as $settled
+    | ($last == "run_finished" or $last == "run_aborted")
+      and all(.[] | select(.type == "send_intent_recorded");
+        $settled[.intent] == "confirmed" or $settled[.intent] == "not_sent")
+  ' "$1" >/dev/null 2>&1
+}
+
+runs_ended() {
+  local wt="$1" d lock owner
+  if [ -e "$wt/.apb/workdir.lock" ]; then
+    owner="$(head -c 256 "$wt/.apb/workdir.lock" 2>/dev/null)" || return 2
+    case "$owner" in
+      ''|*[!0-9]*) return 2 ;;
+    esac
+    kill -0 "$owner" 2>/dev/null && return 2
+    [ -d "/proc/$owner" ] && return 2
+  fi
+  [ -d "$wt/.apb/runs" ] || [ -d "$wt/.apb/scenario-runs" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 3
+  for d in "$wt/.apb/runs"/*/ "$wt/.apb/scenario-runs"/*/; do
+    [ -d "$d" ] || continue
+    case "$d" in "$wt/.apb/scenario-runs/index/") continue ;; esac
+    [ -f "$d/events.jsonl" ] || return 1
+    journal_ended "$d/events.jsonl" || return 1
+  done
+  return 0
+}
+regenerable="^($(IFS='|'; echo "${regenerable_paths[*]}"))(/|$)"
+
 while IFS=$'\t' read -r ref path; do
   [ "$path" = "$repo" ] && continue
   [ "$path" = "$main_wt" ] && continue
@@ -127,17 +202,25 @@ while IFS=$'\t' read -r ref path; do
     echo "keep $path: uncommitted or untracked changes"
     continue
   fi
-  # Ignored files also block a removal, except the build output and caches
-  # this project regenerates (git collapses a fully ignored directory to
-  # one "dir/" entry). Everything under .apb/ blocks: secrets.env,
-  # workspace.local, runs/, trash/ and backup-*/ are state, not output.
+  # Ignored files also block a removal, except what `regenerable` names
+  # (git collapses a fully ignored directory to one "dir/" entry). Not
+  # `grep -q`: an early exit can kill git with SIGPIPE, and under pipefail
+  # that failure would read as "nothing to keep".
+  # shellcheck disable=SC2143
   if [ -n "$(git -C "$path" status --porcelain --ignored=matching 2>/dev/null |
         sed -n 's/^!! //p' |
-        grep -v -E '^(target|web/node_modules|web/dist|\.zvec-grep)(/|$)')" ]; then
-    echo "keep $path: ignored files that are not build output"
+        grep -v -E "$regenerable")" ]; then
+    echo "keep $path: ignored files that may be a person's work"
     continue
   fi
   if merged "$ref"; then
+    rc=0
+    runs_ended "$path" || rc=$?
+    case "$rc" in
+      1) echo "keep $path: a run that has not ended"; continue ;;
+      2) echo "keep $path: the busy lock is held"; continue ;;
+      3) echo "keep $path: holds apb runs and jq is not installed to read them"; continue ;;
+    esac
     echo "remove merged worktree $path ($branch)"
     run git worktree remove "$path" || echo "keep $path: git refused to remove it"
   fi

@@ -1,16 +1,18 @@
 schema: 2
 id: apb-feature-delivery
-name: Feature delivery (assessment only)
+name: Feature delivery
 description: >-
   Staged delivery of one feature, bug fix or refactoring in the current
   project: intake with an expected-result card, design, a decomposition of
   a large change into ordered subtasks, implementation, an independent
   read-only review panel, at most two repair rounds, and a
-  report that accounts for every expected outcome. Assessment only: the run
-  reports how the candidate was reviewed; it does not certify that the
-  reviewed candidate is the final one. No commit, push or pull request is
-  made by the run.
-version: 1.1.2
+  report that accounts for every expected outcome. Nothing changes the tree
+  between the last review and the report, so the report describes the
+  candidate the panel reviewed. The review is the panel's judgment; the
+  project's own tests are executed by apb before and after the work and
+  reported with what changed. No commit, push or pull request is made by
+  the run.
+version: 1.2.0
 agent_launch: ask
 params:
   - name: change_kind
@@ -41,18 +43,18 @@ defaults:
 effects: [fs_read, fs_write]
 goal:
   statement: >-
-    Assessment only. The requested change is implemented locally, reviewed
-    by independent read-only roles within at most two repair rounds, and
-    every expected outcome of the original request is accounted for with
-    evidence. The run does not certify that the reviewed candidate is the
-    final one, and it makes no commit, push or pull request.
+    The requested change is implemented locally, reviewed by independent
+    read-only roles within at most two repair rounds, and every expected
+    outcome of the original request is accounted for with evidence on the
+    candidate the panel reviewed. The run makes no commit, push or pull
+    request.
   enforce: true
   criteria:
     - description: The report node wrote its delivery report
       check: { type: marker, marker: "DELIVERY REPORT:" }
     - description: Every expected outcome on the card is reported as delivered, partial or not delivered, with evidence
       check: { type: manual }
-    - description: The reviewed candidate is the one that will be integrated (not certified by this run)
+    - description: The person integrates the reviewed candidate as the report describes it (the run commits nothing)
       check: { type: manual }
 # The project's own test command runs before the first acting node and
 # again at the finish; a test that passed before and fails after shows in
@@ -379,9 +381,10 @@ nodes:
     audience: people
     prompt: >-
       Run only the Report stage of the apb-delivery skill and use its
-      result template. Do not edit files. Assessment only: say that this
-      run does not certify that the reviewed candidate is the final one,
-      and that nothing was committed, pushed or published. Card:
+      result template. Do not edit files. Say that the findings are the
+      review panel's judgment, keep the project checks that were executed
+      apart from claims nobody checked, and say that nothing was
+      committed, pushed or published. Card:
       {{nodes.intake.output}}. Design: {{nodes.design.output}}.
       Decomposition: {{nodes.decompose.output}}. Implementation:
       {{nodes.implement.output}} {{nodes.implement_subtasks.output}}. Panel, with the
@@ -398,8 +401,9 @@ nodes:
       the task's worktrees and branches and the build output they used, and
       old build artifacts pruned rather than wiped (a build cache pruner
       such as cargo sweep for Rust projects); name only what this task
-      created. Begin the report with the line DELIVERY REPORT: and write
-      the outputs outcomes, conformance, findings and measurements.
+      created. Begin the report, and the outcomes output, with the line
+      DELIVERY REPORT: and write the outputs outcomes, conformance,
+      findings and measurements.
     outputs:
       fields: [outcomes, conformance, findings, measurements]
     success_check: { marker: "DELIVERY REPORT:" }
@@ -416,8 +420,8 @@ nodes:
       {{nodes.implement_subtasks.output}}. Panel:
       {{nodes.collect.output}}. Say which of these happened, what is still
       open, what alternative approach the evidence suggests, and the one
-      question the issuer must answer. Assessment only: nothing was
-      committed, pushed or published.
+      question the issuer must answer. Nothing was committed, pushed or
+      published.
 edges:
   - { from: start, to: intake }
   - { from: intake, to: design }

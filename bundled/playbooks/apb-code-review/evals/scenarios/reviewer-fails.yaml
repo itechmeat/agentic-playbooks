@@ -1,0 +1,43 @@
+schema: 1
+id: reviewer-fails
+title: The security reviewer fails on every attempt; the join still delivers it and the report states the gap
+instruction: "Review the export change."
+params: { target: "HEAD", base: "main" }
+answers:
+  scope:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { candidate: "abc123..def456", files: "[\"src/export.rs\"]", summary: "streams the export", intent: "stream the export", checks: "cargo test" }
+  review_correctness:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { role: correctness, coverage: "the whole diff", findings: "[]" }
+  review_security:
+    - visit: 1
+      attempts:
+        - { status: failed, failure_kind: agent, output: "the security audit skill is not available" }
+        - { status: failed, failure_kind: agent, output: "the security audit skill is not available" }
+  review_tests:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { role: tests, coverage: "the whole diff", findings: "[]" }
+  native_checks:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { results: "[{\"command\": \"cargo test\", \"result\": \"passed\"}]", fresh: "true" }
+  report:
+    - visit: 1
+      attempts:
+        - { status: succeeded, output: "REVIEW REPORT: partial coverage, the security role failed and its review is missing." }
+expect:
+  # `join: all` weighs a failed input as delivered, so the report runs and
+  # the run succeeds; the report is what must say the coverage is partial.
+  run: { outcome: [succeeded] }
+  finish: report
+  visits: { review_security: 1, report: 1 }
+  edges:
+    taken: { "e:review_security>report#1": 1 }

@@ -1,0 +1,19 @@
+schema: 1
+id: no-unread-mail
+title: The search finds no unread mail, so nothing is classified and the run ends with a one-line answer
+instruction: "What needs me this week."
+params: { mail_folder: INBOX, since_days: 7 }
+answers:
+  search:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { messages: '[]', total: "0", truncated: "false" }
+  done_empty:
+    - visit: 1
+      attempts:
+        - { status: succeeded, output: "INBOX DIGEST: INBOX holds no unread mail from the last 7 days." }
+expect:
+  run: { outcome: [succeeded] }
+  finish: done_empty
+  route: { path: [start, search, classify, any_mail, done_empty] }

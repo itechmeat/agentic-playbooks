@@ -1,0 +1,31 @@
+schema: 1
+id: plan-applied-and-verified
+title: The interview asks one question, the plan is read and checked, and the summary names the plan
+instruction: "Set apb up for me."
+answers:
+  interview:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          question: { text: "Which coding agent should review the work?", answer: "the second installed agent reviews" }
+          then:
+            status: succeeded
+            outputs: { goals: "code", agents: "both installed agents, the second one reviews", budget: "balanced", write_outside_repo: "false", notifications: "not wanted", notes: "" }
+  plan:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { digest: "sha256:0f1e", changes: "[\"write the global profile apb-reviewer\"]", unmet: "none", person_only: "a notification target", apply_command: "apb setup apply --digest sha256:0f1e", undo_command: "apb setup remove" }
+  verify:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { validation: "every default validates", warnings: "none", trial_command: "apb trial apb-research" }
+  summary:
+    - visit: 1
+      attempts:
+        - { status: succeeded, output: "SETUP PLAN: sha256:0f1e. Nothing was applied by this run." }
+expect:
+  run: { outcome: [succeeded] }
+  finish: summary
+  route: { path: [start, interview, plan, verify, summary] }

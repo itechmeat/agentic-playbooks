@@ -327,6 +327,20 @@ pub fn recalled_input(run_dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The limits the run recorded at start (`run_provenance.limits`), such as
+/// a reviewer on the main role's agent. Every run detail surface shows them
+/// as one line each. Recorded once: a later profile rebind does not update
+/// them. Empty for a run without limits or an older journal.
+pub fn run_limits(events: &[Event]) -> Vec<crate::event::RunLimit> {
+    events
+        .iter()
+        .find_map(|e| match &e.payload {
+            crate::event::EventPayload::RunProvenance { limits, .. } => Some(limits.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 /// What a run surface reports for a liveness it did not probe.
 pub const LIVENESS_UNKNOWN: &str = "unknown";
 

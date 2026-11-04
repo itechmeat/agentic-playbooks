@@ -108,11 +108,15 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   profile is what setup wrote and every skill it carries holds the shipped
   files (the origin it had, never `Bundled`), `roles` the plan of the
   `apb-main`, `apb-reviewer` and
-  `apb-researcher` profiles from detection and the models table; the
+  `apb-researcher` profiles from detection and the models table, and
+  `same_agent_reviewer`, the one rule (primary agents only) and sentence
+  the setup plan, the doctor, the fit report and a run's limits share; the
   profiles are written by `apb_mcp::profile_tools::write_role_profiles`;
   `InstallState`, `playbook_state` and `skill_state` the read-only state
   setup and the doctor report (no lock, nothing written), `report` the one wording of what an
-  upgrade reconcile did (`describe`, `reconcile_defaults`), `remove_playbook` to the global trash
+  upgrade reconcile did (`describe`, `reconcile_defaults`), `update_diff`
+  what newer shipped content changes over a changed copy (`playbook_update_diff`,
+  `diff_summary`, `skill_update_diff`), `remove_playbook` to the global trash
   (`versioning::delete_global_playbook`) and `remove_skill` of an unchanged
   copy),
   the staged install of an embedded file tree shared with the official
@@ -464,7 +468,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the immutable write-once run manifest (`manifest.rs`, with `RunOrigin`:
   production, scenario, eval or unknown, absent read as production, and
   `RunOrigin::of_read`, where a manifest that does not read is unknown and
-  so no history), scenario runs (`scenario/`: `BoundaryKind` the closed
+  so no history), the run limits a start records from the profiles it
+  resolved (`RunProvenance.limits`, `scheduler/prepare` `run_limits`, read
+  by `run_view::run_limits`; a later rebind does not update them), scenario runs (`scenario/`: `BoundaryKind` the closed
   list of boundaries a scenario answers, `BoundaryKey`, `Session`, `at` and
   `RunsDir`, `guard::enter` the scenario mode plus the decision client's
   request ban at quick, `book` the answer book: attempts counted per visit
@@ -609,8 +615,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   save never from a run step or a dashboard without keys), `scenario` for
   scenario runs on every surface (`scenarios`, `run_scenario`,
   `scenario_run_view`, and `play`, the bounded `apb __scenario-run` child
-  `apb eval --level` uses too; a smoke run needs a cap and an approved
-  version and is refused from a run step and a dashboard without keys),
+  `apb eval --level` uses too; `Scope` picks the project or the global
+  store, the runs always land in the project; a smoke run needs a cap and
+  an approved version and is refused from a run step and a dashboard
+  without keys),
   `problems` for a
   playbook's known problems, a person's decision, a recheck and a scan,
   `results` for a run's result snapshots (`run_results`, `run_result_read`,
@@ -868,6 +876,12 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   so executed commands stay apart from an agent's own text and a model's
   judgment. Display only: it never steers a run. Both events are safe to
   skip before the next `node_finished`.
+
+- **Scenarios of the defaults**: every shipped playbook carries at least
+  two scenarios under `bundled/playbooks/<id>/evals/scenarios/`, installed
+  beside it in the global store, played at quick in CI
+  (`apb-cli` `bundled_scenarios_test`) and by a person or an installing
+  agent with `apb eval <id> --scope global --level quick`.
 
 - **Edge addresses and route facts** (spec
   `docs/superpowers/specs/2026-11-01-edge-identity-design.md`): every edge
@@ -1222,7 +1236,8 @@ On the first agent session of the day in this repository, check the stamp
 today's date (`date +%F`), run `scripts/daily-cleanup.sh` before other work
 (`--dry-run` shows what it would remove, `--force` runs it regardless of the
 stamp). It removes worktrees whose branch is merged into the default branch
-and that hold no uncommitted change, sweeps cargo artifacts older than 7 days
+and that hold no uncommitted change and no apb run that has not ended
+(paused, waiting, running, or with a send nobody settled), sweeps cargo artifacts older than 7 days
 (`cargo sweep`, never a full clean), removes empty leaked test config dirs and
 this project's logs older than 7 days, then writes the stamp. Besides that,
 remove a task's worktrees and their build output as soon as its pull request

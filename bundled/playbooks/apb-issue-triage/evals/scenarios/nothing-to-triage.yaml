@@ -1,0 +1,15 @@
+schema: 1
+id: nothing-to-triage
+title: The listing finds no untriaged issue, so nothing is classified, labelled or asked
+instruction: "Triage the new issues."
+params: { owner: acme, repo: site, label_filter: "new" }
+answers:
+  list_open:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { issues: '[]', index: '[]', truncated: "false" }
+expect:
+  run: { outcome: [succeeded] }
+  finish: done
+  route: { not_visits: [approve_comments, ask_info, done_without_comments] }

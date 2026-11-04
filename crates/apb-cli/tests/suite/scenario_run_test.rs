@@ -479,3 +479,101 @@ fn listing_scenarios_refuses_a_run_flag() {
     }
     assert!(p.started().is_empty(), "{}", p.started());
 }
+
+/// Every path below `dir` with its bytes, sorted; a link is listed with
+/// its target, not followed.
+fn files_below(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let rel = path.strip_prefix(root).unwrap().display().to_string();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                out.push((format!("{rel}/"), Vec::new()));
+                walk(root, &path, out);
+            } else if meta.is_symlink() {
+                let target = std::fs::read_link(&path).unwrap();
+                out.push((rel, target.display().to_string().into_bytes()));
+            } else {
+                out.push((rel, std::fs::read(&path).unwrap_or_default()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+/// A playbook kept only in the global store, with one agent step.
+const GLOBAL: &str = "schema: 2\nid: gpb\nname: gpb\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: agent_task, prompt: work }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n";
+
+/// Its one scenario: the step succeeds and the run finishes.
+const GLOBAL_GREEN: &str = "schema: 1\nid: green\nanswers:\n  work:\n    - { visit: 1, attempts: [ { status: succeeded, output: ok } ] }\nexpect: { finish: done }\n";
+
+/// A global playbook's scenario plays with `--scope global` from a
+/// project: the version comes from the global store, the run lands in the
+/// project's `.apb/scenario-runs/` under the playbook's id, and
+/// `--scenarios --scope global` lists it with that result. Without the
+/// scope the project registry is read, which has no such playbook.
+#[test]
+fn a_global_playbook_plays_its_scenario_in_the_project() {
+    let p = Project::new(&[]);
+    p.global_playbook("gpb", GLOBAL, &[("green", GLOBAL_GREEN)]);
+    let store_before = files_below(&p.cfg.path().join("playbooks"));
+
+    let (code, r) = p.play("gpb", "quick", "green", &["--scope", "global"]);
+    assert_eq!(
+        (code, r["verdict"].as_str()),
+        (0, Some("passed")),
+        "{:?}\n{r:#}",
+        failed_checks(&r)
+    );
+    assert!(run_dir(&p, &r).join("report.json").is_file(), "{r:#}");
+    assert!(
+        p.root()
+            .join(".apb/scenario-runs/index/gpb.jsonl")
+            .is_file()
+    );
+    assert!(
+        !p.cfg.path().join(".apb").exists() && !p.cfg.path().join("scenario-runs").exists(),
+        "a scenario run of a global playbook was written into the global store"
+    );
+    assert_eq!(
+        files_below(&p.cfg.path().join("playbooks")),
+        store_before,
+        "a scenario run of a global playbook was written into the global store"
+    );
+    assert!(p.started().is_empty(), "{}", p.started());
+
+    let listed = p.apb(&["eval", "gpb", "--scenarios", "--scope", "global", "--json"]);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let v: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(v["scenarios"][0]["scenario"], "green", "{v:#}");
+    assert_eq!(v["scenarios"][0]["quick"]["verdict"], "passed", "{v:#}");
+    assert_eq!(v["scenarios"][0]["quick"]["current"], true, "{v:#}");
+
+    let project_scope = p.apb(&["eval", "gpb", "--scenarios", "--json"]);
+    assert_eq!(project_scope.status.code(), Some(2));
+}
+
+/// Deep evals stay project-only: `--scope global` without a scenario
+/// level is refused (exit 2) before anything runs.
+#[test]
+fn a_deep_eval_of_a_global_playbook_is_refused() {
+    let p = Project::new(&[]);
+    p.global_playbook("gpb", GLOBAL, &[("green", GLOBAL_GREEN)]);
+    let out = p.apb(&["eval", "gpb", "--scope", "global"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("--scope global"), "{err}");
+    assert!(err.contains("project"), "{err}");
+    assert!(p.started().is_empty(), "{}", p.started());
+}

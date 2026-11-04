@@ -89,6 +89,10 @@ pub struct Refusal {
 pub struct Warning {
     pub code: String,
     pub detail: String,
+    /// On `update_available`: what the shipped content changes (the
+    /// definition diff of a playbook, the differing paths of a skill).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<Value>,
 }
 
 /// A host entry setup cannot add safely: the person adds it by hand.
@@ -321,7 +325,42 @@ fn warning(code: &str, detail: String) -> Warning {
     Warning {
         code: code.to_string(),
         detail,
+        diff: None,
     }
+}
+
+/// The `update_available` warning of a changed default: `detail`
+/// with the labelled one-line summary of how the copy differs from the
+/// shipped content (`shipped changes: ...` or `differs from the shipped
+/// version: ...`), and that diff with its `base` as `diff`.
+fn update_warning(detail: String, change: Option<(String, Value)>) -> Warning {
+    match change {
+        Some((line, diff)) => Warning {
+            diff: Some(diff),
+            ..warning("update_available", format!("{detail}; {line}"))
+        },
+        None => warning("update_available", detail),
+    }
+}
+
+/// The plan digest: [`digest`], and the diffs of the warnings that carry
+/// one, so a plan read before the shipped changes moved is another plan.
+/// Without a diff it is exactly [`digest`].
+fn plan_digest(actions: &[Action], refusal: Option<&Refusal>, warnings: &[Warning]) -> String {
+    let diffs: Vec<(&str, &Value)> = warnings
+        .iter()
+        .filter_map(|w| Some((w.detail.as_str(), w.diff.as_ref()?)))
+        .collect();
+    if diffs.is_empty() {
+        return digest(actions, refusal);
+    }
+    let bytes = serde_json::to_vec(&json!({
+        "actions": actions,
+        "refusal": refusal,
+        "update_diffs": diffs,
+    }))
+    .unwrap_or_default();
+    apb_core::content::sha256_hex(&bytes)
 }
 
 /// The global profile `name`: its agent, when it exists.
@@ -392,14 +431,19 @@ fn playbooks(
                     )
                 })
             }
-            InstallState::Modified { installed } => warnings.push(warning(
-                "update_available",
+            InstallState::Modified { installed } => warnings.push(update_warning(
                 format!(
                     "the default playbook {} stays at {installed}, which was changed or chosen locally; the shipped {} is available ({})",
                     p.id,
                     p.version,
                     ReplaceModified::hint(&p.id)
                 ),
+                bundled::playbook_update_diff(&p).map(|(base, d)| {
+                    (
+                        base.line(&bundled::diff_summary(&d)),
+                        bundled::playbook_diff_value(base, &d),
+                    )
+                }),
             )),
             InstallState::Foreign => warnings.push(warning(
                 "foreign_playbook",
@@ -455,14 +499,19 @@ fn skills(
                     )
                 })
             }
-            InstallState::Modified { installed } => warnings.push(warning(
-                "update_available",
+            InstallState::Modified { installed } => warnings.push(update_warning(
                 format!(
                     "the skill {} stays at {installed}, which was changed or chosen locally; the shipped {} is available ({})",
                     s.name,
                     s.version,
                     ReplaceModified::hint(&s.name)
                 ),
+                bundled::skill_update_diff(&s).map(|d| {
+                    (
+                        bundled::SkillDiff::BASE.line(&d.summary()),
+                        bundled::skill_diff_value(&d),
+                    )
+                }),
             )),
             InstallState::Foreign => warnings.push(warning(
                 "foreign_skill",
@@ -586,8 +635,11 @@ fn roles(
     }
     if plan.independence == Independence::SameAgent {
         warnings.push(warning(
-            "same_agent_reviewer",
-            "only one agent is usable: the reviewer runs on the same agent as the main profile, in a fresh session; reviews are less independent".to_string(),
+            apb_core::bundled::SAME_AGENT_REVIEWER,
+            format!(
+                "only one agent is usable: {}",
+                apb_core::bundled::SAME_AGENT_REVIEWER_DETAIL
+            ),
         ));
     }
     let roles_seen = RolesSeen {
@@ -793,7 +845,7 @@ pub fn plan(
     };
     Ok(Plan {
         schema: PLAN_SCHEMA,
-        digest: digest(&actions, refusal.as_ref()),
+        digest: plan_digest(&actions, refusal.as_ref(), &warnings),
         ready: refusal.is_none(),
         refusal,
         actions,

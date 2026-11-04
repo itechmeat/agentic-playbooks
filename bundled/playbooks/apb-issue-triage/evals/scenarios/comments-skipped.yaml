@@ -1,0 +1,35 @@
+schema: 1
+id: comments-skipped
+title: A person skips the comment for the issue that needs information, so nothing is posted
+instruction: "Triage the new issues."
+params: { owner: acme, repo: site, label_filter: "new" }
+answers:
+  list_open:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { issues: '[{"number": 1, "title": "issue 1", "url": "https://github.com/acme/site/issues/1", "body": "text"}, {"number": 5, "title": "issue 5", "url": "https://github.com/acme/site/issues/5", "body": "text"}]', index: '[{"number": 1, "title": "issue 1"}, {"number": 5, "title": "issue 5"}]', truncated: "false" }
+  classify:
+    - visit: 1
+      items:
+        "1":
+          - status: succeeded
+            outputs: { category: bug, reason: "the issue says so", duplicate_of: "", missing_info: "" }
+        "5":
+          - status: succeeded
+            outputs: { category: needs_info, reason: "the issue says so", duplicate_of: "", missing_info: "Which browser shows the error?" }
+      judge: { verdict: { value: accept, p: 0.9, confidence: 0.9 } }
+  label_bug:
+    - visit: 1
+      items:
+        "1": [ { status: succeeded, outputs: { applied: "triage:bug" }, check: pass } ]
+  label_needs_info:
+    - visit: 1
+      items:
+        "5": [ { status: succeeded, outputs: { applied: "triage:needs-info" }, check: pass } ]
+  approve_comments:
+    - { visit: 1, review: { decision: skip, note: "I will ask myself." } }
+expect:
+  run: { outcome: [succeeded] }
+  finish: done_without_comments
+  route: { not_visits: [ask_info] }

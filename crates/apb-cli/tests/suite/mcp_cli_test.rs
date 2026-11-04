@@ -327,3 +327,110 @@ fn the_demo_scenario_and_the_judge_sandbox_answer_through_apb_mcp() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// `scope: global` on `playbook_scenarios` and `playbook_scenario_run`
+/// reads a playbook of the global store and plays its scenario through
+/// `apb __scenario-run` into the current project's `.apb/scenario-runs/`;
+/// without it the project registry is read, which has no such playbook.
+#[test]
+fn scenario_tools_take_a_global_playbook() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path();
+    let cfg = base.join("cfg");
+    let project = base.join("project");
+    apb_core::registry::init_project(&project).unwrap();
+    let pb = cfg.join("playbooks/gpb");
+    fs::create_dir_all(pb.join("1.0.0")).unwrap();
+    fs::write(
+        pb.join("1.0.0/playbook.yaml"),
+        "schema: 2\nid: gpb\nname: gpb\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: agent_task, prompt: work }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n",
+    )
+    .unwrap();
+    fs::write(pb.join("current"), "1.0.0").unwrap();
+    fs::create_dir_all(pb.join("evals/scenarios")).unwrap();
+    fs::write(
+        pb.join("evals/scenarios/green.yaml"),
+        "schema: 1\nid: green\nanswers:\n  work:\n    - { visit: 1, attempts: [ { status: succeeded, output: ok } ] }\nexpect: { finish: done }\n",
+    )
+    .unwrap();
+    let env = [
+        ("APB_CONFIG_DIR", cfg.to_str().unwrap()),
+        ("APB_NO_REGISTRY", "1"),
+    ];
+    let (mut child, mut stdin, rx) = start_mcp(&project, &env);
+    let call = |stdin: &mut ChildStdin, id: u32, tool: &str, args: serde_json::Value| {
+        let body = serde_json::json!({
+            "method": "tools/call",
+            "params": { "name": tool, "arguments": args },
+        })
+        .to_string();
+        request(stdin, &rx, id, &body[1..body.len() - 1])
+    };
+
+    let project_scope = call(
+        &mut stdin,
+        2,
+        "playbook_scenarios",
+        serde_json::json!({ "id": "gpb" }),
+    );
+    // Without the scope the project registry is read: a tool error.
+    let project_scope: serde_json::Value = serde_json::from_str(&project_scope).unwrap();
+    assert_eq!(project_scope["result"]["isError"], true, "{project_scope}");
+    assert!(
+        project_scope["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("playbook `gpb` not found"),
+        "{project_scope}"
+    );
+
+    let listed = tool_json(&call(
+        &mut stdin,
+        3,
+        "playbook_scenarios",
+        serde_json::json!({ "id": "gpb", "scope": "global" }),
+    ));
+    assert_eq!(listed["scenarios"][0]["name"], "green", "{listed}");
+
+    let played = tool_json(&call(
+        &mut stdin,
+        4,
+        "playbook_scenario_run",
+        serde_json::json!({ "id": "gpb", "scenario": "green", "level": "quick", "scope": "global" }),
+    ));
+    assert_eq!(played["report"]["verdict"], "passed", "{played}");
+    let run = played["report"]["run_id"].as_str().unwrap().to_string();
+    assert!(project.join(".apb/scenario-runs").join(&run).is_dir());
+
+    let listed = tool_json(&call(
+        &mut stdin,
+        5,
+        "playbook_scenarios",
+        serde_json::json!({ "id": "gpb", "scope": "global" }),
+    ));
+    let latest = &listed["scenarios"][0]["latest"][0];
+    assert_eq!(
+        (&latest["verdict"], &latest["fresh"]),
+        (&serde_json::json!("passed"), &serde_json::json!(true)),
+        "{listed}"
+    );
+
+    let bad = call(
+        &mut stdin,
+        6,
+        "playbook_scenarios",
+        serde_json::json!({ "id": "gpb", "scope": "elsewhere" }),
+    );
+    // A refusal is the tools' structured answer, not a protocol error.
+    let bad = tool_json(&bad);
+    assert_eq!(bad["error"], "invalid_arguments", "{bad}");
+    assert!(
+        bad["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("scope `elsewhere`"),
+        "{bad}"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+}

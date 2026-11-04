@@ -3557,7 +3557,10 @@ be approved or agreed to. When the sub-playbook tree cannot be resolved, a
 `tree_not_assessed` note says the effects and trust items cover the
 playbook alone; memory that cannot be read is a `remembered_unreadable`
 note, and memory that is ignored (corrupt, or not saved by this
-installation) a `remembered_ignored` note, never a failed report. The same report backs
+installation) a `remembered_ignored` note, never a failed report. A
+playbook that binds both role profiles, `apb-main` and `apb-reviewer`, with
+the reviewer on the main role's agent gets a `same_agent_reviewer` note:
+reviews run in a fresh session but are less independent. The same report backs
 `playbook_adopt_report` (with `scope` and `workspace`), `playbook_catalog`
 with `fit: true` (a summary per entry), `apb adopt [--scope]` and the
 dashboard's Fit panel. For a global playbook the report answers for the

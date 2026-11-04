@@ -3724,7 +3724,12 @@ pub(crate) fn execute_finish_answer(
     // The binding snapshot every composer attempt names, as the agent path
     // writes it.
     let binding_digest = crate::execution_identity::store_binding(run_dir, &entry)?;
-    let executed_by = if host_mode {
+    // A scenario run's composer is the scripted agent: nothing is spawned
+    // and the attempt takes the scenario's answer, as an agent node's does.
+    let scripted = crate::scenario::session::is_scenario(run_dir);
+    let executed_by = if scripted {
+        crate::scenario::session::SCENARIO_AGENT
+    } else if host_mode {
         crate::execution_identity::EXECUTED_BY_HOST
     } else {
         crate::execution_identity::EXECUTED_BY_CLI
@@ -3832,7 +3837,13 @@ pub(crate) fn execute_finish_answer(
                 question_timeout: None,
                 default_answer: None,
             });
+            let scenario_adapter = crate::scenario::adapter::ScenarioAdapter {
+                run_dir,
+                node: node_id,
+                item: None,
+            };
             let adapter: &dyn crate::adapter::AgentAdapter = match &host_adapter {
+                _ if scripted => &scenario_adapter,
                 Some(h) => h,
                 None => &cli_adapter,
             };

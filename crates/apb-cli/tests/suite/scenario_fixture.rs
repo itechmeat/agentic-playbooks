@@ -86,6 +86,21 @@ impl Project {
         self.root().join(".apb/playbooks").join(id)
     }
 
+    /// Puts `playbook` (its yaml) as version 1.0.0 and current of `id` in
+    /// this project's global store (`<config dir>/playbooks/<id>`), with
+    /// `scenarios` as its `evals/scenarios/<name>.yaml`.
+    pub(crate) fn global_playbook(&self, id: &str, playbook: &str, scenarios: &[(&str, &str)]) {
+        let pb = self.cfg.path().join("playbooks").join(id);
+        fs::create_dir_all(pb.join("1.0.0")).unwrap();
+        fs::write(pb.join("1.0.0/playbook.yaml"), playbook).unwrap();
+        fs::write(pb.join("current"), "1.0.0").unwrap();
+        let dir = pb.join("evals/scenarios");
+        fs::create_dir_all(&dir).unwrap();
+        for (name, body) in scenarios {
+            fs::write(dir.join(format!("{name}.yaml")), body).unwrap();
+        }
+    }
+
     /// Writes scenario `name` of playbook `id`.
     pub(crate) fn scenario(&self, id: &str, name: &str, body: &str) {
         let path = self

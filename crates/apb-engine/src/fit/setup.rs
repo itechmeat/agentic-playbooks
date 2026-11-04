@@ -76,19 +76,28 @@ pub fn profile_findings(
     cx: &ModelContext,
     store: &TrustStore,
 ) -> Vec<ProfileFinding> {
-    check_profile(root, origin, r, cx, store).0
+    check_profile(root, origin, r, cx, store).findings
 }
 
-/// [`profile_findings`], plus the bundle `(<scope>/<name>, digest)` of a
-/// profile that resolves: computed once for both the setup and the trust
-/// section.
+/// What [`check_profile`] found about one profile reference.
+struct ProfileCheck {
+    findings: Vec<ProfileFinding>,
+    /// `(<scope>/<name>, digest)` of a profile that resolves.
+    bundle: Option<(String, String)>,
+    /// The primary executor agent of a profile that resolves.
+    agent: Option<String>,
+}
+
+/// [`profile_findings`], plus the bundle `(<scope>/<name>, digest)` and
+/// the primary agent of a profile that resolves: computed once for the
+/// setup and the trust section.
 fn check_profile(
     root: &Path,
     origin: PlaybookOrigin,
     r: &QualifiedProfileRef,
     cx: &ModelContext,
     store: &TrustStore,
-) -> (Vec<ProfileFinding>, Option<(String, String)>) {
+) -> ProfileCheck {
     let mut out = Vec::new();
     match profile_store::compute_bundle(root, origin, r) {
         Ok((loaded, _pairs, bundle)) => {
@@ -105,7 +114,11 @@ fn check_profile(
             for (agent, model) in chain {
                 out.extend(model_finding(agent, model, &key, cx));
             }
-            (out, Some((key, bundle)))
+            ProfileCheck {
+                findings: out,
+                bundle: Some((key, bundle)),
+                agent: Some(ex.agent.clone()),
+            }
         }
         Err(e) => {
             let code = match &e {
@@ -117,7 +130,11 @@ fn check_profile(
                 detail: Some(e.to_string()),
                 ..finding(code, &r.name, true)
             });
-            (out, None)
+            ProfileCheck {
+                findings: out,
+                bundle: None,
+                agent: None,
+            }
         }
     }
 }
@@ -186,18 +203,41 @@ pub(super) fn profiles(
     }
     let cx = ModelContext::load();
     let mut seen = std::collections::HashSet::new();
+    let mut agents: BTreeMap<String, String> = BTreeMap::new();
     for r in refs {
-        let (findings, bundle) = check_profile(root, origin, r, &cx, store);
-        out.bundles.extend(bundle);
+        let check = check_profile(root, origin, r, &cx, store);
+        out.bundles.extend(check.bundle);
+        if let Some(agent) = check.agent {
+            agents.entry(r.name.clone()).or_insert(agent);
+        }
         out.setup.extend(
-            findings
+            check
+                .findings
                 .into_iter()
                 .filter(|f| !f.is_trust())
                 .filter(|f| seen.insert(f.clone()))
                 .map(|f| f.to_item()),
         );
     }
+    out.setup.extend(same_agent_reviewer_item(&agents));
     out
+}
+
+/// The `same_agent_reviewer` note of a playbook that binds both role
+/// profiles, `apb-main` and `apb-reviewer`, when both resolve and the
+/// reviewer runs on the main role's agent
+/// ([`apb_core::bundled::same_agent_reviewer`], primary agents only). A
+/// note: it never keeps a playbook from being ready.
+fn same_agent_reviewer_item(agents: &BTreeMap<String, String>) -> Option<FitItem> {
+    use apb_core::bundled::{self, ROLE_MAIN, ROLE_REVIEWER};
+    let main = agents.get(ROLE_MAIN)?;
+    let reviewer = agents.get(ROLE_REVIEWER)?;
+    bundled::same_agent_reviewer(main, reviewer).then(|| FitItem {
+        code: bundled::SAME_AGENT_REVIEWER.to_string(),
+        subject: Some(ROLE_REVIEWER.to_string()),
+        detail: bundled::SAME_AGENT_REVIEWER_DETAIL.to_string(),
+        severity: FitSeverity::Note,
+    })
 }
 
 /// One item per isolated node: what its isolation gets on this machine. A

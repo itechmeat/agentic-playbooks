@@ -95,7 +95,9 @@ is not what the playbook needs.
 The registry only lists `major.minor.patch` directories as versions, so
 `evals/` is never a version, and editing a case never changes a version's
 trust digest. One suite applies across versions; a case can narrow itself
-with `versions`. Only project playbooks can be evaluated in this release.
+with `versions`. Eval cases (deep) run for project playbooks only;
+scenarios (quick and smoke) run for project and global playbooks (see
+"Scenario runs" below).
 
 A playbook has a suite when `evals/` holds `suite.yaml` or a case file
 directly. A directory holding only `scenarios/` is no suite: `apb validate`
@@ -420,10 +422,18 @@ Scenario runs live under `.apb/scenario-runs/`, never under `.apb/runs/`;
 
 ```
 apb eval <id> --level quick|smoke [--scenario NAME ...] [--version X.Y.Z]
-              [--allow-stale] [--yes] [--json]
+              [--scope project|global] [--allow-stale] [--yes] [--json]
               [--max-decision-requests N]      # smoke only
-apb eval <id> --scenarios [--version X.Y.Z] [--json]
+apb eval <id> --scenarios [--version X.Y.Z] [--scope project|global] [--json]
 ```
+
+- `--scope` says where the playbook is read: `project` (the default, the
+  project's `.apb/playbooks/`) or `global` (the global store, where the
+  shipped defaults keep their scenarios). A scenario run of a global
+  playbook still needs a project: it is run from one and lands in that
+  project's `.apb/scenario-runs/`, its index line under the playbook's id.
+  A deep `apb eval` takes no `--scope global` (exit 2): eval cases run for
+  project playbooks only.
 
 - `--scenario NAME` (repeatable) plays only the named scenarios; without
   it every scenario of the playbook plays, one after another.
@@ -448,7 +458,9 @@ machine's decision providers at their cost, so it also needs:
 
 - the version approved by its digest (`apb trust approve`), and an
   approved import when the version was imported with scripts
-  (`untrusted`, `imported_scripts_require_approval`);
+  (`untrusted`, `imported_scripts_require_approval`); this holds for a
+  global playbook too: a shipped default nobody changed is trusted by its
+  shipped digest, an edited copy is `untrusted` until approved;
 - a person's go-ahead: a terminal question that names the cap and the
   number of scenarios, or `--yes` (`needs_confirmation` without either);
 - a caller that is not a run step: inside an agent attempt or a host task
@@ -475,15 +487,18 @@ The same scenario runs are offered to an agent and on the playbook page:
 
 | Surface | List | Play one | Read one |
 |---|---|---|---|
-| MCP | `playbook_scenarios { id, version? }` | `playbook_scenario_run { id, scenario, level, version?, max_decision_requests? }` | |
+| MCP | `playbook_scenarios { id, version?, scope? }` | `playbook_scenario_run { id, scenario, level, version?, max_decision_requests?, scope? }` | |
 | HTTP | `GET /api/playbooks/{id}/scenarios` | `POST /api/playbooks/{id}/scenario-runs` | `GET /api/playbooks/{id}/scenario-runs/{run}` |
 
 They play a scenario exactly as the command does, through the same `apb
-__scenario-run` child with the same timeouts, and answer `{ report, graph
+__scenario-run` child with the same timeouts (the child is handed the
+scope too and refuses a digest that differs, whatever the scope), and answer `{ report, graph
 }`: the report and the run graph of the scenario run directory. The list
 gives each scenario's newest result per level with `fresh` (same version
 digest and scenario file) and whether the scenario is stale now. What
-differs from the command: one scenario per call; a stale scenario answers
+differs from the command: one scenario per call; MCP takes `scope`
+(`project` by default, or `global`) like `--scope`, while the HTTP routes
+serve project playbooks only; a stale scenario answers
 a `stale` report and never plays (there is no `--allow-stale`); a smoke run
 needs `max_decision_requests` named (1 to 200; there is no default and no
 terminal question, naming the cap is the go-ahead), an approved version,
@@ -622,8 +637,14 @@ scenario run's directory), never an event of the journal:
 ### Where a scenario lives
 
 ```
-.apb/playbooks/<id>/evals/scenarios/<name>.yaml
+.apb/playbooks/<id>/evals/scenarios/<name>.yaml      a project playbook
+<config dir>/playbooks/<id>/evals/scenarios/<name>.yaml  a global one
 ```
+
+The shipped defaults (`apb-research` and the others setup installs) carry
+their scenarios: an install or upgrade writes the shipped `evals/` into the
+global store next to the versions, so `apb eval apb-research --scope global
+--level quick` plays them from any project.
 
 The name is `[a-z0-9][a-z0-9-]*`, at most 64 characters, and the file's
 `id` must equal it. A name outside that grammar never becomes a path. apb

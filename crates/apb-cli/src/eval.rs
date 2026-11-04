@@ -79,6 +79,9 @@ impl EvalLevel {
 pub(crate) struct EvalArgs {
     pub id: String,
     pub version: Option<String>,
+    /// Where the playbook is read: a scenario level and `--scenarios` take
+    /// either; a deep eval takes a project playbook only.
+    pub scope: apb_core::scope::Scope,
     pub cases: Vec<String>,
     pub tags: Vec<String>,
     pub repeat: Option<u32>,

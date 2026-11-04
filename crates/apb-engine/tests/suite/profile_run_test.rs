@@ -1284,3 +1284,78 @@ fn exhausted_infrastructure_retries_fall_back_as_transient() {
         vec![(Some("transient".into()), Some("cli".into()))]
     );
 }
+
+const ROLES_PLAYBOOK: &str = r#"schema: 2
+id: p
+name: P
+version: 1.0.0
+defaults:
+  profile: apb-main
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: agent_task, prompt: "do" }
+  - { id: review, type: agent_task, prompt: "look", profile: apb-reviewer }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: review }
+  - { from: review, to: done }
+"#;
+
+/// The limits a run of [`ROLES_PLAYBOOK`] journals on `run_provenance`,
+/// with `apb-main` on claude and `apb-reviewer` on `reviewer_agent`.
+fn role_run_limits(reviewer_agent: &str) -> Vec<apb_engine::event::RunLimit> {
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let root = proj.path();
+    init_project(root).unwrap();
+    let dir = root.join(".apb/playbooks/p/1.0.0");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("playbook.yaml"), ROLES_PLAYBOOK).unwrap();
+    fs::write(root.join(".apb/playbooks/p/current"), "1.0.0").unwrap();
+    seed_profile(root, "apb-main", "", "", "role");
+    let rdir = root.join(".apb/profiles/apb-reviewer");
+    fs::create_dir_all(&rdir).unwrap();
+    fs::write(
+        rdir.join("profile.yaml"),
+        format!(
+            "name: apb-reviewer\ndescription: d\nexecutor:\n  agent: {reviewer_agent}\n  model: m\n"
+        ),
+    )
+    .unwrap();
+    fs::write(rdir.join("SOUL.md"), "review").unwrap();
+    set_env(
+        &make_stub(bin.path(), DUMP_STUB),
+        home.path(),
+        cfg.path(),
+        None,
+    );
+    // The outcome does not matter here: the limit is journaled at start.
+    let res = run(root, "p", None, RunOptions::default()).expect("run starts");
+    read_all(&root.join(".apb/runs").join(&res.run_id))
+        .unwrap()
+        .into_iter()
+        .find_map(|e| match e.payload {
+            EventPayload::RunProvenance { limits, .. } => Some(limits),
+            _ => None,
+        })
+        .expect("run_provenance")
+}
+
+/// A run that binds both role profiles journals the reviewer on the main
+/// role's agent as a limit; one with the roles on two agents journals none.
+#[test]
+fn a_reviewer_on_the_main_agent_is_journaled_as_a_run_limit() {
+    let same = role_run_limits("claude");
+    assert_eq!(same.len(), 1, "{same:?}");
+    assert_eq!(same[0].code, "same_agent_reviewer");
+    assert_eq!(
+        same[0].detail,
+        apb_core::bundled::SAME_AGENT_REVIEWER_DETAIL
+    );
+    assert!(role_run_limits("codex").is_empty());
+}

@@ -977,6 +977,113 @@ fn a_changed_skill_is_replaced_only_on_request_and_its_copy_is_kept() {
 }
 
 #[test]
+fn an_update_available_warning_carries_what_the_shipped_content_changed() {
+    let m = Machine::with(&["codex"]);
+    let digest = m.plan()["digest"].as_str().unwrap().to_string();
+    let (out, code) = m.json(&["setup", "apply", "--plan", &digest, "--json"]);
+    assert_eq!(code, Some(0), "{out}");
+    // A person changes a default skill and a default playbook in place.
+    let skill = m.home().join(".agents/skills/apb-review");
+    let shipped = fs::read_to_string(skill.join("SKILL.md")).unwrap();
+    fs::write(skill.join("SKILL.md"), format!("{shipped}\nmine\n")).unwrap();
+    fs::write(skill.join("NOTES.md"), "mine\n").unwrap();
+    let dir = m.config().join("playbooks/apb-research");
+    let current = fs::read_to_string(dir.join("current")).unwrap();
+    let file = dir.join(current.trim()).join("playbook.yaml");
+    let text = fs::read_to_string(&file).unwrap();
+    fs::write(&file, text.replace("name: Bounded research", "name: Mine")).unwrap();
+
+    let plan = m.plan();
+    let update = |name: &str| {
+        plan["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| {
+                w["code"] == "update_available" && w["detail"].as_str().unwrap().contains(name)
+            })
+            .unwrap_or_else(|| panic!("no update for {name}: {plan}"))
+            .clone()
+    };
+    let skill_warning = update("apb-review");
+    assert_eq!(keys(&skill_warning), ["code", "detail", "diff"]);
+    assert_eq!(
+        skill_warning["diff"],
+        serde_json::json!({
+            "base": "installed_copy",
+            "added": [],
+            "removed": ["NOTES.md"],
+            "changed": ["SKILL.md"]
+        })
+    );
+    assert!(
+        skill_warning["detail"]
+            .as_str()
+            .unwrap()
+            .ends_with("; differs from the shipped version: files +0 -1 ~1"),
+        "{skill_warning}"
+    );
+    let playbook_warning = update("apb-research");
+    let diff = &playbook_warning["diff"];
+    // Edited in place: no apb-written version is left, so the diff starts
+    // at the person's current and says so.
+    assert_eq!(diff["base"], "current", "{diff}");
+    assert_eq!(diff["nodes_added"], serde_json::json!([]), "{diff}");
+    assert!(
+        diff["yaml_diff"]
+            .as_str()
+            .unwrap()
+            .contains("+name: Bounded research"),
+        "{diff}"
+    );
+    assert!(
+        playbook_warning["detail"]
+            .as_str()
+            .unwrap()
+            .ends_with("(text only)"),
+        "{playbook_warning}"
+    );
+    // A warning without a diff has no `diff` key.
+    assert!(
+        plan["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| w["code"] != "update_available")
+            .all(|w| w.get("diff").is_none()),
+        "{plan}"
+    );
+
+    // The digest is stable across reads and covers the diff.
+    assert_eq!(plan["digest"], m.plan()["digest"]);
+    fs::write(skill.join("MORE.md"), "more\n").unwrap();
+    assert_ne!(
+        plan["digest"],
+        m.plan()["digest"],
+        "the diff is in the digest"
+    );
+
+    // The doctor names the summary per changed default.
+    let (doctor, _) = m.json(&["doctor", "--json"]);
+    let defaults = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["subject"] == "defaults")
+        .cloned()
+        .unwrap();
+    let detail = defaults["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("apb-review (differs from the shipped version: files +0 -2 ~1)"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("apb-research (differs from the shipped version: "),
+        "{detail}"
+    );
+}
+
+#[test]
 fn trackers_and_helpers_are_reported_and_nothing_is_installed() {
     let m = Machine::with(&["codex"]);
     let project = tempfile::tempdir().unwrap();

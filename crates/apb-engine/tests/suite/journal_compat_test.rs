@@ -1085,3 +1085,34 @@ fn evidence_records_round_trip_and_are_skippable_before_a_checkpoint() {
     let state = |ev: &[Event]| apb_engine::state::RunState::fold(ev).nodes;
     assert_eq!(state(&events), state(&new));
 }
+
+/// `run_provenance.limits` is an additive field: an old line reads with no
+/// limits and writes its old shape back, a line carrying limits round trips,
+/// and a reader that does not know the field (an older apb, here the same
+/// line with the field renamed to one this binary does not know) still
+/// reads the event with every other field.
+#[test]
+fn run_provenance_limits_are_additive() {
+    let old =
+        r#"{"seq":1,"ts":2,"type":"run_provenance","origin":"project","digest":"sha256:abc"}"#;
+    let e: Event = serde_json::from_str(old).unwrap();
+    assert!(matches!(&e.payload, EventPayload::RunProvenance { limits, .. } if limits.is_empty()));
+    assert_eq!(serde_json::to_string(&e).unwrap(), old);
+
+    let new = r#"{"seq":1,"ts":2,"type":"run_provenance","origin":"project","digest":"sha256:abc","limits":[{"code":"same_agent_reviewer","detail":"d"}]}"#;
+    let e: Event = serde_json::from_str(new).unwrap();
+    let EventPayload::RunProvenance { limits, .. } = &e.payload else {
+        unreachable!()
+    };
+    assert_eq!(limits.len(), 1);
+    assert_eq!(limits[0].code, "same_agent_reviewer");
+    assert_eq!(serde_json::to_string(&e).unwrap(), new);
+
+    let unknown_field = new.replace("\"limits\"", "\"limits_from_the_future\"");
+    let e: Event = serde_json::from_str(&unknown_field).unwrap();
+    assert!(matches!(
+        &e.payload,
+        EventPayload::RunProvenance { digest: Some(d), limits, .. }
+            if d == "sha256:abc" && limits.is_empty()
+    ));
+}

@@ -15,16 +15,20 @@ use serde::Deserialize;
 use super::quality::{invalid, off_runtime};
 use super::{WfMcp, to_call_tool_result};
 use crate::tools;
-use crate::tools::scenario::{ScenarioCaller, ScenarioRunRequest};
+use crate::tools::scenario::{ScenarioCaller, ScenarioRunRequest, Scope};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlaybookScenariosArgs {
-    /// The playbook id (a project playbook).
+    /// The playbook id.
     pub id: String,
     /// The version; `current` when absent.
     #[serde(default)]
     pub version: Option<String>,
+    /// Where the playbook is read: "project" (default) or "global" (the
+    /// global store, where the shipped defaults keep their scenarios).
+    #[serde(default)]
+    pub scope: Option<String>,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,
@@ -45,14 +49,29 @@ pub struct PlaybookScenarioRunArgs {
     /// refused at quick.
     #[serde(default)]
     pub max_decision_requests: Option<u32>,
+    /// Where the playbook is read: "project" (default) or "global". The
+    /// scenario run is written under the current project's
+    /// `.apb/scenario-runs/` either way.
+    #[serde(default)]
+    pub scope: Option<String>,
     #[serde(default)]
     pub workspace: Option<String>,
+}
+
+/// The `scope` argument: project when absent.
+fn scope_of(arg: Option<&str>) -> Result<Scope, String> {
+    match arg {
+        None => Ok(Scope::Project),
+        Some(label) => {
+            Scope::parse(label).ok_or_else(|| format!("scope `{label}`: project or global"))
+        }
+    }
 }
 
 #[tool_router(router = scenario_router, vis = "pub(crate)")]
 impl WfMcp {
     #[tool(
-        description = "List a playbook's scenarios (evals/scenarios/<name>.yaml: scripted answers for every point a run reaches outside apb, with expectations), each with its newest quick and smoke result and whether that result is fresh (same version digest and scenario file), whether the scenario is stale for the version, and one issue per file that does not load.",
+        description = "List a playbook's scenarios (evals/scenarios/<name>.yaml: scripted answers for every point a run reaches outside apb, with expectations), each with its newest quick and smoke result in the current project and whether that result is fresh (same version digest and scenario file), whether the scenario is stale for the version, and one issue per file that does not load. scope global lists a playbook of the global store, where the shipped defaults keep their scenarios.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn playbook_scenarios(
@@ -63,15 +82,19 @@ impl WfMcp {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Ok(e)),
         };
+        let scope = match scope_of(args.scope.as_deref()) {
+            Ok(s) => s,
+            Err(e) => return invalid(e),
+        };
         off_runtime(move || {
-            tools::scenario::scenarios(&root, &args.id, args.version.as_deref())
+            tools::scenario::scenarios(&root, scope, &args.id, args.version.as_deref())
                 .and_then(tools::grade::to_value)
         })
         .await
     }
 
     #[tool(
-        description = "Play one scenario of a playbook through the real engine, with every point that would reach outside apb answered from the scenario, and return its report (verdict passed, failed, invalid, stale or incomplete, the failed checks first, the trace, unused and missing answers) and the run graph. level quick sends nothing, starts no program and writes only below .apb/scenario-runs/ (at most 60 s); nothing it does counts as run history. level smoke asks this machine's decision providers instead of the scripted judge answers: only when the user asks for it, with max_decision_requests (1 to 200), for an approved version, never from a run step (at most 300 s).",
+        description = "Play one scenario of a playbook through the real engine, with every point that would reach outside apb answered from the scenario, and return its report (verdict passed, failed, invalid, stale or incomplete, the failed checks first, the trace, unused and missing answers) and the run graph. level quick sends nothing, starts no program and writes only below .apb/scenario-runs/ (at most 60 s); nothing it does counts as run history. level smoke asks this machine's decision providers instead of the scripted judge answers: only when the user asks for it, with max_decision_requests (1 to 200), for an approved version, never from a run step (at most 300 s). scope global plays a playbook of the global store; the scenario run is still written in the current project.",
         annotations(destructive_hint = false)
     )]
     pub(crate) async fn playbook_scenario_run(
@@ -87,6 +110,10 @@ impl WfMcp {
             "smoke" => ScenarioLevel::Smoke,
             other => return invalid(format!("level `{other}`: quick or smoke")),
         };
+        let scope = match scope_of(args.scope.as_deref()) {
+            Ok(s) => s,
+            Err(e) => return invalid(e),
+        };
         let req = ScenarioRunRequest {
             scenario: args.scenario,
             level,
@@ -101,7 +128,7 @@ impl WfMcp {
                 step: &step,
                 keyless_dashboard: false,
             };
-            tools::scenario::run_scenario(&root, &args.id, &req, caller, &exe)
+            tools::scenario::run_scenario(&root, scope, &args.id, &req, caller, &exe)
                 .and_then(tools::grade::to_value)
         })
         .await

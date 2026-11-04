@@ -8,7 +8,7 @@ description: >-
   it never takes a step that needs a person's own consent (a launch floor,
   trust of a changed playbook, a notification target, filing feedback).
   The person or the host applies the plan afterwards.
-version: 1.0.0
+version: 1.0.1
 agent_launch: ask
 trigger:
   when:
@@ -76,8 +76,10 @@ nodes:
       and what it leaves untouched. Name each answer the plan cannot
       honor and why. List separately what needs the person's own decision
       and must not be done by an agent: a notification target, lowering a
-      launch floor, trusting a changed playbook, filing feedback. Write
-      the outputs digest (the plan digest), changes (a JSON array), unmet
+      launch floor, trusting a changed playbook, filing feedback. The mail
+      digest apb-inbox-digest needs the imap connector, which the person
+      installs (apb connector install imap) and gives an account; name it
+      there when their goals include mail. Write the outputs digest (the plan digest), changes (a JSON array), unmet
       (answers the plan cannot honor), person_only (the decisions left to
       the person), apply_command (the exact `apb setup apply` command for
       this digest) and undo_command.

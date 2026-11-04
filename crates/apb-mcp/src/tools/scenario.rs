@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 
 use apb_core::registry::{Registry, is_safe_segment};
 use apb_core::scenario::{LoadedScenario, ScenarioLevel};
+pub use apb_core::scope::Scope;
 use apb_core::step_env::StepCaller;
 use apb_core::validate::{IssueView, Severity};
 use apb_engine::candidate::summary::ScenarioResultRef;
@@ -161,32 +162,53 @@ pub struct ScenarioVersion {
     pub version: String,
     /// The version's trust digest.
     pub digest: String,
-    /// `.apb/playbooks/<id>`.
+    /// The playbook's directory: `<root>/.apb/playbooks/<id>`, or
+    /// `<config dir>/playbooks/<id>` for a global playbook, where a shipped
+    /// default keeps its `evals/scenarios/`.
     pub dir: PathBuf,
     /// The validator's errors for the version: a run of it is refused, so
     /// a scenario of it is refused before any run too.
     pub invalid: Vec<String>,
 }
 
-/// Project playbook `id` at `version` (`current` when absent). A refusal is
-/// `(code, message)`.
+/// Playbook `id` of `scope` at `version` (`current` when absent): a
+/// project playbook of `root`, or one of the global store. A scenario run
+/// of either is written under `root`, which must be a project. A refusal
+/// is `(code, message)`.
 pub fn load_version(
     root: &Path,
+    scope: Scope,
     id: &str,
     version: Option<&str>,
 ) -> Result<ScenarioVersion, (String, String)> {
-    let reg =
+    let project =
         Registry::open(root).map_err(|e| ("no_project".into(), format!("no project here: {e}")))?;
+    let (reg, origin, dir) = match scope {
+        Scope::Project => (
+            project,
+            apb_core::profile_store::PlaybookOrigin::Project,
+            root.join(".apb/playbooks").join(id),
+        ),
+        Scope::Global => {
+            let parent = apb_core::store::global_playbooks_parent()
+                .ok_or_else(|| ("no_global_store".into(), "no global config dir".into()))?;
+            let reg = Registry::open_dir(&parent).map_err(|e| {
+                (
+                    "not_found".into(),
+                    format!("global playbook `{id}`: no global store: {e}"),
+                )
+            })?;
+            let dir = parent.join("playbooks").join(id);
+            (reg, apb_core::profile_store::PlaybookOrigin::Global, dir)
+        }
+    };
     let loaded = reg
         .load(id, version)
         .map_err(|e| ("not_found".into(), e.to_string()))?;
     let digest = loaded
         .trust_digest()
         .map_err(|e| ("no_digest".into(), e.to_string()))?;
-    let ctx = apb_core::validate::ValidationContext::for_registry(
-        &reg,
-        apb_core::profile_store::PlaybookOrigin::Project,
-    );
+    let ctx = apb_core::validate::ValidationContext::for_registry(&reg, origin);
     let invalid = apb_core::validate::validate(&loaded.playbook, &ctx)
         .issues
         .into_iter()
@@ -197,7 +219,7 @@ pub fn load_version(
         playbook: loaded.playbook,
         version: loaded.version,
         digest,
-        dir: root.join(".apb/playbooks").join(id),
+        dir,
         invalid,
     })
 }
@@ -237,6 +259,9 @@ pub fn smoke_trust(id: &str, v: &ScenarioVersion) -> Result<(), (String, String)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScenarioChild {
     pub root: PathBuf,
+    /// Where the playbook is read: the project's registry or the global
+    /// store. The run is written under `root` either way.
+    pub scope: Scope,
     pub playbook: String,
     pub version: String,
     pub scenario: String,
@@ -251,6 +276,7 @@ impl ScenarioChild {
     /// The child for scenario `s` of version `v` of playbook `id`.
     pub fn of(
         root: &Path,
+        scope: Scope,
         id: &str,
         v: &ScenarioVersion,
         s: &LoadedScenario,
@@ -259,6 +285,7 @@ impl ScenarioChild {
     ) -> Self {
         ScenarioChild {
             root: root.to_path_buf(),
+            scope,
             playbook: id.to_string(),
             version: v.version.clone(),
             scenario: s.name.clone(),
@@ -275,6 +302,8 @@ impl ScenarioChild {
             "__scenario-run".to_string(),
             "--root".into(),
             self.root.display().to_string(),
+            "--scope".into(),
+            self.scope.as_str().into(),
             "--playbook".into(),
             self.playbook.clone(),
             "--version".into(),
@@ -532,16 +561,17 @@ fn safe(what: &str, name: &str) -> Result<(), ToolError> {
     }
 }
 
-/// The scenarios of project playbook `id` at `version` (`current` when
-/// absent), each with its newest result per level, and one issue per file
-/// that does not load.
+/// The scenarios of playbook `id` of `scope` at `version` (`current` when
+/// absent), each with its newest result per level in the project at
+/// `root`, and one issue per file that does not load.
 pub fn scenarios(
     root: &Path,
+    scope: Scope,
     id: &str,
     version: Option<&str>,
 ) -> Result<PlaybookScenarios, ToolError> {
     safe("playbook", id)?;
-    let v = load_version(root, id, version).map_err(refusal)?;
+    let v = load_version(root, scope, id, version).map_err(refusal)?;
     let all = apb_core::scenario::load_all(&v.dir);
     let latest = store::latest(root, id);
     Ok(PlaybookScenarios {
@@ -566,7 +596,8 @@ pub struct ScenarioCaller<'a> {
     pub keyless_dashboard: bool,
 }
 
-/// Plays scenario `req.scenario` of project playbook `id` once, through
+/// Plays scenario `req.scenario` of playbook `id` of `scope` once, written
+/// under the project at `root`, through
 /// the `apb` executable `exe`, and answers its report and graph. What is
 /// refused before any run: a request cap at quick, a smoke run without a
 /// cap, outside 1 to 200, from a run step, from a dashboard without keys or
@@ -575,6 +606,7 @@ pub struct ScenarioCaller<'a> {
 /// report says `stale` and why.
 pub fn run_scenario(
     root: &Path,
+    scope: Scope,
     id: &str,
     req: &ScenarioRunRequest,
     caller: ScenarioCaller,
@@ -610,7 +642,7 @@ pub fn run_scenario(
             Some(n)
         }
     };
-    let v = load_version(root, id, req.version.as_deref()).map_err(refusal)?;
+    let v = load_version(root, scope, id, req.version.as_deref()).map_err(refusal)?;
     if !v.invalid.is_empty() {
         return Err(ToolError::Engine(format!(
             "invalid_playbook: `{id}` {} is invalid: {}",
@@ -628,7 +660,7 @@ pub fn run_scenario(
             ToolError::NotFound(format!("scenario `{}`: {e}", req.scenario))
         }
     })?;
-    let child = ScenarioChild::of(root, id, &v, &s, req.level, cap);
+    let child = ScenarioChild::of(root, scope, id, &v, &s, req.level, cap);
     if let Some(why) = apb_core::scenario::staleness(&s.scenario, &v.version, &v.digest) {
         let report = ScenarioReport::not_run(&child.subject(), Verdict::Stale, why);
         return Ok(ScenarioRunView {
