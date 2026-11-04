@@ -481,15 +481,40 @@ pub struct ManifestExecution {
 }
 
 impl ManifestExecution {
+    /// The suffix a guarded run's mode carries (`cli+guard`, `host+guard`),
+    /// so an apb that does not know it refuses the run with its "written
+    /// by a newer apb" message while this apb reads the real mode from
+    /// the part before the suffix.
+    pub const GUARD_SUFFIX: &str = "+guard";
+
     /// The block for a resolved execution; `None` for a plain `cli` run
     /// without the fallback, which keeps the manifest unchanged.
     pub fn from_resolved(r: &apb_core::execution::ResolvedExecution) -> Option<Self> {
-        (r.mode != apb_core::execution::ExecutionMode::Cli || r.fallback_to_host).then(|| Self {
-            mode: r.mode.as_str().to_string(),
-            source: Some(r.source.as_str().to_string()),
-            client: r.client.clone(),
-            fallback_to_host: r.fallback_to_host,
-        })
+        Self::from_resolved_guarded(r, false)
+    }
+
+    /// [`ManifestExecution::from_resolved`] for a run whose definition
+    /// uses a person-only gate or an approval: the block is always
+    /// written, with the mode suffixed by [`ManifestExecution::GUARD_SUFFIX`].
+    /// An apb from 0.23 on refuses to resume such a run (it does not know
+    /// the suffixed mode), while it still reads and stops it; this apb
+    /// reads, resumes, pauses and stops it as before.
+    pub fn from_resolved_guarded(
+        r: &apb_core::execution::ResolvedExecution,
+        guarded: bool,
+    ) -> Option<Self> {
+        (guarded || r.mode != apb_core::execution::ExecutionMode::Cli || r.fallback_to_host).then(
+            || Self {
+                mode: if guarded {
+                    format!("{}{}", r.mode.as_str(), Self::GUARD_SUFFIX)
+                } else {
+                    r.mode.as_str().to_string()
+                },
+                source: Some(r.source.as_str().to_string()),
+                client: r.client.clone(),
+                fallback_to_host: r.fallback_to_host,
+            },
+        )
     }
 }
 
@@ -500,14 +525,28 @@ impl RunExecutionManifest {
     pub fn execution_mode(&self) -> Result<apb_core::execution::ExecutionMode, EngineError> {
         match &self.execution {
             None => Ok(apb_core::execution::ExecutionMode::Cli),
-            Some(e) => apb_core::execution::ExecutionMode::parse(&e.mode).ok_or_else(|| {
-                EngineError::Conflict(format!(
-                    "the run manifest names execution mode `{}`, which this apb {} does not know; it was written by a newer apb: upgrade apb and retry",
-                    e.mode,
-                    env!("CARGO_PKG_VERSION"),
-                ))
-            }),
+            Some(e) => {
+                let base = e
+                    .mode
+                    .strip_suffix(ManifestExecution::GUARD_SUFFIX)
+                    .unwrap_or(&e.mode);
+                apb_core::execution::ExecutionMode::parse(base).ok_or_else(|| {
+                    EngineError::Conflict(format!(
+                        "the run manifest names execution mode `{}`, which this apb {} does not know; it was written by a newer apb: upgrade apb and retry",
+                        e.mode,
+                        env!("CARGO_PKG_VERSION"),
+                    ))
+                })
+            }
         }
+    }
+
+    /// Whether the run's manifest carries the guard suffix: a run whose
+    /// definition uses a person-only gate or an approval.
+    pub fn is_guarded(&self) -> bool {
+        self.execution
+            .as_ref()
+            .is_some_and(|e| e.mode.ends_with(ManifestExecution::GUARD_SUFFIX))
     }
 
     /// Whether the run executes its agent steps as host tasks.
@@ -853,6 +892,36 @@ mod tests {
             run_execution_mode(dir.path()).unwrap(),
             apb_core::execution::ExecutionMode::Host
         );
+    }
+
+    #[test]
+    fn a_guarded_manifest_mode_reads_as_its_real_mode() {
+        for (mode, want) in [
+            ("cli+guard", apb_core::execution::ExecutionMode::Cli),
+            ("host+guard", apb_core::execution::ExecutionMode::Host),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                manifest_path(dir.path()),
+                format!("profiles: []\nnode_bindings: {{}}\nexecution:\n  mode: {mode}\n"),
+            )
+            .unwrap();
+            let m = read(dir.path()).unwrap().unwrap();
+            assert_eq!(m.execution_mode().unwrap(), want, "{mode}");
+            assert_eq!(
+                m.is_host_mode().unwrap(),
+                want == apb_core::execution::ExecutionMode::Host
+            );
+        }
+        // A bare `guarded` names no real mode, so it still refuses.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            manifest_path(dir.path()),
+            "profiles: []\nnode_bindings: {}\nexecution:\n  mode: guarded\n",
+        )
+        .unwrap();
+        let m = read(dir.path()).unwrap().unwrap();
+        assert!(m.execution_mode().is_err());
     }
 
     #[test]

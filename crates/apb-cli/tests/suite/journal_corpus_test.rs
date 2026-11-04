@@ -85,17 +85,18 @@
 //! an unstamped entry the new drive never consumes. E3: the run paused at
 //! that gate; old resumes refuse, the new one continues. E4: two sibling
 //! checkpoints before the gate, each followed by the guard; old resumes
-//! refuse after each. E5 pins a stated limit, not a guarantee: after an old
-//! binary stopped a guarded run, its own `run_aborted` is the last
-//! checkpoint, and its second resume continues past the person-only gate
-//! and runs `ship`; the new binary reads the run as it ended, with no
-//! person named as the decider. E6 (synthetic fault): the guard's
+//! refuse after each. E5: the limit the manifest guard closes: a guarded
+//! run's manifest carries `execution.mode: cli+guard`, so after an old
+//! binary stopped it, its resume still refuses (naming the execution
+//! mode, not `run_guard`) and writes nothing; the new binary reads the
+//! run as it ended, with no person named as the decider. E6 (synthetic fault): the guard's
 //! line after the last checkpoint is torn; every resume refuses. E7
 //! (synthetic journal shape): a guard ended by `run_guard []` after a
-//! patch, and the next checkpoint carries no guard; beta.1 then resumes it
-//! with the new binary's routing. No supervisor patch writes this shape
-//! (it may not drop a guarded feature); the row pins how every binary
-//! reads an ended guard. E8 (synthetic): a `run_guard` naming a
+//! patch, and the next checkpoint carries no guard; the new binary reads
+//! an ended guard as before, while the manifest guard still makes beta.1
+//! and 0.25.0 refuse to resume it and stop it. No supervisor patch writes
+//! this shape (it may not drop a guarded feature); the row pins how every
+//! binary reads an ended guard. E8 (synthetic): a `run_guard` naming a
 //! feature no apb knows; the new binary refuses to resume and stops it.
 //!
 //! Row E9 covers evidence for node outputs: a definition with `evidence`
@@ -1762,13 +1763,18 @@ impl Case {
     }
 
     /// `apb resume <run>` by `reader` on the saved state is refused as a
-    /// journal a newer apb wrote, naming `kind`, and writes nothing.
+    /// journal a newer apb wrote, naming `kind`, and writes nothing. For
+    /// `cli+guard` the run's journal guard names first on a binary that
+    /// checks the journal before the manifest mode, so `run_guard` also
+    /// counts.
     fn resume_refused(&self, reader: &Path, run: &str, kind: &str) {
         self.restore();
         let before = self.journal_bytes(run);
         let ran = self.run(reader, &["resume", run]);
+        let named =
+            ran.stderr.contains(kind) || (kind == "cli+guard" && ran.stderr.contains("run_guard"));
         assert!(
-            !ran.ok() && ran.stderr.contains("written by a newer apb") && ran.stderr.contains(kind),
+            !ran.ok() && ran.stderr.contains("written by a newer apb") && named,
             "{}: {} refuses to resume, naming `{kind}`: {ran:?}",
             self.name,
             label(reader)
@@ -3495,6 +3501,12 @@ impl Case {
             self.name
         );
         assert_run_guard_follows_last_checkpoint(&journal, self.name, &E_FEATURES);
+        let manifest = fs::read_to_string(self.run_dir(&run).join("manifest.yaml")).unwrap();
+        assert!(
+            manifest.contains("mode: cli+guard"),
+            "{}: the guarded run's manifest carries the guard suffix: {manifest}",
+            self.name
+        );
         self.save();
         run
     }
@@ -3560,7 +3572,7 @@ fn e2_person_only_gate_old_binaries_read_refuse_review_unconsumed_stop() {
             "row E2: {} counts the guard it skipped: {ran:?}",
             label(&reader)
         );
-        case.resume_refused(&reader, &run, "run_guard");
+        case.resume_refused(&reader, &run, "cli+guard");
 
         // The old review appends an entry; the new drive never takes it.
         case.restore();
@@ -3658,7 +3670,7 @@ fn e3_paused_at_the_gate_old_refuse_new_continues() {
         .into_iter()
         .flatten()
     {
-        case.resume_refused(&reader, &run, "run_guard");
+        case.resume_refused(&reader, &run, "cli+guard");
     }
     case.restore();
     let before = case.journal(&run).len();
@@ -3726,7 +3738,7 @@ fn e4_two_sibling_checkpoints_old_resumes_refuse_after_each() {
         .map(|(b, v)| vec![b, v])
         .unwrap_or_default();
     for reader in &old {
-        case.resume_refused(reader, &run, "run_guard");
+        case.resume_refused(reader, &run, "cli+guard");
     }
 
     // The new binary resumes it: `side` runs again, held, then finishes.
@@ -3764,22 +3776,20 @@ fn e4_two_sibling_checkpoints_old_resumes_refuse_after_each() {
     );
     case.save();
     for reader in &old {
-        case.resume_refused(reader, &run, "run_guard");
+        case.resume_refused(reader, &run, "cli+guard");
     }
 }
 
-/// Row E5 (a stated limit, not a guarantee): the guard holds only while
-/// the new binary writes the last checkpoint. An old binary that stops the
-/// new binary's guarded run waiting at the person-only gate appends its own
-/// `run_aborted` with no guard after it; its first resume only applies that
-/// stop again (exit 1, `run_resumed`, `run_aborted`); its `apb review`
-/// appends an unstamped entry; and its second resume skips the guards (all
-/// before its own last checkpoint), decides the gate with that entry and
-/// runs `ship` (exit 0). This pins that sequence for both old binaries, and
-/// that the new binary reads the run as it ended without claiming a person
-/// decided the gate (the decision carries no channel).
+/// Row E5: the limit the manifest guard closes. A guarded run's manifest
+/// carries `execution.mode: cli+guard`, so an old binary that stops the
+/// new binary's guarded run waiting at the person-only gate appends its
+/// own `run_aborted` with no guard after it, and its resume still refuses
+/// (naming the execution mode, with "written by a newer apb") and writes
+/// nothing, before and after its `apb review` appends an unstamped entry.
+/// The new binary reads the run as it ended, with no person named as the
+/// decider, and its doctor names the entry unconsumed.
 #[test]
-fn e5_old_stop_then_old_resume_continues_past_the_guard_stated_limit() {
+fn e5_old_stop_then_old_resume_still_refuses_the_manifest_guard() {
     let mut case = Case::new("row E5");
     let run = case.write_guarded_waiting();
     let Some((beta1, v025)) = old_readers(&case) else {
@@ -3798,85 +3808,44 @@ fn e5_old_stop_then_old_resume_continues_past_the_guard_stated_limit() {
             Some(Value::from("run_guard")),
             "{name}: no guard follows the old stop's run_aborted either"
         );
-        let stopped = case.journal(&run).len();
-        let ran = case.run(&reader, &["resume", &run]);
-        assert!(
-            ran.code == Some(1)
-                && ran
-                    .stdout
-                    .contains("this resume only applied a stop that was still pending"),
-            "{name}: the first resume applies the pending stop: {ran:?}"
-        );
-        let journal = case.journal(&run);
-        assert_eq!(
-            types_from(&journal, stopped),
-            ["run_resumed", "run_aborted"],
-            "{name}"
-        );
-
-        let ran = case.run(&reader, &["review", &run, "gate", "--decision", "approved"]);
-        assert!(ran.ok(), "{name}: review: {ran:?}");
-        let entries = fs::read_to_string(case.run_dir(&run).join("reviews.jsonl")).unwrap();
-        let entry: Value = serde_json::from_str(entries.trim()).unwrap();
-        assert!(
-            entries.lines().count() == 1
-                && entry["node"] == "gate"
-                && entry["request"].is_null()
-                && entry["channel"].is_null(),
-            "{name}: one unstamped entry: {entries}"
-        );
-
-        let before = case.journal(&run).len();
-        let ran = case.run(&reader, &["resume", &run]);
-        assert!(
-            ran.ok()
-                && ran.stdout.contains("finished: succeeded")
-                && ran
-                    .stderr
-                    .contains("skipping 4 event(s) of a type this apb")
-                && ran.stderr.contains("(run_guard)"),
-            "{name}: the second resume continues past the guards: {ran:?}"
-        );
-        let journal = case.journal(&run);
-        let added = types_from(&journal, before);
-        assert_eq!(added.first(), Some(&"run_resumed"), "{name}: {added:?}");
-        assert_eq!(added.last(), Some(&"run_finished"), "{name}: {added:?}");
-        let decided = last_of(&journal, "review_decided").expect("review_decided");
-        assert!(
-            decided["node"] == "gate"
-                && decided["decision"] == "approved"
-                && decided.get("via").is_none()
-                && decided.get("decided_by").is_none(),
-            "{name}: the old decision names no channel and no decider: {decided}"
-        );
-        assert!(
-            journal[before..]
-                .iter()
-                .any(|e| e["type"] == "node_finished"
-                    && e["node"] == "ship"
-                    && e["status"] == "succeeded"),
-            "{name}: ship ran: {}",
-            summary(&journal[before..])
-        );
+        for attempt in ["first", "second"] {
+            if attempt == "second" {
+                let ran = case.run(&reader, &["review", &run, "gate", "--decision", "approved"]);
+                assert!(ran.ok(), "{name}: review: {ran:?}");
+                let entries = fs::read_to_string(case.run_dir(&run).join("reviews.jsonl")).unwrap();
+                let entry: Value = serde_json::from_str(entries.trim()).unwrap();
+                assert!(
+                    entries.lines().count() == 1
+                        && entry["node"] == "gate"
+                        && entry["request"].is_null()
+                        && entry["channel"].is_null(),
+                    "{name}: one unstamped entry: {entries}"
+                );
+            }
+            let before = case.journal_bytes(&run);
+            let ran = case.run(&reader, &["resume", &run]);
+            assert!(
+                !ran.ok()
+                    && ran.stderr.contains("cli+guard")
+                    && ran.stderr.contains("written by a newer apb"),
+                "{name}: the {attempt} resume still refuses, naming the mode: {ran:?}"
+            );
+            assert_eq!(
+                case.journal_bytes(&run),
+                before,
+                "{name}: the {attempt} resume wrote nothing"
+            );
+        }
 
         // The new binary reads the run as it ended.
         let shown = case.run(&new, &["runs", &run]);
         assert!(
-            shown.ok()
-                && shown
-                    .stdout
-                    .contains(&format!("{run}\tcorpus-guarded 1.0.0\tsucceeded"))
-                && shown.stdout.contains("outcome: Run succeeded")
-                && shown
-                    .stdout
-                    .contains("resumed by an older apb (no version recorded) (2 times)")
-                && !shown.stdout.contains("person"),
-            "{name}: the new binary reads the run finished, no person named: {shown:?}"
+            shown.ok() && shown.stdout.contains("aborted") && !shown.stdout.contains("person"),
+            "{name}: the new binary reads the run aborted, no person named: {shown:?}"
         );
         let doctor = case.run(&new, &["doctor", "--run", &run]);
         assert!(
-            doctor.stdout.contains("[ok]   run: folded status: succeeded")
-                && doctor.stdout.contains("the resume at seq 20 ran on an older apb")
+            doctor.stdout.contains("aborted")
                 && doctor.stdout.contains(
                     "1 decision(s) in the review channel this apb's drive never takes: #0 for `gate` (no request stamp)"
                 )
@@ -3884,14 +3853,6 @@ fn e5_old_stop_then_old_resume_continues_past_the_guard_stated_limit() {
             "{name}: the new doctor: {doctor:?}"
         );
     }
-}
-
-/// The record types of `journal` from record `from` on.
-fn types_from(journal: &[Value], from: usize) -> Vec<&str> {
-    journal[from..]
-        .iter()
-        .filter_map(|e| e["type"].as_str())
-        .collect()
 }
 
 /// Row E6 (synthetic fault): the run guard's line that follows the last
@@ -3924,11 +3885,15 @@ fn e6_synthetic_torn_run_guard_every_resume_refuses() {
         case.restore();
         let before = case.journal_bytes(&run);
         let ran = case.run(&reader, &["resume", &run]);
+        // An old binary may refuse on the manifest guard first; the new
+        // binary and a binary that checks the journal first refuse on the
+        // torn tail.
+        let torn = ran
+            .stderr
+            .contains("resume failed: yaml error: EOF while parsing a string");
+        let manifest_guard = ran.stderr.contains("cli+guard");
         assert!(
-            ran.code == Some(2)
-                && ran
-                    .stderr
-                    .contains("resume failed: yaml error: EOF while parsing a string"),
+            ran.code == Some(2) && (torn || manifest_guard),
             "row E6: {} refuses the torn tail: {ran:?}",
             label(&reader)
         );
@@ -3962,10 +3927,11 @@ fn e_unguarded() -> String {
 /// then `run_migrated`. A supervisor's patch is refused this change
 /// (`approval_weakened`); the row pins how every binary reads a guard
 /// that ended. The new binary resumes it and is paused at the gate: that
-/// checkpoint carries no guard. From there beta.1 and 0.25.0 approve and
-/// resume it with the new binary's routing.
+/// checkpoint carries no guard, and it approves and resumes it with its
+/// own routing. The manifest guard still stands, so beta.1 and 0.25.0
+/// refuse to resume it (naming `cli+guard`) and still stop it.
 #[test]
-fn e7_synthetic_patch_drops_the_guard_old_binaries_resume_the_same() {
+fn e7_synthetic_patch_drops_the_guard_old_binaries_still_refuse_the_manifest_guard() {
     let mut case = Case::new("row E7");
     let run = case.write_guarded_waiting();
     synthetic_patch_to(&case, &run, &e_unguarded(), "1.0.0", true);
@@ -4026,13 +3992,8 @@ fn e7_synthetic_patch_drops_the_guard_old_binaries_resume_the_same() {
         return;
     };
     for reader in [beta1, v025] {
-        case.approve_and_resume(&reader, &run);
-        assert_eq!(
-            routing(&case.journal(&run), from),
-            expected,
-            "row E7: {} routes as the new binary",
-            label(&reader)
-        );
+        case.resume_refused(&reader, &run, "cli+guard");
+        case.stop(&reader, &run);
     }
 }
 

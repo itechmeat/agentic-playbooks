@@ -1640,6 +1640,12 @@ fn print_run_rows(root: &Path, runs: Vec<apb_engine::RunSummary>) {
             if let Some(scope) = &r.scope {
                 line.push_str(&format!("\t{scope}"));
             }
+            if let Some(e) = &r.config_error {
+                line.push_str(&format!(
+                    "\tconfig error: {}",
+                    sanitize_for_terminal(e, QUESTION_TEXT_MAX * 2)
+                ));
+            }
             if let Some(fields) = r.search.as_ref().and_then(search_text) {
                 // Through the terminal sanitizer like every other reported
                 // text: a value holding ESC or a newline must not reach the
@@ -1721,6 +1727,12 @@ fn run_detail_text(
         })
         .unwrap_or_default();
     say!("{run_id}\t{playbook}\t{}", view.run_status.as_str());
+    if let Err(e) = apb_engine::run_config::read_run_config(&run_dir) {
+        say!(
+            "  config error: {}",
+            sanitize_for_terminal(&e.to_string(), QUESTION_TEXT_MAX * 2)
+        );
+    }
     say!(
         "  execution: {}",
         sanitize_for_terminal(

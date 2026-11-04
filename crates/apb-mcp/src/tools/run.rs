@@ -204,7 +204,13 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
     );
     let node_times = apb_engine::liveness::node_times(&view.events);
     let progress = view.progress.as_ref();
-    let cfg = apb_engine::run_config::read_run_config(&dir).unwrap_or_default();
+    let (cfg, config_error) = match apb_engine::run_config::read_run_config(&dir) {
+        Ok(cfg) => (cfg, None),
+        Err(e) => (
+            apb_engine::run_config::RunConfig::default(),
+            Some(e.to_string()),
+        ),
+    };
     // Lifted out of `progress` to the top level (spec 2026-07-20-interactive-
     // nodes, Task 8; issue #42 finding 4; issue #45 finding 4): an
     // intermediary that calls `run_status` must see a pending question,
@@ -238,6 +244,9 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
         "superseded_by": cfg.superseded_by,
         "failure_reason": failure_reason,
     });
+    if let Some(e) = config_error {
+        out["config_error"] = json!(e);
+    }
     // Host execution mode (0.23.0): the run's execution block (host mode, or
     // a `cli` run with the host fallback) and the tasks the host executes,
     // prompts inline. `pending_tasks` is there only while a task waits, as in

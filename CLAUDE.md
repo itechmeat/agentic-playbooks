@@ -853,10 +853,13 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `dashboard_session`) goes past (`refuse_resume_skip`). An unattended
   or enforced decision on a bound gate is stamped with the nonce and
   satisfies `requires_approval`, labelled by `decided_by`. A run that uses
-  any of these carries the run guard, so an older apb refuses to continue
-  it; an older apb that starts such a playbook drops the fields, and one
-  that stopped such a run can resume it past its gates (its stop leaves no
-  guard), which is documented, not prevented.
+  any of these carries the run guard and records `execution.mode:
+  cli+guard` (or `host+guard`) in its write-once manifest, so every apb
+  from 0.23 on refuses to resume it with its "written by a newer apb"
+  message while it still reads, pauses and stops it, and this apb reads,
+  resumes, pauses and stops it as before; an apb older than 0.23 ignores
+  the execution block and can still resume it past its gates, and an
+  older apb that starts such a playbook drops the fields.
 
 - **Evidence freshness** (spec
   `docs/superpowers/specs/2026-11-03-evidence-freshness-design.md`): a

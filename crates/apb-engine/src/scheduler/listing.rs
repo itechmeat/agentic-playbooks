@@ -81,6 +81,12 @@ pub struct RunSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub search: Option<apb_core::run_search::SearchFields>,
+    /// The run's own `run.yaml` could not be read, with the error: the
+    /// run still lists with its journal facts, and only this run carries
+    /// the error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub config_error: Option<String>,
 }
 
 /// What a filtered listing keeps. Every filter given is an AND.
@@ -316,7 +322,10 @@ fn list_runs_with(
         } else {
             None
         };
-        let cfg = crate::run_config::read_run_config(&entry.path()).ok();
+        let (cfg, config_error) = match crate::run_config::read_run_config(&entry.path()) {
+            Ok(cfg) => (Some(cfg), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
         let parent_run = cfg.as_ref().and_then(|c| c.parent_run.clone());
         let continued_from = cfg.as_ref().and_then(|c| c.continued_from.clone());
         let superseded_by = cfg.as_ref().and_then(|c| c.superseded_by.clone());
@@ -360,6 +369,7 @@ fn list_runs_with(
                 released,
                 unknown_events,
                 candidate_trial,
+                config_error,
             },
             fields,
         ));

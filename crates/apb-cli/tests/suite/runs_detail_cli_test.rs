@@ -705,3 +705,55 @@ fn runs_with_an_id_shows_requested_and_reported_models_and_why_a_step_was_entere
         "a hint shown as the model:\n{text}"
     );
 }
+
+/// A run whose `run.yaml` does not parse shows its own clear config
+/// error in the listing and in its detail, and hides no other run: no
+/// line reads `[secrets_unresolved]` for it.
+#[test]
+fn a_run_with_an_unreadable_config_shows_its_error_and_hides_no_other_run() {
+    let dir = project();
+    let bad = dir.path().join(".apb/runs/bad-1");
+    fs::create_dir_all(&bad).unwrap();
+    fs::write(bad.join("events.jsonl"), JOURNAL).unwrap();
+    fs::write(bad.join("run.yaml"), "mode: guarded\n").unwrap();
+    apb()
+        .arg("runs")
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("demo-1\tdemo\tsucceeded"))
+        .stdout(predicate::str::contains("bad-1\tdemo\tsucceeded"))
+        .stdout(predicate::str::contains("config error:"))
+        .stdout(predicate::str::contains("[secrets_unresolved]").not());
+    // The parse error names the unknown variant, not a withheld text.
+    let out = apb()
+        .args(["runs", "bad-1"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("config error:")
+            && text.contains("unknown variant")
+            && text.contains("guarded"),
+        "the detail names the config error:\n{text}"
+    );
+    assert!(
+        !text.contains("[secrets_unresolved]") && text.contains("demo 1.0.0\tsucceeded"),
+        "the detail shows the run:\n{text}"
+    );
+    // The JSON list keeps the good run readable and names the error on
+    // the bad one.
+    let out = apb()
+        .args(["runs", "--playbook", "demo", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("\"config_error\"") && !text.contains("[secrets_unresolved]"),
+        "the JSON names the error and withholds nothing:\n{text}"
+    );
+}
