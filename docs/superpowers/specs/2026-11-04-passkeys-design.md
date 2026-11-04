@@ -31,8 +31,8 @@ produce a WebAuthn assertion.
 - apb-server verifies registration and assertion itself
   (`crates/apb-server/src/webauthn.rs`): ES256 and EdDSA, attestation
   `none`, `userVerification` required. No `webauthn-rs` (license);
-  verification uses `p256`, `ed25519-dalek`, `ciborium` (MIT or
-  Apache-2.0).
+  verification uses `p256` and `ciborium` (both MIT or Apache-2.0) and
+  `ed25519-dalek` (BSD-3-Clause).
 - Challenges are single use, held in memory only, and expire after two
   minutes (`crates/apb-server/src/passkeys.rs`).
 - Origin and RP ID are checked against the dashboard's own origin:
@@ -147,7 +147,10 @@ not on the machine's disk and not in its memory.
   be re-signed by an apb-aware writer, since the key sits beside the
   store. What the feature claims is the threat table above: apb's
   surfaces, hand-written channel lines (never consumed without a
-  verified assertion; on a person-only gate nothing is exempt, and a
+  verified assertion; on a person-only gate nothing is exempt for the
+  live drive, whose own definition decides, never the run directory's
+  copy; a resume executes the run's snapshot, and one that no journaled
+  digest accounts for is recorded as `definition_mismatch`), and a
   `by: model` line is bound to the exact request it answers) and the
   isolation sandbox's credential locations, never the config dir against
   its own user. Residual, stated: on a bound gate that is not

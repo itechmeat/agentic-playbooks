@@ -5,8 +5,8 @@
 //! here, by a person at a terminal outside a run step, which prints a
 //! one-time code the dashboard's Passkeys page asks for. Every later
 //! passkey is added through the dashboard with an assertion from one that
-//! exists. Removing the last passkey needs a one-time code typed back at
-//! the terminal, so a process that can run commands cannot quietly take
+//! exists. Removing any passkey needs a one-time code typed back at the
+//! terminal, so a process that can run commands cannot quietly take
 //! the gate off the machine. Every change sends a notice through the
 //! machine's notify target when one is set, and journals nothing: no run
 //! owns it.
@@ -31,8 +31,8 @@ pub(crate) enum PasskeyAction {
     },
     /// List the passkeys enrolled on this machine
     List,
-    /// Remove the passkey with this label; the last one needs a one-time
-    /// code typed back at the terminal
+    /// Remove the passkey with this label; it needs a one-time code typed
+    /// back at the terminal
     Remove { label: String },
 }
 

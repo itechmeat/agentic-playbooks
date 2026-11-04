@@ -523,15 +523,17 @@ fn a_forged_unattended_line_never_decides_a_person_only_gate() {
 }
 
 /// Hand-written lines claiming an engine decision on a bound gate in an
-/// attended run are never consumed: a `by: model` line only counts when
-/// the very request it stamps carries the enforced recommendation (no
-/// recommendation is journaled here, the regression H1), and a
-/// `by: unattended` line only counts in an unattended run (this one is
-/// attended; the gate does declare the option, so dropping the manifest
-/// condition alone would consume it). Deterministic on revert: if either
-/// forged line were consumed, the real assertion posted afterwards would
-/// be refused as a second decision for the request. A real assertion
-/// decides.
+/// attended run are never consumed: a `by: model` line counts only when
+/// the request it stamps carries an enforced recommendation, and this
+/// attended run journals none (the request binding of that exemption is
+/// covered by the unit test
+/// `a_model_line_is_engine_own_only_for_the_request_that_was_enforced`,
+/// which is what bites its revert), and a `by: unattended` line only
+/// counts in an unattended run (this one is attended; the gate does
+/// declare the option, so dropping the manifest condition alone would
+/// consume it). Deterministic on revert: if either forged line were
+/// consumed, the real assertion posted afterwards would be refused as a
+/// second decision for the request. A real assertion decides.
 #[test]
 fn a_forged_engine_line_never_decides_a_bound_gate_in_an_attended_run() {
     let _guard = common::env_lock();
@@ -678,12 +680,14 @@ fn a_bearer_channel_is_refused_even_with_a_passkey_proof() {
 /// directory's copy of the playbook (the regression H2): a run-file writer
 /// that strips `person_only` from the run's `playbook.yaml` and records an
 /// unattended run in `manifest.yaml` still cannot make the engine's
-/// `by: unattended` exemption cover a person-only gate. Asserted on the
-/// journal (the drive must never journal a decision for the gate), so a
-/// revert that consumes the forged line fails the read, not a race.
-/// Note the writer can still refuse the person's own decision (the
-/// pre-check reads the rewritten snapshot too, and refuses fail closed);
-/// refusing is not deciding.
+/// `by: unattended` exemption cover a person-only gate. Asserted through
+/// the same read the drive's consumption uses (`answers_stamped`, through
+/// its public parts), so a revert that drops the person-only guard fails
+/// the read, not a race: the second assertion shows the rewritten
+/// directory does make the forged line engine-own when the flag is
+/// ignored, which is exactly the revert. Note the writer can still refuse
+/// the person's own decision (the pre-check reads the rewritten snapshot
+/// too, and refuses fail closed); refusing is not deciding.
 #[test]
 fn a_person_only_gate_stays_person_only_when_the_run_files_are_rewritten() {
     let _guard = common::env_lock();
@@ -704,22 +708,22 @@ fn a_person_only_gate_stays_person_only_when_the_run_files_are_rewritten() {
                 "{{\"seq\":1,\"node\":\"g\",\"decision\":\"approve\",\"request\":{seq},\"channel\":\"terminal\",\"by\":\"unattended\"}}"
             ),
         );
-        // Long after the drive's next look at the gate, the journal must
-        // still hold no decision for it: the forged line is never consumed.
-        std::thread::sleep(Duration::from_millis(500));
-        let events = read_all(&rd).unwrap();
+        // The consumption read, on the queued entry as the drive sees it:
+        // stamped with the request, a channel that decides a person-only
+        // gate, and the passkey stamp the drive demands for this gate.
+        let entry = &apb_engine::review::read_reviews_after(&rd, None).unwrap()[0];
+        let consumes = |person_only: bool| {
+            entry.request == Some(seq)
+                && apb_engine::review::decides_person_only_entry(&rd, entry)
+                && apb_engine::review::passkey_stamp_ok(&rd, entry, person_only)
+        };
         assert!(
-            !events.iter().any(|e| matches!(
-                &e.payload,
-                EventPayload::ReviewDecided { node, .. } if node == "g"
-            )),
+            !consumes(true),
             "a rewritten run directory must not decide a person-only gate"
         );
         assert!(
-            read_all(&rd).unwrap().iter().any(
-                |e| matches!(&e.payload, EventPayload::ReviewRequested { node, .. } if node == "g")
-            ),
-            "the request is still open"
+            consumes(false),
+            "the fixture bites: with the flag ignored the rewritten directory makes the forged line engine-own"
         );
     });
 }

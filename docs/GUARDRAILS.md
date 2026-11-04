@@ -284,8 +284,9 @@ challenges are single use, live in memory for two minutes, and the origin
 and RP ID are checked against the dashboard's own origin
 (`server.public_base_url`, else the request host on http). A dashboard at
 an IP literal cannot use passkeys: passkeys cannot bind to an IP address,
-and apb refuses it with a clear message. Verification uses `p256`,
-`ed25519-dalek` and `ciborium` (all MIT or Apache-2.0); no
+and apb refuses it with a clear message. Verification uses `p256`
+and `ciborium` (both MIT or Apache-2.0) and `ed25519-dalek`
+(BSD-3-Clause); no
 `webauthn-rs` (its license is not compatible).
 
 **Enrollment and management.** `apb passkey enroll` (a person only,
@@ -332,9 +333,11 @@ decide a passkey-required gate: the CLI, MCP and an HTTP caller with a
 key are refused, and a bearer-key request is refused even with a valid
 assertion token. A hand-written channel line, whatever fields it forges
 (`passkey`, `channel`, even `by`), carries no assertion, and the drive
-re-verifies the proof against the store before it consumes anything: on
-a person-only gate nothing at all is exempt (the consumer's own
-`person_only` flag decides, never the run directory's copy), and a
+re-verifies the proof against the store before it consumes anything: on a person-only gate nothing at
+all is exempt for the live drive (its own definition decides, never a
+re-read of the run directory; a resume executes the run's snapshot, and
+one that no journaled digest accounts for is recorded as
+`definition_mismatch`, a detached driver refuses it), and a
 `by: model` line is bound to the exact request it answers, which must be
 the visit whose recommendation the engine enforced. Honest about the
 residual: on a bound gate that is not person-only, the `by` exemption
