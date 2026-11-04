@@ -268,8 +268,12 @@ pub fn is_stamped_gate(gate: &apb_core::schema::Node) -> bool {
     gate.person_only || gate.approves.is_some()
 }
 
-/// A publish decision on a person-only node carries the open request and
-/// the channel; any other keeps only its nonce.
+/// A publish decision carries its nonce and the open request seq: a
+/// person-only one also the channel. The request is stamped on every
+/// publish entry, person-only or not, because the passkey assertion is
+/// minted over a challenge derived from that very request: without the
+/// stamp the drive re-derives a different challenge at consumption and no
+/// dashboard consent would ever verify.
 fn publish_stamps(
     events: &[crate::event::Event],
     node: &str,
@@ -280,13 +284,10 @@ fn publish_stamps(
     let person_only = crate::progress::load_run_playbook(run_dir)
         .and_then(|p| p.node(node).map(|n| n.person_only))
         .unwrap_or(false);
-    if !person_only {
-        return Stamps::nonce(nonce);
-    }
     Stamps {
         nonce,
         request: latest_request(events, node),
-        channel: poster.channel,
+        channel: person_only.then_some(poster.channel).flatten(),
     }
 }
 
@@ -404,10 +405,7 @@ pub(crate) fn answers_stamped(
 /// consent). The drive consumes nothing else, and `apb doctor --run` names
 /// the reason.
 pub fn passkey_stamp_ok(run_dir: &Path, e: &ReviewEntry) -> bool {
-    let engine_own = matches!(
-        e.by,
-        Some(crate::event::DecidedBy::Unattended) | Some(crate::event::DecidedBy::Model)
-    );
+    let engine_own = engine_own_entry(run_dir, e);
     let scripted = e.channel == Some(crate::decision_channel::DecisionChannel::Scenario)
         && crate::scenario::session::is_scenario(run_dir);
     passkey_proof::stamp_ok(
@@ -422,6 +420,58 @@ pub fn passkey_stamp_ok(run_dir: &Path, e: &ReviewEntry) -> bool {
             scripted,
         },
     )
+}
+
+/// Whether the run's own state proves the engine made this decision, so the
+/// entry needs no person's assertion. The `by` field of a channel line is
+/// forgeable like every other field of the line (it is deserialized with
+/// `lenient_decided_by` from a file any same-user process can append to),
+/// so the line's own word decides nothing: a `by: unattended` entry counts
+/// only when the run's manifest records an unattended run and the gate
+/// itself declares the entry's decision as its `unattended.decide` outcome,
+/// and a `by: model` entry only when the gate's journaled request carries
+/// the enforced recommendation (`auto_decide`, `applied`) that posts
+/// exactly this decision. A `person_only` gate takes no engine decision at
+/// all (V156 refuses one in the definition; the consumer enforces it here),
+/// and a playbook or journal that does not read is never proof of anything.
+pub(crate) fn engine_own_entry(run_dir: &Path, e: &ReviewEntry) -> bool {
+    use crate::event::{DecidedBy, EventPayload};
+    let node = e.cmd.node.as_str();
+    let playbook = crate::progress::load_run_playbook(run_dir);
+    if playbook
+        .as_ref()
+        .is_some_and(|p| p.node(node).is_some_and(|n| n.person_only))
+    {
+        return false;
+    }
+    let Some(playbook) = playbook else {
+        return false;
+    };
+    match e.by {
+        Some(DecidedBy::Unattended) => {
+            let declared = playbook
+                .node(node)
+                .and_then(|n| n.unattended.as_ref().and_then(|u| u.decide()))
+                .is_some_and(|d| d.decide == e.cmd.decision);
+            let unattended = matches!(crate::manifest::read(run_dir), Ok(Some(m)) if m.unattended);
+            declared && unattended
+        }
+        Some(DecidedBy::Model) => {
+            let events = match crate::event::read_all(run_dir) {
+                Ok(events) => events,
+                Err(_) => return false,
+            };
+            events.iter().rev().any(|ev| match &ev.payload {
+                EventPayload::ReviewRequested {
+                    node: n,
+                    recommendation: Some(r),
+                    ..
+                } if n == node => r.applied && r.option == e.cmd.decision,
+                _ => false,
+            })
+        }
+        _ => false,
+    }
 }
 
 /// Whether the entry decides a person-only gate: a person's channel, or a

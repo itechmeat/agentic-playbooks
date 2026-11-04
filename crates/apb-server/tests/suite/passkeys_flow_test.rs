@@ -231,6 +231,31 @@ edges:
   - { from: g, to: done }
 "#;
 
+/// A publishing playbook, run in a git tree whose `origin` is a local bare
+/// remote over `file://`.
+const PUBLISH: &str = r#"schema: 2
+id: pub
+name: pub
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: script, script: scripts/w.sh, runner: sh }
+  - { id: push, type: publish, from: work, remote: origin, branch: "apb/out" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: push }
+  - { from: push, to: done }
+"#;
+
+/// The work node commits with the run's trailer, which is what the publish
+/// plan picks up.
+const PUBLISH_WORK: &str = r#"printf '%s' "$APB_RUN_ID" > work.txt
+git add work.txt
+git -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false \
+  commit -q -m "work of the run" -m "Apb-Run: $APB_RUN_ID"
+"#;
+
 impl Bench {
     async fn new() -> Bench {
         let config = common::config_sandbox().await;
@@ -261,6 +286,139 @@ impl Bench {
 
     fn app(&self) -> axum::Router {
         build_router(AppState::new(self.root.clone()))
+    }
+
+    /// A bench whose workspace is a git tree with a bare `origin` over
+    /// `file://`, seeded with the publishing playbook: everything a publish
+    /// node needs to plan and push, with nothing on the network.
+    async fn publish() -> Bench {
+        let base_dir = tempfile::tempdir().unwrap();
+        let base = base_dir.path().canonicalize().unwrap();
+        let root = base.join("tree");
+        let bare = base.join("remote.git");
+        let home = base.join("home");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".gitconfig"), "").unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .env("HOME", &home)
+                .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join(".gitignore"), ".apb/\n").unwrap();
+        git(&root, &["add", ".gitignore"]);
+        git(&root, &["commit", "-q", "-m", "base"]);
+        git(&base, &["init", "-q", "--bare", "remote.git"]);
+        let url = format!("file://{}", bare.display());
+        git(&root, &["remote", "add", "origin", &url]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        let config = common::config_sandbox().await;
+        let config_dir = config.path().to_path_buf();
+        apb_core::registry::init_project(&root).unwrap();
+        let vdir = root.join(".apb/playbooks/pub/1.0.0");
+        std::fs::create_dir_all(vdir.join("scripts")).unwrap();
+        std::fs::write(vdir.join("playbook.yaml"), PUBLISH).unwrap();
+        std::fs::write(vdir.join("scripts/w.sh"), PUBLISH_WORK).unwrap();
+        std::fs::write(root.join(".apb/playbooks/pub/current"), "1.0.0").unwrap();
+        std::mem::forget(base_dir); // the whole bench lives as long as the test
+        std::mem::forget(base);
+        Bench {
+            _config: config,
+            root,
+            config_dir,
+            started: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// A dashboard with server keys on, and a signed-in browser session:
+    /// a publish consent is a signed-in browser's, never a keyless call's.
+    async fn keyed_app_with_session(&self) -> (axum::Router, String) {
+        use apb_core::server_auth;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server-auth.yaml");
+        let (key, _) = server_auth::issue_into(&path).unwrap();
+        let file = server_auth::load_from(&path).unwrap();
+        let auth = std::sync::Arc::new(
+            apb_server::auth::AuthState::new(
+                None,
+                file.keys,
+                &apb_core::config::ServerConfig::default(),
+            )
+            .unwrap(),
+        );
+        std::mem::forget(dir); // the key file lives as long as the test
+        let app = build_router(AppState::new(self.root.clone()).with_auth(auth));
+        let login = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .header(apb_server::auth::CSRF_HEADER, apb_server::auth::CSRF_VALUE)
+            .body(Body::from(
+                serde_json::json!({ "key": key.expose_secret() }).to_string(),
+            ))
+            .unwrap();
+        let res = app.clone().oneshot(login).await.unwrap();
+        let cookie = res
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        assert!(!cookie.is_empty(), "the login minted a session cookie");
+        (app, cookie)
+    }
+
+    /// Starts a playbook with the person's start consent, as a publish
+    /// node's `irreversible` effect demands.
+    fn start_with_consent(&self, playbook: &str) -> (String, PathBuf, mpsc::Receiver<bool>) {
+        let (tx, rx) = mpsc::channel();
+        let drive_root = self.root.clone();
+        let root = self.root.clone();
+        let id = playbook.to_string();
+        std::thread::spawn(move || {
+            let opts = apb_engine::scheduler::RunOptions {
+                consent: Some(apb_engine::consent::RunConsent::irreversible("cli")),
+                ..apb_engine::scheduler::RunOptions::default()
+            };
+            let _ = apb_engine::scheduler::run(&drive_root, &id, None, opts).map(|r| {
+                tx.send(r.outcome == apb_engine::state::RunStatus::Succeeded)
+                    .ok()
+            });
+        });
+        let seen = self.started.borrow().clone();
+        let rd = poll("the run dir", || {
+            std::fs::read_dir(root.join(".apb/runs"))
+                .ok()?
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .find(|p| p.is_dir() && !seen.contains(p))
+        });
+        self.started.borrow_mut().push(rd.clone());
+        let run_id = rd.file_name().unwrap().to_str().unwrap().to_string();
+        (run_id, rd, rx)
     }
 
     /// Starts the playbook through the engine on a drive thread and returns
@@ -326,13 +484,30 @@ async fn request_json(
     uri: &str,
     body: serde_json::Value,
 ) -> (StatusCode, serde_json::Value) {
-    let req = Request::builder()
+    request_json_as(app, method, host, uri, body, None).await
+}
+
+/// [`request_json`] with an optional dashboard session cookie and the CSRF
+/// marker header a cookie-authenticated write must carry.
+async fn request_json_as(
+    app: &axum::Router,
+    method: &str,
+    host: &str,
+    uri: &str,
+    body: serde_json::Value,
+    cookie: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder()
         .method(method)
         .uri(uri)
         .header("host", host)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
+        .header("content-type", "application/json");
+    if let Some(cookie) = cookie {
+        builder = builder
+            .header("cookie", cookie)
+            .header(apb_server::auth::CSRF_HEADER, apb_server::auth::CSRF_VALUE);
+    }
+    let req = builder.body(Body::from(body.to_string())).unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     let status = res.status();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
@@ -413,6 +588,56 @@ async fn assert_token(
     ))
 }
 
+/// [`assert_token`] with an optional dashboard session cookie.
+async fn assert_token_as(
+    app: &axum::Router,
+    auth: &Authenticator,
+    purpose: serde_json::Value,
+    cookie: Option<&str>,
+) -> Result<((String, String), serde_json::Value), String> {
+    let (status, start) = request_json_as(
+        app,
+        "POST",
+        HOST,
+        "/api/passkeys/assert/challenge",
+        serde_json::json!({ "purpose": purpose }),
+        cookie,
+    )
+    .await;
+    if status != StatusCode::OK {
+        return Err(format!("assert/challenge: {status} {start}"));
+    }
+    let challenge = start["challenge"].as_str().unwrap().to_string();
+    let assertion = auth.assertion(RP_ID, ORIGIN, &challenge);
+    let body = serde_json::json!({
+        "purpose": purpose,
+        "challenge": challenge,
+        "id": assertion["id"],
+        "clientDataJSON": assertion["clientDataJSON"],
+        "authenticatorData": assertion["authenticatorData"],
+        "signature": assertion["signature"],
+    });
+    let (status, verify) = request_json_as(
+        app,
+        "POST",
+        HOST,
+        "/api/passkeys/assert/verify",
+        body,
+        cookie,
+    )
+    .await;
+    if status != StatusCode::OK {
+        return Err(format!("assert/verify: {status} {verify:?}"));
+    }
+    Ok((
+        (
+            verify["token"].as_str().unwrap().to_string(),
+            verify["credential_prefix"].as_str().unwrap().to_string(),
+        ),
+        assertion,
+    ))
+}
+
 /// The first passkey on the machine, enrolled with the one-time code a
 /// person got from the terminal, exactly as the dashboard's page posts it.
 async fn enroll_first(bench: &Bench, app: &axum::Router, auth: &Authenticator) {
@@ -442,6 +667,119 @@ async fn enroll_first(bench: &Bench, app: &axum::Router, auth: &Authenticator) {
     assert_eq!(status, StatusCode::OK, "{finish}");
     let listed = apb_core::passkey::try_load().unwrap();
     assert_eq!(listed.passkeys.len(), 1);
+}
+
+/// A publish consent decided from the dashboard with a fresh assertion is
+/// consumed: the entry is stamped with the open request seq the assertion
+/// signed, the drive re-derives the same challenge and the run pushes.
+/// Without the request stamp on the entry the challenge the drive derives
+/// can never match the one the assertion signed, and the consent queues
+/// forever (the regression G2).
+/// A publish consent decided from a signed-in dashboard with a fresh
+/// assertion is consumed: the entry is stamped with the open request seq
+/// the assertion signed, the drive re-derives the same challenge and the
+/// run pushes. Without the request stamp on the entry the challenge the
+/// drive derives can never match the one the assertion signed, and the
+/// consent queues forever (the regression G2).
+#[tokio::test]
+async fn a_publish_consent_from_the_dashboard_pushes_with_a_passkey_enrolled() {
+    let bench = Bench::publish().await;
+    let (app, cookie) = bench.keyed_app_with_session().await;
+    let auth = Authenticator::es256(11);
+
+    // Enroll through the same signed-in dashboard.
+    let code = apb_core::passkey::write_enroll_code(&bench.config_dir).unwrap();
+    let (status, start) = request_json_as(
+        &app,
+        "POST",
+        HOST,
+        "/api/passkeys/enroll/start",
+        serde_json::json!({ "code": code }),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{start}");
+    let challenge = start["challenge"].as_str().unwrap().to_string();
+    let reg = auth.registration(RP_ID, ORIGIN, &challenge);
+    let (status, finish) = request_json_as(
+        &app,
+        "POST",
+        HOST,
+        "/api/passkeys/enroll/finish",
+        serde_json::json!({
+            "challenge": challenge,
+            "id": reg["id"],
+            "clientDataJSON": reg["clientDataJSON"],
+            "attestationObject": reg["attestationObject"],
+            "label": "laptop",
+        }),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{finish}");
+    assert_eq!(apb_core::passkey::count(), 1);
+
+    let (run_id, rd, rx) = bench.start_with_consent("pub");
+    let (_request, nonce) = poll_debug(&rd, "the publish plan", || {
+        apb_engine::event::read_all(&rd)
+            .ok()?
+            .iter()
+            .rev()
+            .find_map(|e| match &e.payload {
+                apb_engine::event::EventPayload::PublishPlanned { nonce, .. } => {
+                    let request =
+                        apb_engine::event::read_all(&rd)
+                            .ok()?
+                            .iter()
+                            .rev()
+                            .find_map(|ev| match &ev.payload {
+                                apb_engine::event::EventPayload::ReviewRequested {
+                                    node, ..
+                                } if node == "push" => Some(ev.seq),
+                                _ => None,
+                            })?;
+                    Some((request, nonce.clone()))
+                }
+                _ => None,
+            })
+    });
+
+    let purpose = serde_json::json!({
+        "decision": { "run": run_id, "node": "push", "decision": "publish", "request": null, "nonce": nonce }
+    });
+    let ((token, _prefix), assertion) = assert_token_as(&app, &auth, purpose, Some(&cookie))
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    let (status, posted) = request_json_as(
+        &app,
+        "POST",
+        HOST,
+        &format!("/api/runs/{run_id}/review"),
+        serde_json::json!({
+            "node": "push", "decision": "publish", "nonce": nonce,
+            "passkey_token": token,
+            "assertionId": assertion["id"],
+            "assertionClientDataJSON": assertion["clientDataJSON"],
+            "assertionAuthenticatorData": assertion["authenticatorData"],
+            "assertionSignature": assertion["signature"],
+        }),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{posted}");
+
+    // The entry the route queued carries the request the assertion signed,
+    // which is what the drive re-derives the challenge from.
+    let channel = poll("the stamped entry", || {
+        let text = std::fs::read_to_string(rd.join("reviews.jsonl")).ok()?;
+        text.lines()
+            .find(|l| l.contains("passkey_proof"))
+            .map(str::to_string)
+    });
+    assert!(channel.contains("\"request\""), "{channel}");
+
+    let ok = rx.recv_timeout(DEADLINE).unwrap();
+    assert!(ok, "the publish consent pushed and the run finished");
 }
 
 #[tokio::test]
@@ -615,7 +953,12 @@ async fn a_replayed_assertion_and_a_wrong_origin_are_refused() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    // The same assertion replayed is refused: the challenge was single use.
+    // The same assertion replayed with the same challenge is refused: the
+    // verify consumed the challenge. Decision challenges are deterministic
+    // and are re-issued on a fresh challenge request, so a stored assertion
+    // can mint a second token; that stays harmless because the token is
+    // bound to the same run, gate, decision and request, which is already
+    // decided, so the second token decides nothing new.
     let (status, replay) =
         request_json(&app, "POST", HOST, "/api/passkeys/assert/verify", body).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{replay}");
@@ -732,7 +1075,3 @@ async fn removal_of_the_last_passkey_stays_terminal_only_and_needs_an_assertion_
     assert_eq!(res.status(), StatusCode::FORBIDDEN, "{}", res.status());
     assert_eq!(apb_core::passkey::count(), 1, "the last passkey stays");
 }
-
-// Silence the unused helper when only some tests run under cfg.
-#[allow(dead_code)]
-fn unused(_: &Path) {}

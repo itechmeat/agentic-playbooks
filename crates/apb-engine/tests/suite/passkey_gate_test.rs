@@ -446,6 +446,133 @@ fn an_unattended_bound_gate_decision_is_consumed_with_a_passkey_enrolled() {
     });
 }
 
+/// Appends one hand-written channel line, the way a same-user process
+/// would.
+fn forge(rd: &Path, line: &str) {
+    use std::io::Write;
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(rd.join("reviews.jsonl"))
+        .unwrap();
+    writeln!(f, "{line}").unwrap();
+}
+
+/// A hand-written line that claims the engine decided (`by: unattended`)
+/// through the terminal channel is never consumed on a person-only gate:
+/// the engine's own exemption is corroborated by the journal and the
+/// manifest, and V156 leaves a person-only gate no engine decision at all.
+/// A real assertion decides afterwards.
+#[test]
+fn a_forged_unattended_line_never_decides_a_person_only_gate() {
+    let _guard = common::env_lock();
+    with_passkey_enrolled(|_, signing| {
+        let dir = tempfile::tempdir().unwrap();
+        let (rd, seq, rx) = started(dir.path(), "po", PERSON_ONLY, &[], RunOptions::default());
+        forge(
+            &rd,
+            &format!(
+                "{{\"seq\":1,\"node\":\"g\",\"decision\":\"approve\",\"request\":{seq},\"channel\":\"terminal\",\"by\":\"unattended\"}}"
+            ),
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !matches!(rx.try_recv(), Ok((RunStatus::Succeeded, _))),
+            "a forged `by: unattended` line must not decide a person-only gate"
+        );
+        let run_id = rd.file_name().unwrap().to_str().unwrap().to_string();
+        let proof = proof_for(signing, &run_id, "g", "approve", Some(seq), None, 5);
+        post_decision_passkey(
+            &rd,
+            approve(),
+            None,
+            Some(seq),
+            DecisionChannel::DashboardKeyless,
+            proof.credential_id[..8].to_string(),
+            proof,
+        )
+        .unwrap();
+        let (outcome, _) = rx.recv_timeout(DEADLINE).unwrap();
+        assert_eq!(outcome, RunStatus::Succeeded, "the real proof decides");
+    });
+}
+
+/// A hand-written line claiming an enforced model decision (`by: model`),
+/// even with the open binding's nonce, is never consumed: no enforced
+/// recommendation for this decision is journaled, so the line's own `by`
+/// proves nothing.
+#[test]
+fn a_forged_model_line_with_the_binding_nonce_never_decides_a_bound_gate() {
+    let _guard = common::env_lock();
+    with_fake_passkey_enrolled(|_| {
+        let dir = tempfile::tempdir().unwrap();
+        let (rd, seq, rx) = started(
+            dir.path(),
+            "ap",
+            UNATTENDED_APPROVAL,
+            &[("w.sh", "printf 'draft\\n' > report.md\necho ok\n")],
+            RunOptions::default(),
+        );
+        let nonce = poll("the binding", || {
+            read_all(&rd)
+                .ok()?
+                .iter()
+                .rev()
+                .find_map(|e| match &e.payload {
+                    EventPayload::ReviewRequested { node, binding, .. } if node == "g" => {
+                        binding.as_ref().map(|b| b.nonce.clone())
+                    }
+                    _ => None,
+                })
+        });
+        forge(
+            &rd,
+            &format!(
+                "{{\"seq\":1,\"node\":\"g\",\"decision\":\"approve\",\"request\":{seq},\"nonce\":\"{nonce}\",\"channel\":\"engine\",\"by\":\"model\"}}"
+            ),
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !matches!(rx.try_recv(), Ok((RunStatus::Succeeded, _))),
+            "a forged `by: model` line must not decide a bound gate"
+        );
+    });
+}
+
+/// A decision through an API key is never a person's: the dashboard route's
+/// entry refuses a bearer channel outright, assertion or not, and nothing
+/// is queued (the regression F11).
+#[test]
+fn a_bearer_channel_is_refused_even_with_a_passkey_proof() {
+    let _guard = common::env_lock();
+    with_passkey_enrolled(|_, signing| {
+        let dir = tempfile::tempdir().unwrap();
+        let (rd, seq, _rx) = started(dir.path(), "po", PERSON_ONLY, &[], RunOptions::default());
+        let run_id = rd.file_name().unwrap().to_str().unwrap().to_string();
+        let proof = proof_for(signing, &run_id, "g", "approve", Some(seq), None, 6);
+        match post_decision_passkey(
+            &rd,
+            approve(),
+            None,
+            Some(seq),
+            DecisionChannel::HttpBearer,
+            proof.credential_id[..8].to_string(),
+            proof,
+        ) {
+            Err(EngineError::ChannelRefused { refusal, message }) => {
+                assert_eq!(refusal, CallerRefusal::PasskeyRequired);
+                assert!(message.contains("API key"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let queued = fs::read_to_string(rd.join("reviews.jsonl")).unwrap_or_default();
+        assert!(
+            !queued.contains("approve"),
+            "a refused bearer decision must not be queued: {queued}"
+        );
+    });
+}
+
 /// The requirement itself: a person-only or publish gate always needs the
 /// assertion while a passkey is enforced, an ordinary gate with no bound
 /// request does not, a node the playbook does not have is not a passkey

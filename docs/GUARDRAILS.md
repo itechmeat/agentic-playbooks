@@ -315,16 +315,42 @@ it cannot sign an assertion with the authenticator's private key, which
 never leaves it, and a `passkey` stamp it writes into the channel file
 by hand carries no assertion, so the drive refuses it.
 
+**What the gate buys.** An agent that acts through apb's surfaces cannot
+decide a passkey-required gate: the CLI, MCP and an HTTP caller with a
+key are refused, and a bearer-key request is refused even with a valid
+assertion token. An agent that writes run files cannot decide either: a
+hand-written channel line, whatever fields it forges (`passkey`,
+`channel`, even `by`), carries no assertion, and the drive re-verifies
+the proof against the store before it consumes anything. A run step
+whose isolation sandbox keeps `<config_dir>` out of reach cannot enroll
+or assert at all.
+
 **Limits.** The server cannot tell a browser from a plain HTTP client,
 so whoever holds a valid credential can assert with a script instead of
 a browser; that is no loss, the assertion is the proof either way. Out
 of scope, and documented as such: a same-user agent that drives the
-person's own browser through remote debugging, or a virtual
-authenticator plugged in during the person's own enrollment, can produce
-assertions it should not. Enrollment is the protected step (a person at
-a terminal, typing the code back), and an agent that enrolled its own
-passkey would be visible, in the notify notice and in `apb passkey
-list`. The design is
+person's own browser through remote debugging, a virtual authenticator
+plugged in during the person's own enrollment, or a process that
+captures the enroll code from the terminal pane (piped stdout, a herdr
+or tmux pane) and races the person to `enroll/start` once the code is
+live; the code is inert without the typed confirmation, so the race wins
+only during the person's own enrollment window. Enrollment is the
+protected step (a person at a terminal, typing the code back). The store
+itself has no tamper proof, and a same-user writer of `<config_dir>`
+stays out of scope, like for every other apb guard: appending a record
+with its own key into `passkeys.yaml` directly enrolls it with no
+notice (the notify notice and the journal cover only enrollments and
+removals through apb's own surfaces; `apb passkey list` is the only
+view), and deleting the file reads as "no passkey enrolled", which
+switches the whole requirement off silently; the only trace is the
+`apb doctor` warning row that recommends enrolling again. Nothing inside
+the same uid can be made tamper-proof against such a writer: it can
+replace the `apb` binary, the dashboard assets and the installation key
+too, and a MAC on the store keyed with the installation key would be
+re-signed by an apb-aware writer, since the key sits beside the store.
+What the feature honestly claims is the paragraph above: apb's surfaces,
+the run files and the sandbox boundary, never the config dir against its
+own user. The design is
 `docs/superpowers/specs/2026-11-04-passkeys-design.md`.
 
 ## Launch policy for agents

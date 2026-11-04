@@ -235,16 +235,15 @@ pub fn verify(
     if flags & FLAG_UP == 0 || flags & FLAG_UV == 0 || flags & FLAG_ATTESTED_CREDENTIAL_DATA != 0 {
         return Err(ProofError::Flags);
     }
-    let count = u32::from_be_bytes([auth_data[33], auth_data[34], auth_data[35], auth_data[36]]);
-    // The server bumped the store to this assertion's counter at verify
-    // time, so a stamp whose counter does not match what the store now
-    // holds was not the assertion the store accepted.
-    if record.sign_count != 0 && count != record.sign_count {
-        return Err(ProofError::Signature(format!(
-            "counter {} does not match the store's {}",
-            count, record.sign_count
-        )));
-    }
+
+    // The assertion's sign counter is read (the signature covers it) but
+    // deliberately not compared with the store's: the server bumps the
+    // store on every verified assertion, so a proof queued for a run that
+    // is paused or has no live drive is overtaken by any later assertion
+    // (another gate, another run, the Passkeys page), and an equality
+    // check would invalidate a perfectly valid queued consent. The
+    // derived challenge already binds the proof to one run, gate,
+    // decision, request and nonce, so nothing is lost.
 
     let mut signed = auth_data;
     signed.extend_from_slice(&Sha256::digest(&raw_client));

@@ -59,7 +59,9 @@ produce a WebAuthn assertion.
   removals cannot race the count down to zero.
 - Enrollment and removal journal nothing into runs. Each sends a notice
   to the machine's notify target when one is set ("a passkey was added
-  on `<machine>`"), so an enrollment a person did not make is visible.
+  on `<machine>`"), so an enrollment a person did not make through apb's
+  own surfaces is visible. A record appended into `passkeys.yaml`
+  directly sends no notice; see the limits below.
 
 ### Deciding
 
@@ -123,13 +125,29 @@ not on the machine's disk and not in its memory.
 **Limits, stated honestly.**
 
 - A same-user agent that drives the person's own browser (for example
-  through remote debugging) or a virtual authenticator can sign in and
+  through remote debugging), a virtual authenticator, or a process that
+  captures the enroll code from the terminal pane (piped stdout, a herdr
+  or tmux pane) and races the person during the enrollment window can
   produce the assertion. Out of scope.
 - Enrollment is the protected step (a person at a terminal); visibility
   of an agent's enrollment is notice plus `apb passkey list`, not a
   refusal.
 - The gate still does not prove a person decided; it proves an
   authenticator holding the enrolled key answered within two minutes.
+- The store has no tamper proof, and a same-user writer of
+  `<config_dir>` is out of scope, like for every other apb guard: it can
+  append its own credential into `passkeys.yaml` (which sends no notice;
+  the notice and `apb passkey list` cover only enrollments through apb's
+  own surfaces), and it can delete the file, after which every gate
+  reads "no passkey enrolled" and the requirement switches off silently;
+  the only trace is the `apb doctor` warning row. Nothing inside the
+  same uid can be made tamper-proof against such a writer: it can
+  replace the `apb` binary, the dashboard assets and the installation
+  key too, and a MAC on the store keyed with the installation key would
+  be re-signed by an apb-aware writer, since the key sits beside the
+  store. What the feature claims is the threat table above: apb's
+  surfaces, the run files and the isolation sandbox's credential
+  locations, never the config dir against its own user.
 
 ## 4. Deliberately out of scope
 
