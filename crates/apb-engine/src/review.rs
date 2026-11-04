@@ -11,6 +11,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 pub mod channel;
+pub mod passkey_proof;
 
 pub use channel::open_request;
 
@@ -62,6 +63,19 @@ pub struct ReviewEntry {
         deserialize_with = "crate::decision_channel::lenient_channel"
     )]
     pub channel: Option<crate::decision_channel::DecisionChannel>,
+    /// The credential id prefix of the passkey whose assertion this
+    /// decision carried, stamped only by the dashboard route after it
+    /// verified the assertion. While this machine holds at least one
+    /// passkey, a person-only or bound gate consumes nothing else.
+    /// `None` in old channels and whenever no passkey was used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passkey: Option<String>,
+    /// The full WebAuthn assertion the decision was minted from, so the
+    /// drive re-verifies the stamp at consumption instead of trusting the
+    /// string above (a plain JSONL line is writable by any same-user
+    /// process). `None` in old channels and whenever no passkey was used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passkey_proof: Option<passkey_proof::PasskeyProof>,
 }
 
 /// Rejects a decision that names something other than a currently pending gate
@@ -123,7 +137,12 @@ fn check_review_target(
             }
             if let Some(gate) = gate.filter(|g| is_stamped_gate(g)) {
                 if gate.person_only {
-                    crate::review::channel::refuse_for_person_only(run_dir, node, poster.channel)?;
+                    crate::review::channel::refuse_for_person_only(
+                        run_dir,
+                        node,
+                        poster.channel,
+                        poster.proof.is_some(),
+                    )?;
                 }
                 if !publish {
                     return check_bound_decision(run_dir, gate, cmd, nonce, poster);
@@ -213,10 +232,16 @@ fn check_review_target(
 /// Who posts a decision: the channel it came through, and whether it is the
 /// engine's own decision (an unattended run's declared one, an enforced
 /// recommendation), which takes the open binding without naming it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Poster {
     channel: Option<DecisionChannel>,
     engine: bool,
+    /// Set only by the dashboard route after it verified a WebAuthn
+    /// assertion for this very decision: the credential id prefix the
+    /// entry stamps in `passkey`, and the full assertion it re-verifies at
+    /// consumption.
+    passkey: Option<String>,
+    proof: Option<passkey_proof::PasskeyProof>,
 }
 
 /// What [`post_decision`] stamps on a channel entry.
@@ -243,8 +268,12 @@ pub fn is_stamped_gate(gate: &apb_core::schema::Node) -> bool {
     gate.person_only || gate.approves.is_some()
 }
 
-/// A publish decision on a person-only node carries the open request and
-/// the channel; any other keeps only its nonce.
+/// A publish decision carries its nonce and the open request seq: a
+/// person-only one also the channel. The request is stamped on every
+/// publish entry, person-only or not, because the passkey assertion is
+/// minted over a challenge derived from that very request: without the
+/// stamp the drive re-derives a different challenge at consumption and no
+/// dashboard consent would ever verify.
 fn publish_stamps(
     events: &[crate::event::Event],
     node: &str,
@@ -255,13 +284,10 @@ fn publish_stamps(
     let person_only = crate::progress::load_run_playbook(run_dir)
         .and_then(|p| p.node(node).map(|n| n.person_only))
         .unwrap_or(false);
-    if !person_only {
-        return Stamps::nonce(nonce);
-    }
     Stamps {
         nonce,
         request: latest_request(events, node),
-        channel: poster.channel,
+        channel: person_only.then_some(poster.channel).flatten(),
     }
 }
 
@@ -368,7 +394,110 @@ pub(crate) fn answers_stamped(
 ) -> bool {
     e.request == Some(request)
         && binding.is_none_or(|b| e.nonce.as_deref() == Some(b.nonce.as_str()))
-        && (!person_only || crate::review::channel::decides_person_only(run_dir, e.channel))
+        && (!person_only || decides_person_only_entry(run_dir, e))
+        && passkey_stamp_ok(run_dir, e, person_only)
+}
+
+/// Whether a channel entry carries the passkey stamp this machine demands:
+/// any entry at all when no passkey is enforced, else only an entry whose
+/// assertion proof verifies against the store (the engine's own decisions
+/// and a scenario run's scripted one are exempt: they are not a person's
+/// consent). `person_only` is the consumer's own flag, never read from the
+/// run directory (see [`engine_own_entry`]). The drive consumes nothing
+/// else, and `apb doctor --run` names the reason.
+pub fn passkey_stamp_ok(run_dir: &Path, e: &ReviewEntry, person_only: bool) -> bool {
+    let engine_own = engine_own_entry(run_dir, e, person_only);
+    let scripted = e.channel == Some(crate::decision_channel::DecisionChannel::Scenario)
+        && crate::scenario::session::is_scenario(run_dir);
+    passkey_proof::stamp_ok(
+        run_dir,
+        passkey_proof::Stamp {
+            node: &e.cmd.node,
+            decision: &e.cmd.decision,
+            request: e.request,
+            nonce: e.nonce.as_deref(),
+            proof: e.passkey_proof.as_ref(),
+            engine_own,
+            scripted,
+        },
+    )
+}
+
+/// Whether the run's own state proves the engine made this decision, so the
+/// entry needs no person's assertion. The `by` field of a channel line is
+/// forgeable like every other field of the line (it is deserialized with
+/// `lenient_decided_by` from a file any same-user process can append to),
+/// so the line's own word decides nothing: a `by: unattended` entry counts
+/// only when the run's manifest records an unattended run and the gate
+/// itself declares the entry's decision as its `unattended.decide` outcome,
+/// and a `by: model` entry only when the request the entry stamps carries
+/// the enforced recommendation (`auto_decide`, `applied`) that posts
+/// exactly this decision: the entry is pinned to the request by
+/// `answers_stamped`, so this is the request the engine itself would have
+/// auto-decided, not an earlier visit's.
+///
+/// `person_only` is the consumer's own flag (the drive's definition, the
+/// doctor's), never read back from the run directory: a person-only gate
+/// takes no engine decision at all (V156 refuses one in the definition; the
+/// consumer enforces it here), whatever the run directory's copy of the
+/// playbook says. A playbook or journal that does not read is never proof
+/// of anything.
+pub(crate) fn engine_own_entry(run_dir: &Path, e: &ReviewEntry, person_only: bool) -> bool {
+    use crate::event::{DecidedBy, EventPayload};
+    if person_only {
+        return false;
+    }
+    let node = e.cmd.node.as_str();
+    let playbook = crate::progress::load_run_playbook(run_dir);
+    let Some(playbook) = playbook else {
+        return false;
+    };
+    match e.by {
+        Some(DecidedBy::Unattended) => {
+            let declared = playbook
+                .node(node)
+                .and_then(|n| n.unattended.as_ref().and_then(|u| u.decide()))
+                .is_some_and(|d| d.decide == e.cmd.decision);
+            let unattended = matches!(crate::manifest::read(run_dir), Ok(Some(m)) if m.unattended);
+            declared && unattended
+        }
+        Some(DecidedBy::Model) => {
+            let Some(request) = e.request else {
+                return false;
+            };
+            let events = match crate::event::read_all(run_dir) {
+                Ok(events) => events,
+                Err(_) => return false,
+            };
+            events.iter().rev().any(|ev| {
+                ev.seq == request
+                    && match &ev.payload {
+                        EventPayload::ReviewRequested {
+                            node: n,
+                            recommendation: Some(r),
+                            ..
+                        } => n == node && r.applied && r.option == e.cmd.decision,
+                        _ => false,
+                    }
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Whether the entry decides a person-only gate: a person's channel, or a
+/// dashboard request that carries a verified assertion proof (which is the
+/// person), or a scenario run's scripted decision in a scenario run.
+pub fn decides_person_only_entry(run_dir: &Path, e: &ReviewEntry) -> bool {
+    if channel::decides_person_only(run_dir, e.channel) {
+        return true;
+    }
+    let dashboard = matches!(
+        e.channel,
+        Some(crate::decision_channel::DecisionChannel::DashboardSession)
+            | Some(crate::decision_channel::DecisionChannel::DashboardKeyless)
+    );
+    dashboard && e.passkey_proof.is_some()
 }
 
 /// The bound snapshots of a binding, for a message.
@@ -511,6 +640,8 @@ pub fn post_decision_to(
         Poster {
             channel: None,
             engine: false,
+            passkey: None,
+            proof: None,
         },
     )
 }
@@ -544,8 +675,90 @@ pub fn post_decision_via(
         Poster {
             channel: Some(channel),
             engine: false,
+            passkey: None,
+            proof: None,
         },
     )
+}
+
+/// [`post_decision_via`] carrying a verified passkey assertion: the
+/// dashboard route's entry, after the route verified the assertion against
+/// the store and bound it to this run, gate, request and option. The
+/// credential id prefix is stamped on the entry; the engine consumes such
+/// a gate's decision only from an entry that carries it while this
+/// machine holds at least one passkey. `passkey_credential` is a short
+/// prefix of the credential id, never a secret.
+pub fn post_decision_passkey(
+    run_dir: &Path,
+    cmd: ReviewCommand,
+    nonce: Option<String>,
+    request: Option<u64>,
+    channel: DecisionChannel,
+    passkey_credential: String,
+    proof: passkey_proof::PasskeyProof,
+) -> Result<u64, EngineError> {
+    if channel == DecisionChannel::HttpBearer {
+        return Err(EngineError::ChannelRefused {
+            refusal: crate::decision_channel::CallerRefusal::PasskeyRequired,
+            message: "a decision through an API key is never a person's, passkey assertion or not; a key-made client cannot decide a gate that needs a passkey. Sign in to the dashboard in a browser and decide there".to_string(),
+        });
+    }
+    crate::review::channel::refuse_own_run(run_dir, &apb_core::step_env::StepCaller::from_env())?;
+    append_decision(
+        run_dir,
+        cmd,
+        nonce,
+        request,
+        None,
+        Poster {
+            channel: Some(channel),
+            engine: false,
+            passkey: Some(passkey_credential),
+            proof: Some(proof),
+        },
+    )
+}
+
+/// Whether the decision `cmd` makes on the run at `run_dir` needs a fresh
+/// passkey assertion on this machine: at least one passkey is enrolled
+/// and the gate is `person_only`, is a `publish` consent, or answers a
+/// bound request (an approval, `approves` or `requires_approval`). A node
+/// the playbook does not have is not a passkey matter (the caller refuses
+/// it as unknown); a playbook or journal that does not read fails closed,
+/// since the store is what decided the requirement.
+/// Whether at least one passkey is enforced on this machine: a passkey is
+/// enrolled, or the store exists but does not read (fail closed: the store
+/// is what decides whether the gate stands).
+pub fn passkey_enforced() -> bool {
+    match apb_core::passkey::count_strict() {
+        Ok(n) => n > 0,
+        Err(_) => true,
+    }
+}
+
+pub fn passkey_required(run_dir: &Path, cmd: &ReviewCommand) -> bool {
+    if !passkey_enforced() {
+        return false;
+    }
+    let Some(playbook) = crate::progress::load_run_playbook(run_dir) else {
+        // The playbook does not read: fail closed, the store is why.
+        return true;
+    };
+    let Some(gate) = playbook.node(cmd.node.as_str()) else {
+        // The playbook reads and names no such node: the ordinary
+        // unknown-node refusal answers, not the passkey gate.
+        return false;
+    };
+    if gate.person_only || matches!(gate.kind, apb_core::schema::NodeKind::Publish { .. }) {
+        return true;
+    }
+    match crate::event::read_all(run_dir) {
+        Ok(events) => {
+            open_request(&events, cmd.node.as_str()).is_some_and(|(_, binding)| binding.is_some())
+        }
+        // The journal does not read: fail closed.
+        Err(_) => true,
+    }
 }
 
 /// Queues a decision the engine itself makes for the request the journal
@@ -575,6 +788,8 @@ pub(crate) fn post_engine_decision(
         Poster {
             channel: Some(channel),
             engine: true,
+            passkey: None,
+            proof: None,
         },
     )
 }
@@ -596,7 +811,58 @@ fn append_decision(
     if let Some(seq) = request {
         check_review_request(run_dir, &cmd.node, seq)?;
     }
+    let passkey_prefix = poster.passkey.clone();
+    let poster_channel = poster.channel;
+    let poster_engine = poster.engine;
+    let poster_proof = poster.proof.clone();
     let stamps = check_review_target(run_dir, &cmd, nonce, poster)?;
+
+    // The passkey gate: while this machine holds at least one passkey, a
+    // person-only gate and a bound approval take a decision only with a
+    // fresh WebAuthn assertion, which only the dashboard route can verify.
+    // The engine's own decisions (an unattended run's declared outcome, an
+    // enforced recommendation) and a scenario run's scripted one are
+    // exempt: they are not a person's consent anyway, and V156 already
+    // refuses both on a person-only gate.
+    let exempt = poster_engine || poster_channel == Some(DecisionChannel::Scenario);
+    let stamped_dashboard = matches!(
+        poster_channel,
+        Some(DecisionChannel::DashboardSession) | Some(DecisionChannel::DashboardKeyless)
+    );
+    if passkey_prefix.is_some() && !stamped_dashboard {
+        return Err(EngineError::Invalid(
+            "a passkey assertion is stamped only on a decision through the dashboard".to_string(),
+        ));
+    }
+    if passkey_prefix.is_some() && poster_proof.is_none() {
+        return Err(EngineError::Invalid(
+            "a passkey decision carries the full assertion, not only the credential prefix"
+                .to_string(),
+        ));
+    }
+    let entry_passkey = if let Some(prefix) = passkey_prefix {
+        Some(prefix)
+    } else if !exempt && passkey_required(run_dir, &cmd) {
+        let run = run_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        let link = run_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|root| crate::people::link::run_link(root, &run))
+            .unwrap_or_else(|| "the dashboard's run page".to_string());
+        return Err(EngineError::ChannelRefused {
+            refusal: crate::decision_channel::CallerRefusal::PasskeyRequired,
+            message: format!(
+                "gate `{}` of run `{run}` needs a passkey: at least one passkey is enrolled on this machine, so this decision takes a fresh passkey assertion. Decide on the dashboard: {link}",
+                cmd.node
+            ),
+        });
+    } else {
+        None
+    };
 
     let seq = read_reviews_after(run_dir, None)?.len() as u64;
 
@@ -607,6 +873,8 @@ fn append_decision(
         by,
         request: stamps.request,
         channel: stamps.channel,
+        passkey: entry_passkey,
+        passkey_proof: poster_proof,
     };
     let line = serde_json::to_string(&entry).map_err(|e| EngineError::Yaml(e.to_string()))?;
 
@@ -777,5 +1045,98 @@ mod tests {
         let after = read_reviews_after(dir.path(), Some(s0)).unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].cmd.decision, "rejected");
+    }
+
+    /// The `by: model` exemption is bound to the request the entry stamps
+    /// (the regression H1): it holds only when the request the entry
+    /// answers is the visit whose enforced recommendation posts exactly
+    /// this decision, never an earlier visit of the same gate in a loop.
+    /// The consumer's `person_only` flag rules the exemption out outright,
+    /// whatever the run directory's copy of the playbook says.
+    #[test]
+    fn a_model_line_is_engine_own_only_for_the_request_that_was_enforced() {
+        use crate::event::{EventLog, EventPayload, ReviewRecommendation};
+        let dir = tempfile::tempdir().unwrap();
+        let rd = dir.path().join("r1");
+        std::fs::create_dir_all(&rd).unwrap();
+        // A bound gate with `auto_decide`, not person-only: V156 lets the
+        // engine decide it when the recommendation is enforced.
+        std::fs::write(
+            rd.join("playbook.yaml"),
+            "schema: 2\nid: ap\nname: ap\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: g, type: human_review, options: [needs_changes, reject], auto_decide: { allow: [needs_changes], min_confidence: 0.5 } }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: g }\n  - { from: g, to: done }\n",
+        )
+        .unwrap();
+        let mut log = EventLog::create(&rd).unwrap();
+        // Visit 1: the recommendation `approve` was enforced (applied).
+        let visit1 = log
+            .append(EventPayload::ReviewRequested {
+                node: "g".into(),
+                options: vec!["approve".into(), "reject".into()],
+                title: None,
+                instruction: String::new(),
+                prompt: None,
+                recommendation: Some(ReviewRecommendation {
+                    option: "approve".into(),
+                    applied: true,
+                    ..Default::default()
+                }),
+                plan_digest: None,
+                binding: None,
+                person_only: false,
+            })
+            .unwrap()
+            .seq;
+        // Visit 2 (a gate in a loop): the recommendation is not applied
+        // this time (say, low confidence), so the person decides.
+        let visit2 = log
+            .append(EventPayload::ReviewRequested {
+                node: "g".into(),
+                options: vec!["approve".into(), "reject".into()],
+                title: None,
+                instruction: String::new(),
+                prompt: None,
+                recommendation: Some(ReviewRecommendation {
+                    option: "approve".into(),
+                    applied: false,
+                    ..Default::default()
+                }),
+                plan_digest: None,
+                binding: None,
+                person_only: false,
+            })
+            .unwrap()
+            .seq;
+        let entry = |request: u64| ReviewEntry {
+            seq: 1,
+            cmd: ReviewCommand {
+                node: "g".into(),
+                decision: "approve".into(),
+                note: String::new(),
+            },
+            nonce: None,
+            by: Some(crate::event::DecidedBy::Model),
+            request: Some(request),
+            channel: Some(crate::decision_channel::DecisionChannel::Engine),
+            passkey: None,
+            passkey_proof: None,
+        };
+        assert!(
+            engine_own_entry(&rd, &entry(visit1), false),
+            "the enforced visit's own request proves the engine decided"
+        );
+        assert!(
+            !engine_own_entry(&rd, &entry(visit2), false),
+            "a later, unenforced visit must not inherit visit 1's enforcement"
+        );
+        assert!(
+            !engine_own_entry(&rd, &entry(visit1), true),
+            "the consumer's person-only flag rules the exemption out"
+        );
+        // An entry stamped with no request at all is never engine-own.
+        let unstamped = ReviewEntry {
+            request: None,
+            ..entry(visit1)
+        };
+        assert!(!engine_own_entry(&rd, &unstamped, false));
     }
 }

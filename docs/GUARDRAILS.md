@@ -61,7 +61,7 @@ policy to the host agent and its administrators (see "Host agent settings" below
 | `agent_launch`, launch floor, `launch:` in `policy.yaml` | 4 Gates | Enforced (run gate) | Whether an agent may launch a playbook: `allow` (the default), `ask` (only with the nonce of the refusal, after the host asked the person) or `deny` (only a person, from the dashboard or an interactive terminal). The run's policy is the strictest over its tree of the playbook's declaration held up by its launch floor, the machine settings and the project settings. Every start, trial, plan execution, eval and resume of a run never authorized goes through the one run gate; a run authorized once stays authorized for its lifetime. See "Launch policy for agents" below. |
 | `human_review` | 4 Gates | Enforced | The run waits for a person's decision; nothing is preselected. |
 | `approves` on `human_review`, `requires_approval` on a working node | 4 Gates | Enforced (engine, at admission) | A gate's request is bound to the latest stored result snapshots of the nodes it `approves`; an approving decision must carry that binding's nonce, and the drive re-verifies every bound snapshot before it consumes the decision (a snapshot that no longer verifies ends the run `approval_snapshot_unreadable`). A node with `requires_approval` starts only when the gate's latest decision approved a binding that covers its `of` nodes, none of them ran again, the snapshots verify and are complete and, with `live: check` (the default), every bound file still hashes to its approved digest; otherwise it finishes failed with the refusal code and no attempt runs. An approval is a fact about stored bytes, never a consent: a publish still needs its own. See "Approvals and person-only gates" below. |
-| `person_only` on `human_review` and `publish` | 4 Gates | Enforced (channel) | Only a person's channel decides the gate: `apb review` (or `apb publish approve`) at an interactive terminal outside a run step after a typed confirmation, and the dashboard with a signed-in session. MCP, a run step, the CLI without a terminal, a bearer key and a dashboard without keys are refused before anything is queued; no automatic decision may be declared (V156). It does not prove that a person decided. See "Approvals and person-only gates" below. |
+| `person_only` on `human_review` and `publish` | 4 Gates | Enforced (channel) | Only a person's channel decides the gate: `apb review` (or `apb publish approve`) at an interactive terminal outside a run step after a typed confirmation, and the dashboard with a signed-in session. MCP, a run step, the CLI without a terminal, a bearer key and a dashboard without keys are refused before anything is queued; no automatic decision may be declared (V156). It does not prove that a person decided. With a passkey enrolled on the machine the bar is raised further: the decision then needs a fresh WebAuthn assertion through the dashboard, and every other caller is refused `passkey_required`. See "Passkeys on person-only gates and approvals" below. |
 | Unattended mode (`apb run --unattended`), `human_review.unattended` | 4 Gates | Enforced | A run nobody attends fails at once (`hitl_required`) at every review, publish gate and question that declares no unattended outcome, without taking a failure route, and fails `budget_exhausted` where an attended run would pause for its budget. A review may declare `unattended: { decide: <option> }`, journaled with `decided_by: unattended` and never counted as a person's consent (nor is a `decided_by` this apb does not know); the validator refuses an option that reaches an irreversible or secret step before the next gate, over edges and failure handlers (V142), and the run checks it again. An unattended review never waits: a decision lost to a crash is made on resume, one that cannot be recorded fails the run. A publish gate has no unattended outcome. Host execution and supervised modes are refused at start, and so is an unattended start from a run step of an attended run (a person, CI, an agent session or a step of an unattended run may choose the mode; a run step is recognized by its environment, as for every run-step refusal, so this keeps a cooperating step from choosing it by mistake). The mode grants no consent: irreversible starts and the launch policy are unchanged. See CI.md "Unattended runs". |
 | `judge` nodes and edges | 4 Gates | Model-decided | A decision model answers typed questions and routes; thresholds are declared, failures take `on_unavailable`. |
 | Trust digests (playbook, profile bundle, connector, account) | 4 Gates | Enforced | A changed playbook, profile, skill or connector drops its approval; MCP starts are refused until a person approves or acknowledges. |
@@ -215,6 +215,7 @@ API and the CLI (`CALLER_REFUSALS` in the generated constants):
 | `keyless_dashboard` | a person-only gate refuses a dashboard without keys |
 | `bearer_key` | a person-only gate refuses the HTTP API with a bearer key |
 | `run_step_own_run` | a run step never decides a gate or answers a question of its own run tree |
+| `passkey_required` | a passkey is enrolled on the machine, so a person-only gate or an approval decides only with a fresh assertion through the dashboard |
 
 ### Approval refusals
 
@@ -234,15 +235,146 @@ author loops back to the producer and the gate for a fresh approval).
 ### Older apb binaries
 
 A run whose definition uses `approves`, `requires_approval` or
-`person_only` journals a `run_guard` record after every checkpoint, so an
-older apb refuses to resume it, answer through its engine or pause it
-("written by a newer apb"); its stop still works. Two cases are not
-covered: an older apb that *starts* such a playbook drops the three fields
-and runs plain gates, and an older apb that *stops* such a run leaves its
-own stop as the last checkpoint with no guard after it, after which that
-older apb can resume the run past its gates. Every apb on a machine that
-runs these playbooks must be this release or newer; `apb doctor` warns
-about other `apb` binaries on `PATH`.
+`person_only` journals a `run_guard` record after every checkpoint and
+records `execution.mode: cli+guard` (or `host+guard` for a host run) in
+its write-once manifest. Every apb from 0.23 on refuses to resume such a
+run, naming the execution mode with its "written by a newer apb" message,
+writes nothing, and still reads the run and stops it; a pause of a run
+whose journal carries the guard is refused by that guard as it was
+before this change, so an older apb keeps the pause refusal; this apb
+reads, resumes, pauses and stops the run as before. The stop limit is
+closed for binaries from 0.23 on: an older apb that *stops* such a run
+leaves its own stop as the last checkpoint with no guard after it, but
+the manifest guard still stands, so its next resume still refuses. The
+manifest guard follows the start definition only: a supervisor patch
+that adds `person_only`, `approves` or `requires_approval` to a running
+run journals the guard, but the write-once manifest cannot be rewritten,
+so for that run the old stop-then-resume limit stays open. What
+older ones still do: an apb older than 0.23 does not know the execution
+block and ignores it, so it can still resume such a run past its gates;
+and an older apb that *starts* such a playbook drops the three fields
+and runs plain gates. Every apb on a machine that runs these playbooks
+must be this release or newer; `apb doctor` warns about other `apb`
+binaries on `PATH`.
+
+## Passkeys on person-only gates and approvals
+
+A channel refusal proves a caller type, not a person: whoever holds a
+server key can sign in to the dashboard and decide. When at least one
+passkey is enforced on the machine, apb raises the bar: a person-only
+gate's decision and an approval (a gate with `approves` or
+`requires_approval`, and a publish consent) then need a fresh WebAuthn
+assertion, made through the dashboard and bound to the run, the gate, the
+request and the chosen option. Without a passkey enrolled, behavior is
+exactly as before; `apb doctor` shows a warning row recommending
+`apb passkey enroll`. When the store exists but does not read, nothing
+falls back: the requirement stands and every person-only decision refuses
+until the file is fixed (fail closed), and `apb doctor` reports it as a
+failure. Ordinary review gates are unchanged.
+
+**What apb stores.** Passkeys live per machine in
+`<config_dir>/passkeys.yaml` (0600, atomic write through
+`apb_core::fsutil`): the credential id, the COSE public key, the sign
+count, a label and the created time. Nothing secret is stored and nothing
+secret is logged; the authenticator's private key never leaves it.
+
+**The ceremonies.** apb-server verifies registration and assertion itself
+(ES256 and EdDSA, attestation `none`, `userVerification` required). Its
+challenges are single use, live in memory for two minutes, and the origin
+and RP ID are checked against the dashboard's own origin
+(`server.public_base_url`, else the request host on http). A dashboard at
+an IP literal cannot use passkeys: passkeys cannot bind to an IP address,
+and apb refuses it with a clear message. Verification uses `p256`
+and `ciborium` (both MIT or Apache-2.0) and `ed25519-dalek`
+(BSD-3-Clause); no
+`webauthn-rs` (its license is not compatible).
+
+**Enrollment and management.** `apb passkey enroll` (a person only,
+refused inside a run step like the other person-only commands, and only
+at an interactive terminal) prints a one-time code and asks the person to
+type it back; only then is the code written, so a piped stdout leaks
+nothing usable. The code is valid five minutes, and the dashboard's
+Passkeys page asks for it. Every later passkey is added through the
+dashboard with an assertion from an existing one. `apb passkey list`
+shows them; `apb passkey remove <label>` removes one, and every removal,
+last or not, needs a one-time code typed back at the terminal (the same
+rule the dashboard enforces with an assertion), under a store lock, so
+two removals cannot race the count down to zero. Enrollment and removal
+journal nothing into runs, but each sends a notice to the machine's
+notify target when one is set ("a passkey was added on `<machine>`").
+
+**Deciding.** With a passkey enforced, `apb review` (and `apb publish
+approve`) prints the dashboard link and refuses with `passkey_required`
+(a new code in the closed `CallerRefusal` list); the person decides on
+the dashboard, which runs `navigator.credentials.get` and posts the
+assertion. MCP is refused as before, and a bearer-key request is refused
+even when it carries a valid token: a key-made client is never a person.
+The engine stamps the credential id prefix (`passkey`) and the full
+assertion (`passkey_proof`) on the consumed channel entry, and
+re-verifies the proof against the store when it consumes the decision:
+the challenge is derived from the run, the gate, the decision, the
+request and the nonce, so a hand-written line with a made-up prefix, or
+a proof replayed onto another request, is refused, and `apb doctor
+--run` names it. What the proof does not re-check is the browser's
+origin (the engine cannot see the request's Host); that check happens
+where the assertion is first accepted, in the server. An unattended
+run's declared `decide` and a scenario run's script are exempt: they are
+not a person's consent anyway, and V156 already refuses them on a
+person-only gate.
+
+**What the gate buys.** An agent that reads the config dir and the
+dashboard key file can sign in to the dashboard but still cannot decide:
+it cannot sign an assertion with the authenticator's private key, which
+never leaves it, and a `passkey` stamp it writes into the channel file
+by hand carries no assertion, so the drive refuses it.
+
+**What the gate buys.** An agent that acts through apb's surfaces cannot
+decide a passkey-required gate: the CLI, MCP and an HTTP caller with a
+key are refused, and a bearer-key request is refused even with a valid
+assertion token. A hand-written channel line, whatever fields it forges
+(`passkey`, `channel`, even `by`), carries no assertion, and the drive
+re-verifies the proof against the store before it consumes anything: on a person-only gate nothing at
+all is exempt for the live drive (its own definition decides, never a
+re-read of the run directory; a resume executes the run's snapshot, and
+one that no journaled digest accounts for is recorded as
+`definition_mismatch`, a detached driver refuses it), and a
+`by: model` line is bound to the exact request it answers, which must be
+the visit whose recommendation the engine enforced. Honest about the
+residual: on a bound gate that is not person-only, the `by` exemption
+for the engine's own decision is corroborated from the run directory
+itself (the run's manifest, the definition snapshot and the journal),
+which a writer of the run directory can alter, so such a writer can
+still decide a bound, non-person-only gate; the passkey gate does not
+claim otherwise. A run step whose isolation sandbox keeps
+`<config_dir>` out of reach cannot enroll or assert at all.
+
+**Limits.** The server cannot tell a browser from a plain HTTP client,
+so whoever holds a valid credential can assert with a script instead of
+a browser; that is no loss, the assertion is the proof either way. Out
+of scope, and documented as such: a same-user agent that drives the
+person's own browser through remote debugging, a virtual authenticator
+plugged in during the person's own enrollment, or a process that
+captures the enroll code from the terminal pane (piped stdout, a herdr
+or tmux pane) and races the person to `enroll/start` once the code is
+live; the code is inert without the typed confirmation, so the race wins
+only during the person's own enrollment window. Enrollment is the
+protected step (a person at a terminal, typing the code back). The store
+itself has no tamper proof, and a same-user writer of `<config_dir>`
+stays out of scope, like for every other apb guard: appending a record
+with its own key into `passkeys.yaml` directly enrolls it with no
+notice (the notify notice covers only enrollments and removals through
+apb's own surfaces, and no run journal records either; `apb passkey
+list` is the one view of what is enrolled), and deleting the file reads as "no passkey enrolled", which
+switches the whole requirement off silently; the only trace is the
+`apb doctor` warning row that recommends enrolling again. Nothing inside
+the same uid can be made tamper-proof against such a writer: it can
+replace the `apb` binary, the dashboard assets and the installation key
+too, and a MAC on the store keyed with the installation key would be
+re-signed by an apb-aware writer, since the key sits beside the store.
+What the feature honestly claims is the paragraph above: apb's surfaces,
+the run files and the sandbox boundary, never the config dir against its
+own user. The design is
+`docs/superpowers/specs/2026-11-04-passkeys-design.md`.
 
 ## Launch policy for agents
 

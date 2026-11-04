@@ -5,6 +5,7 @@
   import UserCog from '@lucide/svelte/icons/user-cog'
   import Plug from '@lucide/svelte/icons/plug'
   import ShieldCheck from '@lucide/svelte/icons/shield-check'
+  import KeyRound from '@lucide/svelte/icons/key-round'
   import Repeat from '@lucide/svelte/icons/repeat'
   import LogOut from '@lucide/svelte/icons/log-out'
   import Moon from '@lucide/svelte/icons/moon'
@@ -36,7 +37,7 @@
     actions,
     project = '',
   }: {
-    active?: 'playbooks' | 'runs' | 'profiles' | 'connectors' | 'trust' | 'discover' | ''
+    active?: 'playbooks' | 'runs' | 'profiles' | 'connectors' | 'trust' | 'discover' | 'passkeys' | ''
     title?: Snippet
     actions?: Snippet
     /** Optional project name shown as a chip on the right. */
@@ -50,6 +51,7 @@
     { key: 'connectors', label: 'Connectors', href: '#/connectors', icon: Plug },
     { key: 'trust', label: 'Approvals', href: '#/trust', icon: ShieldCheck },
     { key: 'discover', label: 'Discover', href: '#/discover', icon: Repeat },
+    { key: 'passkeys', label: 'Passkeys', href: '#/passkeys', icon: KeyRound },
   ] as const
 
   // Theme switch. mode-watcher persists the choice; dark is the default

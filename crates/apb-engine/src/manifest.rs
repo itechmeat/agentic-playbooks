@@ -481,16 +481,59 @@ pub struct ManifestExecution {
 }
 
 impl ManifestExecution {
+    /// The suffix a guarded run's mode carries (`cli+guard`, `host+guard`),
+    /// so an apb that does not know it refuses the run with its "written
+    /// by a newer apb" message while this apb reads the real mode from
+    /// the part before the suffix.
+    pub const GUARD_SUFFIX: &str = "+guard";
+
     /// The block for a resolved execution; `None` for a plain `cli` run
     /// without the fallback, which keeps the manifest unchanged.
     pub fn from_resolved(r: &apb_core::execution::ResolvedExecution) -> Option<Self> {
-        (r.mode != apb_core::execution::ExecutionMode::Cli || r.fallback_to_host).then(|| Self {
-            mode: r.mode.as_str().to_string(),
-            source: Some(r.source.as_str().to_string()),
-            client: r.client.clone(),
-            fallback_to_host: r.fallback_to_host,
-        })
+        Self::from_resolved_guarded(r, false)
     }
+
+    /// [`ManifestExecution::from_resolved`] for a run whose definition
+    /// uses a person-only gate or an approval: the block is always
+    /// written, with the mode suffixed by [`ManifestExecution::GUARD_SUFFIX`].
+    /// An apb from 0.23 on refuses to resume such a run (it does not know
+    /// the suffixed mode), while it still reads and stops it; this apb
+    /// reads, resumes, pauses and stops it as before.
+    pub fn from_resolved_guarded(
+        r: &apb_core::execution::ResolvedExecution,
+        guarded: bool,
+    ) -> Option<Self> {
+        (guarded || r.mode != apb_core::execution::ExecutionMode::Cli || r.fallback_to_host).then(
+            || Self {
+                mode: if guarded {
+                    format!("{}{}", r.mode.as_str(), Self::GUARD_SUFFIX)
+                } else {
+                    r.mode.as_str().to_string()
+                },
+                source: Some(r.source.as_str().to_string()),
+                client: r.client.clone(),
+                fallback_to_host: r.fallback_to_host,
+            },
+        )
+    }
+}
+
+/// Whether a run of `playbook` writes the manifest guard: its definition
+/// uses a person-only gate or an approval, the runs the journal
+/// `run_guard` follows today. An evidence-only run keeps the journal
+/// guard alone: the manifest stays as it was, so an older apb that
+/// stopped such a run can still resume it past the ended guard.
+pub fn manifest_guard(playbook: &apb_core::schema::Playbook) -> bool {
+    apb_core::validate::guarded_features(playbook)
+        .into_iter()
+        .any(|f| {
+            matches!(
+                f,
+                apb_core::validate::GuardedFeature::ApprovalBinding
+                    | apb_core::validate::GuardedFeature::PersonOnly
+                    | apb_core::validate::GuardedFeature::RequiredApproval
+            )
+        })
 }
 
 impl RunExecutionManifest {
@@ -500,14 +543,42 @@ impl RunExecutionManifest {
     pub fn execution_mode(&self) -> Result<apb_core::execution::ExecutionMode, EngineError> {
         match &self.execution {
             None => Ok(apb_core::execution::ExecutionMode::Cli),
-            Some(e) => apb_core::execution::ExecutionMode::parse(&e.mode).ok_or_else(|| {
-                EngineError::Conflict(format!(
-                    "the run manifest names execution mode `{}`, which this apb {} does not know; it was written by a newer apb: upgrade apb and retry",
-                    e.mode,
-                    env!("CARGO_PKG_VERSION"),
-                ))
-            }),
+            Some(e) => {
+                let base = e
+                    .mode
+                    .strip_suffix(ManifestExecution::GUARD_SUFFIX)
+                    .unwrap_or(&e.mode);
+                apb_core::execution::ExecutionMode::parse(base).ok_or_else(|| {
+                    EngineError::Conflict(format!(
+                        "the run manifest names execution mode `{}`, which this apb {} does not know; it was written by a newer apb: upgrade apb and retry",
+                        e.mode,
+                        env!("CARGO_PKG_VERSION"),
+                    ))
+                })
+            }
         }
+    }
+
+    /// Whether the run's manifest carries the guard suffix: a run whose
+    /// definition uses a person-only gate or an approval.
+    pub fn is_guarded(&self) -> bool {
+        self.execution
+            .as_ref()
+            .is_some_and(|e| e.mode.ends_with(ManifestExecution::GUARD_SUFFIX))
+    }
+
+    /// The execution mode a surface shows: the part before the guard
+    /// suffix, so the internal suffix never reaches a person or a host
+    /// that matches on the mode ([`Self::is_guarded`] carries it as its
+    /// own attribute instead). `cli` for a run without an execution block.
+    pub fn base_mode(&self) -> &str {
+        let mode = self
+            .execution
+            .as_ref()
+            .map(|e| e.mode.as_str())
+            .unwrap_or(apb_core::execution::ExecutionMode::Cli.as_str());
+        mode.strip_suffix(ManifestExecution::GUARD_SUFFIX)
+            .unwrap_or(mode)
     }
 
     /// Whether the run executes its agent steps as host tasks.
@@ -853,6 +924,73 @@ mod tests {
             run_execution_mode(dir.path()).unwrap(),
             apb_core::execution::ExecutionMode::Host
         );
+    }
+
+    /// A person-only gate, an approval binding or a required approval
+    /// writes the manifest guard; an evidence-only run and a plain run
+    /// do not.
+    #[test]
+    fn manifest_guard_names_the_approval_features_only() {
+        let base = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n";
+        let with = |node: &str| {
+            apb_core::schema::Playbook::from_yaml(&base.replace(
+                "  - { id: done, type: finish, outcome: success }",
+                &format!("{node}\n  - {{ id: done, type: finish, outcome: success }}"),
+            ))
+            .unwrap()
+        };
+        assert!(!manifest_guard(
+            &apb_core::schema::Playbook::from_yaml(base).unwrap()
+        ));
+        for node in [
+            "  - id: gate\n    type: human_review\n    person_only: true\n    options: [approve]\n",
+            "  - id: gate\n    type: human_review\n    approves: { results: [work] }\n    options: [approve]\n",
+            "  - id: work\n    type: agent_task\n    profile: x\n    requires_approval: { gate: gate }\n    prompt: p\n",
+        ] {
+            assert!(manifest_guard(&with(node)), "{node}");
+        }
+        assert!(
+            !manifest_guard(&with(
+                "  - id: work\n    type: agent_task\n    profile: x\n    evidence: { from: [work] }\n    prompt: p\n"
+            )),
+            "evidence only keeps the journal guard"
+        );
+    }
+
+    #[test]
+    fn a_guarded_manifest_mode_reads_as_its_real_mode() {
+        for (mode, want) in [
+            ("cli+guard", apb_core::execution::ExecutionMode::Cli),
+            ("host+guard", apb_core::execution::ExecutionMode::Host),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                manifest_path(dir.path()),
+                format!("profiles: []\nnode_bindings: {{}}\nexecution:\n  mode: {mode}\n"),
+            )
+            .unwrap();
+            let m = read(dir.path()).unwrap().unwrap();
+            assert_eq!(m.execution_mode().unwrap(), want, "{mode}");
+            assert_eq!(
+                m.is_host_mode().unwrap(),
+                want == apb_core::execution::ExecutionMode::Host
+            );
+            assert_eq!(
+                m.base_mode(),
+                mode.strip_suffix("+guard").unwrap(),
+                "{mode}"
+            );
+            assert_eq!(m.is_guarded(), mode.ends_with("+guard"), "{mode}");
+        }
+        // A bare `guarded` names no real mode, so it still refuses.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            manifest_path(dir.path()),
+            "profiles: []\nnode_bindings: {}\nexecution:\n  mode: guarded\n",
+        )
+        .unwrap();
+        let m = read(dir.path()).unwrap().unwrap();
+        assert!(m.execution_mode().is_err());
     }
 
     #[test]

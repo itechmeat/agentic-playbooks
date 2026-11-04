@@ -613,6 +613,22 @@ pub(crate) struct ReviewBody {
     /// action's `target.request.seq`).
     #[serde(default)]
     request: Option<u64>,
+    /// While this machine holds at least one passkey, a person-only gate
+    /// and an approval decide only with the token a verified WebAuthn
+    /// assertion minted for exactly this decision (the Passkeys page's
+    /// decide flow runs the assertion first).
+    #[serde(default)]
+    passkey_token: Option<String>,
+    /// The assertion the token was minted from, carried on the retried
+    /// post so the drive can re-verify the stamp at consumption.
+    #[serde(default, rename = "assertionId")]
+    assertion_id: String,
+    #[serde(default, rename = "assertionClientDataJSON")]
+    assertion_client_data: String,
+    #[serde(default, rename = "assertionAuthenticatorData")]
+    assertion_auth_data: String,
+    #[serde(default, rename = "assertionSignature")]
+    assertion_signature: String,
 }
 
 /// The answer to a gate's engine refusal: 404 for a node or request that
@@ -641,13 +657,20 @@ fn gate_refusal(e: apb_engine::EngineError) -> axum::response::Response {
 /// `network: open` a sandboxed agent shares that loopback: it could read the
 /// open plan's nonce and consent to its own push. So a keyless dashboard
 /// never takes a `publish` decision; a `skip` pushes nothing and stays open.
-/// The person approves with the CLI, or issues a dashboard key first.
+/// The person approves with the CLI, or issues a dashboard key first; while
+/// a passkey is enrolled only the signed-in dashboard is left.
 fn keyless_publish_refusal(
     auth: &crate::auth::AuthState,
     run_id: &str,
     body: &ReviewBody,
 ) -> Option<String> {
     (!auth.enabled() && body.decision == apb_core::publish::OPTION_PUBLISH).then(|| {
+        // While a passkey is enforced the CLI refuses a publish consent
+        // too (`passkey_required`), so the one route left is a signed-in
+        // dashboard session with a fresh assertion.
+        if apb_engine::review::passkey_enforced() {
+            return "a dashboard without keys does not take a publish consent, since anything on this machine can reach it, and while a passkey is enrolled the CLI refuses it too: issue a key with `apb server key issue`, sign in, and decide with a passkey on the run page".to_string();
+        }
         format!(
             "a dashboard without keys does not take a publish consent, since anything on this machine can reach it; approve with `apb publish approve {run_id} --node {} --nonce <nonce>`, or issue a key with `apb server key issue` and sign in",
             body.node
@@ -693,9 +716,71 @@ pub(crate) async fn post_review_handler(
     // session decides a person-only gate (a keyless dashboard and a bearer
     // key are 403).
     let channel = crate::auth::RequestChannel::of(channel.map(|c| c.0));
-    match apb_engine::review::post_decision_via(&run_dir, cmd, body.nonce, body.request, channel) {
-        Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
-        Err(e) => gate_refusal(e),
+    // While a passkey is enrolled on this machine, this gate takes its
+    // decision only with a fresh assertion bound to exactly this run,
+    // gate, request and option: the token `assert/verify` minted for it.
+    if apb_engine::review::passkey_required(&run_dir, &cmd) {
+        let Some(token) = body.passkey_token.as_deref() else {
+            return (
+                StatusCode::FORBIDDEN,
+                "this gate needs a passkey: at least one passkey is enrolled on this machine, so a fresh passkey assertion decides it. Use the Passkeys flow on the run page, which runs the assertion first",
+            )
+                .into_response();
+        };
+        // The purpose must name the request and nonce the entry will be
+        // stamped with, or the drive's re-verification refuses the proof:
+        // the same resolution the assertion ceremony used, so the
+        // assertion's challenge equals the derived challenge the drive
+        // recomputes from the stamped entry.
+        let decision_purpose = crate::routes::passkeys::DecisionPurpose {
+            run: id.clone(),
+            node: cmd.node.clone(),
+            decision: cmd.decision.clone(),
+            request: body.request,
+            nonce: body.nonce.clone(),
+        };
+        let purpose = match crate::routes::passkeys::AssertPurpose::resolved_decision(
+            root.as_path(),
+            &decision_purpose,
+        ) {
+            Ok(p) => p,
+            Err(why) => return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response(),
+        };
+        let request = purpose.request_of();
+        let nonce = purpose.nonce_of();
+        let digest = purpose.digest();
+        let Some(credential) = state.passkeys.take_token(token, &digest) else {
+            return (
+                StatusCode::FORBIDDEN,
+                "that passkey assertion is wrong, used or expired, or answers another decision; run it again for this gate",
+            )
+                .into_response();
+        };
+        // The browser posted clientDataJSON base64url; the proof the drive
+        // re-verifies is exactly what it posted.
+        let proof = apb_engine::review::passkey_proof::PasskeyProof {
+            credential_id: body.assertion_id.clone(),
+            client_data_json: body.assertion_client_data.clone(),
+            authenticator_data: body.assertion_auth_data.clone(),
+            signature: body.assertion_signature.clone(),
+        };
+        match apb_engine::review::post_decision_passkey(
+            &run_dir, cmd, nonce, request, channel, credential, proof,
+        ) {
+            Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
+            Err(e) => gate_refusal(e),
+        }
+    } else {
+        match apb_engine::review::post_decision_via(
+            &run_dir,
+            cmd,
+            body.nonce,
+            body.request,
+            channel,
+        ) {
+            Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
+            Err(e) => gate_refusal(e),
+        }
     }
 }
 

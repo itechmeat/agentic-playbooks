@@ -31,6 +31,9 @@ pub struct AppState {
     /// behaves, and a start whose semantics could change under it mid-flight
     /// is the kind of thing an operator cannot reason about.
     pub workdir_queue_wait: Option<std::time::Duration>,
+    /// WebAuthn ceremony state for passkeys: single-use challenges and the
+    /// tokens a verified assertion mints. In memory only, like sessions.
+    pub passkeys: Arc<crate::passkeys::PasskeyState>,
 }
 
 impl AppState {
@@ -42,6 +45,7 @@ impl AppState {
             events,
             auth: Arc::new(crate::auth::AuthState::disabled()),
             workdir_queue_wait: default_workdir_queue_wait(),
+            passkeys: Arc::new(crate::passkeys::PasskeyState::default()),
         }
     }
 
@@ -54,6 +58,7 @@ impl AppState {
             events,
             auth: Arc::new(crate::auth::AuthState::disabled()),
             workdir_queue_wait: default_workdir_queue_wait(),
+            passkeys: Arc::new(crate::passkeys::PasskeyState::default()),
         }
     }
 
@@ -65,6 +70,7 @@ impl AppState {
             events,
             auth,
             workdir_queue_wait: default_workdir_queue_wait(),
+            passkeys: Arc::new(crate::passkeys::PasskeyState::default()),
         }
     }
 

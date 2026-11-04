@@ -71,6 +71,9 @@ fn refusal_words(r: apb_engine::next_action::CallerRefusal) -> &'static str {
         CallerRefusal::RunStepOwnRun => {
             "this process runs inside the run's own tree, which never decides for it; ask the person"
         }
+        CallerRefusal::PasskeyRequired => {
+            "a passkey is enrolled on this machine, so decide on the dashboard run page, where a fresh passkey assertion is asked for"
+        }
         _ => "this caller does not take it; ask the person",
     }
 }

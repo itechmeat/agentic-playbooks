@@ -550,12 +550,7 @@ pub fn build(run: &RetroRun, history: &[StatsRun], compare_last: usize) -> Retro
         playbook,
         version,
         outcome,
-        execution: run.manifest.as_ref().map(|m| {
-            m.execution
-                .as_ref()
-                .map_or("cli", |x| x.mode.as_str())
-                .to_string()
-        }),
+        execution: run.manifest.as_ref().map(|m| m.base_mode().to_string()),
         duration_ms: run_duration(&run.events),
         goal: goal_from(run.snapshot.as_ref(), &run.events),
         interventions: crate::run_stats::interventions::of_run(&run.events),

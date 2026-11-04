@@ -15,6 +15,8 @@ path = "src/main.rs"
 dist = true
 
 [dependencies]
+# The one-time code typed back to remove the last passkey.
+getrandom.workspace = true
 apb-core = { path = "../apb-core" }
 apb-server = { path = "../apb-server" }
 tokio.workspace = true
@@ -22,8 +24,8 @@ clap = { version = "4.6", features = ["derive"] }
 anyhow = "1.0"
 open = "5.3.6"
 serde_json.workspace = true
-apb-engine = { version = "1.0.0-beta.4", path = "../apb-engine" }
-apb-mcp = { version = "1.0.0-beta.4", path = "../apb-mcp" }
+apb-engine = { version = "1.0.0-beta.5", path = "../apb-engine" }
+apb-mcp = { version = "1.0.0-beta.5", path = "../apb-mcp" }
 cliclack = "0.5.5"
 axoupdater = { version = "0.10.0", default-features = false, features = ["github_releases", "blocking"] }
 yaml_serde.workspace = true

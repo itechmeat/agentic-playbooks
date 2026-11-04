@@ -86,7 +86,15 @@ pub(crate) fn sanitize_for_terminal(s: &str, max: usize) -> String {
     // Redacted before anything collapses or cuts it, so neither splits a
     // secret value into a shape the redactor no longer knows.
     let s = shown(s);
-    let cleaned = apb_core::text::replace_hidden(&s, ' ');
+    sanitize_plain(&s, max)
+}
+
+/// [`sanitize_for_terminal`] without the redaction step, for text apb
+/// built itself from fixed words (a config error sentence): a redactor
+/// that withholds would turn it into `[secrets_unresolved]` and hide the
+/// very sentence the row is there to show.
+pub(crate) fn sanitize_plain(s: &str, max: usize) -> String {
+    let cleaned = apb_core::text::replace_hidden(s, ' ');
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     let trimmed = collapsed.trim();
     if trimmed.chars().count() <= max {
@@ -144,6 +152,17 @@ pub(crate) fn shown_value(mut value: serde_json::Value) -> serde_json::Value {
         }
     });
     value
+}
+
+/// One journal or manifest field (a playbook id, a version, a scope) as a
+/// run surface prints it on a line `say!` must not withhold whole:
+/// [`apb_engine::run_redact::RunRedactor::redact_token`] of the redactor in
+/// force, unchanged outside one.
+pub(crate) fn shown_token(text: &str) -> String {
+    RUN_REDACTOR.with(|r| match r.borrow().as_ref() {
+        Some(redactor) => redactor.redact_token(text),
+        None => text.to_string(),
+    })
 }
 
 /// `text` as a run surface prints it: without the secret values of the run

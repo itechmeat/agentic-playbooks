@@ -103,7 +103,7 @@ export const PUBLISH_REFUSAL_TEXTS = { no_pin: "The remote was not pinned before
 export const DECISION_CHANNELS = ['terminal', 'cli_unattended', 'dashboard_session', 'dashboard_keyless', 'http_bearer', 'mcp', 'run_step', 'scenario', 'engine', 'unattended'] as const
 
 /** Every reason a surface does not offer an action to its caller. */
-export const CALLER_REFUSALS = ['read_only_server', 'supervisor_only', 'relay_to_person', 'not_this_caller', 'agent_channel', 'run_step', 'no_terminal', 'keyless_dashboard', 'bearer_key', 'run_step_own_run'] as const
+export const CALLER_REFUSALS = ['read_only_server', 'supervisor_only', 'relay_to_person', 'not_this_caller', 'agent_channel', 'run_step', 'no_terminal', 'keyless_dashboard', 'bearer_key', 'run_step_own_run', 'passkey_required'] as const
 
 /** Every reason an approval check refuses a node. */
 export const APPROVAL_REFUSALS = ['approval_missing', 'approval_stale', 'approval_snapshot_unreadable', 'approval_incomplete', 'approval_unverifiable', 'approval_mismatch'] as const
