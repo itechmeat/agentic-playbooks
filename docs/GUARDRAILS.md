@@ -235,15 +235,27 @@ author loops back to the producer and the gate for a fresh approval).
 ### Older apb binaries
 
 A run whose definition uses `approves`, `requires_approval` or
-`person_only` journals a `run_guard` record after every checkpoint, so an
-older apb refuses to resume it, answer through its engine or pause it
-("written by a newer apb"); its stop still works. Two cases are not
-covered: an older apb that *starts* such a playbook drops the three fields
-and runs plain gates, and an older apb that *stops* such a run leaves its
-own stop as the last checkpoint with no guard after it, after which that
-older apb can resume the run past its gates. Every apb on a machine that
-runs these playbooks must be this release or newer; `apb doctor` warns
-about other `apb` binaries on `PATH`.
+`person_only` journals a `run_guard` record after every checkpoint and
+records `execution.mode: cli+guard` (or `host+guard` for a host run) in
+its write-once manifest. Every apb from 0.23 on refuses to resume such a
+run, naming the execution mode with its "written by a newer apb" message,
+writes nothing, and still reads the run and stops it; a pause of a run
+whose journal carries the guard is refused by that guard as it was
+before this change, so an older apb keeps the pause refusal; this apb
+reads, resumes, pauses and stops the run as before. The stop limit is
+closed for binaries from 0.23 on: an older apb that *stops* such a run
+leaves its own stop as the last checkpoint with no guard after it, but
+the manifest guard still stands, so its next resume still refuses. The
+manifest guard follows the start definition only: a supervisor patch
+that adds `person_only`, `approves` or `requires_approval` to a running
+run journals the guard, but the write-once manifest cannot be rewritten,
+so for that run the old stop-then-resume limit stays open. What
+older ones still do: an apb older than 0.23 does not know the execution
+block and ignores it, so it can still resume such a run past its gates;
+and an older apb that *starts* such a playbook drops the three fields
+and runs plain gates. Every apb on a machine that runs these playbooks
+must be this release or newer; `apb doctor` warns about other `apb`
+binaries on `PATH`.
 
 ## Passkeys on person-only gates and approvals
 

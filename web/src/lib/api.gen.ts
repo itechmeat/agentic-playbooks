@@ -1817,7 +1817,13 @@ scope?: string,
 /**
  * The run's search fields; only in a filtered listing.
  */
-search?: SearchFields, };
+search?: SearchFields, 
+/**
+ * The run's own `run.yaml` could not be read, with the error: the
+ * run still lists with its journal facts, and only this run carries
+ * the error.
+ */
+config_error?: string, };
 
 export type RunListing = { runs: Array<RunSummary>, 
 /**
@@ -1897,7 +1903,13 @@ scope?: string,
 /**
  * The run's search fields; only in a filtered listing.
  */
-search?: SearchFields, };
+search?: SearchFields, 
+/**
+ * The run's own `run.yaml` could not be read, with the error: the
+ * run still lists with its journal facts, and only this run carries
+ * the error.
+ */
+config_error?: string, };
 
 export type LaunchPolicy = "allow" | "ask" | "deny";
 

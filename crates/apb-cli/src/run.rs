@@ -1606,7 +1606,52 @@ fn print_run_rows(root: &Path, runs: Vec<apb_engine::RunSummary>) {
     // ancestors'); the workspace's connector secrets resolved once.
     let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
     for (r, mode) in runs.into_iter().zip(modes) {
-        crate::util::with_run_redaction(redaction.run(&r.run_id), || {
+        // A run whose redactor withholds (its config or a run of its
+        // tree does not parse) still lists: the row keeps the facts apb
+        // wrote itself (ids, state, markers) and names the config error;
+        // only the run's own reported text stays withheld, so one
+        // unreadable `run.yaml` hides no other row and no position in
+        // the table. The journal-sourced detail markers (a pause, a
+        // finding, search fields) are left out: their text may hold a
+        // value no redactor could read.
+        let redactor = redaction.run(&r.run_id);
+        if redactor.withholds() {
+            // The playbook, the mode column and the scope come from the
+            // journal and the manifest, which a step can write: each is
+            // kept only while it reads as one of apb's own tokens.
+            let mut line = format!(
+                "{}\t{}\t{}",
+                redactor.redact_token(&r.run_id),
+                redactor.redact_token(&r.playbook),
+                r.status
+            );
+            if show_mode {
+                line.push('\t');
+                line.push_str(&redactor.redact_token(mode.as_deref().unwrap_or("cli")));
+            }
+            if r.driver_dead {
+                line.push_str("\tdriver dead");
+            }
+            if r.unknown_events > 0 {
+                line.push('\t');
+                line.push_str(&unknown_events_note(r.unknown_events));
+            }
+            if let Some(scope) = &r.scope {
+                line.push_str(&format!("\t{}", redactor.redact_token(scope)));
+            }
+            if let Some(e) = &r.config_error {
+                line.push_str(&format!(
+                    "\tconfig error: {}",
+                    crate::util::sanitize_plain(e, QUESTION_TEXT_MAX * 2)
+                ));
+            }
+            // Printed directly: every field is a token or withheld above,
+            // the error a fixed sentence, and `say` would withhold the
+            // whole line.
+            println!("{line}");
+            continue;
+        }
+        crate::util::with_run_redaction(redactor, || {
             // The status column stays exactly as it always has (a script
             // parsing it must keep working); a dead driver and events a
             // newer apb wrote are called out as appended markers rather
@@ -1639,6 +1684,12 @@ fn print_run_rows(root: &Path, runs: Vec<apb_engine::RunSummary>) {
             }
             if let Some(scope) = &r.scope {
                 line.push_str(&format!("\t{scope}"));
+            }
+            if let Some(e) = &r.config_error {
+                line.push_str(&format!(
+                    "\tconfig error: {}",
+                    crate::util::sanitize_plain(e, QUESTION_TEXT_MAX * 2)
+                ));
             }
             if let Some(fields) = r.search.as_ref().and_then(search_text) {
                 // Through the terminal sanitizer like every other reported
@@ -1716,11 +1767,36 @@ fn run_detail_text(
         .find_map(|e| match &e.payload {
             apb_engine::event::EventPayload::RunStarted {
                 playbook, version, ..
-            } => Some(format!("{playbook} {version}")),
+            } => Some(format!(
+                "{} {}",
+                crate::util::shown_token(playbook),
+                crate::util::shown_token(version)
+            )),
             _ => None,
         })
         .unwrap_or_default();
-    say!("{run_id}\t{playbook}\t{}", view.run_status.as_str());
+    // The header and the config error line print directly, so a run whose
+    // `run.yaml` does not parse keeps its row identifiable while its
+    // reported text withholds. The playbook and version come from the
+    // journal, which a step can write: each goes through the run's
+    // redaction field by field (`shown_token`), kept raw while withholding
+    // only when it reads as one of apb's own tokens.
+    println!(
+        "{}\t{playbook}\t{}",
+        crate::util::shown_token(run_id),
+        view.run_status.as_str()
+    );
+    // The redactor already parsed the run's own config while it resolved
+    // its secrets: its error is the one sentence, a fixed wording plus
+    // the parser's line and column, never the parser's quote of the
+    // value it choked on (that value may be a secret param a step wrote
+    // into the file).
+    if let Some(e) = redaction.run_dir(&run_dir).config_error() {
+        println!(
+            "  config error: {}",
+            crate::util::sanitize_plain(e, QUESTION_TEXT_MAX * 2)
+        );
+    }
     say!(
         "  execution: {}",
         sanitize_for_terminal(

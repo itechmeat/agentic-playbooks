@@ -10,7 +10,13 @@
 //! the workspace scrubber resolves. An input that names or holds such a
 //! value and cannot be read (a named run without a readable config, a
 //! journal that does not parse) never reads as "no secret": the run's
-//! surfaces withhold its text ([`RunRedactor::withholds`]). A param counts as declared secret when the run's manifest
+//! surfaces withhold its text ([`RunRedactor::withholds`]), the run's own
+//! config included. A config that does not parse is reported as apb's own
+//! sentence ([`RunRedactor::config_error`], fixed words plus the parser's
+//! line and column, never the parser's quote of the value it choked on),
+//! and the run's listing row keeps its journal facts, so one unreadable
+//! `run.yaml` hides no other run of a listing while the run's own text
+//! stays withheld until the file reads again. A param counts as declared secret when the run's manifest
 //! records it (`secret_params`, written at start and only ever added to by
 //! a current-run patch) or when the run's current snapshot declares it, so
 //! a value classified secret once stays secret for the run and its
@@ -161,10 +167,17 @@ struct TreeSecrets {
     /// The params the run itself counts as declared secret.
     own: BTreeSet<String>,
     /// Whether every input naming or holding a value was read: a run the
-    /// tree names whose config is missing or does not parse, a journal
-    /// that cannot be read, or a child id that is not a safe segment make
-    /// it `false`, and the run's surfaces then withhold.
+    /// tree names whose config is missing or does not parse, the run's
+    /// own config that does not parse, a journal that cannot be read, or
+    /// a child id that is not a safe segment make it `false`, and the
+    /// run's surfaces then withhold.
     complete: bool,
+    /// The error of the run's own config, when the file that is there
+    /// does not parse: [`crate::run_config::config_error_message`], a
+    /// fixed sentence that quotes no value from the file. The run's
+    /// text withholds while it stands; the surfaces show the error next
+    /// to the withheld text, so the run stays identifiable.
+    own_config_error: Option<String>,
 }
 
 /// The run's tree as its redaction sees it: the ancestors followed through
@@ -180,6 +193,7 @@ fn tree_secrets(run_dir: &Path) -> TreeSecrets {
         values: Vec::new(),
         own: own.clone(),
         complete: true,
+        own_config_error: None,
     };
     let mut seen = BTreeSet::new();
     let mut dir = run_dir.to_path_buf();
@@ -187,8 +201,16 @@ fn tree_secrets(run_dir: &Path) -> TreeSecrets {
     for depth in 0..=MAX_ANCESTORS {
         seen.insert(dir.clone());
         let cfg = match named_config(&dir, depth > 0) {
-            Some(cfg) => cfg,
-            None => {
+            Ok(cfg) => cfg,
+            Err(e) if depth == 0 && !e.missing => {
+                // The run's own config does not parse: the values of its
+                // params, and of every run above it in the tree (the walk
+                // stops here), are unknown, so everything withholds.
+                found.own_config_error = Some(e.message);
+                found.complete = false;
+                break;
+            }
+            Err(_) => {
                 found.complete = false;
                 break;
             }
@@ -219,15 +241,31 @@ fn tree_secrets(run_dir: &Path) -> TreeSecrets {
     found
 }
 
-/// The run config of the run at `dir`: `None` when it cannot be read, or
-/// when the run has none though it must (a run `named` by another run of
-/// the tree: a child's is written before its parent journals it; a run
-/// [`config_expected`] says was prepared).
-fn named_config(dir: &Path, named: bool) -> Option<crate::run_config::RunConfig> {
+/// A run config that could not be read, and whether the file is missing
+/// though the run must have one. The `message` of a parse error is
+/// [`crate::run_config::config_error_message`], the fixed sentence a
+/// surface shows; it quotes no value from the file.
+struct ConfigReadError {
+    message: String,
+    missing: bool,
+}
+
+/// The run config of the run at `dir`, or the error when it cannot be
+/// read: when the run has none though it must (a run `named` by another
+/// run of the tree: a child's is written before its parent journals it;
+/// a run [`config_expected`] says was prepared), or when the file that
+/// is there does not parse.
+fn named_config(dir: &Path, named: bool) -> Result<crate::run_config::RunConfig, ConfigReadError> {
     if !dir.join("run.yaml").is_file() && (named || config_expected(dir)) {
-        return None;
+        return Err(ConfigReadError {
+            message: "run.yaml is missing".to_string(),
+            missing: true,
+        });
     }
-    crate::run_config::read_run_config(dir).ok()
+    crate::run_config::read_run_config(dir).map_err(|e| ConfigReadError {
+        message: crate::run_config::config_error_message(&e),
+        missing: false,
+    })
 }
 
 /// Whether the run at `dir` was prepared, so it wrote its `run.yaml`: it
@@ -281,10 +319,10 @@ fn descendants(top: &Path, found: &mut TreeSecrets) {
                     continue;
                 }
                 match named_config(&child_dir, true) {
-                    Some(cfg) => found
+                    Ok(cfg) => found
                         .values
                         .extend(sensitive_values(&cfg.params, &secret_names(&child_dir))),
-                    None => found.complete = false,
+                    Err(_) => found.complete = false,
                 }
                 next.push(child_dir);
             }
@@ -394,6 +432,10 @@ pub struct RunRedactor {
     /// withholds the run's text instead of showing it. So does any process
     /// that could not read the tree's secret-discovery inputs.
     withhold: bool,
+    /// The run's own config does not parse, with the fixed sentence a
+    /// surface shows ([`crate::run_config::config_error_message`]). The
+    /// run's text withholds while it stands, storing included.
+    config_error: Option<String>,
 }
 
 /// What a withheld string reads as ([`RunRedactor::withholds`]).
@@ -438,6 +480,11 @@ const CONTAINERS: &[(&str, &[&str])] = &[
     ("children", &["run_id", "node_id", "status"]),
 ];
 
+/// Root fields that pass through a withheld answer untouched: values apb
+/// built itself from fixed words, never run text. Only apb sets them, so
+/// nothing of the run leaks through.
+const PASSTHROUGH_FIELDS: &[&str] = &["config_error"];
+
 /// A kept value still has the shape of apb's own token (an id, a state, a
 /// version): anything else is withheld even at a kept position.
 fn is_token(s: &str) -> bool {
@@ -468,6 +515,7 @@ impl RunRedactor {
             values,
             own,
             complete,
+            own_config_error,
         } = tree_secrets(run_dir);
         let mut all = workspace;
         all.extend(values.iter().cloned());
@@ -476,6 +524,7 @@ impl RunRedactor {
             run: Scrubber::new(values, root),
             declared: own,
             withhold: !complete,
+            config_error: own_config_error,
         }
     }
 
@@ -491,6 +540,19 @@ impl RunRedactor {
         self.withhold
     }
 
+    /// The error of the run's own `run.yaml`, when it does not parse: a
+    /// fixed sentence quoting no value from the file. The run's text
+    /// withholds while the error stands ([`RunRedactor::withholds`]);
+    /// surfaces show the sentence next to the withheld text.
+    pub fn config_error(&self) -> Option<&str> {
+        self.config_error.as_deref()
+    }
+
+    /// Whether storing a text must fail closed: the redactor withholds.
+    fn storing_refused(&self) -> bool {
+        self.withhold
+    }
+
     /// Text that leaves the machine (an HTML report, a notice): the full
     /// workspace scrubber, the run's values included.
     pub fn redact_text(&self, text: &str) -> String {
@@ -498,6 +560,23 @@ impl RunRedactor {
             return WITHHELD.to_string();
         }
         self.workspace.scrub(text)
+    }
+
+    /// One field of a line a surface prints next to withheld text (a
+    /// playbook id, a version, a scope, a mode column): read from the run's
+    /// journal or manifest, which a step can write, so never printed raw.
+    /// Scrubbed like [`RunRedactor::redact_str`]; while this redactor
+    /// withholds, kept only when it reads as one of apb's own tokens (the
+    /// rule of a withheld answer's kept positions), else [`WITHHELD`].
+    pub fn redact_token(&self, text: &str) -> String {
+        if self.withhold {
+            return if is_token(text) {
+                text.to_string()
+            } else {
+                WITHHELD.to_string()
+            };
+        }
+        self.workspace.scrub_values(text)
     }
 
     /// Text inside a structured answer: the secret values replaced, paths
@@ -515,7 +594,7 @@ impl RunRedactor {
     /// ([`Scrubber::scrub_secrets`]). Refused when this redactor withholds:
     /// a value it could not read would be stored, so nothing is.
     pub fn secret_text(&self, text: &str) -> Result<String, SecretsUnresolved> {
-        if self.withhold {
+        if self.storing_refused() {
             return Err(SecretsUnresolved);
         }
         Ok(self.workspace.scrub_secrets(text))
@@ -526,7 +605,7 @@ impl RunRedactor {
     /// number that spells a secret value becomes a string. Refused when
     /// this redactor withholds.
     pub fn secret_json(&self, value: &mut serde_json::Value) -> Result<(), SecretsUnresolved> {
-        if self.withhold {
+        if self.storing_refused() {
             return Err(SecretsUnresolved);
         }
         self.workspace.scrub_secrets_json(value);
@@ -585,7 +664,7 @@ impl RunRedactor {
     /// ([`RunRedactor::withholds`]): the scrubber would miss the values
     /// discovery could not read, so the text is not handed on at all.
     pub fn scrubber(&self) -> Result<&Scrubber, SecretsUnresolved> {
-        if self.withhold {
+        if self.storing_refused() {
             return Err(SecretsUnresolved);
         }
         Ok(&self.workspace)
@@ -593,7 +672,7 @@ impl RunRedactor {
 
     /// [`RunRedactor::scrubber`], owned.
     pub fn into_scrubber(self) -> Result<Scrubber, SecretsUnresolved> {
-        if self.withhold {
+        if self.storing_refused() {
             return Err(SecretsUnresolved);
         }
         Ok(self.workspace)
@@ -626,6 +705,9 @@ fn withhold_root(value: &mut serde_json::Value) {
         Value::Array(items) => items.iter_mut().for_each(withhold_root),
         Value::Object(map) => {
             for (k, v) in map.iter_mut() {
+                if PASSTHROUGH_FIELDS.contains(&k.as_str()) {
+                    continue;
+                }
                 match CONTAINERS.iter().find(|(name, _)| name == k) {
                     Some((_, fields)) => withhold_items(v, fields),
                     None => withhold_field(v, ROOT_FIELDS.contains(&k.as_str())),
@@ -749,6 +831,83 @@ mod tests {
 
     // A declaration a patch dropped keeps redacting: the engine's
     // `run_secrets_test` drives that end to end.
+
+    /// The run's own `run.yaml` does not parse: its text still withholds
+    /// (the values of its params are unknown), the surface error is a
+    /// fixed sentence that quotes no value from the file, and apb's own
+    /// facts and the config error stay readable in a structured answer.
+    #[test]
+    fn an_unreadable_own_config_still_withholds_its_text_and_names_the_error() {
+        let root = tempfile::tempdir().unwrap();
+        let runs = root.path().join(".apb/runs");
+        let dir = runs.join("bad-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        // `guarded` is no RunMode variant, so the file does not parse; the
+        // value the parser quotes must never reach a surface.
+        std::fs::write(dir.join("run.yaml"), "mode: guarded\n").unwrap();
+        std::fs::write(dir.join("playbook.yaml"), PLAIN_SNAPSHOT).unwrap();
+        let r = RunRedactor::with_workspace(Vec::new(), root.path(), &dir);
+        assert!(r.withholds(), "an unparsable own config withholds");
+        let sentence = r.config_error().unwrap();
+        assert!(
+            sentence.starts_with("run.yaml does not parse for this apb")
+                && !sentence.contains("guarded"),
+            "fixed words, no parser quote: {sentence}"
+        );
+        assert_eq!(r.redact_text("plain text"), WITHHELD);
+        let mut v = serde_json::json!({ "run_id": "bad-1", "outputs": { "w": "plain" } });
+        r.redact_answer(&mut v);
+        assert_eq!(v["run_id"], "bad-1");
+        assert_eq!(v["outputs"], WITHHELD);
+        assert_eq!(v["secrets_unresolved"], true);
+        // The config error passes a withheld answer untouched: the row
+        // stays identifiable.
+        let mut row = serde_json::json!({ "run_id": "bad-1", "config_error": sentence });
+        r.redact_json(&mut row);
+        assert_eq!(row["config_error"], sentence);
+        assert!(r.secret_text("plain").is_err(), "storing fails closed");
+    }
+
+    /// The safety property: a run whose own config does not parse never
+    /// prints a secret value, neither one the run declared itself nor one
+    /// declared by an ancestor of its tree. Both are unknown to a
+    /// redactor that could not read the configs, so both withhold.
+    #[test]
+    fn an_unreadable_own_config_never_prints_a_declared_secret_value() {
+        let root = tempfile::tempdir().unwrap();
+        let runs = root.path().join(".apb/runs");
+        // The run's own declared secret, its value in the unparsable file.
+        let dir = runs.join("leak-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("run.yaml"), "mode: guarded\n").unwrap();
+        std::fs::write(dir.join("playbook.yaml"), SECRET_SNAPSHOT).unwrap();
+        let r = RunRedactor::with_workspace(Vec::new(), root.path(), &dir);
+        assert_eq!(
+            r.redact_text("the key is violet hedgehog"),
+            WITHHELD,
+            "the run's own secret value never prints"
+        );
+        // A child of a parent that declares a secret: the child's own
+        // config does not parse, so the parent's value is unknown too.
+        write_run(
+            &runs,
+            "par-1",
+            &[("message", "amber walrus")],
+            None,
+            SECRET_SNAPSHOT,
+        );
+        let kid = runs.join("kid-1");
+        std::fs::create_dir_all(&kid).unwrap();
+        std::fs::write(kid.join("run.yaml"), "parent_run: par-1\nmode: guarded\n").unwrap();
+        std::fs::write(kid.join("playbook.yaml"), PLAIN_SNAPSHOT).unwrap();
+        let r = RunRedactor::with_workspace(Vec::new(), root.path(), &kid);
+        assert!(r.withholds());
+        assert_eq!(
+            r.redact_text("the key is amber walrus"),
+            WITHHELD,
+            "an ancestor's secret value never prints"
+        );
+    }
 
     /// A withholding redactor keeps apb's own ids and states at known
     /// positions only: a structural-looking key inside step output, a

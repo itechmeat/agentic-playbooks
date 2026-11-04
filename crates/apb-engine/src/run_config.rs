@@ -325,8 +325,7 @@ pub fn read_run_config(run_dir: &Path) -> Result<RunConfig, EngineError> {
         return Ok(RunConfig::default());
     }
     let raw = std::fs::read_to_string(&path)?;
-    let value: yaml_serde::Value =
-        yaml_serde::from_str(&raw).map_err(|e| EngineError::Yaml(e.to_string()))?;
+    let value: yaml_serde::Value = yaml_serde::from_str(&raw).map_err(yaml_error)?;
     // A config written before `RunMode::AgentSupervised` carried the agent
     // half of the mode as `supervisor_expected: true` next to `mode:
     // supervised`; fold it in so such a run keeps its supervisor agent.
@@ -334,12 +333,52 @@ pub fn read_run_config(run_dir: &Path) -> Result<RunConfig, EngineError> {
         .get("supervisor_expected")
         .and_then(yaml_serde::Value::as_bool)
         .unwrap_or(false);
-    let mut cfg: RunConfig =
-        yaml_serde::from_value(value).map_err(|e| EngineError::Yaml(e.to_string()))?;
+    let mut cfg: RunConfig = yaml_serde::from_value(value).map_err(yaml_error)?;
     if legacy_agent && cfg.mode == RunMode::Supervised {
         cfg.mode = RunMode::AgentSupervised;
     }
     Ok(cfg)
+}
+
+/// A parse error as an [`EngineError`]: the parser's message with its
+/// line and column appended. The message itself quotes the value it
+/// choked on, which [`config_error_message`] strips again; a surface
+/// shows that sentence, never this.
+fn yaml_error(e: yaml_serde::Error) -> EngineError {
+    match e.location() {
+        Some(loc) => EngineError::Yaml(format!(
+            "{} at line {} column {}",
+            e,
+            loc.line(),
+            loc.column()
+        )),
+        None => EngineError::Yaml(e.to_string()),
+    }
+}
+
+/// The one sentence a surface shows for a `run.yaml` that does not parse:
+/// fixed words plus the position the parser reported. The parser's own
+/// words quote the value it choked on (an unknown variant, a wrong type),
+/// and a step that saw a secret may have written that value into the
+/// file, so those words are never shown.
+pub fn config_error_message(e: &EngineError) -> String {
+    let raw = e.to_string();
+    // Only a trailing "at line <n> column <m>" is kept, digits alone, so
+    // nothing the parser quoted reaches the sentence.
+    let at = raw.rfind("at line ").and_then(|i| {
+        let rest = raw[i + "at line ".len()..].trim_end();
+        let mut parts = rest.split_whitespace();
+        let line = parts.next()?;
+        let word = parts.next()?;
+        let column = parts.next()?;
+        let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+        (word == "column" && digits(line) && digits(column) && parts.next().is_none())
+            .then(|| format!("line {line} column {column}"))
+    });
+    match at {
+        Some(at) => format!("run.yaml does not parse for this apb ({at})"),
+        None => "run.yaml does not parse for this apb".to_string(),
+    }
 }
 
 pub fn snapshot_playbook(run_dir: &Path, yaml: &str) -> Result<(), EngineError> {
@@ -378,6 +417,30 @@ pub fn sibling_run(run_dir: &Path, run_id: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The config error sentence keeps only fixed words and the parser's
+    /// line and column: never the parser's quote of the value it choked
+    /// on, which may be a secret param a step wrote into the file.
+    #[test]
+    fn the_config_error_sentence_quotes_no_value_from_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("run.yaml"), "mode: violet hedgehog\n").unwrap();
+        let e = read_run_config(dir.path()).unwrap_err();
+        let sentence = config_error_message(&e);
+        assert_eq!(sentence, "run.yaml does not parse for this apb");
+        // A syntax error carries the parser's position, still no quote.
+        std::fs::write(dir.path().join("run.yaml"), "params: [violet hedgehog\n").unwrap();
+        let e = read_run_config(dir.path()).unwrap_err();
+        let sentence = config_error_message(&e);
+        assert!(
+            sentence.starts_with("run.yaml does not parse for this apb (line ")
+                && !sentence.contains("violet"),
+            "{sentence}"
+        );
+        // An error without a parse position reads as the bare sentence.
+        let bare = config_error_message(&EngineError::Yaml("permission denied".into()));
+        assert_eq!(bare, "run.yaml does not parse for this apb");
+    }
 
     /// The typed `scope` field (review I2) must serialize to the SAME lowercase
     /// strings the field used as a `String`, and an on-disk config written with
