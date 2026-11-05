@@ -2,16 +2,20 @@
 name: apb-brainstorm
 description: One design pass per feature with an independent advisor before implementation. Reuses a current design on re-entry. Use before building a new feature, or when a consequential design question is asked. Design only; it does not implement, commit or publish.
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # Brainstorm a design
 
 Every new feature gets one design pass. Keep it short for a small feature.
-The result is a design record that the implementation can follow.
+The result is a design record that the implementation can follow without
+guessing.
 
 ## 0. Depth by risk
 
+- **Fully specified**: the request already settles everything that matters
+  and leaves no real choice open. Write one line into the task record (what
+  is built, and why nothing is open) and return to the caller. No advisor.
 - **Small and reversible** (no risk trigger, easy to undo): a short record,
   the few questions that matter, one advisor round.
 - **Risky**: the design touches persisted data or formats, a public API or
@@ -21,6 +25,10 @@ The result is a design record that the implementation can follow.
   the protected boundary.
 - File count alone neither raises nor lowers the depth. A lower depth needs
   a written reason based on consequences.
+- Size again when the work changes during the pass. A design that reaches a
+  risk trigger moves to the risky depth. A request that turns out to be
+  several independent features is split: record the order, then design them
+  one at a time.
 
 ## 1. Reuse first
 
@@ -42,6 +50,9 @@ The result is a design record that the implementation can follow.
   design artifact):
   - observable expected outcomes;
   - exclusions;
+  - anti-goals: what would make the result a failure even if it works as
+    specified (too slow to use, a second way to do the same thing, a
+    guarantee quietly weakened);
   - behavior that must keep working;
   - facts and assumptions, kept apart.
 - Find code facts yourself. Do not ask the issuer to read the code for you.
@@ -56,6 +67,14 @@ from a similar project is an assumption until you checked it.
 
 - Batch the consequential open questions. Give each real options and the
   sources behind them. Leave your own preference out of the first packet.
+- Find the options wide, then narrow them: list the ways it could be built,
+  drop those that work against the intent or that the existing code rules
+  out, and send the two or three that remain. When only one way makes
+  sense, say so and why the others fail.
+- A factual question that reading cannot settle may be settled by a
+  throwaway experiment: in a scratch directory outside the work tree, never
+  committed, nothing of it kept. Only its finding enters the record, with
+  the command that produced it.
 - The advisor works in a context that did not write the design: its first
   packet holds no reasoning of yours, no preference and no other advisor's
   answer.
@@ -100,15 +119,32 @@ workflow artifacts when it uses one. Do not create a parallel document. Include:
 
 1. identity: task, issuer, the code and requirement state you read;
 2. intent: outcomes, scenarios, exclusions, preserved behavior;
-3. decisions: question, choice, reason, evidence, real alternatives;
+3. decisions: question, choice, reason, evidence, real alternatives, and
+   who made it: the issuer, settled with the advisor, or your own call
+   (marked as such, so nobody reads it as agreed);
 4. advisor provenance: who, rung, input scope, answer, reconciliation;
 5. acceptance: observable checks, proposed apart from already run;
 6. next action: ready, or the exact remaining gap and who can close it.
+
+Leave out anything nobody asked for. A record is complete when a capable
+implementer could plan from it alone.
+
+## 7. Builder check (risky depth only)
+
+Before you return a risky design, a fresh context reads the record as the
+implementer who must plan from it and names only the places where it would
+have to guess and a wrong guess would matter. Sort each one: already
+answered (write the answer in), minor (settle it, mark it as your call), or
+the issuer's (one round, most important first). See
+[references/builder-check.md](references/builder-check.md). The check finds
+gaps; it is not an approval and not a second advisor round.
 
 ## Limits
 
 - A ready design is not code, not a review and not a permission to publish.
 - A fresh context improves independence. It does not prove correctness.
+- A throwaway experiment is evidence for one fact. Keeping its code is new
+  work that comes back through the task rules.
 - If no permitted independent context exists at all, report that gap. Never
   call unreviewed choices agreed.
 - No routine human design approval follows an agreed design. Return to the
