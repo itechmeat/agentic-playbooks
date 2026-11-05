@@ -14,11 +14,14 @@ guessing.
 ## 0. Depth by risk
 
 - **Fully specified**: no risk trigger applies, and the request already
-  settles everything that matters, so no real choice is left open. Write a
-  short record: items 1, 2 and 5 of section 6 briefly, the consequence-based
-  reason nothing is open in place of item 3, and item 6 ready. Record the advisor as not needed (fully specified), not as
-  unavailable, and return to the caller. A risk trigger always rules this
-  depth out, however tightly the request is worded.
+  settles everything that matters, so no real choice is left open. Do
+  sections 1 and 2 as usual, skip sections 3, 4 and 7, and write a short
+  record: items 1, 2 and 5 of section 6 briefly, the consequence-based
+  reason nothing is open in place of item 3, and item 6 ready. Record the
+  advisor as not needed (fully specified), not as unavailable. A split
+  request takes this depth per part; return to the caller only when every
+  part is designed. A risk trigger always rules this depth out, however
+  tightly the request is worded.
 - **Small and reversible** (no risk trigger, easy to undo): a short record,
   the few questions that matter, one advisor round.
 - **Risky**: the design touches persisted data or formats, a public API or

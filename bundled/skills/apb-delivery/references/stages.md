@@ -7,7 +7,7 @@ Do not run the whole delivery flow inside one node.
 | Stage | Required result |
 | --- | --- |
 | Intake | Reference to the original request; the expected-result card; the project's checks, risk triggers and merge policy found |
-| Design | One design pass with real advisor evidence and its fallback rung, or a sound reuse of a current design; for a bug fix, the reproduction and root cause of the apb-diagnosis skill |
+| Design | One design pass with real advisor evidence and its fallback rung, a short fully specified record when no risk trigger applies, or a sound reuse of a current design; for a bug fix, the reproduction and root cause of the apb-diagnosis skill |
 | Decompose | The triggers checked; no subtasks, or subtasks with their card outcomes, checks and dependencies in order |
 | Implement | A bounded end-to-end change against the card; causal or preservation evidence for the change kind; native check results |
 | Review | Independent read-only roles against the card and the actual candidate; findings with consequences, coverage and provenance |

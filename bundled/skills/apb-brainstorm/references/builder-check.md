@@ -21,8 +21,10 @@ plan this well: places where you would have to guess and a wrong guess would
 change what gets built. For each, give the question and why the answer
 changes the plan. Rank them by importance.
 
-Skip what the record explicitly leaves to the implementer, what you could
-reasonably decide yourself, and wording.
+Skip what the record explicitly leaves to the implementer when its
+consequences are bounded, what you could reasonably decide yourself, and
+wording. Report any delegated choice that could change what gets built: a
+risky record must not leave such a choice to the implementer.
 
 If nothing important is left, answer "nothing important left".
 ```
