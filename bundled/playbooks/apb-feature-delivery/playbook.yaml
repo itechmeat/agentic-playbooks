@@ -12,7 +12,7 @@ description: >-
   project's own tests are executed by apb before and after the work and
   reported with what changed. No commit, push or pull request is made by
   the run.
-version: 1.2.1
+version: 1.2.2
 agent_launch: ask
 params:
   - name: change_kind
@@ -121,8 +121,9 @@ nodes:
     prompt: >-
       Run only the Design stage. Change kind: {{params.change_kind}}. Card:
       {{nodes.intake.output}}. For a feature, use the apb-brainstorm skill:
-      reuse a current advised design when it still applies, otherwise ask
-      an independent advisor through its fallback chain (another family,
+      reuse a current design record when it still applies, write the short
+      record of a fully specified request that no risk trigger touches,
+      otherwise ask an independent advisor through its fallback chain (another family,
       any other available family, then a fresh clean-context subagent with
       only the question packet); a usage limit routes to the next rung and
       never stops the work. For a bugfix, run sections 1 to 4 of the
@@ -136,7 +137,8 @@ nodes:
       this step created and stop the background processes it started,
       only those. Write the outputs ready (true or false), design (the
       decisions, or the causal explanation, or the preservation plan),
-      advisor (who advised, at which rung, or why none was possible),
+      advisor (who advised, at which rung, or why none was needed or
+      possible; then the builder check, if one ran, kept apart),
       assumptions (a JSON array) and question (the one unresolved question
       for the issuer, empty when ready). Set ready to false only for a
       real unresolved dependency, never because a provider is unavailable.

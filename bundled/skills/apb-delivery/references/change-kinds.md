@@ -34,7 +34,8 @@
 
 ## Feature
 
-- One design pass (apb-brainstorm), or reuse of a current advised design.
+- One design pass (apb-brainstorm), or reuse of a current design record
+  (advised, or fully specified).
 - Acceptance comes from the original request, not from the code you wrote.
 - Cover the main scenario, the edge cases the design names and the behavior
   that must keep working.
