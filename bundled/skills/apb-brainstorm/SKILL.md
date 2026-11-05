@@ -1,6 +1,6 @@
 ---
 name: apb-brainstorm
-description: One design pass per feature with an independent advisor before implementation. Reuses a current design on re-entry. Use before building a new feature, or when a consequential design question is asked. Design only; it does not implement, commit or publish.
+description: One design pass per feature before implementation, with an independent advisor unless the request is fully specified and no risk trigger applies. Reuses a current design on re-entry. Use before building a new feature, or when a consequential design question is asked. Design only; it does not implement, commit or publish.
 metadata:
   version: "1.2.0"
 ---
@@ -15,8 +15,8 @@ guessing.
 
 - **Fully specified**: no risk trigger applies, and the request already
   settles everything that matters, so no real choice is left open. Write a
-  short record: what is built, and the consequence-based reason nothing is
-  open. Record the advisor as not needed (fully specified), not as
+  short record: items 1, 2 and 5 of section 6 briefly, the consequence-based
+  reason nothing is open in place of item 3, and item 6 ready. Record the advisor as not needed (fully specified), not as
   unavailable, and return to the caller. A risk trigger always rules this
   depth out, however tightly the request is worded.
 - **Small and reversible** (no risk trigger, easy to undo): a short record,
@@ -139,7 +139,8 @@ workflow artifacts when it uses one. Do not create a parallel document. Include:
 6. next action: ready, or the exact remaining gap and who can close it.
 
 Beyond these six items, add no features, options or material nobody asked
-for; the six items themselves always stay. A record is complete when a
+for; the six items themselves always stay (briefly at the fully specified
+depth, as section 0 says). A record is complete when a
 capable implementer could plan from it alone.
 
 ## 7. Builder check (risky depth only)
