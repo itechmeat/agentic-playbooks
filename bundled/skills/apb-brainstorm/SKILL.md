@@ -13,9 +13,12 @@ guessing.
 
 ## 0. Depth by risk
 
-- **Fully specified**: the request already settles everything that matters
-  and leaves no real choice open. Write one line into the task record (what
-  is built, and why nothing is open) and return to the caller. No advisor.
+- **Fully specified**: no risk trigger applies, and the request already
+  settles everything that matters, so no real choice is left open. Write a
+  short record: what is built, and the consequence-based reason nothing is
+  open. Record the advisor as not needed (fully specified), not as
+  unavailable, and return to the caller. A risk trigger always rules this
+  depth out, however tightly the request is worded.
 - **Small and reversible** (no risk trigger, easy to undo): a short record,
   the few questions that matter, one advisor round.
 - **Risky**: the design touches persisted data or formats, a public API or
@@ -27,15 +30,18 @@ guessing.
   a written reason based on consequences.
 - Size again when the work changes during the pass. A design that reaches a
   risk trigger moves to the risky depth. A request that turns out to be
-  several independent features is split: record the order, then design them
-  one at a time.
+  several independent features is split: record the parts and their order,
+  then design every part in this same pass, one after another. The split is
+  input for the caller's own decomposition, not a replacement for it, and
+  it never narrows or widens the authorized scope.
 
 ## 1. Reuse first
 
 - Look for an existing design record of this task, including the project's
   spec workflow artifacts when it uses a spec-driven tool.
 - Reuse it when it still covers the current scope, facts and guarantees, and
-  it records real advisor input. Say which record and why it still applies.
+  it records real advisor input, or it is a fully specified record whose
+  request and risk triggers are unchanged. Say which record and why it still applies.
 - Reopen only the decisions whose scope, facts or guarantees changed. Keep the
   valid parts.
 - Do not start a new interview just because the caller changed.
@@ -73,8 +79,12 @@ from a similar project is an assumption until you checked it.
   sense, say so and why the others fail.
 - A factual question that reading cannot settle may be settled by a
   throwaway experiment: in a scratch directory outside the work tree, never
-  committed, nothing of it kept. Only its finding enters the record, with
-  the command that produced it.
+  committed, nothing of it kept. It stays local and reversible: no network,
+  no installs, no writes outside the scratch directory (global config,
+  registries and stores included), no external or irreversible effect. An
+  experiment that needs more goes to the issuer as a question. Only its
+  finding enters the record, as a one-time observation with the command
+  that produced it.
 - The advisor works in a context that did not write the design: its first
   packet holds no reasoning of yours, no preference and no other advisor's
   answer.
@@ -122,12 +132,15 @@ workflow artifacts when it uses one. Do not create a parallel document. Include:
 3. decisions: question, choice, reason, evidence, real alternatives, and
    who made it: the issuer, settled with the advisor, or your own call
    (marked as such, so nobody reads it as agreed);
-4. advisor provenance: who, rung, input scope, answer, reconciliation;
+4. provenance: the advisor (who, rung, input scope, answer,
+   reconciliation) and, apart from it, the builder check (reader, rung,
+   whether it was independent, how many questions fell into each group);
 5. acceptance: observable checks, proposed apart from already run;
 6. next action: ready, or the exact remaining gap and who can close it.
 
-Leave out anything nobody asked for. A record is complete when a capable
-implementer could plan from it alone.
+Beyond these six items, add no features, options or material nobody asked
+for; the six items themselves always stay. A record is complete when a
+capable implementer could plan from it alone.
 
 ## 7. Builder check (risky depth only)
 
@@ -135,9 +148,10 @@ Before you return a risky design, a fresh context reads the record as the
 implementer who must plan from it and names only the places where it would
 have to guess and a wrong guess would matter. Sort each one: already
 answered (write the answer in), minor (settle it, mark it as your call), or
-the issuer's (one round, most important first). See
-[references/builder-check.md](references/builder-check.md). The check finds
-gaps; it is not an approval and not a second advisor round.
+the issuer's (one round, most important first). Update the next action
+afterwards. See [references/builder-check.md](references/builder-check.md).
+The check finds gaps; it is not an approval and not a second advisor round,
+and it never opens one.
 
 ## Limits
 

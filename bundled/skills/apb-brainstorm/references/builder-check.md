@@ -40,8 +40,20 @@ If nothing important is left, answer "nothing important left".
 
 Send the issuer's questions in a single message, most important first. Write
 the answers into the record. Return it with the short list of your own calls
-so the issuer can check them. The check produces no further round. When the
-issuer is unavailable, follow section 5 of the skill.
+as information: the work continues, nobody has to approve the list. The
+check produces no further round.
 
-Record in the provenance who read the record, its rung, and how many
-questions fell into each group.
+- **Issuer unavailable**: no new advisor round. A reversible choice becomes
+  your own call, recorded as an assumption with its consequence at the top.
+  A fact only the owner has, or permission for an irreversible effect,
+  stays an open gap; only the work that depends on it pauses.
+- **A caller that takes one question** (a run step with a single `question`
+  output): settle what you can as above. When a gap still blocks, ask its
+  most important question there and list the others in the record's next
+  action. When nothing blocks, the step stays ready and the question is
+  empty.
+- Update the next action of the record to what is true after the check.
+
+Record the check in the provenance apart from the advisor: who read the
+record, its rung, whether it was independent, and how many questions fell
+into each group.
