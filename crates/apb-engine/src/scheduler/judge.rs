@@ -72,6 +72,7 @@ pub(crate) fn execute(
         )));
     };
     let inputs = JudgeInputs::from_state(
+        playbook,
         run_dir,
         run_id,
         state,
@@ -527,6 +528,7 @@ impl ProfileEmulation<'_, '_> {
             partial_output: None,
             failure_kind: None,
             usage,
+            rejected_for: None,
         })?;
         Ok(output.filter(|_| status == NodeStatus::Succeeded))
     }

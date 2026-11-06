@@ -33,16 +33,10 @@ fn lock() -> MutexGuard<'static, ()> {
     common::env_lock()
 }
 
-struct EnvGuard;
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("APB_AGENT_CMD");
-            std::env::remove_var("APB_CONFIG_DIR");
-            std::env::remove_var("HOME");
-        }
-    }
-}
+/// The process env these tests change; `common::EnvVar::saved` guards
+/// each name and restores the value it had before the test
+/// (removing `HOME` outright broke later tests that read it).
+const TOUCHED_ENV: [&str; 3] = ["APB_AGENT_CMD", "APB_CONFIG_DIR", "HOME"];
 
 /// Aborts and joins a still-parked drive on drop, so a failed assertion mid-run
 /// never leaves an orphaned helper thread spinning on a torn-down tempdir.
@@ -203,7 +197,7 @@ fn two_ask_body(counter: &Path) -> String {
 #[test]
 fn expiry_with_default_answer_posts_timeout_answer_and_node_succeeds() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -264,7 +258,7 @@ fn expiry_with_default_answer_posts_timeout_answer_and_node_succeeds() {
 #[test]
 fn expiry_without_default_answer_fails_the_node() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -355,7 +349,7 @@ fn expiry_without_default_answer_fails_the_node() {
 #[test]
 fn second_round_expires_via_default_after_first_round_answered_normally() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();

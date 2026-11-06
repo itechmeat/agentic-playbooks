@@ -12,17 +12,15 @@ use crate::common;
 fn lock() -> MutexGuard<'static, ()> {
     common::env_lock()
 }
-struct EnvGuard;
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("APB_AGENT_CMD");
-            std::env::remove_var("APB_CONFIG_DIR");
-            std::env::remove_var("HOME");
-            std::env::remove_var("APB_PAUSE_GRACE_MS");
-        }
-    }
-}
+/// The process env these tests change; `common::EnvVar::saved` guards
+/// each name and restores the value it had before the test
+/// (removing `HOME` outright broke later tests that read it).
+const TOUCHED_ENV: [&str; 4] = [
+    "APB_AGENT_CMD",
+    "APB_CONFIG_DIR",
+    "HOME",
+    "APB_PAUSE_GRACE_MS",
+];
 fn make_stub(dir: &Path, body: &str) -> String {
     let path = dir.join("stub.sh");
     common::write_sync(&path, &format!("#!/bin/sh\n{body}\n"));
@@ -35,7 +33,7 @@ fn make_stub(dir: &Path, body: &str) -> String {
 #[test]
 fn finish_with_prompt_stores_answer_as_output() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -176,7 +174,7 @@ fn finished_f(events: &[Event]) -> usize {
 #[test]
 fn the_closing_answer_journals_its_model_and_chain_position() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let (proj, home, cfg, bin) = (
         tempfile::tempdir().unwrap(),
         tempfile::tempdir().unwrap(),
@@ -292,7 +290,7 @@ fn run_id_of(root: &Path) -> String {
 fn paused_composer_resumes_and_snapshots_once() {
     use apb_engine::pause::{PauseBy, PauseMode, PauseRequest, request_pause};
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let (proj, home, cfg, bin) = (
         tempfile::tempdir().unwrap(),
         tempfile::tempdir().unwrap(),
@@ -364,7 +362,7 @@ fn paused_composer_resumes_and_snapshots_once() {
 #[test]
 fn an_abort_during_the_closing_answer_moves_on_to_no_fallback() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let (proj, home, cfg, bin) = (
         tempfile::tempdir().unwrap(),
         tempfile::tempdir().unwrap(),

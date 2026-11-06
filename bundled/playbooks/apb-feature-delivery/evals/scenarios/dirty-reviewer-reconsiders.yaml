@@ -1,0 +1,64 @@
+schema: 1
+id: dirty-reviewer-reconsiders
+title: A reviewer that changes a tracked file fails the panel, the repair round cannot converge, and the run reconsiders
+instruction: "Keep the change small."
+params: { change_kind: feature, task: "Add a --json flag to the export command" }
+baseline: skip
+answers:
+  intake:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { original_request: "Add a --json flag to the export command", expected: "[\"the export prints JSON with --json\"]", exclusions: "none", must_preserve: "the text output", assumptions: "[]", issuer: "the person at the terminal", risk_triggers: "public CLI contract", checks: "cargo test" }
+  design:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { ready: "true", design: "add the flag and a JSON writer", advisor: "a fresh subagent", assumptions: "[]", question: "" }
+  decompose:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { triggers: "none", decomposed: "false", subtasks: '[]' }
+  implement:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { changed_paths: "[\"src/export.rs\"]", evidence: "cargo test passed", gaps: "" }
+  review_correctness:
+    - visit: 1
+      attempts:
+        - { status: succeeded, output: "the correctness review notes", read_only: { dirty: ["src/export.rs"] } }
+  review_security:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { role: security, blocking: "0", findings: "[]" }
+  review_tests:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { role: tests, blocking: "0", findings: "[]" }
+  # The panel's join fails on the delivered reviewer; its fallback starts
+  # a repair round, the fix fails both its attempts, and the run ends at
+  # the failure finish.
+  fix:
+    - visit: 1
+      attempts:
+        - { status: failed, failure_kind: agent, output: "the repair could not be made" }
+        - { status: failed, failure_kind: agent, output: "the repair could not be made" }
+  reconsider:
+    - visit: 1
+      attempts:
+        - { status: succeeded, output: "The run stopped before a converged review." }
+expect:
+  run: { outcome: [failed] }
+  finish: reconsider
+  visits: { review_correctness: 1, review_security: 1, review_tests: 1, collect: 1, fix: 1, reconsider: 1 }
+  status: { review_correctness: failed, collect: failed, fix: failed }
+  route: { not_visits: [implement_subtasks, next_round, report, assessed] }
+  outputs:
+    - { node: review_correctness, matches: "^read_only_dirty:" }
+  # The prompts name both implementation paths, every repair round and
+  # the panel's earlier state; the ones this route never runs render empty.
+  templates_empty: report

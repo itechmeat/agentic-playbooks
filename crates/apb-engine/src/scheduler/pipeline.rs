@@ -104,33 +104,39 @@ pub(crate) fn pipeline_member(
     // cycle through the batch, `F -> {A, B} -> C -> F`) is not admitted: it
     // waits for the batch to end, as it did when the batch was routed only at
     // its end, so a new pass of the loop never starts beside the old one.
-    let pending: Vec<&String> = slots
+    let pending: Vec<String> = slots
         .batch
         .iter()
         .filter(|m| !finished.contains(*m) && m.as_str() != node)
-        .collect();
-    let ready: Vec<String> = frontier
-        .iter()
-        .filter(|n| {
-            is_batchable(playbook, n) && !slots.batch.contains(*n) && !held.contains_key(*n)
-        })
-        .filter(|n| {
-            let reach = apb_core::graphutil::reachable(playbook, &[n.as_str()]);
-            !pending.iter().any(|m| reach.contains(m.as_str()))
-        })
         .cloned()
         .collect();
-    frontier.retain(|n| !ready.contains(n));
-    for n in ready {
+    // One candidate at a time, each admitted node pushed into `slots.batch`
+    // before the next is weighed (spec loops-and-graphs D1): a single filter
+    // pass would admit a detected read-only candidate and a writer candidate
+    // together. A refused candidate stays in the frontier.
+    let mut admitted: Vec<String> = Vec::new();
+    for n in frontier.iter() {
+        if !is_batchable(playbook, n) || slots.batch.contains(n) || held.contains_key(n) {
+            continue;
+        }
+        let reach = apb_core::graphutil::reachable(playbook, &[n.as_str()]);
+        if pending.iter().any(|m| reach.contains(m.as_str())) {
+            continue;
+        }
+        if !batch_class::batch_admits(playbook, slots.batch, n) {
+            continue;
+        }
         let flag = Arc::new(AtomicBool::new(false));
         slots
             .member_fans
             .push(slots.fanout.register_pausable(&flag));
         slots.member_flags.insert(n.clone(), flag);
         slots.batch.push(n.clone());
-        slots.queue.push_back(n);
+        slots.queue.push_back(n.clone());
         *slots.steps += 1;
+        admitted.push(n.clone());
     }
+    frontier.retain(|n| !admitted.contains(n));
     Ok(true)
 }
 

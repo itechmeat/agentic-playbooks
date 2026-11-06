@@ -951,6 +951,7 @@ fn an_open_session_of_a_written_off_attempt_refuses_reads() {
             partial_output: None,
             failure_kind: None,
             usage: None,
+            rejected_for: None,
         })
         .unwrap();
         started

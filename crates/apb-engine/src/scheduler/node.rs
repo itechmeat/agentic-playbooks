@@ -4,7 +4,7 @@
 use super::*;
 
 mod exposure;
-mod read_only;
+pub(crate) mod read_only;
 mod sandbox;
 mod step_env;
 
@@ -20,8 +20,10 @@ use crate::failure_class::{FailureKind, INFRA_RETRY_ACTION};
 /// actually receives) and the drive-loop cache-key computation, so the two can
 /// never drift: a prompt that changes changes the key. `run_id` comes from the
 /// caller rather than being re-derived from the path, matching every other
-/// render site.
+/// render site. `playbook` feeds the seen text of its `no_new_items`
+/// conditions (spec loops-and-graphs D2).
 pub(crate) fn render_node_prompt(
+    playbook: &Playbook,
     run_dir: &Path,
     run_id: &str,
     state: &RunState,
@@ -29,7 +31,8 @@ pub(crate) fn render_node_prompt(
     prompt: &str,
     budget: &apb_core::schema::ContextBudget,
 ) -> Result<String, EngineError> {
-    let inputs = crate::judge_eval::JudgeInputs::from_state(run_dir, run_id, state, cfg, budget)?;
+    let inputs =
+        crate::judge_eval::JudgeInputs::from_state(playbook, run_dir, run_id, state, cfg, budget)?;
     Ok(inputs.render(prompt, run_dir, budget.output_max_bytes))
 }
 
@@ -238,6 +241,23 @@ impl Rejection {
 /// The failure kind of an attempt whose claims the evidence check refused
 /// under `on_invalid: fail`.
 pub(crate) const CHECK_REJECTED: &str = "check_rejected";
+
+/// Why a rejected report failed its attempt, as `attempt_finished.rejected_for`
+/// carries it and the retry briefing quotes it: scrubbed of the secret
+/// values of the run's tree and the workspace's connectors, token shapes and
+/// the workspace's and attempt directory's paths (the run redactor's text
+/// that leaves the machine, since the retry prompt goes to a model
+/// provider), then cut to 500 characters by `chars`, never a byte slice (a
+/// cut in the middle of a code point would panic). The scrub comes before
+/// the bound, so a cut never leaves a fragment of a value behind.
+pub(crate) fn rejected_for_text(run_dir: &Path, workdir: &Path, reason: &str) -> String {
+    let run = crate::run_redact::RunRedactor::for_run_dir(run_dir).redact_text(reason);
+    apb_core::scrub::Scrubber::for_workspace(workdir, Vec::new())
+        .scrub(&run)
+        .chars()
+        .take(500)
+        .collect()
+}
 
 #[allow(clippy::too_many_arguments)]
 fn success_check_rejection(
@@ -530,6 +550,7 @@ pub(super) fn journal_interrupted_attempt(
         partial_output: (!attempt.partial.trim().is_empty()).then(|| attempt.partial.to_string()),
         failure_kind: attempt.failure_kind.map(|k| k.as_str().to_string()),
         usage: None,
+        rejected_for: None,
     })
 }
 
@@ -723,6 +744,7 @@ pub(crate) fn execute_node(
         .then(|| {
             super::provenance::Tracker::start(playbook, run_dir, node_id, workdir, |t| {
                 render_node_prompt(
+                    playbook,
                     run_dir,
                     run_id,
                     state,
@@ -777,6 +799,7 @@ fn execute_node_kind(
         live,
         item,
         continuation,
+        batch_peers,
         ..
     } = opts;
     // The execution's key: the node, and for a list item the item.
@@ -837,6 +860,7 @@ fn execute_node_kind(
             let text = match &override_prompt {
                 Some(p) => p.clone(),
                 None => render_node_prompt(
+                    playbook,
                     run_dir,
                     run_id,
                     state,
@@ -890,6 +914,7 @@ fn execute_node_kind(
             // `workdir` fails the node before anything is spawned.
             let node_dir = match super::node_workdir::resolve(playbook, node_id, workdir, |t| {
                 render_node_prompt(
+                    playbook,
                     run_dir,
                     run_id,
                     state,
@@ -919,7 +944,7 @@ fn execute_node_kind(
                 (None, None, None) => {
                     let budget = playbook.context_budget(node_id);
                     let inputs = crate::judge_eval::JudgeInputs::from_state(
-                        run_dir, run_id, state, cfg, &budget,
+                        playbook, run_dir, run_id, state, cfg, &budget,
                     )?;
                     // A scenario run names every reference that rendered
                     // empty (diagnostics only).
@@ -1749,9 +1774,27 @@ fn execute_node_kind(
                             run_dir,
                             crate::scenario::BoundaryKind::ReadOnlyCheck,
                         );
+                    // In a batch, the attempt's interval opens here, so a
+                    // detected check can name the members that ran beside
+                    // it; an enforced member keeps its interval too, so a
+                    // detected peer can name it. A scripted attempt runs
+                    // nothing and keeps none.
+                    let mut read_only_interval = batch_peers
+                        .as_ref()
+                        .filter(|_| node.read_only && !scripted_check)
+                        .map(|p| p.open(node_id));
+                    let read_only_peers = read_only_interval
+                        .as_ref()
+                        .map(read_only::OpenInterval::peers);
                     let read_only_before =
-                        (node.read_only && place.sandbox.is_none() && !scripted_check)
-                            .then(|| read_only::Before::take(node_id, attempt, &node_dir));
+                        (node.read_only && place.sandbox.is_none() && !scripted_check).then(|| {
+                            read_only::Before::take(
+                                node_id,
+                                attempt,
+                                &node_dir,
+                                read_only_peers.clone(),
+                            )
+                        });
                     let attempt_read_only = match &read_only_before {
                         Some(before) => Some(before.record()),
                         None if node.read_only && !scripted_check => Some(read_only::enforced()),
@@ -2366,6 +2409,11 @@ fn execute_node_kind(
                         }
                         None => Ok(None),
                     };
+                    // The interval closes after the after state was taken;
+                    // an enforced member (no `Before`) closes its own here.
+                    if let Some(interval) = &mut read_only_interval {
+                        interval.close();
+                    }
                     // --- 0.23.0 protected paths (C6): undo and name any change
                     // to a protected file before anything else reads the tree. ---
                     let protect_violation = match protect_snapshot {
@@ -2415,6 +2463,7 @@ fn execute_node_kind(
                             partial_output: None,
                             failure_kind: None,
                             usage: None,
+                            rejected_for: None,
                         })?;
                         return Ok(AttemptOutcome::Finished {
                             status: NodeStatus::Failed,
@@ -2450,6 +2499,7 @@ fn execute_node_kind(
                             partial_output: None,
                             failure_kind: None,
                             usage: None,
+                            rejected_for: None,
                         })?;
                         return Ok(AttemptOutcome::Finished {
                             status: NodeStatus::Failed,
@@ -2641,6 +2691,7 @@ fn execute_node_kind(
                                     partial_output: None,
                                     failure_kind: None,
                                     usage: report.usage.clone(),
+                                    rejected_for: None,
                                 })?;
                                 return Ok(AttemptOutcome::Suspended {
                                     question: q.question,
@@ -2762,6 +2813,9 @@ fn execute_node_kind(
                                             partial_output: None,
                                             failure_kind,
                                             usage: report.usage.clone(),
+                                            rejected_for: (!fatal).then(|| {
+                                                rejected_for_text(run_dir, ctx.workdir, &reason)
+                                            }),
                                         })?;
                                         if fatal {
                                             return Ok(AttemptOutcome::Finished {
@@ -2816,6 +2870,11 @@ fn execute_node_kind(
                                                 partial_output: None,
                                                 failure_kind: None,
                                                 usage: report.usage.clone(),
+                                                rejected_for: Some(rejected_for_text(
+                                                    run_dir,
+                                                    ctx.workdir,
+                                                    &reason,
+                                                )),
                                             })?;
                                             last_msg = format!("{reason}: {}", report.output);
                                             last_timed_out = false;
@@ -2846,6 +2905,7 @@ fn execute_node_kind(
                                             partial_output: None,
                                             failure_kind: None,
                                             usage: report.usage.clone(),
+                                            rejected_for: None,
                                         })?;
                                         return Ok(AttemptOutcome::Finished {
                                             status: NodeStatus::Succeeded,
@@ -2876,6 +2936,7 @@ fn execute_node_kind(
                                     partial_output: None,
                                     failure_kind: None,
                                     usage: report.usage.clone(),
+                                    rejected_for: None,
                                 })?;
                                 last_msg = report.output;
                                 last_timed_out = false;
@@ -2966,6 +3027,7 @@ fn execute_node_kind(
                                         // failure: nothing is classified.
                                         failure_kind: None,
                                         usage: failed_usage.clone(),
+                                        rejected_for: None,
                                     })?;
                                     last_msg = msg;
                                 }
@@ -3042,6 +3104,11 @@ fn execute_node_kind(
                                                     partial_output: None,
                                                     failure_kind: None,
                                                     usage: failed_usage.clone(),
+                                                    rejected_for: Some(rejected_for_text(
+                                                        run_dir,
+                                                        ctx.workdir,
+                                                        &reason,
+                                                    )),
                                                 })?;
                                                 last_msg = format!("{reason}: {output}");
                                                 last_timed_out = false;
@@ -3061,6 +3128,7 @@ fn execute_node_kind(
                                                     partial_output: None,
                                                     failure_kind: None,
                                                     usage: failed_usage.clone(),
+                                                    rejected_for: None,
                                                 })?;
                                                 return Ok(AttemptOutcome::Finished {
                                                     status: NodeStatus::Succeeded,
@@ -3094,6 +3162,9 @@ fn execute_node_kind(
                                                 partial_output: None,
                                                 failure_kind,
                                                 usage: failed_usage.clone(),
+                                                rejected_for: (!fatal).then(|| {
+                                                    rejected_for_text(run_dir, ctx.workdir, &reason)
+                                                }),
                                             })?;
                                             if fatal {
                                                 return Ok(AttemptOutcome::Finished {
@@ -3128,6 +3199,7 @@ fn execute_node_kind(
                                         partial_output: None,
                                         failure_kind: None,
                                         usage: failed_usage.clone(),
+                                        rejected_for: None,
                                     })?;
                                     last_msg = sfr.outputs.clone().unwrap_or_else(|| msg.clone());
                                 }
@@ -3223,6 +3295,7 @@ fn execute_node_kind(
                                             failure_kind: failure_kind
                                                 .map(|k| k.as_str().to_string()),
                                             usage: failed_usage.clone(),
+                                            rejected_for: None,
                                         })?;
                                     }
                                     last_msg = msg;
@@ -3448,6 +3521,7 @@ fn execute_node_kind(
             let timeout = timeout_seconds.map(Duration::from_secs);
             let workdir = match super::node_workdir::resolve(playbook, node_id, workdir, |t| {
                 render_node_prompt(
+                    playbook,
                     run_dir,
                     run_id,
                     state,
@@ -3520,9 +3594,19 @@ fn execute_node_kind(
                 }
                 _ => {}
             }
+            // The script's interval opens here (a script is always the
+            // detected tier), so its check can name the batch members whose
+            // attempts overlapped its run.
+            let mut read_only_interval = batch_peers
+                .as_ref()
+                .filter(|_| node.read_only)
+                .map(|p| p.open(node_id));
+            let read_only_peers = read_only_interval
+                .as_ref()
+                .map(read_only::OpenInterval::peers);
             let read_only_before = node
                 .read_only
-                .then(|| read_only::Before::take(node_id, 1, workdir));
+                .then(|| read_only::Before::take(node_id, 1, workdir, read_only_peers.clone()));
             if let Some(before) = &read_only_before {
                 read_only::journal_check(journal, node_id, 1, Some(&before.record()))?;
             }
@@ -3535,9 +3619,15 @@ fn execute_node_kind(
                 Some(cancel),
                 &env,
             )?;
-            if let Some(before) = read_only_before
-                && let Some(reason) = before.finish(run_dir, ctx.workdir, journal)?
-            {
+            let read_only_violation = match read_only_before {
+                Some(before) => before.finish(run_dir, ctx.workdir, journal)?,
+                None => None,
+            };
+            // The interval closes after the after state was taken.
+            if let Some(interval) = &mut read_only_interval {
+                interval.close();
+            }
+            if let Some(reason) = read_only_violation {
                 return Ok(AttemptOutcome::Finished {
                     status: NodeStatus::Failed,
                     output: reason,
@@ -3639,6 +3729,7 @@ pub(crate) fn execute_finish_answer(
         &state.rejected_outputs,
         &hooks,
         &context,
+        &crate::loop_seen::seen_texts(playbook, state),
         &crate::context::OutputClip {
             run_dir,
             max_bytes: budget.output_max_bytes,
@@ -4028,6 +4119,7 @@ pub(crate) fn execute_finish_answer(
                         .then(|| super::journal::PAUSE_INTERRUPT_NOTE.to_string()),
                     failure_kind: None,
                     usage: None,
+                    rejected_for: None,
                 })?;
                 return Ok((NodeStatus::Cancelled, "cancelled".to_string(), events));
             }
@@ -4047,6 +4139,7 @@ pub(crate) fn execute_finish_answer(
                         partial_output: None,
                         failure_kind: None,
                         usage: report.usage.clone(),
+                        rejected_for: None,
                     })?;
                     if report.status == NodeStatus::Succeeded {
                         // The composed finish answer is the agent's reply body,
@@ -4084,6 +4177,7 @@ pub(crate) fn execute_finish_answer(
                         partial_output: None,
                         failure_kind: None,
                         usage: failed_usage,
+                        rejected_for: None,
                     })?;
                     last_msg = msg;
                     if class == ErrorClass::Transport || class == ErrorClass::Timeout {
@@ -4303,6 +4397,7 @@ pub(crate) fn run_playbook_node(
                 &state.rejected_outputs,
                 &hooks,
                 &context,
+                &crate::loop_seen::seen_texts(playbook, &state),
                 &crate::context::OutputClip {
                     run_dir,
                     max_bytes: budget.output_max_bytes,
@@ -4621,18 +4716,20 @@ pub(crate) fn is_interactive(playbook: &Playbook, node: &str) -> bool {
 /// whole tree before and after the attempt, so a concurrent sibling's write
 /// under its globs would be undone and blamed on it.
 ///
-/// A `read_only` node is batchable only with `isolation: full`, which is
-/// always the enforced tier or a refusal: a detected-tier check compares
-/// the tree after the attempt, so a sibling's write would be blamed on it.
+/// A detected-tier `read_only` node (no sandbox, or a sandbox that is not
+/// full) is batchable since spec loops-and-graphs D1, but only beside
+/// members that cannot write: [`batch_class::batch_admits`] refuses a
+/// detected member a batch that holds a writer and a writer a batch that
+/// holds a detected member, so a change a detected check sees was made by
+/// a co-member that ran at the same time. An enforced one (`isolation:
+/// full`, the sandbox binds the tree read-only) batches with anything.
 pub(crate) fn is_batchable(playbook: &Playbook, node: &str) -> bool {
     is_agent_or_script(playbook, node)
         && !is_interactive(playbook, node)
         && playbook
             .node(node)
             // A list node runs its items on its own pool, on the sequential arm.
-            .is_none_or(|n| {
-                n.kind.protect_globs().is_empty() && n.list().is_none() && !detected_read_only(n)
-            })
+            .is_none_or(|n| n.kind.protect_globs().is_empty() && n.list().is_none())
         && !matches!(
             parallel::join_kind(playbook, node),
             Some(parallel::JoinKind::Explicit(_))
@@ -4640,15 +4737,6 @@ pub(crate) fn is_batchable(playbook: &Playbook, node: &str) -> bool {
         // A `require: all_succeeded` join (issue #195) may refuse, and only the
         // sequential path journals a refusal.
         && !(parallel::is_join(playbook, node) && parallel::requires_all_succeeded(playbook, node))
-}
-
-/// Whether `node` is read-only in a tier that may be the detected one.
-fn detected_read_only(node: &apb_core::schema::Node) -> bool {
-    node.read_only
-        && node
-            .kind
-            .isolation()
-            .is_none_or(|i| i.level != apb_core::isolation::Level::Full)
 }
 
 /// Context compaction (spec 8.5): if enabled (cfg.context_max_bytes) and the

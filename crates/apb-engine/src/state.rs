@@ -261,6 +261,16 @@ pub struct RunState {
     /// with no drive event after it (a node or attempt start, a pause, a
     /// resume, a stop or the end).
     pub released: Option<Released>,
+    /// Every successful visit's whole output, by node, appended in journal
+    /// order (the `no_new_items` edge condition, spec loops-and-graphs D2).
+    /// History is never reset: a `continue_from`, a revive, a supervisor
+    /// retry or a patch adds visits, and what a node output before stays
+    /// seen. A cache hit journals a successful `node_finished` and counts.
+    /// Only successful visits land here: failed, timed-out and cancelled
+    /// ones neither count nor break a `no_new_items` streak.
+    /// Kept for every node, not only those a condition names (the fold has
+    /// no playbook): a clone of each successful output per fold.
+    pub success_outputs: BTreeMap<String, Vec<String>>,
 }
 
 /// One open deferred retry (see [`RunState::deferred`]).
@@ -598,6 +608,17 @@ impl RunState {
                     s.outputs.insert(node.clone(), output.clone());
                     s.last_node = Some(node.clone());
                     *s.finished_counts.entry(node.clone()).or_insert(0) += 1;
+                    // The whole output of every successful visit, in journal
+                    // order: what `no_new_items` folds (the label is
+                    // "succeeded", never "success" - that is the StatusEq
+                    // spelling). Failed, timed-out and cancelled visits land
+                    // in `outputs` only.
+                    if NodeStatus::from_label(status) == NodeStatus::Succeeded {
+                        s.success_outputs
+                            .entry(node.clone())
+                            .or_default()
+                            .push(output.clone());
+                    }
                 }
                 p @ EventPayload::RunPaused { .. } => {
                     s.run_status = RunStatus::Paused;

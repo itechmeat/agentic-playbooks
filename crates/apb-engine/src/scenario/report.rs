@@ -75,8 +75,9 @@ impl Verdict {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExpectationResult {
     /// `run.outcome`, `finish`, `route.path`, `route.visits`,
-    /// `route.not_visits`, `visits[<node>]`, `edges.taken[<address>]`,
-    /// `edges.not_taken[<address>]`, `joins.dead[<join>]`,
+    /// `route.not_visits`, `visits[<node>]`, `status[<node>]`,
+    /// `edges.taken[<address>]`, `edges.not_taken[<address>]`,
+    /// `joins.dead[<join>]`,
     /// `outputs[<node>]`, `outputs[<node>.<field>]`, `run_outputs[<name>]`,
     /// `templates_empty`, `unused_answers`.
     pub check: String,
@@ -775,6 +776,21 @@ pub fn build(input: ReportInput<'_>) -> ScenarioReport {
             n.to_string(),
         ));
     }
+    for (node, want) in &expect.status {
+        // The last execution, a cancelled one included, so a race loser's
+        // `cancelled` can be expected.
+        let seen = executions
+            .iter()
+            .rev()
+            .find(|x| &x.node == node)
+            .and_then(|x| x.status.clone());
+        checks.push(check(
+            format!("status[{node}]"),
+            seen.as_deref() == Some(want.as_str()),
+            want.clone(),
+            seen.unwrap_or_else(|| "none".to_string()),
+        ));
+    }
     let taken = |addr: &str| {
         edges_taken
             .iter()
@@ -1032,6 +1048,24 @@ pub(crate) mod tests {
         }
     }
 
+    /// `expect.status` reads the last execution, a cancelled one included:
+    /// a race loser's `cancelled` can be expected.
+    #[test]
+    fn a_cancelled_execution_can_be_expected_by_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal = green_journal();
+        journal[11]["status"] = json!("cancelled");
+        write_run(dir.path(), &journal);
+        let body = format!("{GREEN_EXPECT}  status: {{ b: cancelled }}\n");
+        let r = report_of(dir.path(), &body, green_drive());
+        let check = r
+            .checks
+            .iter()
+            .find(|c| c.check == "status[b]")
+            .expect("a status check");
+        assert!(check.passed, "{check:?}");
+    }
+
     /// The report shows the trace, not only the outcome: every execution in
     /// settlement order with its visit and its attempts counted per
     /// execution (with where each answer came from), the edges by address,
@@ -1145,6 +1179,10 @@ pub(crate) mod tests {
             (
                 format!("{GREEN_EXPECT}  run_outputs: {{ pr: {{ state: value }} }}\n"),
                 "run_outputs[pr]",
+            ),
+            (
+                format!("{GREEN_EXPECT}  status: {{ a: failed, b: succeeded }}\n"),
+                "status[a]",
             ),
         ];
         for (body, name) in cases {

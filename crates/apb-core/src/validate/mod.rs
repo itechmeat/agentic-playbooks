@@ -21,6 +21,7 @@ mod isolation;
 mod judge;
 mod known_problems;
 mod list;
+mod loop_items;
 mod node_io;
 pub(crate) mod nodes;
 mod outputs;
@@ -381,6 +382,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     edges::check_edge_ids(playbook, &mut r); // V121
     edges::check_pair_caps(playbook, &mut r); // V122
     edges::check_one_of_order(playbook, &mut r); // V123, V124
+    loop_items::check_loop_items(playbook, &mut r); // V164-V166
     edges::check_judge_values(playbook, &mut r); // V125
     review::check_review_caps(playbook, &mut r); // V136
     review::check_review_status_values(playbook, &mut r); // V144

@@ -61,6 +61,7 @@ pub(crate) fn execute(
                 ctx.state,
             )?;
             super::node::render_node_prompt(
+                ctx.playbook,
                 ctx.run_dir,
                 ctx.run_id,
                 ctx.state,

@@ -733,6 +733,13 @@ attempts after the judge is unavailable):
 | `publish` | `publish`: `{ decision, status }`; nothing is pushed |
 | `start`, `condition`, a `finish` without a prompt | none |
 
+A scripted attempt leaves what an agent would: a `succeeded` one writes a
+`success` verdict (with `outputs`) to the attempt's status file, and a
+`failed` one without a kind (or with `agent`) writes a `failure` verdict,
+so a node with `require_verdict` reads it as the agent's own report of
+success or failure, never as an attempt that ended without a verdict.
+A `failed` one with another kind is a process failure and writes none.
+
 `judge_edges` rides along with any kind (or alone): answers for the judge
 edges out of the node, keyed by edge address (`id:<id>` or
 `e:<from>><to>#<n>`, see "Edge ids and edge addresses" in
@@ -744,7 +751,10 @@ edges out of the node, keyed by edge address (`id:<id>` or
 case's `run` and `outputs` checks. `finish` names the finish node the run
 ends at. `route` takes the eval route words (`visits`, `in_order`,
 `not_visits`) plus `path`, the exact sequence of node executions in
-settlement order. `visits` is an exact count per node. `edges.taken`
+settlement order. `visits` is an exact count per node, and `status` the
+status each named node's last execution recorded, a cancelled one
+included: one of `succeeded`, `failed`, `timed_out`, `cancelled`,
+`skipped` or `unknown` (another word is V150). `edges.taken`
 counts traversals per edge address and `edges.not_taken` lists edges never
 taken. `joins.dead` lists, per join node, the inputs expected dead.
 `run_outputs` names a run output's expected `state` (`value`, `null` or
@@ -841,8 +851,8 @@ held to it, but its file problems still are.
 - **V149** (error): a param the playbook declares `secret` is set.
 - **V150** (error): an expectation names an unknown node, edge address or
   run output, a finish that is not a finish node, a join input that does
-  not feed that join, a run outcome or output state apb does not write, or
-  a regex that does not compile.
+  not feed that join, a run outcome, node status or output state apb does
+  not write, or a regex that does not compile.
 - **V151** (warning): a visit answers more attempts than the node's
   `max_retries` allows (infrastructure and quota failures, which retry out
   of their own budget, are not counted).

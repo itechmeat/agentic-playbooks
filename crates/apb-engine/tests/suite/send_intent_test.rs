@@ -168,6 +168,7 @@ impl Run {
             partial_output: None,
             failure_kind: None,
             usage: None,
+            rejected_for: None,
             output_truncated: Vec::new(),
             transcript_incomplete: false,
         });

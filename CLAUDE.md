@@ -58,7 +58,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   the precedence of a run argument over the playbook's block and the amount
   parsers (`budget.rs`), list mode (`list/`: the `list:` block, item
   loading with ids and the `where` filter in `items`, the per-item state
-  machine in `verdict`), the baseline check
+  machine in `verdict`), the loop visit fold behind `no_new_items`
+  (`loop_items.rs`: the readable visits, the seen keys and the dry
+  streak), the baseline check
   (`baseline/`: the `baseline_check` block, the observation path reader and
   the rule comparison), the project's own test and lint commands
   (`project_checks.rs`), the findings and warnings an attempt reports and
@@ -267,7 +269,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   or abort ends the chain, a supervisor interrupt names itself),
   `journal` event-log folds, `status_file` the attempt verdict contract and its
   findings and warnings, `attempt_notes` their journal entry,
-  `attempt_memory` the retry briefing on what earlier attempts did, `baseline` the
+  `attempt_memory` the retry briefing on what earlier attempts did,
+  `batch_class` the write class of a node and the one batch admission rule
+  (a detected read-only member batches only beside members that cannot
+  write), `baseline` the
   before and after snapshots and comparisons, `resume`,
   `patch`, `rebind`, `cache`, `prepare`, `live`, `listing`, `deferred` the
   deferred retries of `retry_delay` (the delay, the due time on the
@@ -295,7 +300,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   item checks, `run` one visit's shared state), list mode's pure half
   (`list/`: `ledger` the journal fold of a visit, `prompt` the `## item`
   prompt section, `stamp` the item stamp on item-scoped events, `view` the
-  surface view), the execution key that pairs attempts, files and sends by
+  surface view), `loop_seen` the rendered seen keys of `no_new_items`
+  fed to every prompt, judge state field and cache key, the execution key
+  that pairs attempts, files and sends by
   node and list item (`exec_key.rs`), the host task store behind `run_task_submit` and
   `apb tasks` (`host_task.rs`), the baseline check's journal fold and its
   source reads (`baseline.rs`, `baseline/`: `read` a connector or script,

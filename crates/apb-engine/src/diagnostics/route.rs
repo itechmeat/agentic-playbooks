@@ -81,6 +81,7 @@ fn kind_name(edge: &apb_core::schema::Edge) -> &'static str {
         Some(EdgeCondition::OutputMatch { .. }) => "output_match",
         Some(EdgeCondition::OutputField { .. }) => "output_field",
         Some(EdgeCondition::Judge { .. }) => "judge",
+        Some(EdgeCondition::NoNewItems { .. }) => "no_new_items",
     }
 }
 
@@ -113,6 +114,26 @@ fn observed(
             }
             let p = answers.p.get(&format!("edge_{rank}"))?;
             Some(serde_json::json!({ "p": p, "applied": answers.applied }))
+        }
+        // The loop fold itself (spec loops-and-graphs D2): what the node's
+        // successful visits read out, whatever the edge decided from.
+        EdgeCondition::NoNewItems {
+            node, field, key, ..
+        } => {
+            let items = apb_core::loop_items::evaluate(
+                state
+                    .success_outputs
+                    .get(node)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                field,
+                key.as_deref(),
+            );
+            Some(serde_json::json!({
+                "visits": items.visits,
+                "streak": items.streak,
+                "new_in_last": items.new_in_last,
+            }))
         }
     }
 }

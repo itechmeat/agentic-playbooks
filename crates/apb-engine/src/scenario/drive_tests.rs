@@ -333,6 +333,50 @@ fn a_missing_attempt_fails_like_an_agent_under_on_missing_fail() {
     assert!(r.halted.is_none());
 }
 
+/// Under `require_verdict` a scripted attempt leaves the verdict an agent
+/// writes: a `failed` one says it failed (a failed attempt, never an
+/// interrupted one), a `succeeded` one without declared outputs says it
+/// succeeded.
+#[test]
+fn a_scripted_attempt_writes_its_verdict_under_require_verdict() {
+    let yaml = LOOP
+        .replace(
+            "defaults: { profile: main }",
+            "defaults: { profile: main, require_verdict: true }",
+        )
+        .replace(
+            "  - { from: work, to: gate }\n",
+            "  - { from: work, to: failed, condition: { type: node_status, node: work, equals: failure } }\n  - { from: work, to: gate, fallback: true }\n",
+        );
+    let attempt_statuses = |events: &[Event]| -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                EventPayload::AttemptFinished { node, status, .. } if node == "work" => {
+                    Some(status.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let dir = project(&yaml);
+    let failing = "schema: 1\nid: s\nanswers:\n  work:\n    - visit: 1\n      attempts:\n        - { status: failed, output: \"cannot\" }\n        - { status: failed, failure_kind: agent, output: \"still cannot\" }\n";
+    let (r, events) = run(dir.path(), "loop", failing);
+    assert_eq!(r.outcome, RunStatus::Failed, "{events:#?}");
+    assert_eq!(
+        attempt_statuses(&events),
+        ["failed", "failed"],
+        "{events:#?}"
+    );
+    assert_eq!(finished(&events, "work")[0].0, "failed");
+
+    let dir = project(&yaml);
+    let passing = "schema: 1\nid: s\nanswers:\n  work:\n    - { visit: 1, attempts: [ { status: succeeded, output: \"done\" } ] }\n  gate:\n    - { visit: 1, script: { exit: 0, stdout: \"QA green\" } }\n  triage:\n    - { visit: 1, judge: { verdict: { value: green, p: 0.9 } } }\n  approve:\n    - { visit: 1, review: { decision: approve } }\n";
+    let (r, events) = run(dir.path(), "loop", passing);
+    assert_eq!(r.outcome, RunStatus::Succeeded, "{events:#?}");
+    assert_eq!(attempt_statuses(&events), ["succeeded"], "{events:#?}");
+}
+
 /// An answer for an attempt that never ran is extra: here attempt 2 of a
 /// work visit whose attempt 1 succeeded.
 #[test]

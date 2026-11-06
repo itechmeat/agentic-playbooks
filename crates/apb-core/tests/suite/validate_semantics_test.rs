@@ -251,8 +251,8 @@ fn v13_message_includes_variable_and_known_namespaces() {
     assert!(
         issue.message.contains(
             "known namespaces: params.*, nodes.<id>.output, nodes.<id>.report, \
-             nodes.<id>.output.<field>, nodes.<id>.report.<field>, nodes.<id>.review_note, \
-             nodes.<id>.review_decision, nodes.<id>.rejected_output, run.instruction, \
+             nodes.<id>.output.<field>, nodes.<id>.report.<field>, nodes.<id>.seen.<field>, \
+             nodes.<id>.review_note, nodes.<id>.review_decision, nodes.<id>.rejected_output, run.instruction, \
              run.context, run.id, run.retro, run.active_elapsed_seconds, run.hooks.*"
         ),
         "message must carry the exact known-namespaces suffix: {}",

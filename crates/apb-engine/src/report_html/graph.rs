@@ -510,6 +510,7 @@ fn edge_label(condition: &EdgeCondition) -> Option<String> {
         EdgeCondition::ReviewStatus { equals } => Some(format!("review: {equals}")),
         EdgeCondition::OutputField { field, equals, .. } => Some(format!("{field}: {equals}")),
         EdgeCondition::Judge { min_p, .. } => Some(format!("judge p>={}", min_p.0)),
+        EdgeCondition::NoNewItems { rounds, .. } => Some(format!("no new items x{rounds}")),
         _ => None,
     }
 }

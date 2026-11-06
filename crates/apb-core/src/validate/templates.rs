@@ -40,6 +40,11 @@ pub(crate) fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
                 ["nodes", nid, "output" | "report", field] => {
                     nodes.contains(nid) && !field.trim().is_empty()
                 }
+                // The seen keys of a loop node (`no_new_items`). The node
+                // must exist and the field must be a plain name; the
+                // condition behind the reference is V165's business
+                // (validate/loop_items.rs), not the grammar's.
+                ["nodes", nid, "seen", field] => nodes.contains(nid) && !field.trim().is_empty(),
                 [
                     "run",
                     "instruction" | "context" | "id" | "retro" | "active_elapsed_seconds",
@@ -207,6 +212,7 @@ pub(crate) fn check_cross_branch_reads(playbook: &Playbook, r: &mut ValidationRe
 /// the one they got wrong.
 pub(crate) const V13_KNOWN_NAMESPACES: &str = "; known namespaces: params.*, nodes.<id>.output, \
     nodes.<id>.report, nodes.<id>.output.<field>, nodes.<id>.report.<field>, \
+    nodes.<id>.seen.<field>, \
     nodes.<id>.review_note, nodes.<id>.review_decision, nodes.<id>.rejected_output, \
     run.instruction, run.context, run.id, run.retro, run.active_elapsed_seconds, run.hooks.*";
 

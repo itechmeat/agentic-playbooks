@@ -40,16 +40,10 @@ fn lock() -> MutexGuard<'static, ()> {
     common::env_lock()
 }
 
-struct EnvGuard;
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("APB_AGENT_CMD");
-            std::env::remove_var("APB_CONFIG_DIR");
-            std::env::remove_var("HOME");
-        }
-    }
-}
+/// The process env these tests change; `common::EnvVar::saved` guards
+/// each name and restores the value it had before the test
+/// (removing `HOME` outright broke later tests that read it).
+const TOUCHED_ENV: [&str; 3] = ["APB_AGENT_CMD", "APB_CONFIG_DIR", "HOME"];
 
 struct RunReaper {
     root: PathBuf,
@@ -264,7 +258,7 @@ fn spawn_run(root: &Path, id: &str) -> (mpsc::Receiver<RunStatus>, thread::JoinH
 #[test]
 fn resume_reinvokes_with_resume_flag_and_no_transcript() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -350,7 +344,7 @@ fn resume_reinvokes_with_resume_flag_and_no_transcript() {
 #[test]
 fn resume_runtime_failure_downgrades_and_completes_via_reprompt() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -440,7 +434,7 @@ fn resume_runtime_failure_downgrades_and_completes_via_reprompt() {
 #[test]
 fn resume_without_session_downgrades_to_reprompt() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -523,7 +517,7 @@ fn seed_loop(root: &Path) {
 #[test]
 fn reprompt_transcript_is_scoped_to_the_current_visit() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();

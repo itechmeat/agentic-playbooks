@@ -200,6 +200,7 @@ pub(crate) fn step(r: &PublishRun<'_>, d: &mut GateDrive<'_>) -> Result<PublishS
     let tree = source_tree(r, d, &s)?;
     let branch = match s.branch {
         Some(t) => Some(render_node_prompt(
+            d.playbook,
             d.run_dir,
             r.run_id,
             r.state,
@@ -307,6 +308,7 @@ fn source_tree(
         r.workdir,
         |t| {
             render_node_prompt(
+                d.playbook,
                 d.run_dir,
                 r.run_id,
                 r.state,

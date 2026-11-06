@@ -8,6 +8,9 @@
 //! preservation, and the cache bypass on re-execution.
 
 use apb_core::registry::init_project;
+use apb_core::versioning::create_patch_version;
+use apb_engine::control::{Control, post_control};
+use apb_engine::diagnostics::{self, Diagnostic};
 use apb_engine::event::{Event, EventPayload, read_all};
 use apb_engine::scheduler::{RunOptions, list_runs, resume, run};
 use apb_engine::state::RunStatus;
@@ -792,4 +795,525 @@ fn the_dead_end_names_only_the_spent_edge_of_its_own_status() {
         "{events:#?}"
     );
     assert_eq!(count_starts(&events, "check"), 3, "{events:#?}");
+}
+
+// --- The `no_new_items` loop exit (spec loops-and-graphs D2) -------------------
+//
+// The loop node is an agent_task stand-in whose stub agent echoes a findings
+// array and records the prompt it was given (a script node has no prompt, so
+// the seen template could not reach one). Routing follows the shape the design
+// prescribes: the exit edge first (`no_new_items`), then the conditional loop
+// edge at its cap, then the fallback.
+
+/// The hunt loop: `hunt` loops back on its own success while the cap holds;
+/// once the last `rounds` visits added no new key the run leaves to `report`.
+const HUNT_LOOP: &str = r#"schema: 2
+id: huntloop
+name: Hunt loop
+version: 1.0.0
+defaults: { profile: main }
+nodes:
+  - { id: start, type: start }
+  - { id: hunt, type: agent_task, prompt: "Round. Seen so far:\n{{nodes.hunt.seen.findings}}" }
+  - { id: report, type: prompt, prompt: "report" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: hunt }
+  - { from: hunt, to: report, condition: { type: no_new_items, node: hunt, field: findings, rounds: 2 } }
+  - { from: hunt, to: hunt, condition: { type: node_status, node: hunt, equals: success }, max_traversals: 6 }
+  - { from: hunt, to: report, fallback: true }
+  - { from: report, to: done }
+"#;
+
+fn seed_hunt(root: &Path, yaml: &str, id: &str) {
+    init_project(root).unwrap();
+    let vdir = root.join(format!(".apb/playbooks/{id}/1.0.0"));
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
+    fs::write(root.join(format!(".apb/playbooks/{id}/current")), "1.0.0").unwrap();
+    common::seed_main(root);
+}
+
+/// A hunt stub agent: records the prompt of each visit as `prompt-<n>` and
+/// echoes the findings of the shell `cases` (a `case $n in` body).
+fn hunt_stub(root: &Path, name: &str, cases: &str) -> String {
+    let body = format!(
+        "#!/bin/sh\nD='{d}'\nmkdir -p \"$D\"\nn=$(cat \"$D/visits\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"$D/visits\"\nprev=\"\"\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"--\" ]; then printf '%s' \"$a\" > \"$D/prompt-$n\"; break; fi\n  prev=\"$a\"\ndone\ncase $n in\n{cases}\nesac\n",
+        d = root.display()
+    );
+    write_agent(root, name, &body)
+}
+
+fn run_hunt(root: &Path, id: &str, stub: &str) -> apb_engine::scheduler::RunResult {
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", stub);
+    }
+    let res = run(root, id, None, RunOptions::default());
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+    res.unwrap()
+}
+
+fn routes(run_dir: &Path) -> Vec<apb_engine::diagnostics::route::RouteEvaluated> {
+    diagnostics::read(run_dir)
+        .into_iter()
+        .filter_map(|d| match d {
+            Diagnostic::Route(r) => Some(r),
+            _ => None,
+        })
+        .collect()
+}
+
+fn run_dir(root: &Path, run_id: &str) -> std::path::PathBuf {
+    root.join(".apb/runs").join(run_id)
+}
+
+/// Every journaled hop `(from, to)` whatever its flags: the uncounted
+/// records carry the hops of unbounded edges, whose budget is not spent.
+fn count_hops(events: &[Event], from_id: &str, to_id: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| {
+            matches!(&e.payload, EventPayload::EdgeTraversed { from, to, .. } if from == from_id && to == to_id)
+        })
+        .count()
+}
+
+/// The last routing decision recorded for `node`.
+fn last_route(run_dir: &Path, node: &str) -> apb_engine::diagnostics::route::RouteEvaluated {
+    routes(run_dir)
+        .into_iter()
+        .rev()
+        .find(|r| r.node == node)
+        .expect("a route record for the node")
+}
+
+/// A scripted loop whose findings dry up: visits output `[a,b]`, then `[a]`
+/// forever. With `rounds: 2` the third visit is the second dry one, so the
+/// exit edge matches there - one round before the cap would even matter.
+#[test]
+fn a_no_new_items_loop_stops_at_the_dry_round_before_its_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_hunt(root, HUNT_LOOP, "huntloop");
+    let stub = hunt_stub(
+        root,
+        "hunt.sh",
+        "  1) echo '{\"findings\":[\"a\",\"b\"]}' ;;\n  *) echo '{\"findings\":[\"a\"]}' ;;\n",
+    );
+    let res = run_hunt(root, "huntloop", &stub);
+
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir(root, &res.run_id)).unwrap();
+    assert_eq!(
+        count_starts(&events, "hunt"),
+        3,
+        "two loop passes, then out"
+    );
+    assert_eq!(
+        count_traversals(&events, "hunt", "hunt"),
+        2,
+        "the loop edge, never its cap of 6"
+    );
+    assert_eq!(count_finishes(&events, "done"), 1, "reached done");
+
+    // The deciding route: the exit condition matched on the fold of the
+    // three successful visits, and the run left through the exit edge, not
+    // the fallback.
+    let r = last_route(&run_dir(root, &res.run_id), "hunt");
+    let check = r
+        .checks
+        .iter()
+        .find(|c| c.kind == "no_new_items")
+        .expect("the exit edge is checked");
+    assert_eq!(check.result, "matched");
+    assert_eq!(
+        check.observed,
+        Some(serde_json::json!({"visits": 3, "streak": 2, "new_in_last": 0}))
+    );
+    assert_eq!(r.chosen, ["e:hunt>report#1"]);
+}
+
+/// The same loop whose every visit finds a new key never matches the exit
+/// edge: the loop edge runs to its cap, and the fallback carries the run out.
+#[test]
+fn a_loop_that_keeps_finding_stops_at_its_cap_through_the_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let yaml = HUNT_LOOP.replace("max_traversals: 6", "max_traversals: 2");
+    seed_hunt(root, &yaml, "huntcap");
+    let stub = hunt_stub(
+        root,
+        "hunt.sh",
+        "  *) echo \"{\\\"findings\\\":[\\\"k$n\\\"]}\" ;;\n",
+    );
+    let res = run_hunt(root, "huntcap", &stub);
+
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir(root, &res.run_id)).unwrap();
+    assert_eq!(
+        count_starts(&events, "hunt"),
+        3,
+        "two loop passes to the cap, then the fallback"
+    );
+    assert_eq!(count_traversals(&events, "hunt", "hunt"), 2, "at the cap");
+
+    let r = last_route(&run_dir(root, &res.run_id), "hunt");
+    let check = r
+        .checks
+        .iter()
+        .find(|c| c.kind == "no_new_items")
+        .expect("the exit edge is checked");
+    assert_eq!(check.result, "not_matched");
+    assert_eq!(
+        check.observed,
+        Some(serde_json::json!({"visits": 3, "streak": 0, "new_in_last": 1}))
+    );
+    assert_eq!(r.chosen, ["e:hunt>report#2"], "left through the fallback");
+}
+
+/// A crash between rounds: the journal cut right after the first visit's
+/// `node_finished`, before any loop hop. The resume folds the visit back
+/// (its output is what keeps the keys seen) and routes exactly as an
+/// uninterrupted run would: two more passes, out through the exit edge.
+#[test]
+fn a_resume_between_rounds_gives_the_same_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_hunt(root, HUNT_LOOP, "huntloop");
+    let stub = hunt_stub(
+        root,
+        "hunt.sh",
+        "  1) echo '{\"findings\":[\"a\",\"b\"]}' ;;\n  *) echo '{\"findings\":[\"a\"]}' ;;\n",
+    );
+    let stub_for_run = stub.clone();
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &stub_for_run);
+    }
+    let _ = run(root, "huntloop", None, RunOptions::default());
+    let run_id = only_run_id(root);
+    keep_through(
+        root,
+        &run_id,
+        |p| matches!(p, EventPayload::NodeFinished { node, .. } if node == "hunt"),
+    );
+
+    let before = read_all(&run_dir(root, &run_id)).unwrap();
+    assert_eq!(
+        count_traversals(&before, "hunt", "hunt"),
+        0,
+        "fixture: the first hop is not journaled yet"
+    );
+
+    let resumed = resume(root, &run_id, None);
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+    let resumed = resumed.unwrap();
+    assert_eq!(resumed.outcome, RunStatus::Succeeded);
+
+    let after = read_all(&run_dir(root, &run_id)).unwrap();
+    assert_eq!(
+        count_starts(&after, "hunt"),
+        3,
+        "same shape as an uninterrupted run"
+    );
+    assert_eq!(count_traversals(&after, "hunt", "hunt"), 2);
+    assert_eq!(count_finishes(&after, "done"), 1);
+    let r = last_route(&run_dir(root, &run_id), "hunt");
+    let check = r
+        .checks
+        .iter()
+        .find(|c| c.kind == "no_new_items")
+        .expect("the exit edge is checked");
+    assert_eq!(check.result, "matched");
+    assert_eq!(
+        check.observed,
+        Some(serde_json::json!({"visits": 3, "streak": 2, "new_in_last": 0})),
+        "the visit from before the crash still counts"
+    );
+    assert_eq!(r.chosen, ["e:hunt>report#1"]);
+}
+
+/// Round 3 is the deciding round: its prompt (the one the agent actually
+/// received) lists the keys seen so far, one per line, in first-seen order.
+#[test]
+fn the_deciding_round_prompt_lists_the_seen_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_hunt(root, HUNT_LOOP, "huntloop");
+    let stub = hunt_stub(
+        root,
+        "hunt.sh",
+        "  1) echo '{\"findings\":[\"a\",\"b\"]}' ;;\n  *) echo '{\"findings\":[\"a\"]}' ;;\n",
+    );
+    let res = run_hunt(root, "huntloop", &stub);
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+
+    let first = fs::read_to_string(root.join("prompt-1")).unwrap();
+    assert!(
+        first.starts_with("Round. Seen so far:\n"),
+        "first visit: nothing seen yet, got {first:?}"
+    );
+    let deciding = fs::read_to_string(root.join("prompt-3")).unwrap();
+    assert!(
+        deciding.starts_with("Round. Seen so far:\na\nb"),
+        "the deciding round lists both keys in first-seen order, got {deciding:?}"
+    );
+}
+
+/// A finish prompt renders the seen template too: the closing answer lists
+/// every key the loop found, not an empty list.
+#[test]
+fn a_finish_prompt_lists_the_seen_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let yaml = HUNT_LOOP.replace(
+        "{ id: done, type: finish, outcome: success }",
+        "{ id: done, type: finish, outcome: success, prompt: \"Final findings:\\n{{nodes.hunt.seen.findings}}\" }",
+    );
+    seed_hunt(root, &yaml, "huntloop");
+    let stub = hunt_stub(
+        root,
+        "hunt.sh",
+        "  1) echo '{\"findings\":[\"a\",\"b\"]}' ;;\n  *) echo '{\"findings\":[\"a\"]}' ;;\n",
+    );
+    let res = run_hunt(root, "huntloop", &stub);
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+
+    let finish = (1..=8)
+        .filter_map(|n| fs::read_to_string(root.join(format!("prompt-{n}"))).ok())
+        .find(|p| p.contains("Final findings:"))
+        .expect("the finish composer was prompted");
+    assert!(
+        finish.contains("Final findings:\na\nb"),
+        "the finish prompt lists both keys, got {finish:?}"
+    );
+}
+
+/// A playbook with no exit edge loops through a review gate; a supervisor's
+/// patch adds the `no_new_items` edge while the run is parked there, and the
+/// next routing of `hunt` (a dry second visit) takes it instead of looping.
+const PATCH_LOOP: &str = r#"schema: 2
+id: patchloop
+name: Patch loop
+version: 1.0.0
+defaults: { profile: main }
+nodes:
+  - { id: start, type: start }
+  - { id: hunt, type: agent_task, prompt: "hunt" }
+  - { id: hold, type: human_review, options: [approved, rejected] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: hunt }
+  - { from: hunt, to: hold, fallback: true }
+  - { from: hold, to: hunt, condition: { type: review_status, equals: approved }, max_traversals: 3 }
+  - { from: hold, to: done, fallback: true }
+"#;
+
+const PATCH_LOOP_V2: &str = r#"schema: 2
+id: patchloop
+name: Patch loop
+version: 1.0.1
+defaults: { profile: main }
+nodes:
+  - { id: start, type: start }
+  - { id: hunt, type: agent_task, prompt: "hunt" }
+  - { id: hold, type: human_review, options: [approved, rejected] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: hunt }
+  - { from: hunt, to: done, condition: { type: no_new_items, node: hunt, field: findings, rounds: 1 } }
+  - { from: hunt, to: hold, fallback: true }
+  - { from: hold, to: hunt, condition: { type: review_status, equals: approved }, max_traversals: 3 }
+  - { from: hold, to: done, fallback: true }
+"#;
+
+#[test]
+fn a_patch_that_adds_the_exit_edge_takes_effect_at_the_next_routing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_hunt(root, PATCH_LOOP, "patchloop");
+    let stub = hunt_stub(root, "hunt.sh", "  *) echo '{\"findings\":[\"a\"]}' ;;\n");
+    let run_stub = stub.clone();
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &run_stub);
+    }
+    let root_c = root.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root_c, "patchloop", None, RunOptions::default()));
+    });
+
+    let runs = root.join(".apb/runs");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let rd = loop {
+        if let Some(e) = fs::read_dir(&runs)
+            .ok()
+            .and_then(|mut d| d.find_map(|e| e.ok()))
+            .filter(|e| e.path().join("events.jsonl").is_file())
+        {
+            break e.path();
+        }
+        assert!(std::time::Instant::now() < deadline, "no run directory");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+
+    // Visit 1 routed to the gate. Queue the patch (it adds the exit edge),
+    // then let the gate through: the patch applies at that boundary and
+    // continues the run from the gate, and the second pass of `hunt` - a
+    // dry one - routes out through the new edge.
+    loop {
+        let asked = read_all(&rd)
+            .unwrap_or_default()
+            .iter()
+            .filter(|e| matches!(e.payload, EventPayload::ReviewRequested { .. }))
+            .count();
+        if asked >= 1 {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the gate never asked");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let run_id = only_run_id(root);
+    let version = create_patch_version(
+        root,
+        "patchloop",
+        "1.0.0",
+        PATCH_LOOP_V2,
+        &run_id,
+        "improvement",
+    )
+    .unwrap();
+    post_control(
+        &rd,
+        Control::Patch {
+            version: version.clone(),
+            classification: "improvement".into(),
+            continue_from: "hold".into(),
+        },
+    )
+    .unwrap();
+    apb_engine::review::post_review(
+        &rd,
+        apb_engine::review::ReviewCommand {
+            node: "hold".into(),
+            decision: "approved".into(),
+            note: String::new(),
+        },
+    )
+    .unwrap();
+
+    let res = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .unwrap()
+        .unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&rd).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::PatchApplied { .. })),
+        "the patch applied"
+    );
+    // Without the exit edge, visit 2 would route back to the gate and wait
+    // for another person; with it, the dry second visit leaves `hunt`
+    // straight to done.
+    assert_eq!(count_starts(&events, "hunt"), 2);
+    assert_eq!(
+        count_hops(&events, "hunt", "done"),
+        1,
+        "out through the new edge"
+    );
+    assert_eq!(count_hops(&events, "hold", "done"), 0);
+    assert_eq!(count_finishes(&events, "done"), 1);
+    let r = last_route(&rd, "hunt");
+    let check = r
+        .checks
+        .iter()
+        .find(|c| c.kind == "no_new_items")
+        .expect("the patched exit edge is checked");
+    assert_eq!(check.result, "matched");
+    assert_eq!(
+        check.observed,
+        Some(serde_json::json!({"visits": 2, "streak": 1, "new_in_last": 0}))
+    );
+}
+
+/// The cache-key shape: `cache: auto`, the prompt reads ONLY the seen
+/// template, and the visits output `[a,b]`, `[c]`, `[a]`, `[b]`. Every visit
+/// is a cache miss (a loop re-execution bypasses the cache), and the keys
+/// move with the seen text: visit 2's key differs from visit 1's and visit
+/// 3's from visit 2's.
+const SEEN_CACHE_LOOP: &str = r#"schema: 2
+id: seencache
+name: Seen cache
+version: 1.0.0
+defaults: { profile: main }
+nodes:
+  - { id: start, type: start }
+  - { id: hunt, type: agent_task, prompt: "Seen:\n{{nodes.hunt.seen.findings}}", cache: auto }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: hunt }
+  - { from: hunt, to: done, condition: { type: no_new_items, node: hunt, field: findings, rounds: 2 } }
+  - { from: hunt, to: hunt, condition: { type: node_status, node: hunt, equals: success }, max_traversals: 4 }
+  - { from: hunt, to: done, fallback: true }
+"#;
+
+#[test]
+fn the_seen_template_moves_the_cache_key_between_rounds() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // The agent cache needs a git work tree for the workspace fingerprint;
+    // keep apb's own state out of it.
+    std::fs::write(root.join(".gitignore"), ".apb/\nvisits\nprompt-*\n").unwrap();
+    seed_hunt(root, SEEN_CACHE_LOOP, "seencache");
+    let stub = hunt_stub(
+        root,
+        "hunt.sh",
+        "  1) echo '{\"findings\":[\"a\",\"b\"]}' ;;\n  2) echo '{\"findings\":[\"c\"]}' ;;\n  3) echo '{\"findings\":[\"a\"]}' ;;\n  *) echo '{\"findings\":[\"b\"]}' ;;\n",
+    );
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "t@t"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "c1"]);
+    let res = run_hunt(root, "seencache", &stub);
+
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir(root, &res.run_id)).unwrap();
+    assert_eq!(
+        count_starts(&events, "hunt"),
+        4,
+        "two dry rounds to the exit"
+    );
+    let keys: Vec<String> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::NodeCacheMiss { node, key } if node == "hunt" => Some(key.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(keys.len(), 4, "every visit is a miss: {keys:?}");
+    assert_ne!(keys[1], keys[0], "the second visit's prompt lists a and b");
+    assert_ne!(
+        keys[2], keys[1],
+        "the third visit's prompt lists a, b and c"
+    );
+    assert_eq!(
+        keys[3], keys[2],
+        "visits 3 and 4 both see a, b and c, so the key stays put"
+    );
 }

@@ -46,6 +46,15 @@ impl EnvVar {
         EnvVar { key, prior }
     }
 
+    /// `key` left as it is now and restored to that value on drop: for a
+    /// test that changes the var itself later on.
+    pub fn saved(key: &'static str) -> Self {
+        EnvVar {
+            key,
+            prior: std::env::var_os(key),
+        }
+    }
+
     /// `key` unset for the life of the guard, restored on drop.
     pub fn remove(key: &'static str) -> Self {
         let prior = std::env::var_os(key);

@@ -26,8 +26,8 @@
 //! - **V149** (error): a param the playbook declares `secret` is set.
 //! - **V150** (error): an expectation names an unknown node, edge address
 //!   or run output, a finish that is not a finish node, a join input that
-//!   does not feed that join, a run outcome or output state apb does not
-//!   write, or a regex that does not compile.
+//!   does not feed that join, a run outcome, node status or output state
+//!   apb does not write, or a regex that does not compile.
 //! - **V151** (warning): a visit answers more attempts than the node's
 //!   `max_retries` allows (infrastructure and quota failures, which retry
 //!   out of their own budget, are not counted).
@@ -56,6 +56,16 @@ const PUBLISH: &str = "publish";
 
 /// The output states a run output can end in.
 const OUTPUT_STATES: [&str; 3] = ["value", "null", "missing"];
+
+/// The statuses a `node_finished` records, what `expect.status` may name.
+const NODE_STATUSES: [&str; 6] = [
+    "succeeded",
+    "failed",
+    "timed_out",
+    "cancelled",
+    "skipped",
+    "unknown",
+];
 
 /// The pairs of kinds one visit may carry, because one node crosses both
 /// boundaries: a list whose item check is a judge (`items` and `judge`),
@@ -600,6 +610,7 @@ fn expected_nodes(e: &Expect) -> Vec<&str> {
         named.extend(r.not_visits.iter().map(String::as_str));
     }
     named.extend(e.visits.keys().map(String::as_str));
+    named.extend(e.status.keys().map(String::as_str));
     named.extend(e.outputs.iter().map(|o| o.node.as_str()));
     named
 }
@@ -678,6 +689,18 @@ fn check_expect(cx: &mut Ctx, e: &Expect) {
                     "expect.run_outputs.{name}: state `{}` is not one of {}",
                     want.state,
                     OUTPUT_STATES.join(", ")
+                ),
+            );
+        }
+    }
+    for (node, want) in &e.status {
+        if !NODE_STATUSES.contains(&want.as_str()) {
+            cx.push(
+                "V150",
+                Some(node),
+                format!(
+                    "expect.status.{node}: status `{want}` is not one of {}",
+                    NODE_STATUSES.join(", ")
                 ),
             );
         }

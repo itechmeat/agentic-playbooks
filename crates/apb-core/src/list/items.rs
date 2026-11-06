@@ -246,8 +246,9 @@ fn field_equals(got: Option<&Value>, equals: &Value) -> bool {
 
 /// The id at index `i`: a non-empty string or integer of at most
 /// [`ITEM_ID_MAX_CHARS`] characters that prints (it reaches prompts, the
-/// environment and journal lines).
-fn id_of(v: &Value, i: usize) -> Result<String, ItemsError> {
+/// environment and journal lines). Also the key grammar of the
+/// `no_new_items` condition (`crate::loop_items`).
+pub(crate) fn id_of(v: &Value, i: usize) -> Result<String, ItemsError> {
     let id = match v {
         Value::String(s) => s.clone(),
         Value::Number(n) if n.is_i64() || n.is_u64() => n.to_string(),

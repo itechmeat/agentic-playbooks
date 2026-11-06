@@ -577,6 +577,7 @@ pub(crate) fn journal_interrupted(
         partial_output: Some(PAUSE_INTERRUPT_NOTE.into()),
         failure_kind: None,
         usage: None,
+        rejected_for: None,
     })
 }
 
@@ -664,6 +665,7 @@ mod tests {
             ts: 1_000 + seq as u128,
             payload: EventPayload::AttemptFinished {
                 item: None,
+                rejected_for: None,
                 output_truncated: Vec::new(),
                 transcript_incomplete: false,
                 node: node.into(),
@@ -742,6 +744,7 @@ mod tests {
                 ts,
                 EventPayload::AttemptFinished {
                     item: None,
+                    rejected_for: None,
                     output_truncated: Vec::new(),
                     transcript_incomplete: false,
                     node: "work".into(),
@@ -826,6 +829,7 @@ mod tests {
                     2,
                     EventPayload::AttemptFinished {
                         item: None,
+                        rejected_for: None,
                         output_truncated: Vec::new(),
                         transcript_incomplete: false,
                         node: "work".into(),
@@ -900,6 +904,7 @@ mod tests {
                     partial_output: None,
                     failure_kind: None,
                     usage: None,
+                    rejected_for: None,
                 },
             ),
         ];
@@ -1021,6 +1026,7 @@ mod tests {
                     2,
                     EventPayload::AttemptFinished {
                         item: None,
+                        rejected_for: None,
                         output_truncated: Vec::new(),
                         transcript_incomplete: false,
                         node: "work".into(),

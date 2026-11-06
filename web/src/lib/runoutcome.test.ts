@@ -213,10 +213,21 @@ describe('read_only_violated in the event journal', () => {
         truncated: 4,
       },
       { seq: 2, ts: 2, type: 'read_only_violated', node: 'sh', attempt: 1, changes: [] },
+      {
+        seq: 3,
+        ts: 3,
+        type: 'read_only_violated',
+        node: 'rb',
+        attempt: 1,
+        tier: 'detected',
+        changes: [{ path: 'a.txt', change: 'modified' }],
+        concurrent_with: ['ra'],
+      },
     ]
     expect(runEventJournal(events).map((e) => e.note)).toEqual([
       'read-only (detected) node changed the tree: modified notes.md, added .env, 4 more',
       'read-only (detected) node changed the tree: changed',
+      'read-only (detected) node changed the tree: modified a.txt (ran beside ra)',
     ])
   })
 })

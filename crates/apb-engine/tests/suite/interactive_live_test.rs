@@ -43,16 +43,10 @@ fn lock() -> MutexGuard<'static, ()> {
     common::env_lock()
 }
 
-struct EnvGuard;
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("APB_AGENT_CMD");
-            std::env::remove_var("APB_CONFIG_DIR");
-            std::env::remove_var("HOME");
-        }
-    }
-}
+/// The process env these tests change; `common::EnvVar::saved` guards
+/// each name and restores the value it had before the test
+/// (removing `HOME` outright broke later tests that read it).
+const TOUCHED_ENV: [&str; 3] = ["APB_AGENT_CMD", "APB_CONFIG_DIR", "HOME"];
 
 /// Aborts and joins a still-live drive on drop, so a failed assertion mid-run
 /// never leaves an orphaned helper thread (and its stub child) spinning.
@@ -243,7 +237,7 @@ fn blocking_stub_body(argv_file: Option<&Path>) -> String {
 #[test]
 fn live_injection_reaches_the_spawned_argv() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -319,7 +313,7 @@ fn live_injection_reaches_the_spawned_argv() {
 #[test]
 fn live_observation_journals_round_and_excludes_pending_from_timeout() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -444,7 +438,7 @@ fn write_livex_config(cfg: &Path) {
 #[test]
 fn live_configured_non_claude_agent_downgrades() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -496,7 +490,7 @@ fn live_configured_non_claude_agent_downgrades() {
 #[test]
 fn live_question_timeout_posts_default_answer() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -566,7 +560,7 @@ fn live_question_timeout_posts_default_answer() {
 #[test]
 fn live_question_timeout_without_default_fails_the_attempt() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -686,7 +680,7 @@ fn count_lines(path: &Path) -> usize {
 #[test]
 fn live_crash_recovery_adopts_orphaned_channel_question() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
