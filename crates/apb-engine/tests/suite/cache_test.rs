@@ -320,9 +320,9 @@ edges:
   - { from: t, to: done }
 "#;
 
-/// The process env these tests change, each var restored on drop to its
-/// value before the test (removing `HOME` outright broke later tests that
-/// read it).
+/// The process env these tests change; `common::EnvVar::saved` guards
+/// each name and restores the value it had before the test
+/// (removing `HOME` outright broke later tests that read it).
 const TOUCHED_ENV: [&str; 4] = [
     "APB_AGENT_CMD",
     "APB_CONFIG_DIR",

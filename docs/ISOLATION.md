@@ -495,9 +495,9 @@ names the file of a violation.
 A node in the detected tier joins a concurrent batch only beside members
 that cannot write the tree, finished members included. A batchable node
 that can write (one without `read_only` and without `protect`, and no list
-node) is admitted to the batch only after every detected read-only member
-of it has ended; a detected read-only node is admitted only into a batch
-that holds no such writer. A node with `protect` never batches, exactly as
+node) never joins a batch that holds a detected read-only member, running
+or finished; it waits for the next batch. A detected read-only node is
+admitted only into a batch that holds no such writer. A node with `protect` never batches, exactly as
 before, and a list node never batches. Each detected read-only member
 keeps its own before and after check: since no member of its batch may
 write, a change it sees was made by a co-member that ran at the same time,

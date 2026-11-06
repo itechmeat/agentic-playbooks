@@ -43,9 +43,9 @@ fn lock() -> MutexGuard<'static, ()> {
     common::env_lock()
 }
 
-/// The process env these tests change, each var restored on drop to its
-/// value before the test (removing `HOME` outright broke later tests that
-/// read it).
+/// The process env these tests change; `common::EnvVar::saved` guards
+/// each name and restores the value it had before the test
+/// (removing `HOME` outright broke later tests that read it).
 const TOUCHED_ENV: [&str; 3] = ["APB_AGENT_CMD", "APB_CONFIG_DIR", "HOME"];
 
 /// Aborts and joins a still-live drive on drop, so a failed assertion mid-run
