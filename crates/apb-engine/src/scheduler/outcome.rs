@@ -104,7 +104,7 @@ pub(crate) struct ExecOptions<'a> {
     /// of, one `Arc` per logical batch (`scheduler/node/read_only.rs`): a
     /// detected read-only check names the members whose attempts overlapped
     /// its own. `None` for a sequential execution; no global state.
-    pub(crate) batch_peers: Option<std::sync::Arc<super::node::read_only::BatchIntervals>>,
+    pub(crate) batch_peers: Option<std::sync::Arc<super::read_only::BatchIntervals>>,
 }
 
 /// What every node execution runs against: the run, its state, the flag
@@ -131,8 +131,9 @@ pub(crate) struct ItemExec {
     pub template: String,
     /// The `## item` section the prompt ends with.
     pub section: String,
-    /// The declared item outputs (the status file contract).
-    pub outputs: Vec<String>,
+    /// The declared item outputs (the status file contract), kept as the
+    /// declarations so the contract and the status-file note see the types.
+    pub outputs: Vec<apb_core::schema::FieldDecl>,
     /// The list declares a check: the completion check is skipped.
     pub checked: bool,
     /// The item's JSON on disk, for a script step.

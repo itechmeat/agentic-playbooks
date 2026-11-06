@@ -1,10 +1,18 @@
 // Node form helpers for the fields issue #67 added: declared output fields
 // (`outputs.fields`) and the node a `continue_session` may name.
 
+/** The name of one declared field entry: a plain string or a typed map. */
+function entryName(f: unknown): string {
+  if (f && typeof f === 'object' && 'name' in (f as Record<string, unknown>)) {
+    return String((f as Record<string, unknown>).name)
+  }
+  return String(f)
+}
+
 /** The declared output fields as the form shows them: `a, b`. */
 export function fieldsToField(outputs: unknown): string {
   const fields = (outputs as { fields?: unknown } | null | undefined)?.fields
-  return Array.isArray(fields) ? fields.map(String).join(', ') : ''
+  return Array.isArray(fields) ? fields.map(entryName).join(', ') : ''
 }
 
 /**
@@ -16,12 +24,19 @@ export function fieldToOutputs(
   raw: string,
   current: unknown,
 ): Record<string, unknown> | undefined {
-  const fields = raw
+  const names = raw
     .split(',')
     .map((f) => f.trim())
     .filter((f) => f !== '')
   const base: Record<string, unknown> = { ...((current as Record<string, unknown> | null) ?? {}) }
   delete base.fields
+  const prev = Array.isArray((current as { fields?: unknown } | null | undefined)?.fields)
+    ? ((current as { fields: unknown[] }).fields as unknown[])
+    : []
+  // A name that a typed entry still declares keeps that entry; a name the
+  // user added (or one whose typed entry they removed) lands as a plain
+  // string. The declaration follows the order the names were typed in.
+  const fields = names.map((n) => prev.find((f) => entryName(f) === n) ?? n)
   if (fields.length) base.fields = fields
   return Object.keys(base).length ? base : undefined
 }

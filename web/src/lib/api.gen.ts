@@ -187,7 +187,7 @@ export type BaselineOutcome = { problem: Array<string>, change: Array<string>,
  */
 goal_reached?: boolean, };
 
-export type NeedsLookReason = "regression" | "findings" | "warnings" | "unknown_sends" | "list_items";
+export type NeedsLookReason = "regression" | "findings" | "warnings" | "unknown_sends" | "list_items" | "checks_green_before";
 
 export type NeedsLook = { reasons: Array<NeedsLookReason>, regressions: number, findings: number, warnings: number, 
 /**
@@ -197,7 +197,11 @@ unknown_sends?: number,
 /**
  * List items that need a look.
  */
-list_items?: number, };
+list_items?: number, 
+/**
+ * Checks that passed before the work (`on_green_before: fail`).
+ */
+green_checks?: number, };
 
 export type ListOutcome = { node: string, total: number, processed: number, passed: number, passed_with_note: number, needs_look: number, 
 /**
@@ -1690,7 +1694,7 @@ unestimated_tokens: Array<string>,
  */
 unestimated_cost: Array<string>, note?: string, };
 
-export type Transition = "review" | "question" | "paused" | "finished" | "host_task" | "supervisor";
+export type Transition = "review" | "question" | "paused" | "finished" | "host_task" | "supervisor" | "stalled";
 
 export type FinishOutcome = "succeeded" | "needs_look" | "failed" | "aborted";
 

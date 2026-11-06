@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::judge::{JudgeQuestion, JudgeQuestions, OrderedMap};
+use crate::schema::FieldDecl;
 
 /// `max_items` when the playbook sets none.
 pub const DEFAULT_MAX_ITEMS: u32 = 100;
@@ -62,15 +63,27 @@ pub struct ListSpec {
     pub items: ItemSource,
     #[serde(default)]
     pub batch: BatchSpec,
-    /// The fields each item's step writes in its status file outputs.
+    /// The fields each item's step writes in its status file outputs. Each
+    /// entry is a plain name or a typed entry (`apb_core::output_contract`);
+    /// a mismatch on a typed entry rejects the item's attempt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub item_outputs: Vec<String>,
+    pub item_outputs: Vec<FieldDecl>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<ItemCheck>,
     #[serde(default)]
     pub on_needs_look: OnNeedsLook,
     #[serde(default)]
     pub rerun: RerunPolicy,
+}
+
+impl ListSpec {
+    /// The names of `item_outputs`, in declaration order.
+    pub fn item_output_names(&self) -> Vec<String> {
+        self.item_outputs
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect()
+    }
 }
 
 /// Where a list's items come from: an earlier node's output field, or

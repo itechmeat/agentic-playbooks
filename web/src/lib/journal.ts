@@ -149,8 +149,22 @@ function eventNote(e: WfEvent): string | undefined {
       return agentEnvNote(r)
     case 'tool_exposure_mismatch':
       return toolExposureNote(r)
+    case 'check_proved':
+      return r.failed_first
+        ? 'the check failed before the work'
+        : `passed before the agent ran (${String(r.on_green_before ?? 'fail')})`
     case 'attempt_finished': {
-      const notes = [attemptUsageNote(r.usage), attemptOutputNote(r.output_truncated, r.transcript_incomplete)]
+      const rejected =
+        typeof r.rejected_for === 'string' && r.rejected_for
+          ? `rejected: ${r.rejected_for.slice(0, 80)}`
+          : ''
+      const stalled = r.stalled === true ? 'stalled' : ''
+      const notes = [
+        attemptUsageNote(r.usage),
+        attemptOutputNote(r.output_truncated, r.transcript_incomplete),
+        rejected,
+        stalled,
+      ]
       const line = notes.filter(Boolean).join(' · ')
       return line || undefined
     }

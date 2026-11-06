@@ -375,6 +375,8 @@ with the forced allowlist, and every attempt records `no_sandbox` and why.
 
 ## Read-only nodes
 
+A declared write scope (`writes`, `max_changed_files`) is checked after the attempt in every tier, including the sandbox: bubblewrap binds directories and cannot enforce globs, so the post-hoc tree comparison is what holds the scope.
+
 `read_only: true` on an `agent_task` or a `script` node promises that the
 node does not change its tree: the run's working tree, or the node's own
 `workdir`. Do not confuse it with the two other uses of the word: the

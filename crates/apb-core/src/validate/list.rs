@@ -223,7 +223,7 @@ fn check_source(
         let declared = source
             .outputs
             .as_ref()
-            .map(|o| o.fields.clone())
+            .map(|o| crate::schema::field_names(&o.fields))
             .filter(|f| !f.is_empty())
             .or_else(|| super::judge::judge_output_fields(source))
             .is_some_and(|f| f.contains(&from.field));
@@ -284,7 +284,7 @@ fn check_item_check(
     let mut err = |msg: String| r.error("V87", Some(&node.id), format!("list.check: {msg}"));
     let templates: Vec<&str> = match source {
         CheckSource::Output(o) => {
-            if !spec.item_outputs.contains(&o.field) {
+            if !spec.item_outputs.iter().any(|f| f.name() == o.field) {
                 err(format!("output field `{}` is not in item_outputs", o.field));
             }
             Vec::new()
@@ -343,7 +343,7 @@ fn check_item_check(
                 ["item", rest @ ..] => {
                     !rest.is_empty() && rest.iter().all(|s| !s.trim().is_empty())
                 }
-                ["item_output", field] => spec.item_outputs.iter().any(|f| f == field),
+                ["item_output", field] => spec.item_outputs.iter().any(|f| f.name() == *field),
                 ["params", p] => playbook.params.iter().any(|d| d.name == *p),
                 _ => false,
             };

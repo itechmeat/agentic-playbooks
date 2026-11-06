@@ -102,11 +102,23 @@ fn observed(
             .get(from)
             .map(|r| Value::from(scrub.clip(&r.decision, OBSERVED_MAX))),
         EdgeCondition::OutputMatch { .. } => None,
-        EdgeCondition::OutputField { node, field, .. } => state
-            .outputs
-            .get(node)
-            .and_then(|o| output_field_value(o, field))
-            .map(|v| Value::from(scrub.clip(&v, OBSERVED_MAX))),
+        cond @ EdgeCondition::OutputField { node, field, .. } => {
+            let o = state.outputs.get(node)?;
+            // An `equals` keeps today's clipped text; a threshold names the
+            // text it read and the number it made of it (either may be null).
+            if matches!(
+                cond.field_compare(),
+                Some(apb_core::schema::FieldCompare::Equals(_))
+            ) {
+                output_field_value(o, field).map(|v| Value::from(scrub.clip(&v, OBSERVED_MAX)))
+            } else {
+                // The number is read from the raw value, the way routing
+                // reads it, never from the clipped text.
+                let value = output_field_value(o, field).map(|v| scrub.clip(&v, OBSERVED_MAX));
+                let number = apb_core::schema::output_field_number(o, field);
+                Some(serde_json::json!({ "value": value, "number": number }))
+            }
+        }
         EdgeCondition::Judge { .. } => {
             let answers = state.judge_edges.get(from)?;
             if state.finished_counts.get(from) != Some(&answers.execution) {

@@ -1,0 +1,51 @@
+schema: 1
+id: reviewer-prose-findings-fails
+title: A reviewer that writes prose where an array was declared fails after its retries
+instruction: "Review the export change."
+params: { target: "HEAD", base: "main" }
+answers:
+  scope:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { candidate: "abc123..def456", files: "[\"src/export.rs\"]", summary: "streams the export", intent: "stream the export", checks: "cargo test" }
+  review_correctness:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { role: correctness, coverage: "the whole diff", findings: "[]" }
+  # Both attempts write prose where the findings array was declared: the
+  # output contract rejects each success report, the retries are spent and
+  # the node fails with the contract reason as its terminal output.
+  review_security:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { role: security, coverage: "the whole diff", findings: "no issues found" }
+        - status: succeeded
+          outputs: { role: security, coverage: "the whole diff", findings: "no issues found" }
+  review_tests:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { role: tests, coverage: "the whole diff", findings: "[]" }
+  native_checks:
+    - visit: 1
+      attempts:
+        - status: succeeded
+          outputs: { results: "[{\"command\": \"cargo test\", \"result\": \"passed\"}]", fresh: "true" }
+  report:
+    - visit: 1
+      attempts:
+        - { status: succeeded, output: "REVIEW REPORT: partial coverage, the security role failed and its review is missing." }
+expect:
+  # The failed reviewer is delivered by the join as reviewer-fails does; the
+  # report runs and the run succeeds, stating the gap.
+  run: { outcome: [succeeded] }
+  finish: report
+  visits: { review_security: 1, report: 1 }
+  status: { review_security: failed }
+  edges:
+    taken: { "e:review_security>report#1": 1 }
+  outputs:
+    - { node: review_security, matches: "^output_contract:" }

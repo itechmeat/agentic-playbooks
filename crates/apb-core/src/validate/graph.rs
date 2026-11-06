@@ -197,7 +197,11 @@ pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
         // check_conditions never sees that shape (validate() only calls this
         // inside `if r.is_valid()`). `covered` therefore never needs to also
         // treat an unconditional edge as coverage.
-        if uses_node_status && covered.len() < 2 && !has_fallback {
+        // `Stalled` covers neither outcome: only an explicit `success` and
+        // `failure` pair counts as coverage.
+        let covers_both =
+            covered.contains(&StatusEq::Success) && covered.contains(&StatusEq::Failure);
+        if uses_node_status && !covers_both && !has_fallback {
             match is_condition {
                 true => r.error(
                     "V09",
@@ -553,12 +557,13 @@ pub(crate) fn describe_route_key(key: &RouteKey<'_>) -> String {
         // The field is part of the routing key: two edges reading DIFFERENT
         // fields of the same node are distinct routes, so only an identical
         // node/field/value triple is a duplicate.
-        RouteKey::Conditional(EdgeCondition::OutputField {
-            node,
-            field,
-            equals,
-        }) => {
-            format!("output_field node=`{node}` field=`{field}` equals=`{equals}`")
+        RouteKey::Conditional(cond @ EdgeCondition::OutputField { node, field, .. }) => {
+            // The comparator is part of the routing key (V169 refuses none
+            // or several).
+            let cmp = cond
+                .field_compare()
+                .map_or_else(|| "none".to_string(), |c| c.route_key());
+            format!("output_field node=`{node}` field=`{field}` {cmp}")
         }
         RouteKey::Conditional(EdgeCondition::Judge {
             question, min_p, ..

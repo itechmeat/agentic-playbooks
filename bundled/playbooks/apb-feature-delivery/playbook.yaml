@@ -12,7 +12,7 @@ description: >-
   project's own tests are executed by apb before and after the work and
   reported with what changed. No commit, push or pull request is made by
   the run.
-version: 1.2.3
+version: 1.2.4
 agent_launch: ask
 params:
   - name: change_kind
@@ -277,7 +277,10 @@ nodes:
       location, why, evidence, disposition: open, fixed or rejected).
       Missing review capability fails the step; it never counts as clean.
     outputs:
-      fields: [role, blocking, findings]
+      fields:
+        - { name: role, type: enum, values: [correctness], required: true }
+        - { name: blocking, type: number, required: true }
+        - { name: findings, type: array, required: true }
   - id: review_security
     type: agent_task
     title: Review security
@@ -307,7 +310,10 @@ nodes:
       location, why, evidence, disposition: open, fixed or rejected).
       Missing review capability fails the step; it never counts as clean.
     outputs:
-      fields: [role, blocking, findings]
+      fields:
+        - { name: role, type: enum, values: [security], required: true }
+        - { name: blocking, type: number, required: true }
+        - { name: findings, type: array, required: true }
   - id: review_tests
     type: agent_task
     title: Review tests and maintainability
@@ -339,7 +345,10 @@ nodes:
       location, why, evidence, disposition: open, fixed or rejected).
       Missing review capability fails the step; it never counts as clean.
     outputs:
-      fields: [role, blocking, findings]
+      fields:
+        - { name: role, type: enum, values: [tests], required: true }
+        - { name: blocking, type: number, required: true }
+        - { name: findings, type: array, required: true }
   - id: collect
     type: agent_task
     title: Collect the panel's findings
@@ -358,7 +367,10 @@ nodes:
       disposition) and roles (each role with its coverage and executor as
       reported).
     outputs:
-      fields: [open_count, findings, roles]
+      fields:
+        - { name: open_count, type: number, required: true }
+        - { name: findings, type: array, required: true }
+        - roles
   - { id: repair_round, type: condition, title: Another repair round }
   - id: fix
     type: agent_task

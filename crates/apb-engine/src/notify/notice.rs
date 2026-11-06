@@ -70,6 +70,7 @@ impl Notice {
             Transition::Finished => finished(&playbook, run_id, run_dir, opened),
             Transition::HostTask => host_task(&playbook, run_id, opened, command),
             Transition::Supervisor => supervisor(&playbook, run_id, opened),
+            Transition::Stalled => stalled(&playbook, run_id, events, t),
         };
         lines.push(match crate::people::link::run_link(root, run_id) {
             Some(url) => format!("Open the run: {url}"),
@@ -88,6 +89,56 @@ impl Notice {
         let body = self.text.split_whitespace().collect::<Vec<_>>().join(" ");
         format!("{}. {body}", self.subject)
     }
+}
+
+/// A stalled node: which step stopped retrying, how many times the same
+/// rejection came back and the rejection itself (the attempt's
+/// `rejected_for`, first 200 characters).
+fn stalled(
+    playbook: &str,
+    run_id: &str,
+    events: &[Event],
+    t: &TransitionId,
+) -> (String, Vec<String>) {
+    let opened = events.iter().find(|e| e.seq == t.seq).map(|e| &e.payload);
+    let (node, fingerprint, reason) = match opened {
+        Some(EventPayload::AttemptFinished {
+            node,
+            rejection_fingerprint,
+            rejected_for,
+            ..
+        }) => (
+            node.as_str(),
+            rejection_fingerprint.clone(),
+            rejected_for
+                .as_deref()
+                .unwrap_or("the same rejection")
+                .chars()
+                .take(200)
+                .collect::<String>(),
+        ),
+        _ => ("?", None, "the same rejection".to_string()),
+    };
+    // The stall exit's own fold, over the journal through the transition's
+    // event: what came later (a retry that succeeded) never changes the
+    // count this notice reports.
+    let through = events.partition_point(|e| e.seq <= t.seq);
+    let count = fingerprint.as_deref().map_or(0, |fp| {
+        crate::scheduler::stall_exit::streak::streak(
+            &events[..through],
+            crate::exec_key::ExecKey { node, item: None },
+            fp,
+        )
+    });
+    (
+        format!("{playbook} stalled at {node}"),
+        vec![
+            format!(
+                "Step {node} of run {run_id} of {playbook} stopped retrying: the same rejection came back {count} times in a row."
+            ),
+            format!("Reason: {reason}"),
+        ],
+    )
 }
 
 /// The command of the action of run `run_id` that answers exactly what
@@ -122,7 +173,7 @@ pub fn command_for(
         Transition::Paused => {
             matches!(a.code, ActionCode::ResumeRun | ActionCode::ResumeWithBudget)
         }
-        Transition::Finished | Transition::Supervisor => false,
+        Transition::Finished | Transition::Supervisor | Transition::Stalled => false,
     };
     actions
         .iter()

@@ -35,17 +35,21 @@ pub enum Transition {
     HostTask,
     /// A failed or timed-out node waits for the run's supervisor (opt-in).
     Supervisor,
+    /// A node stopped retrying: the same rejection came back `stall_after`
+    /// times in a row (opt-in, spec node-contracts D5).
+    Stalled,
 }
 
 impl Transition {
     /// Every transition, in the order they are reported.
-    pub const ALL: [Transition; 6] = [
+    pub const ALL: [Transition; 7] = [
         Transition::Review,
         Transition::Question,
         Transition::Paused,
         Transition::Finished,
         Transition::HostTask,
         Transition::Supervisor,
+        Transition::Stalled,
     ];
 
     /// The transitions a subscription covers when nothing narrows it: the
@@ -66,6 +70,7 @@ impl Transition {
             Transition::Finished => "finished",
             Transition::HostTask => "host_task",
             Transition::Supervisor => "supervisor",
+            Transition::Stalled => "stalled",
         }
     }
 

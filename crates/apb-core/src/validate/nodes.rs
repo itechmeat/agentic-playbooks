@@ -371,6 +371,19 @@ pub(crate) fn check_success_check(playbook: &Playbook, r: &mut ValidationReport)
                 Some(&n.id),
                 "success_check is only valid on an agent_task node".to_string(),
             );
+            // A proof on a script (or any other kind) is named too: the
+            // engine proves before an agent's first attempt only.
+            if sc.prove().is_some() {
+                r.error(
+                    "V173",
+                    Some(&n.id),
+                    format!(
+                        "`prove_fails_first` applies to agent_task nodes only; node `{}` is a {} node, which has no agent attempt to prove before",
+                        n.id,
+                        n.kind.type_str()
+                    ),
+                );
+            }
             continue;
         }
         if let SuccessCheck::Marker { marker } = sc
@@ -382,9 +395,72 @@ pub(crate) fn check_success_check(playbook: &Playbook, r: &mut ValidationReport)
                 "success_check marker must not be empty".to_string(),
             );
         }
+        // V173: a proof that cannot mean anything, and a `skip` that would
+        // claim an output the node did not produce (spec node-contracts D4).
+        if let SuccessCheck::Scoped {
+            script,
+            scope,
+            prove_fails_first,
+            on_green_before,
+        } = sc
+        {
+            if on_green_before.is_some() && !prove_fails_first {
+                r.error(
+                    "V173",
+                    Some(&n.id),
+                    "success_check `on_green_before` needs `prove_fails_first: true`; without a proof the node never settles green before work".to_string(),
+                );
+            }
+            if scope.is_none() && !prove_fails_first {
+                r.error(
+                    "V173",
+                    Some(&n.id),
+                    format!("success_check map carries neither `scope` nor `prove_fails_first: true`: write the bare string `{script}`"),
+                );
+            }
+            // The proof runs before a plain agent's first attempt only: a
+            // list node's items have no such attempt, so the engine would
+            // skip it in silence.
+            if *prove_fails_first && n.list().is_some() {
+                r.error(
+                    "V173",
+                    Some(&n.id),
+                    "`prove_fails_first` on a list node: the proof runs before a plain agent_task's first attempt, never per item".into(),
+                );
+            }
+            if *prove_fails_first && n.cache.is_some() {
+                r.error(
+                    "V173",
+                    Some(&n.id),
+                    "`prove_fails_first` on a node with `cache`: a cache hit settles the node with no proof in this run".into(),
+                );
+            }
+            if *on_green_before == Some(crate::schema::OnGreenBefore::Skip) {
+                let claims = n.outputs.as_ref().is_some_and(|o| !o.fields.is_empty())
+                    || n.results.is_some()
+                    || playbook.edges.iter().any(|e| {
+                        e.condition.as_ref().is_some_and(|c| match c {
+                            EdgeCondition::OutputMatch { node, .. }
+                            | EdgeCondition::OutputField { node, .. }
+                            | EdgeCondition::NoNewItems { node, .. } => node == &n.id,
+                            _ => false,
+                        })
+                    });
+                if claims {
+                    r.error(
+                        "V173",
+                        Some(&n.id),
+                        "`on_green_before: skip` settles the node without the agent, so it must not declare `outputs.fields` or `results`, and no edge may read its output".into(),
+                    );
+                }
+            }
+        }
         // V163: a declared check scope names at least one glob, and each
         // compiles; an empty one would bind the pass to nothing.
-        if let SuccessCheck::Scoped { scope, .. } = sc {
+        if let SuccessCheck::Scoped {
+            scope: Some(scope), ..
+        } = sc
+        {
             if scope.is_empty() || scope.iter().any(|g| g.trim().is_empty()) {
                 r.error(
                     "V163",

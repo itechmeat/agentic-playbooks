@@ -4,7 +4,7 @@
 //! carry one, and a delay that no retry ever uses is reported.
 
 use super::*;
-use crate::schema::RetryDelay;
+use crate::schema::{RetryDelay, StatusEq};
 
 /// Runs every retry delay rule.
 pub(crate) fn check_retry_delay(playbook: &Playbook, r: &mut ValidationReport) {
@@ -100,5 +100,105 @@ fn check_block(delay: &RetryDelay, node: Option<&str>, at: &str, r: &mut Validat
             format!("{at}.max must be at least {at}.initial"),
         ),
         Some(_) => {}
+    }
+}
+
+/// V174 (error): `stall_after` outside 2 to 10 (on a node or `defaults`), or
+/// on a node that is not an `agent_task`, or on a list node. V175 (warning):
+/// a `node_status` edge with `equals: stalled` whose node has no effective
+/// `stall_after` (it never matches), or that comes after an edge from the
+/// same source with `node_status` `equals: failure` on the same node (the
+/// failure edge is always taken first).
+pub(crate) fn check_stall_after(playbook: &Playbook, r: &mut ValidationReport) {
+    if let Some(value) = playbook.defaults.stall_after
+        && !(2..=10).contains(&value)
+    {
+        r.error(
+            "V174",
+            None,
+            format!("defaults.stall_after is {value}, outside the range 2 to 10"),
+        );
+    }
+    for n in &playbook.nodes {
+        if let Some(value) = n.stall_after {
+            if !matches!(n.kind, NodeKind::AgentTask { .. }) {
+                r.error(
+                    "V174",
+                    Some(&n.id),
+                    format!(
+                        "`stall_after` applies to agent_task nodes only; node `{}` is a {} node, which never retries a rejection",
+                        n.id,
+                        n.kind.type_str()
+                    ),
+                );
+            } else if n.list().is_some() {
+                r.error(
+                    "V174",
+                    Some(&n.id),
+                    "`stall_after` is not allowed on a list node: its items are bounded by the batch retries".into(),
+                );
+            } else if !(2..=10).contains(&value) {
+                r.error(
+                    "V174",
+                    Some(&n.id),
+                    format!(
+                        "node `{}` has stall_after {value}, outside the range 2 to 10",
+                        n.id
+                    ),
+                );
+            }
+        }
+    }
+    // V175: a `stalled` edge that can never match.
+    for e in &playbook.edges {
+        let Some(EdgeCondition::NodeStatus {
+            node,
+            equals: StatusEq::Stalled,
+        }) = &e.condition
+        else {
+            continue;
+        };
+        // The node the condition names, which need not be the edge's
+        // source; `effective_stall_after` is `None` for anything but a
+        // non-list agent_task, which never stalls either.
+        let Some(named) = playbook.node(node) else {
+            continue;
+        };
+        if playbook.effective_stall_after(named).is_none() {
+            r.warn(
+                "V175",
+                Some(&e.from),
+                format!(
+                    "edge from `{}` routes on `stalled`, but node `{node}` has no effective stall_after, so it never stalls",
+                    e.from
+                ),
+            );
+            continue;
+        }
+        // A stalled edge after a failure edge on the same node, from the same
+        // source: the failure edge is always taken first.
+        let failure_first = playbook.edges.iter().any(|other| {
+            other.from == e.from
+                && other.to != e.to
+                && matches!(
+                    other.condition,
+                    Some(EdgeCondition::NodeStatus {
+                        node: ref n2,
+                        equals: StatusEq::Failure,
+                    }) if n2 == node
+                )
+                && playbook.edges.iter().position(|x| std::ptr::eq(x, other))
+                    < playbook.edges.iter().position(|x| std::ptr::eq(x, e))
+        });
+        if failure_first {
+            r.warn(
+                "V175",
+                Some(&e.from),
+                format!(
+                    "edge from `{}` routes on `stalled` after an edge of the same source already routes `failure` on `{node}`, which is always taken first",
+                    e.from
+                ),
+            );
+        }
     }
 }

@@ -176,6 +176,7 @@ dependencies = [
  "base64 0.23.1",
  "ciborium",
  "ed25519-dalek",
+ "globset",
  "imap",
  "imap-proto 0.17.0",
  "jsonschema",

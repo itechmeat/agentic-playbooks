@@ -4,7 +4,9 @@
 //! declared cache key (`cache.key`, V49).
 
 use super::graph::must_have_finished;
-use super::templates::{cache_key_texts, template_refs, template_texts, workdir_texts};
+use super::templates::{
+    cache_key_texts, template_refs, template_texts, workdir_texts, writes_texts,
+};
 use super::*;
 
 /// V44 (error): `continue_session` must name another `agent_task` of the
@@ -83,7 +85,7 @@ pub(crate) fn check_session_handoff(playbook: &Playbook, r: &mut ValidationRepor
     }
 }
 
-/// V46 (warning): a template (prompt, workdir or cache key) or an
+/// V46 (warning): a template (prompt, workdir, `writes` or cache key) or an
 /// `output_field` or `no_new_items` edge reads `nodes.<id>.output.<field>`
 /// (or `.report.<field>`, or `.seen.<field>`) of a node that declares
 /// `outputs.fields` without that field. Nodes that declare nothing are not checked, so
@@ -121,6 +123,7 @@ pub(crate) fn check_declared_fields(
     let mut texts: Vec<(Option<&str>, &str)> = template_texts(playbook)
         .into_iter()
         .chain(workdir_texts(playbook))
+        .chain(writes_texts(playbook))
         .chain(cache_key_texts(playbook))
         .map(|(owner, text)| (Some(owner), text))
         .collect();
@@ -163,7 +166,7 @@ pub(super) fn declared_fields<'a>(
         } else if let Some(f) = n
             .outputs
             .as_ref()
-            .map(|o| &o.fields)
+            .map(|o| crate::schema::field_names(&o.fields))
             .filter(|f| !f.is_empty())
         {
             Some(f.clone())

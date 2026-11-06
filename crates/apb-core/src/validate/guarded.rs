@@ -25,15 +25,19 @@ pub enum GuardedFeature {
     /// A node reads through an evidence session and its claims are checked
     /// (`evidence`).
     Evidence,
+    /// An attempt's writes are scoped (`writes`, `max_changed_files`); an
+    /// older apb drops the keys and runs the node unchecked.
+    WriteScope,
 }
 
 impl GuardedFeature {
     /// Every feature this binary knows, in declaration order.
-    pub const ALL: [GuardedFeature; 4] = [
+    pub const ALL: [GuardedFeature; 5] = [
         GuardedFeature::ApprovalBinding,
         GuardedFeature::PersonOnly,
         GuardedFeature::RequiredApproval,
         GuardedFeature::Evidence,
+        GuardedFeature::WriteScope,
     ];
 
     /// The name a `run_guard` carries.
@@ -43,6 +47,7 @@ impl GuardedFeature {
             GuardedFeature::PersonOnly => "person_only",
             GuardedFeature::RequiredApproval => "required_approval",
             GuardedFeature::Evidence => "evidence",
+            GuardedFeature::WriteScope => "write_scope",
         }
     }
 
@@ -70,6 +75,9 @@ pub fn guarded_features(playbook: &Playbook) -> Vec<GuardedFeature> {
         if node.evidence.is_some() {
             used.insert(GuardedFeature::Evidence);
         }
+        if node.writes.is_some() || node.max_changed_files.is_some() {
+            used.insert(GuardedFeature::WriteScope);
+        }
     }
     used.into_iter().collect()
 }
@@ -92,7 +100,7 @@ mod tests {
     fn each_declaration_names_its_feature_once_in_order() {
         use GuardedFeature::*;
         let work = "  - { id: w, type: script, script: s, runner: sh }\n";
-        let cases: [(String, Vec<GuardedFeature>); 6] = [
+        let cases: [(String, Vec<GuardedFeature>); 7] = [
             (
                 format!("{work}  - {{ id: g, type: human_review }}\n"),
                 vec![],
@@ -124,6 +132,12 @@ mod tests {
                     "{work}  - {{ id: e, type: agent_task, prompt: p, evidence: {{ from: [w] }} }}\n"
                 ),
                 vec![Evidence],
+            ),
+            (
+                format!(
+                    "{work}  - {{ id: w2, type: script, script: s, runner: sh, writes: [\"src/**\"] }}\n"
+                ),
+                vec![WriteScope],
             ),
         ];
         for (nodes, want) in cases {

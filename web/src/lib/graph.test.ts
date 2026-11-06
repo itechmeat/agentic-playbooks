@@ -2,6 +2,7 @@ import dagre from '@dagrejs/dagre'
 import { describe, expect, it, vi } from 'vitest'
 import {
   dragFromHandle,
+  edgeLabel,
   edgeTone,
   exitHandleAddress,
   expectedText,
@@ -13,6 +14,23 @@ import {
   toFlow,
   withProfileModels,
 } from './graph'
+import { parseDocument, type Document } from 'yaml'
+import { updateNode } from './playbookedit'
+
+function docOf(text: string): Document {
+  const d = parseDocument(text)
+  if (d.errors.length) throw new Error(d.errors[0].message)
+  return d
+}
+
+// The condition of the first edge of `from` that carries one, from the
+// re-parsed plain object (what a reload of the saved text produces).
+function firstCondition(text: string, from: string): Record<string, unknown> | undefined {
+  const plain = docOf(text).toJS() as {
+    edges: { from: string; condition?: Record<string, unknown> }[]
+  }
+  return plain.edges.find((e) => e.from === from && e.condition)?.condition
+}
 
 const playbook = {
   id: 'demo',
@@ -364,6 +382,104 @@ describe('nodeExits', () => {
     )
     expect(exits?.list.map((e) => e.label)).toEqual(['1 match: yes', '2 match: no'])
     expect(exits?.list[0].title).toContain('needs_brainstorm: yes')
+  })
+
+  // D5: a `stalled` edge takes the fail tone and says what a stall is.
+  it('gives a stalled edge the fail tone and the stall caption', () => {
+    const edge = {
+      from: 'fix',
+      to: 'ask',
+      condition: { type: 'node_status', node: 'fix', equals: 'stalled' },
+    }
+    expect(edgeTone(edge as Parameters<typeof edgeTone>[0])).toBe('fail')
+    const exits = nodeExits(pb([edge]), 'fix')
+    expect(exits?.list[0].title).toContain('taken when this node stalls (the same rejection repeated), goes to ask')
+  })
+
+  it('keeps a stalled edge on save', () => {
+    const yaml = `schema: 2
+id: stall-demo
+name: Stall Demo
+version: 1.0.0
+
+nodes:
+  - { id: start, type: start }
+  - { id: fix, type: agent_task, prompt: Fix it, stall_after: 3 }
+  - { id: ask, type: finish, outcome: success }
+  - { id: bad, type: finish, outcome: failure }
+
+edges:
+  - { from: start, to: fix }
+  - { from: fix, to: ask, condition: { type: node_status, node: fix, equals: stalled } }
+  - { from: fix, to: bad, fallback: true }
+`
+    const edited = updateNode(docOf(yaml), 'fix', { title: 'Fix it again' })
+    expect(firstCondition(edited.toString(), 'fix')).toEqual({
+      type: 'node_status',
+      node: 'fix',
+      equals: 'stalled',
+    })
+  })
+
+  // D2: a threshold edge labels like the HTML report and titles with the
+  // word for its comparison (below, at most, above, at least).
+  const THRESHOLD_YAML = `schema: 2
+id: score-demo
+name: Score Demo
+version: 1.0.0
+
+nodes:
+  - { id: start, type: start }
+  - { id: score, type: script, script: scripts/score.sh, runner: sh }
+  - { id: low, type: finish, outcome: success }
+  - { id: high, type: finish, outcome: success }
+  - { id: other, type: finish, outcome: success }
+
+edges:
+  - { from: start, to: score }
+  - { from: score, to: low, condition: { type: output_field, node: score, field: coverage, lt: 80 } }
+  - { from: score, to: high, condition: { type: output_field, node: score, field: coverage, gte: 80 } }
+  - { from: score, to: other, fallback: true }
+`
+
+  it('labels and titles the four threshold comparators', () => {
+    const exits = nodeExits(
+      pb([
+        { from: 'score', to: 'a', condition: { type: 'output_field', node: 'score', field: 'cov', lt: 80 } },
+        { from: 'score', to: 'b', condition: { type: 'output_field', node: 'score', field: 'cov', lte: 80.5 } },
+        { from: 'score', to: 'c', condition: { type: 'output_field', node: 'score', field: 'cov', gt: 10 } },
+        { from: 'score', to: 'd', condition: { type: 'output_field', node: 'score', field: 'cov', gte: 10000 } },
+      ]),
+      'score',
+    )
+    expect(exits?.list.map((e) => e.label)).toEqual([
+      '1 cov < 80',
+      '2 cov <= 80.5',
+      '3 cov > 10',
+      '4 cov >= 10000',
+    ])
+    expect(exits?.list[0].title).toContain('whose "cov" is below 80')
+    expect(exits?.list[1].title).toContain('whose "cov" is at most 80.5')
+    expect(exits?.list[2].title).toContain('whose "cov" is above 10')
+    expect(exits?.list[3].title).toContain('whose "cov" is at least 10000')
+  })
+
+  it('labels a threshold edge like the HTML report does', () => {
+    const edges: { from: string; to: string; condition?: Record<string, unknown> }[] =
+      docOf(THRESHOLD_YAML).toJS().edges
+    const edge = edges.find((e) => e.condition?.lt != null)
+    expect(edgeLabel(edge as Parameters<typeof edgeLabel>[0])).toBe('coverage < 80')
+  })
+
+  it('keeps the lt comparator on a load, edit and save round trip', () => {
+    const edited = updateNode(docOf(THRESHOLD_YAML), 'score', { title: 'Score it' })
+    const saved = edited.toString()
+    expect(firstCondition(saved, 'score')).toEqual({
+      type: 'output_field',
+      node: 'score',
+      field: 'coverage',
+      lt: 80,
+    })
   })
 
   // Without its own arm an `output_field` exit fell through to the raw type

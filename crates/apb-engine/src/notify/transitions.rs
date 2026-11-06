@@ -77,6 +77,10 @@ pub fn open_transitions(events: &[Event]) -> Vec<TransitionId> {
     let mut supervisor: Option<u64> = None;
     let mut paused: Option<u64> = None;
     let mut finished: Option<u64> = None;
+    // A stalled attempt opens `stalled` at its seq; the run's end does not
+    // close it (it is news about a step, not a wait), and the send ledger
+    // keeps it to one send (spec node-contracts D5).
+    let mut stalled: Vec<u64> = Vec::new();
     for e in events {
         match &e.payload {
             EventPayload::HostTaskRequested { task_id, .. } => {
@@ -128,6 +132,11 @@ pub fn open_transitions(events: &[Event]) -> Vec<TransitionId> {
                 paused = None;
                 finished = None;
             }
+            EventPayload::AttemptFinished {
+                item: None,
+                stalled: true,
+                ..
+            } => stalled.push(e.seq),
             EventPayload::RunFinished { .. } | EventPayload::RunAborted { .. } => {
                 reviews.clear();
                 questions.clear();
@@ -166,6 +175,11 @@ pub fn open_transitions(events: &[Event]) -> Vec<TransitionId> {
     out.extend(supervisor.map(|seq| TransitionId::new(Transition::Supervisor, seq)));
     out.extend(paused.map(|seq| TransitionId::new(Transition::Paused, seq)));
     out.extend(finished.map(|seq| TransitionId::new(Transition::Finished, seq)));
+    out.extend(
+        stalled
+            .into_iter()
+            .map(|seq| TransitionId::new(Transition::Stalled, seq)),
+    );
     out.sort_by_key(|t| t.seq);
     out
 }

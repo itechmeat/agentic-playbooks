@@ -186,7 +186,7 @@ pub(super) fn settled_output(spec: &ListSpec, output: &str) -> Option<String> {
         obj
     } else {
         obj.into_iter()
-            .filter(|(k, _)| spec.item_outputs.contains(k))
+            .filter(|(k, _)| spec.item_outputs.iter().any(|f| f.name() == k))
             .collect()
     };
     let text = serde_json::to_string(&kept).ok()?;

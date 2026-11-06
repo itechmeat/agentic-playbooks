@@ -193,6 +193,12 @@ pub struct RunState {
     /// earlier one; a node that later succeeds keeps its last rejected text
     /// here (harmless - only a node that references the key reads it).
     pub rejected_outputs: BTreeMap<String, String>,
+    /// The nodes whose latest execution ended stalled (the same rejection
+    /// repeated `stall_after` times in a row), folded from
+    /// `AttemptFinished.stalled` and `NodeFinished` (spec node-contracts
+    /// D5). A node keeps the label only while its last execution stalled; a
+    /// successful or plain failed execution clears it.
+    pub stalled: BTreeSet<String>,
     /// The most recent `RunError` folded from the journal, if any (issue #42
     /// finding 3). Set even when the run later succeeds via resume/patch past
     /// the failure - `run_status`/doctor only read it while `run_status` is
@@ -562,6 +568,11 @@ impl RunState {
                     s.nodes.insert(node.clone(), NodeStatus::Running);
                     s.route_suppressed.remove(node);
                     s.refused_joins.remove(node);
+                    // A new execution owns the label afresh: one that ends
+                    // with no attempt (a green-before proof, a refused
+                    // scope, an isolation or approval refusal) never
+                    // inherits an earlier stall.
+                    s.stalled.remove(node);
                     s.ran_again(node);
                 }
                 EventPayload::AttemptStarted {
@@ -581,18 +592,31 @@ impl RunState {
                 // the drive never finished is a crash to an offline reader.
                 // Live reporting reads this event (see `liveness`).
                 EventPayload::AttemptExited { .. } => {}
+                // The proof is an observation that carries no state of its
+                // own; the fold reads it only through the prove module.
+                EventPayload::CheckProved { .. } => {}
                 EventPayload::AttemptFinished {
                     node,
                     rejected_output,
                     item,
+                    stalled,
                     ..
                 } => {
                     open.remove(&(node.clone(), item.clone()));
                     // A list item's rejection is its own, not the node's.
-                    if item.is_none()
-                        && let Some(text) = rejected_output
-                    {
-                        s.rejected_outputs.insert(node.clone(), text.clone());
+                    if item.is_none() {
+                        if let Some(text) = rejected_output {
+                            s.rejected_outputs.insert(node.clone(), text.clone());
+                        }
+                        // The label rides the node's latest attempt: a
+                        // later attempt that did not stall clears it, and
+                        // the node's own `NodeFinished` decides whether a
+                        // stalled one stays.
+                        if *stalled {
+                            s.stalled.insert(node.clone());
+                        } else {
+                            s.stalled.remove(node);
+                        }
                     }
                 }
                 EventPayload::NodeFinished {
@@ -608,6 +632,14 @@ impl RunState {
                     s.outputs.insert(node.clone(), output.clone());
                     s.last_node = Some(node.clone());
                     *s.finished_counts.entry(node.clone()).or_insert(0) += 1;
+                    // The stall label rides the last attempt: a node that
+                    // finished otherwise (a success, or a failure that was
+                    // not a stall) loses it.
+                    if !(NodeStatus::from_label(status) == NodeStatus::Failed
+                        && s.stalled.contains(node))
+                    {
+                        s.stalled.remove(node);
+                    }
                     // The whole output of every successful visit, in journal
                     // order: what `no_new_items` folds (the label is
                     // "succeeded", never "success" - that is the StatusEq
