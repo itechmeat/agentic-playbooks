@@ -120,6 +120,7 @@ fn renders_all_template_refs() {
         &rejected_outputs,
         &hooks,
         "CTXBODY",
+        &BTreeMap::new(),
         &unlimited_outputs(),
     );
     assert_eq!(
@@ -172,8 +173,10 @@ fn build_context_for_render_has_no_instruction_section_when_absent() {
 }
 
 /// `{{nodes.<id>.output.<field>}}` projects ONE top-level field of a node
-/// output that parses as a JSON object, with the exact `output_field` edge
-/// condition semantics. `.report` is the same alias it is for the bare form.
+/// output that parses as a JSON object. A string, bool or number renders as
+/// `output_field_value` reads it; an array or an object renders as compact
+/// JSON, so a reviewer's findings array reaches a later node. `.report` is
+/// the same alias it is for the bare form.
 #[test]
 fn renders_a_top_level_field_selector_on_output_and_report() {
     let mut outputs = BTreeMap::new();
@@ -191,14 +194,40 @@ fn renders_a_top_level_field_selector_on_output_and_report() {
         &BTreeMap::new(),
         &BTreeMap::new(),
         "",
+        &BTreeMap::new(),
         &unlimited_outputs(),
     );
     assert_eq!(out, "V: failed | C: 3 | O: true");
 }
 
+/// An array or an object field renders as compact JSON, so an agent that
+/// writes a real findings array hands the next node every finding.
+#[test]
+fn an_array_or_object_field_renders_as_compact_json() {
+    let mut outputs = BTreeMap::new();
+    outputs.insert(
+        "collect".to_string(),
+        r#"{"findings":[{"id":"a"}]}"#.to_string(),
+    );
+    let out = render(
+        "F: {{nodes.collect.output.findings}}",
+        &BTreeMap::new(),
+        None,
+        &outputs,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        "",
+        &BTreeMap::new(),
+        &unlimited_outputs(),
+    );
+    assert_eq!(out, r#"F: [{"id":"a"}]"#);
+}
+
 /// Every shape the projection cannot read renders as the empty string, never an
 /// error: a node with no output, an output that is not JSON, JSON that is not an
-/// object, an absent field, and a value with no unambiguous string form.
+/// object, an absent field, and a null value. An array or an object value
+/// renders as compact JSON, so it is no longer among the unreadable shapes.
 #[test]
 fn a_field_selector_renders_empty_for_every_unreadable_shape() {
     let mut outputs = BTreeMap::new();
@@ -214,8 +243,6 @@ fn a_field_selector_renders_empty_for_every_unreadable_shape() {
         ("[{{nodes.arr.output.verdict}}]", "JSON is not an object"),
         ("[{{nodes.obj.output.missing}}]", "absent field"),
         ("[{{nodes.obj.output.verdict}}]", "null value"),
-        ("[{{nodes.obj.output.nested}}]", "object value"),
-        ("[{{nodes.obj.output.list}}]", "array value"),
     ] {
         let out = render(
             text,
@@ -226,6 +253,7 @@ fn a_field_selector_renders_empty_for_every_unreadable_shape() {
             &BTreeMap::new(),
             &BTreeMap::new(),
             "",
+            &BTreeMap::new(),
             &unlimited_outputs(),
         );
         assert_eq!(out, "[]", "{why} must render empty, got {out}");
@@ -243,7 +271,31 @@ fn unknown_refs_become_empty() {
         &BTreeMap::new(),
         &BTreeMap::new(),
         "",
+        &BTreeMap::new(),
         &unlimited_outputs(),
     );
     assert_eq!(out, "[]");
+}
+
+// The seen reference of a `no_new_items` loop (spec loops-and-graphs D2)
+// renders the rendered seen text the run's JudgeInputs carry, keyed
+// `<node>.<field>`; absent from the map, or on a first visit, it renders
+// empty.
+#[test]
+fn a_seen_reference_renders_from_the_map_and_empty_when_absent() {
+    let mut seen = BTreeMap::new();
+    seen.insert("hunt.findings".to_string(), "a\nb".to_string());
+    let out = render(
+        "S: [{{nodes.hunt.seen.findings}}] E: [{{nodes.ghost.seen.findings}}]",
+        &BTreeMap::new(),
+        None,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        "",
+        &seen,
+        &unlimited_outputs(),
+    );
+    assert_eq!(out, "S: [a\nb] E: []");
 }

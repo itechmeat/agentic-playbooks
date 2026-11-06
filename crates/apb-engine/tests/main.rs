@@ -446,6 +446,9 @@ mod prompt_cache_test;
 #[path = "suite/protect_test.rs"]
 mod protect_test;
 #[cfg(unix)]
+#[path = "suite/read_only_batch_test.rs"]
+mod read_only_batch_test;
+#[cfg(unix)]
 #[path = "suite/read_only_test.rs"]
 mod read_only_test;
 #[path = "suite/result_snapshot_test.rs"]

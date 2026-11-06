@@ -45,16 +45,10 @@ fn lock() -> MutexGuard<'static, ()> {
     common::env_lock()
 }
 
-struct EnvGuard;
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("APB_AGENT_CMD");
-            std::env::remove_var("APB_CONFIG_DIR");
-            std::env::remove_var("HOME");
-        }
-    }
-}
+/// The process env these tests change, each var restored on drop to its
+/// value before the test (removing `HOME` outright broke later tests that
+/// read it).
+const TOUCHED_ENV: [&str; 3] = ["APB_AGENT_CMD", "APB_CONFIG_DIR", "HOME"];
 
 /// Aborts and joins a still-parked drive on drop, so a failed assertion mid-run
 /// never leaves an orphaned helper thread spinning on a torn-down tempdir.
@@ -198,7 +192,7 @@ fn single_ask_body(counter: &Path) -> String {
 #[test]
 fn ask_answer_finish_single_suspension() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -293,7 +287,7 @@ fn ask_answer_finish_single_suspension() {
 #[test]
 fn two_questions_across_two_suspensions_count_based() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -371,7 +365,7 @@ fn abort_while_parked_finalizes_run_aborted_without_answer() {
     // an Abort while the question is outstanding (never answered) finalizes the
     // run as Aborted, exactly like aborting a waiting human_review.
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -440,7 +434,7 @@ fn context_append_while_parked_is_applied_then_node_completes() {
     // bounces to the top-of-loop control scan every cycle), and after answering
     // the node still completes normally.
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -526,7 +520,7 @@ fn context_append_while_parked_is_applied_then_node_completes() {
 #[test]
 fn malformed_marker_json_fails_without_parking() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -584,7 +578,7 @@ fn malformed_marker_json_fails_without_parking() {
 #[test]
 fn non_interactive_marker_finishes_normally() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -635,7 +629,7 @@ fn non_interactive_marker_finishes_normally() {
 #[test]
 fn reinvocation_prompt_carries_original_and_transcript() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();

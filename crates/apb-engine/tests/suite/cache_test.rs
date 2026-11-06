@@ -320,18 +320,15 @@ edges:
   - { from: t, to: done }
 "#;
 
-/// Restores the agent env vars on drop so a mutation never leaks between tests.
-struct AgentEnvGuard;
-impl Drop for AgentEnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("APB_AGENT_CMD");
-            std::env::remove_var("APB_CONFIG_DIR");
-            std::env::remove_var("HOME");
-            std::env::remove_var("APB_TEST_FIXTURE");
-        }
-    }
-}
+/// The process env these tests change, each var restored on drop to its
+/// value before the test (removing `HOME` outright broke later tests that
+/// read it).
+const TOUCHED_ENV: [&str; 4] = [
+    "APB_AGENT_CMD",
+    "APB_CONFIG_DIR",
+    "HOME",
+    "APB_TEST_FIXTURE",
+];
 
 /// Writes an executable `#!/bin/sh` stub and returns its path (for APB_AGENT_CMD).
 fn make_stub(dir: &Path, body: &str) -> String {
@@ -438,7 +435,7 @@ fn now_unix() -> u64 {
 #[test]
 fn agent_node_second_run_hits_cache() {
     let _l = common::env_lock();
-    let _g = AgentEnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -483,7 +480,7 @@ fn agent_node_second_run_hits_cache() {
 #[test]
 fn agent_bundle_change_is_a_miss() {
     let _l = common::env_lock();
-    let _g = AgentEnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -517,7 +514,7 @@ fn agent_bundle_change_is_a_miss() {
 #[test]
 fn agent_read_only_connector_call_is_admitted() {
     let _l = common::env_lock();
-    let _g = AgentEnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -556,7 +553,7 @@ fn agent_read_only_connector_call_is_admitted() {
 #[test]
 fn agent_non_read_only_connector_call_is_rejected() {
     let _l = common::env_lock();
-    let _g = AgentEnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();

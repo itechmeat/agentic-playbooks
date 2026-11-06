@@ -1,6 +1,7 @@
 //! The run retrospective (issue #192 part 3): `run_retro::build` over run
 //! directories laid out as apb writes them, and `{{run.retro}}`.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -321,6 +322,7 @@ fn run_retro_renders_into_a_prompt_bounded() {
         &empty,
         &empty,
         "",
+        &BTreeMap::new(),
         &clip,
     );
     assert!(

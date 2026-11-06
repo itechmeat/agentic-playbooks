@@ -140,6 +140,7 @@ fn judge_key_parts(
     let mut rendered = serde_json::Map::new();
     for (name, template) in fields.iter() {
         let text = render_node_prompt(
+            playbook,
             run_dir,
             run_id,
             state,
@@ -583,6 +584,7 @@ pub(crate) fn probe(
         && let Some((bundle, agent, model, digests)) = agent_key_parts(run_dir, node_id)
     {
         rendered_prompt = Some(render_node_prompt(
+            playbook,
             run_dir,
             run_id,
             state,
@@ -619,6 +621,7 @@ pub(crate) fn probe(
         match playbook.node(node_id).and_then(|n| n.cache_key_template()) {
             Some(template) => {
                 let rendered = render_node_prompt(
+                    playbook,
                     run_dir,
                     run_id,
                     state,

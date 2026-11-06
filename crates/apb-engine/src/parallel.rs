@@ -97,6 +97,26 @@ pub fn edge_matches_at(edge: &Edge, index: Option<usize>, from: &str, state: &Ru
             Some(p) => p >= min_p.0,
             None => on_unavailable.unwrap_or(false),
         },
+        // The loop exit (spec loops-and-graphs D2): matched once the last
+        // `rounds` successful visits of `node` each added no new key, over
+        // the successful visits the fold kept.
+        Some(EdgeCondition::NoNewItems {
+            node,
+            field,
+            key,
+            rounds,
+        }) => {
+            let items = apb_core::loop_items::evaluate(
+                state
+                    .success_outputs
+                    .get(node)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                field,
+                key.as_deref(),
+            );
+            items.visits >= *rounds as usize && items.streak >= *rounds as usize
+        }
     }
 }
 
@@ -124,7 +144,8 @@ fn condition_reads(cond: &EdgeCondition, node: &str) -> bool {
     match cond {
         EdgeCondition::NodeStatus { node: n, .. }
         | EdgeCondition::OutputMatch { node: n, .. }
-        | EdgeCondition::OutputField { node: n, .. } => n == node,
+        | EdgeCondition::OutputField { node: n, .. }
+        | EdgeCondition::NoNewItems { node: n, .. } => n == node,
         // A judge edge reads its own source, which the caller already
         // treats as a conditional edge out of that node.
         EdgeCondition::ReviewStatus { .. } | EdgeCondition::Judge { .. } => false,
@@ -1442,6 +1463,19 @@ edges:
         ));
         // Empty output.
         assert!(!output_field_matches(Some(""), "failed"));
+    }
+
+    /// After templates learned to render an array field as compact JSON
+    /// (`output_field_text`), routing keeps its documented non-match: an
+    /// `output_field` edge on an array field still does not match, because
+    /// the condition keeps reading through `output_field_value`.
+    #[test]
+    fn output_field_edge_on_an_array_field_still_does_not_match() {
+        assert!(!output_field_matches(
+            Some(r#"{"findings":[{"id":"a"},{"id":"b"}]}"#),
+            r#"[{"id":"a"},{"id":"b"}]"#
+        ));
+        assert!(!output_field_matches(Some(r#"{"findings":[]}"#), "[]"));
     }
 
     #[test]

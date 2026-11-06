@@ -98,6 +98,37 @@ describe('AttemptIsolationPanel', () => {
     expect(document.body.textContent).toContain('over 1 entry, 1 byte')
   })
 
+  it("names the batch members a violation ran beside, and the plain wording when there were none", () => {
+    const readOnly = [
+      {
+        node: 'scan',
+        attempt: 1,
+        tier: 'detected' as const,
+        violated: {
+          changes: [{ path: 'a.txt', change: 'modified' }],
+          concurrent_with: ['write', 'other'],
+        },
+      },
+      {
+        node: 'solo',
+        attempt: 1,
+        tier: 'detected' as const,
+        violated: { changes: [{ path: 'b.txt', change: 'added' }] },
+      },
+    ]
+    app = mount(AttemptIsolationPanel, { target: document.body, props: { readOnly } })
+    flushSync()
+    const violated = [...document.querySelectorAll('[data-testid="run-read-only-violated"]')].map(
+      (v) => v.textContent?.trim(),
+    )
+    expect(violated).toHaveLength(2)
+    expect(violated[0]).toContain(
+      'The tree changed while this node ran beside write, other; the change cannot be attributed to one of them',
+    )
+    expect(violated[0]).toContain('read_only_dirty')
+    expect(violated[1]).toContain('The node changed the tree')
+  })
+
   it('renders nothing for a run without an isolated attempt', () => {
     app = mount(AttemptIsolationPanel, { target: document.body, props: { rows: [] } })
     flushSync()

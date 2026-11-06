@@ -2155,6 +2155,19 @@ pub enum EdgeCondition {
         equals: String,
     },
     // --- issue #165 Part 7: the judge edge condition -------------------------
+    /// Matches once the last `rounds` successful visits of `node` each output
+    /// only keys that an earlier successful visit of this run had already
+    /// output. Everything ever output counts as seen. The fold lives in
+    /// [`crate::loop_items`]; failed, timed-out and cancelled visits are not
+    /// passed in at all. YAML:
+    /// `{ type: no_new_items, node: hunt, field: findings, key: id, rounds: 2 }`.
+    NoNewItems {
+        node: String,
+        field: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        rounds: u32,
+    },
     /// A yes/no question to a decision model about the SOURCE node's output
     /// (its only state, with the source's title as `step`), asked once when
     /// the source finishes, together with every other judge edge of that
@@ -2199,6 +2212,20 @@ pub fn output_field_value(output: &str, field: &str) -> Option<String> {
         serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
             None
         }
+    }
+}
+
+/// The text a `{{nodes.<id>.output.<field>}}` template renders: what
+/// [`output_field_value`] returns, plus an array or an object as compact
+/// JSON. Edge conditions keep [`output_field_value`].
+pub fn output_field_text(output: &str, field: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(output).ok()?;
+    let value = parsed.as_object()?.get(field)?;
+    match value {
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            serde_json::to_string(value).ok()
+        }
+        _ => output_field_value(output, field),
     }
 }
 
@@ -2965,6 +2992,38 @@ edges: []
         );
     }
 
+    /// The YAML form of the `no_new_items` condition round-trips, with and
+    /// without `key`.
+    #[test]
+    fn no_new_items_round_trips_with_and_without_key() {
+        let yaml = "{ type: no_new_items, node: hunt, field: findings, key: id, rounds: 2 }";
+        let c: EdgeCondition = yaml_serde::from_str(yaml).unwrap();
+        assert_eq!(
+            c,
+            EdgeCondition::NoNewItems {
+                node: "hunt".into(),
+                field: "findings".into(),
+                key: Some("id".into()),
+                rounds: 2,
+            }
+        );
+        let back = yaml_serde::to_string(&c).unwrap();
+        let c2: EdgeCondition = yaml_serde::from_str(&back).unwrap();
+        assert_eq!(c2, c);
+
+        let no_key: EdgeCondition =
+            yaml_serde::from_str("{ type: no_new_items, node: h, field: f, rounds: 1 }").unwrap();
+        assert_eq!(
+            no_key,
+            EdgeCondition::NoNewItems {
+                node: "h".into(),
+                field: "f".into(),
+                key: None,
+                rounds: 1,
+            }
+        );
+    }
+
     #[test]
     fn success_check_mixed_maps_are_refused() {
         // A map naming keys of two forms used to parse as the marker form and
@@ -2981,6 +3040,71 @@ edges: []
             assert!(
                 Playbook::from_yaml(&yaml).is_err(),
                 "{check} must be refused"
+            );
+        }
+    }
+
+    /// `output_field_text` is what a `{{nodes.<id>.output.<field>}}` template
+    /// renders: everything `output_field_value` reads, plus an array or an
+    /// object as compact JSON. Null, absent and non-object output stay `None`.
+    #[test]
+    fn output_field_text_renders_array_and_object_as_compact_json() {
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            // array: compact JSON, never pretty
+            (
+                r#"{"findings":[{"id":"a"},{"id":"b"}]}"#,
+                "findings",
+                Some(r#"[{"id":"a"},{"id":"b"}]"#),
+            ),
+            // empty array
+            (r#"{"items":[]}"#, "items", Some("[]")),
+            // object: compact JSON
+            (
+                r#"{"meta":{"k":"v","n":3}}"#,
+                "meta",
+                Some(r#"{"k":"v","n":3}"#),
+            ),
+            // string: same as output_field_value, verbatim
+            (r#"{"s":"hello"}"#, "s", Some("hello")),
+            (r#"{"s":""}"#, "s", Some("")),
+            // bool and number: JSON textual form
+            (r#"{"b":true}"#, "b", Some("true")),
+            (r#"{"n":3}"#, "n", Some("3")),
+            (r#"{"n":3.5}"#, "n", Some("3.5")),
+            // null: None (renders empty)
+            (r#"{"x":null}"#, "x", None),
+            // absent field: None
+            (r#"{"x":1}"#, "missing", None),
+            // output that is not a JSON object: None
+            ("not json", "x", None),
+            // output that is a JSON array, not an object: None
+            (r#"[1,2]"#, "x", None),
+            // output that is a bare JSON scalar: None
+            ("3", "x", None),
+        ];
+        for (output, field, want) in cases {
+            let got = output_field_text(output, field);
+            assert_eq!(
+                got.as_deref(),
+                *want,
+                "output_field_text({output:?}, {field:?})"
+            );
+        }
+    }
+
+    /// The template reader renders an array or an object field; the edge
+    /// condition's reader keeps the stricter reading and does not match one.
+    #[test]
+    fn output_field_text_reads_arrays_and_objects_output_field_value_does_not() {
+        for (output, field, text) in [
+            (r#"{"a":[1]}"#, "a", "[1]"),
+            (r#"{"o":{"k":1}}"#, "o", r#"{"k":1}"#),
+        ] {
+            assert_eq!(output_field_value(output, field), None, "{output}");
+            assert_eq!(
+                output_field_text(output, field).as_deref(),
+                Some(text),
+                "{output}"
             );
         }
     }

@@ -83,9 +83,10 @@ pub(crate) fn check_session_handoff(playbook: &Playbook, r: &mut ValidationRepor
     }
 }
 
-/// V46 (warning): a template (prompt or workdir) or an `output_field` edge
-/// reads `nodes.<id>.output.<field>` of a node that declares `outputs.fields`
-/// without that field. Nodes that declare nothing are not checked, so
+/// V46 (warning): a template (prompt, workdir or cache key) or an
+/// `output_field` or `no_new_items` edge reads `nodes.<id>.output.<field>`
+/// (or `.report.<field>`, or `.seen.<field>`) of a node that declares
+/// `outputs.fields` without that field. Nodes that declare nothing are not checked, so
 /// existing playbooks see no new warnings.
 pub(crate) fn check_declared_fields(
     playbook: &Playbook,
@@ -127,7 +128,7 @@ pub(crate) fn check_declared_fields(
     texts.extend(playbook.worktree_template().map(|w| (None, w)));
     for (owner, text) in texts {
         for cap in template_refs(text) {
-            if let ["nodes", source, "output" | "report", field] =
+            if let ["nodes", source, "output" | "report" | "seen", field] =
                 cap.split('.').collect::<Vec<&str>>().as_slice()
             {
                 report(owner, source, field, None, r);
@@ -136,6 +137,11 @@ pub(crate) fn check_declared_fields(
     }
     for edge in &playbook.edges {
         if let Some(EdgeCondition::OutputField { node, field, .. }) = &edge.condition {
+            report(Some(&edge.from), node, field, Some(edge), r);
+        }
+        // The seen template reads a declared field of the loop node, and the
+        // condition's field is the same reading: the same V46 warning.
+        if let Some(EdgeCondition::NoNewItems { node, field, .. }) = &edge.condition {
             report(Some(&edge.from), node, field, Some(edge), r);
         }
     }

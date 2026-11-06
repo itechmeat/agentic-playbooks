@@ -492,11 +492,23 @@ not, each under the next free `<n>`, so a loop or a resume never
 overwrites an earlier one; the journal's `read_only_violated.evidence`
 names the file of a violation.
 
-A node in the detected tier never joins a concurrent batch, as with
-`protect`: while it runs, no sibling runs, so a change during its attempt is
-its own or an outside process's. Whether a node may batch is decided from
-the playbook, before the attempt knows its sandbox, so only a node with
-`isolation: full` may batch; `best_effort` and `none` run alone.
+A node in the detected tier joins a concurrent batch only beside members
+that cannot write the tree, finished members included. A batchable node
+that can write (one without `read_only` and without `protect`, and no list
+node) is admitted to the batch only after every detected read-only member
+of it has ended; a detected read-only node is admitted only into a batch
+that holds no such writer. A node with `protect` never batches, exactly as
+before, and a list node never batches. Each detected read-only member
+keeps its own before and after check: since no member of its batch may
+write, a change it sees was made by a co-member that ran at the same time,
+or by something outside apb, which the check cannot tell apart, so every
+member that saw the change fails. The `read_only_violated` event then
+lists in `concurrent_with` the batch members whose attempts overlapped
+its own, so the change cannot be attributed to one of them. On the
+sequential arm the list is empty and left out. Whether a node may batch is
+decided from the playbook, before the attempt knows its sandbox, so a
+detected read-only node under `isolation: full` is enforced rather than
+detected and may sit beside any batchable node.
 
 ### Where it is shown
 

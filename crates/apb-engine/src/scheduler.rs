@@ -43,6 +43,7 @@ pub(crate) mod approval;
 mod attempt_memory;
 mod attempt_notes;
 mod baseline;
+pub(crate) mod batch_class;
 pub(crate) mod budget_gate;
 mod cache;
 mod continuation;
@@ -1107,6 +1108,7 @@ fn drive_inner(
                 crate::publish::pin::ensure(&playbook, &events, log, cfg.parent_acted, |from| {
                     publish::resolved_tree(&playbook, from, &workdir, |t| {
                         render_node_prompt(
+                            &playbook,
                             run_dir,
                             &run_id,
                             &state,
@@ -1395,9 +1397,19 @@ fn drive_inner(
         // failures then park one at a time, in batch order, at the batch tail
         // below (per-branch live parking is out of scope, spec 1.3).
         if approval_refused.is_none() && is_batchable(&playbook, &current) {
+            // One member at a time, pushed as it is admitted, so each check
+            // weighs every member admitted before it (spec loops-and-graphs
+            // D1): a detected read-only member refuses a writer and is
+            // refused by one, in either order; an enforced one mixes with
+            // both. A refused node stays in the frontier for a later
+            // iteration.
             let mut batch: Vec<String> = vec![current.clone()];
             for n in &frontier {
-                if is_batchable(&playbook, n) && !batch.contains(n) && !held.contains_key(n) {
+                if is_batchable(&playbook, n)
+                    && !batch.contains(n)
+                    && !held.contains_key(n)
+                    && batch_class::batch_admits(&playbook, &batch, n)
+                {
                     batch.push(n.clone());
                 }
             }
@@ -1411,6 +1423,11 @@ fn drive_inner(
             // parity (cache, artifacts, progress attribution).
             if batch.len() >= 2 && max_parallel >= 2 {
                 steps += batch.len();
+                // One interval book per logical batch (spec loops-and-graphs
+                // D1): every member's attempt records when it ran, and a
+                // detected read-only check names the members whose attempts
+                // overlapped its own.
+                let batch_peers = Arc::new(node::read_only::BatchIntervals::new());
                 // A shared cancel flag: once join:any is ready we set it, and
                 // still-running branches kill their processes (7c-3).
                 let cancel = Arc::new(AtomicBool::new(false));
@@ -1725,6 +1742,7 @@ fn drive_inner(
                                         let journal_ref = &journal;
                                         let decisions_ref = decisions.as_ref();
                                         let cont_c = cont.clone();
+                                        let peers_c = Arc::clone(&batch_peers);
                                         running += 1;
                                         scope.spawn(move || {
                                             // A panic becomes an error the drive
@@ -1756,6 +1774,7 @@ fn drive_inner(
                                                             override_prompt: op,
                                                             track_provenance: alone,
                                                             continuation: cont_c,
+                                                            batch_peers: Some(peers_c),
                                                             ..ExecOptions::default()
                                                         },
                                                     )

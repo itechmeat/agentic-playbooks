@@ -1406,8 +1406,13 @@ report. apb holds the node to it and fails it when it changed the tree.
   by name only) are kept in `runs/<id>/read_only/<node>/<n>.json`, written
   for every detected check, clean or not. The journal records the tier
   (`read_only_checked`) and a change (`read_only_violated`).
-- A node in the detected tier never runs in a concurrent batch; one with
-  `isolation: full` may.
+- A node in the detected tier runs in a concurrent batch only beside
+  members that cannot write the tree (a writer waits until every detected
+  read-only member of the batch has ended, and a detected read-only node is
+  admitted only into a batch with no writer); a change any member sees fails
+  every member that saw it, and the `read_only_violated` event names the
+  batch members whose attempts overlapped (`concurrent_with`). One with
+  `isolation: full` is enforced and may sit beside any batchable node.
 - An older apb ignores `read_only` and runs the node without the check.
 
 `read_only` is not the `read_only` list of extra paths under `isolation`,
@@ -1530,13 +1535,19 @@ a V13 validation error:
   resolve identically).
 - `nodes.<id>.output.<field>` (and `nodes.<id>.report.<field>`) - ONE top-level
   field of that output when it parses as a JSON object, the template twin of the
-  `output_field` edge condition below and with exactly its semantics. Strings
-  render verbatim; booleans and numbers render as their JSON text (`true`, `3`).
-  Everything it cannot read renders as the empty string and never fails the node:
-  output that is not JSON or not a JSON object, an absent field, and a value that
-  is null, an array or an object. One field only, never a path, and never empty:
+  `output_field` edge condition below. Strings
+  render verbatim; booleans and numbers render as their JSON text (`true`, `3`);
+  an array or an object field renders as compact JSON (`[{"id":"a"},{"id":"b"}]`,
+  never pretty-printed), so a reviewer's findings array reaches the next prompt
+  whole. Edge conditions keep the stricter reading: an `output_field` condition
+  on an array field still does not match.
+  Everything else it cannot read renders as the empty string and never fails the
+  node: output that is not JSON or not a JSON object, an absent field, and a
+  value that is null. One field only, never a path, and never empty:
   `.output.a.b` and a trailing `.output.` are not valid references and fail
-  validation like any other unknown namespace.
+  validation like any other unknown namespace. A prompt that renders an array
+  or object field for the first time moves its cache key once (the field used
+  to render empty); that is a one-time cache miss, not a wrong cache hit.
 - `nodes.<id>.review_note` - the reviewer's note from a `human_review` node's
   decision.
 - `nodes.<id>.review_decision` - the option a `human_review` node was decided
@@ -2779,6 +2790,21 @@ commits in the working tree, which the agent checks with `git status` and
 `git log`. The briefing sits outside the node's cache key, and the default
 retry policy is unchanged.
 
+After apb rejected a report the agent called a success (a `success_check`,
+a scoped check, an evidence check under `on_invalid: fail`, a protected
+path or a fully restored git guard, or the completion check's enforce
+rejection), the briefing quotes apb's own rejection reason instead of the
+agent's summary, and ends with a fixed repair-scope paragraph: change only
+what the rejection names, keep the parts of the earlier work it does not
+name, and write the full outputs again. The reason is scrubbed of the
+secret values of the run and its tree (declared secret params) and of the
+workspace's connectors, of token-shaped values and of workspace paths, and
+cut at 500 characters, and only a non-fatal rejection carries
+it: a transient failure, a timeout or an interruption after a rejection
+gets no paragraph, because its work was not finished. List item check
+rejections are covered too, when they are newer than the last attempt
+that ended.
+
 ### Continuing another node's session (continue_session)
 
 Consecutive nodes on the same profile often need the same understanding of the
@@ -3106,6 +3132,74 @@ under `on_needs_look: fail`, a bounded edge routes to a fix, the fix routes
 back to the list, and only the reviewers still open review again
 (examples/playbooks/review-panel-list.yaml). `rerun: not_passed` on a node
 that sits in no cycle has no effect, and the validator warns (V93).
+
+### Loops that stop when nothing new turns up
+
+An open-ended loop (bug hunting, research rounds, review rounds) can stop on
+a verdict the agent writes, or on `no_new_items`: an edge condition that
+matches once the last rounds of the loop produced only keys an earlier
+round had already produced. Everything the node ever output in this run
+counts as seen, so a round that finds nothing new cannot revive an old
+finding.
+
+```yaml
+edges:
+  - { from: hunt, to: report, condition: { type: no_new_items, node: hunt, field: findings, key: id, rounds: 2 } }
+  - { from: hunt, to: hunt, condition: { type: node_status, node: hunt, equals: success }, max_traversals: 6 }
+  - { from: hunt, to: report, fallback: true }
+```
+
+The exit edge is written before the loop edge (conditional edges match
+first in declaration order), and the loop edge itself is conditional: an
+unconditional edge would pre-empt every other route out of the node
+(validator V34 reports that, in either order of the two edges). Keep the
+`max_traversals` cap as the hard stop behind the condition.
+
+A round counts only when the node finished successfully: failed,
+timed-out and cancelled visits neither count nor break the streak, and the
+verdict comes from the journal alone (no new event, no storage). It reads
+the output `node_finished` recorded, which apb journals whole: the clip of
+`context.output_max_bytes` shortens only the copy a prompt renders. The one
+bound is the attempt's output capture (`output_limits`, 2 MiB head and 6 MiB
+tail by default); an output larger than that loses lines in the middle, no
+longer parses as JSON and so reads as unreadable, which breaks the streak:
+a clipped array is never taken for a dry round.
+
+A visit is readable when the node's output is a JSON object whose `field`
+is an array (or a string holding one, the same tolerance the list loader
+has) and every element yields a key: the element itself when it is a
+string or an integer, or the element's `key` value, under the same key
+rules list items follow (non-empty, at most 128 characters, printable, no
+whitespace other than a plain space). Without `key`, elements are
+read as the keys themselves; with `key`, elements are objects. Anything
+else is unreadable: an unreadable visit breaks the streak and adds nothing
+to the seen keys, so an agent that forgets the field never ends the hunt
+by accident; the loop runs on to its `max_traversals` cap.
+
+A readable visit is dry when every one of its keys was already seen before
+it. A dry round raises the streak by one; a round with at least one new
+key resets the streak to zero and adds its new keys to the seen set. The
+condition matches when at least `rounds` successful visits exist and the
+last `rounds` of them are all dry. `[]` is readable and dry, including on
+the first visit. History is never reset: a `continue_from`, a revive, a
+supervisor retry or a patch adds visits, and what a node output before
+stays seen.
+
+The prompt of the next round can name what was already found, through the
+template `{{nodes.<id>.seen.<field>}}`: the keys seen so far, one per
+line, in first-seen order, at most 200 keys and 8 KiB, with a final
+`(N more not shown)` line when keys are left out. The cache key and the
+attempt prompt are rendered from the same text, so the template moves the
+node cache key when a new key appears (which is what makes the next round
+a fresh computation).
+
+The validator rules:
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| V164 | error | a malformed `no_new_items`: the `node` is unknown, not an `agent_task` or `script`, or is a list node; `field` or `key` is empty or holds a `.`, whitespace or a `}`; `rounds` is outside 1 to 10 |
+| V165 | error | a `{{nodes.<id>.seen.<field>}}` template with no `no_new_items` condition on that node and field, or two such conditions on them that disagree on `key` |
+| V166 | warning | the condition's `node` and the edge's source share no cycle, so the condition can never match |
 
 ## Edge ids and edge addresses
 

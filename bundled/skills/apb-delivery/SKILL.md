@@ -2,7 +2,7 @@
 name: apb-delivery
 description: Deliver an authorized feature, bug fix or refactoring from the original request to a reviewed, checked and reported change. Use for product code changes. Inside an apb playbook, run only the stage the node names. Research and design-only tasks stay local and unpublished.
 metadata:
-  version: "1.3.2"
+  version: "1.3.3"
 ---
 
 # Deliver a change

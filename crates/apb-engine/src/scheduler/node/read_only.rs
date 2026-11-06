@@ -32,6 +32,7 @@
 //! could still write the tree by path.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use apb_core::fingerprint::{TreeChange, TreeLimit, TreeLimits, TreeState};
 
@@ -125,6 +126,7 @@ pub(crate) fn scripted(
         changes,
         truncated: dirty.len().saturating_sub(MAX_LISTED) as u64,
         evidence: None,
+        concurrent_with: Vec::new(),
     })?;
     let more = match dirty.len() {
         1 => String::new(),
@@ -144,22 +146,168 @@ pub(crate) fn list_refusal(node: &str) -> String {
     )
 }
 
+/// Who ran beside whom in one concurrent batch (spec loops-and-graphs D1):
+/// a monotonic tick counter and, per attempt, the node, its start tick and
+/// an optional end tick. One instance per logical batch, carried by
+/// `ExecOptions.batch_peers`; a sequential execution carries none, and no
+/// global state exists. A detected read-only check names the members whose
+/// attempts overlapped its own, so a change cannot be attributed to one of
+/// them; an enforced member keeps its interval too, so a detected peer can
+/// name it.
+pub(crate) struct BatchIntervals {
+    book: Mutex<Book>,
+}
+
+#[derive(Default)]
+struct Book {
+    tick: u64,
+    intervals: Vec<Interval>,
+}
+
+struct Interval {
+    node: String,
+    start: u64,
+    end: Option<u64>,
+}
+
+impl BatchIntervals {
+    pub(crate) fn new() -> BatchIntervals {
+        BatchIntervals {
+            book: Mutex::new(Book::default()),
+        }
+    }
+
+    /// Opens the interval of one attempt and returns the tick it started
+    /// with. Called only by [`BatchIntervals::open`], whose guard closes it.
+    pub(crate) fn start(&self, node: &str) -> u64 {
+        let mut book = self.book.lock().unwrap_or_else(|e| e.into_inner());
+        book.tick += 1;
+        let start = book.tick;
+        book.intervals.push(Interval {
+            node: node.to_string(),
+            start,
+            end: None,
+        });
+        start
+    }
+
+    /// Opens the interval of one attempt as a guard that closes it on drop,
+    /// so every exit of the attempt (an error return, an engine pause)
+    /// closes it, not only the path that reaches [`OpenInterval::close`].
+    /// Called immediately before `Before::take`.
+    pub(crate) fn open(self: &Arc<Self>, node: &str) -> OpenInterval {
+        OpenInterval {
+            book: Arc::clone(self),
+            node: node.to_string(),
+            start: self.start(node),
+            closed: false,
+        }
+    }
+
+    /// Closes the interval opened with `start_tick`: by
+    /// [`OpenInterval::close`] after the attempt's after state has been
+    /// taken, or by the guard's drop on any other exit. An interval still
+    /// open (an attempt under way) counts as running to infinity, so it can
+    /// only list a member, never hide one.
+    pub(crate) fn finish(&self, node: &str, start_tick: u64) {
+        let mut book = self.book.lock().unwrap_or_else(|e| e.into_inner());
+        book.tick += 1;
+        let end = book.tick;
+        if let Some(open) = book
+            .intervals
+            .iter_mut()
+            .find(|i| i.node == node && i.start == start_tick)
+        {
+            open.end = Some(end);
+        }
+    }
+
+    /// The node ids of every member whose attempt overlapped the attempt
+    /// that opened with `start_tick`, sorted and deduplicated. Two
+    /// intervals overlap when each starts before the other ends; an end
+    /// not set yet is open (infinity). Self is excluded.
+    pub(crate) fn overlapping(&self, node: &str, start_tick: u64) -> Vec<String> {
+        let book = self.book.lock().unwrap_or_else(|e| e.into_inner());
+        let end = |i: &Interval| i.end.unwrap_or(u64::MAX);
+        let Some(mine) = book
+            .intervals
+            .iter()
+            .find(|i| i.node == node && i.start == start_tick)
+        else {
+            return Vec::new();
+        };
+        let mut peers: Vec<String> = book
+            .intervals
+            .iter()
+            .filter(|other| other.node != node)
+            .filter(|other| mine.start < end(other) && other.start < end(mine))
+            .map(|other| other.node.clone())
+            .collect();
+        peers.sort();
+        peers.dedup();
+        peers
+    }
+}
+
+/// One attempt's open interval in a batch's book ([`BatchIntervals::open`]):
+/// closed once, by [`OpenInterval::close`] after the after state was taken,
+/// or on drop when the attempt left by any other way.
+pub(crate) struct OpenInterval {
+    book: Arc<BatchIntervals>,
+    node: String,
+    start: u64,
+    closed: bool,
+}
+
+impl OpenInterval {
+    /// The book and the start tick, as `Before::take` carries them.
+    pub(crate) fn peers(&self) -> (Arc<BatchIntervals>, u64) {
+        (Arc::clone(&self.book), self.start)
+    }
+
+    /// Closes the interval now; a second call does nothing.
+    pub(crate) fn close(&mut self) {
+        if !self.closed {
+            self.closed = true;
+            self.book.finish(&self.node, self.start);
+        }
+    }
+}
+
+impl Drop for OpenInterval {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 /// The tree's state before one detected attempt.
 pub(crate) struct Before {
     node: String,
     attempt: u32,
     root: PathBuf,
     state: TreeState,
+    /// The batch peers of the execution and the tick this attempt opened
+    /// with, when it runs in a concurrent batch (`ExecOptions.batch_peers`);
+    /// none on the sequential arm.
+    peers: Option<(Arc<BatchIntervals>, u64)>,
 }
 
 impl Before {
-    /// Takes the state of `root` now.
-    pub(crate) fn take(node: &str, attempt: u32, root: &Path) -> Before {
+    /// Takes the state of `root` now. `peers` carries the batch interval
+    /// book and the tick the attempt opened with (see
+    /// [`BatchIntervals::start`]); `None` outside a batch.
+    pub(crate) fn take(
+        node: &str,
+        attempt: u32,
+        root: &Path,
+        peers: Option<(Arc<BatchIntervals>, u64)>,
+    ) -> Before {
         Before {
             node: node.to_string(),
             attempt,
             root: root.to_path_buf(),
             state: TreeState::take(root, limits()),
+            peers,
         }
     }
 
@@ -178,9 +326,10 @@ impl Before {
     }
 
     /// Compares the tree with the state taken before, writes the evidence
-    /// and, on a change, journals `read_only_violated`. The failure reason
-    /// when anything changed. `project` is the workspace whose scrubber
-    /// cleans the paths.
+    /// and, on a change, journals `read_only_violated` with the batch
+    /// members whose attempts overlapped this one. The failure reason when
+    /// anything changed. `project` is the workspace whose scrubber cleans
+    /// the paths.
     pub(crate) fn finish(
         self,
         run_dir: &Path,
@@ -210,6 +359,10 @@ impl Before {
             return Ok(None);
         }
         let tier = tier(self.state.partial().is_some() || after_partial.is_some());
+        let concurrent_with = self
+            .peers
+            .as_ref()
+            .map_or_else(Vec::new, |(p, tick)| p.overlapping(&self.node, *tick));
         journal.append(EventPayload::ReadOnlyViolated {
             node: self.node.clone(),
             attempt: self.attempt,
@@ -217,6 +370,7 @@ impl Before {
             changes: listed.clone(),
             truncated,
             evidence,
+            concurrent_with: concurrent_with.clone(),
         })?;
         let first = &listed[0];
         let more = match changes.len() {
@@ -224,9 +378,32 @@ impl Before {
             n => format!(" (and {} more)", n - 1),
         };
         Ok(Some(format!(
-            "{READ_ONLY_DIRTY}: node `{}` changed the tree it may only read: {} {}{more}",
-            self.node, first.path, first.change
+            "{READ_ONLY_DIRTY}: {} {} {}{more}",
+            self.beside(&concurrent_with),
+            first.path,
+            first.change
         )))
+    }
+
+    /// The clause that says who moved the tree: an empty list is today's
+    /// wording; a batch member names the peers it ran beside, whose change
+    /// cannot be attributed to one of them.
+    fn beside(&self, concurrent_with: &[String]) -> String {
+        match concurrent_with {
+            [] => format!("node `{}` changed the tree it may only read:", self.node),
+            [one] => format!(
+                "the tree changed while node `{}` ran beside `{one}`; the change cannot be attributed to one of them:",
+                self.node
+            ),
+            many => format!(
+                "the tree changed while node `{}` ran beside {}; the change cannot be attributed to one of them:",
+                self.node,
+                many.iter()
+                    .map(|p| format!("`{p}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
     }
 
     /// `git diff --stat` against the commit `HEAD` named before, limited
@@ -362,4 +539,35 @@ fn next_ordinal(dir: &Path) -> u64 {
         })
         .unwrap_or(0)
         + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An attempt that leaves without reaching its close (an error return,
+    /// an engine pause) still closes its interval when the guard drops: a
+    /// member that starts afterwards does not list it.
+    #[test]
+    fn a_dropped_interval_is_closed_and_never_listed_by_a_later_member() {
+        let book = Arc::new(BatchIntervals::new());
+        drop(book.open("gone"));
+        let later = book.open("later");
+        assert!(book.overlapping("later", later.peers().1).is_empty());
+    }
+
+    /// An explicit close and the drop after it close once: a member that
+    /// starts after the close does not list it, and one that ran beside it
+    /// does.
+    #[test]
+    fn a_closed_interval_is_listed_only_by_members_that_overlapped_it() {
+        let book = Arc::new(BatchIntervals::new());
+        let mut first = book.open("first");
+        let beside = book.open("beside");
+        first.close();
+        drop(first);
+        assert_eq!(book.overlapping("beside", beside.peers().1), ["first"]);
+        let after = book.open("after");
+        assert_eq!(book.overlapping("after", after.peers().1), ["beside"]);
+    }
 }

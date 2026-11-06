@@ -52,7 +52,11 @@
               {#if e.readOnly.violated}
                 {@const v = e.readOnly.violated}
                 <div class="violated" data-testid="run-read-only-violated">
-                  The node changed the tree <span class="code">read_only_dirty</span>
+                  {#if v.concurrent_with?.length}
+                    The tree changed while this node ran beside {v.concurrent_with.join(', ')}; the change cannot be attributed to one of them <span class="code">read_only_dirty</span>
+                  {:else}
+                    The node changed the tree <span class="code">read_only_dirty</span>
+                  {/if}
                   <ul>
                     {#each v.changes as c, j (j)}
                       <li data-testid="run-read-only-change"><span class="code path">{c.path}</span> {c.change}</li>

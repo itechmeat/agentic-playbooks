@@ -413,6 +413,13 @@ pub struct Expect {
     pub route: Option<ScenarioRoute>,
     #[serde(default)]
     pub visits: BTreeMap<String, u32>,
+    /// The status the last execution of each named node recorded, a
+    /// cancelled one included (`succeeded`, `failed`, `timed_out`,
+    /// `cancelled`, `skipped` or `unknown`; another word is V150). Left out of the
+    /// serialized form when empty, so the digest of a scenario without it
+    /// is unchanged.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub status: BTreeMap<String, String>,
     #[serde(default)]
     pub edges: EdgeExpect,
     #[serde(default)]

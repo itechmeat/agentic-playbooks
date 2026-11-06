@@ -39,5 +39,6 @@ expect:
   run: { outcome: [succeeded] }
   finish: report
   visits: { review_security: 1, report: 1 }
+  status: { review_security: failed }
   edges:
     taken: { "e:review_security>report#1": 1 }

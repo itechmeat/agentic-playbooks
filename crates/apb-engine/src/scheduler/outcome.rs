@@ -100,6 +100,11 @@ pub(crate) struct ExecOptions<'a> {
     /// A delayed retry that is due: the execution continues on its recorded
     /// chain step, retry number and binding.
     pub continuation: Option<super::deferred::RetryContinuation>,
+    /// The interval book of the concurrent batch the execution is a member
+    /// of, one `Arc` per logical batch (`scheduler/node/read_only.rs`): a
+    /// detected read-only check names the members whose attempts overlapped
+    /// its own. `None` for a sequential execution; no global state.
+    pub(crate) batch_peers: Option<std::sync::Arc<super::node::read_only::BatchIntervals>>,
 }
 
 /// What every node execution runs against: the run, its state, the flag

@@ -279,7 +279,7 @@ pub enum EventPayload {
         /// an attempt that ended without a parsable result), and for old
         /// logs: never an estimate made by apb. Additive. Read leniently: a
         /// usage block this binary cannot decode (a newer apb's shape) reads
-        /// as `None` rather than failing the whole journal.
+        /// as `None` rather than failing the journal.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -303,6 +303,10 @@ pub enum EventPayload {
         /// success. Additive, old logs read unchanged.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         transcript_incomplete: bool,
+        /// Why apb rejected a report the agent called a success, scrubbed and at
+        /// most 500 characters. Set only for a non-fatal rejection. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rejected_for: Option<String>,
         /// The list item this belongs to, for an item of a list node
         /// (`list:`). Absent everywhere else. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1462,6 +1466,11 @@ pub enum EventPayload {
         /// (`read_only/<node>/<n>.json`), when it was written.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         evidence: Option<String>,
+        /// Other members of a concurrent batch whose attempts overlapped
+        /// this attempt; the change cannot be attributed to one of them.
+        /// Empty on the sequential arm. Additive.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        concurrent_with: Vec<String>,
     },
     // --- end of the 0.23.0 block -------------------------------------------
     /// Every hop the drive loop actually took out of a node (spec
@@ -3921,6 +3930,7 @@ mod tests {
     fn attempt_finished_with_rejected_output_round_trips() {
         let payload = EventPayload::AttemptFinished {
             item: None,
+            rejected_for: None,
             output_truncated: Vec::new(),
             transcript_incomplete: false,
             node: "a".into(),
@@ -3956,6 +3966,78 @@ mod tests {
         }
     }
 
+    /// An old log line, written before `rejected_for` existed, reads as
+    /// `None`; a rejection carries the reason and round-trips.
+    #[test]
+    fn attempt_finished_rejected_for_decodes_and_round_trips() {
+        let old = r#"{"type":"attempt_finished","node":"a","attempt":1,"status":"failed"}"#;
+        match serde_json::from_str::<EventPayload>(old).unwrap() {
+            EventPayload::AttemptFinished { rejected_for, .. } => assert_eq!(rejected_for, None),
+            other => panic!("expected AttemptFinished, got {other:?}"),
+        }
+        let payload = EventPayload::AttemptFinished {
+            item: None,
+            output_truncated: Vec::new(),
+            transcript_incomplete: false,
+            node: "a".into(),
+            attempt: 1,
+            status: "failed".into(),
+            duration_ms: Some(42),
+            session: None,
+            summary: None,
+            rejected_output: None,
+            partial_output: None,
+            failure_kind: None,
+            usage: None,
+            rejected_for: Some("missing required section".into()),
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        match serde_json::from_str::<EventPayload>(&line).unwrap() {
+            EventPayload::AttemptFinished { rejected_for, .. } => {
+                assert_eq!(rejected_for.as_deref(), Some("missing required section"));
+            }
+            other => panic!("expected AttemptFinished, got {other:?}"),
+        }
+    }
+
+    /// A payload without a rejection does not write the key at all.
+    #[test]
+    fn attempt_finished_without_rejected_for_omits_the_key() {
+        let payload = EventPayload::AttemptFinished {
+            item: None,
+            output_truncated: Vec::new(),
+            transcript_incomplete: false,
+            node: "a".into(),
+            attempt: 1,
+            status: "succeeded".into(),
+            duration_ms: Some(42),
+            session: None,
+            summary: None,
+            rejected_output: None,
+            partial_output: None,
+            failure_kind: None,
+            usage: None,
+            rejected_for: None,
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        assert!(!line.contains("rejected_for"));
+    }
+
+    /// An old `read_only_violated` line, written before `concurrent_with`
+    /// existed, decodes with an empty list (spec loops-and-graphs D1).
+    #[test]
+    fn read_only_violated_without_concurrent_with_decodes_to_an_empty_list() {
+        let old = r#"{"type":"read_only_violated","node":"a","attempt":1,"tier":"detected","changes":[{"path":"x","change":"modified"}]}"#;
+        match serde_json::from_str::<EventPayload>(old).unwrap() {
+            EventPayload::ReadOnlyViolated {
+                concurrent_with, ..
+            } => {
+                assert!(concurrent_with.is_empty());
+            }
+            other => panic!("expected ReadOnlyViolated, got {other:?}"),
+        }
+    }
+
     #[test]
     fn attempt_finished_with_failure_kind_round_trips() {
         let payload = EventPayload::AttemptFinished {
@@ -3972,6 +4054,7 @@ mod tests {
             partial_output: None,
             failure_kind: Some("transient".into()),
             usage: None,
+            rejected_for: None,
         };
         let line = serde_json::to_string(&payload).unwrap();
         let back: EventPayload = serde_json::from_str(&line).unwrap();
@@ -4109,6 +4192,7 @@ mod tests {
     fn attempt_finished_with_session_round_trips() {
         let payload = EventPayload::AttemptFinished {
             item: None,
+            rejected_for: None,
             output_truncated: Vec::new(),
             transcript_incomplete: false,
             node: "a".into(),

@@ -41,6 +41,14 @@ pub struct JudgeInputs {
     pub rejected_outputs: BTreeMap<String, String>,
     #[serde(default)]
     pub hooks: BTreeMap<String, String>,
+    /// The rendered seen text of every `no_new_items` condition in the
+    /// playbook, keyed `"<node>.<field>"` (spec loops-and-graphs D2).
+    /// Absent when empty: a stored judge example of a playbook without the
+    /// condition must not gain a key it cannot read back with
+    /// `deny_unknown_fields`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<BTreeMap<String, String>>", optional))]
+    pub seen: BTreeMap<String, String>,
     /// `run.context` as it would render.
     #[serde(default)]
     pub context: String,
@@ -81,8 +89,10 @@ pub(crate) const FIELD_TAIL: usize = 12 * 1024;
 impl JudgeInputs {
     /// What a template of node budget `budget` reads in the run of
     /// `run_dir` now: the run's params and instruction, the folded outputs
-    /// and reviews, the hook paths and the run context as it renders.
+    /// and reviews, the hook paths, the seen text of the playbook's
+    /// `no_new_items` conditions and the run context as it renders.
     pub(crate) fn from_state(
+        playbook: &Playbook,
         run_dir: &Path,
         run_id: &str,
         state: &RunState,
@@ -115,6 +125,7 @@ impl JudgeInputs {
                 .collect(),
             rejected_outputs: state.rejected_outputs.clone(),
             hooks,
+            seen: crate::loop_seen::seen_texts(playbook, state),
             context,
         })
     }
@@ -144,6 +155,7 @@ impl JudgeInputs {
             &self.rejected_outputs,
             &self.hooks,
             &self.context,
+            &self.seen,
             &OutputClip {
                 run_dir: clip_dir,
                 max_bytes,

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use apb_core::schema::{ContextBudget, output_field_value};
+use apb_core::schema::{ContextBudget, output_field_text};
 
 use crate::error::EngineError;
 use crate::event::{Event, EventPayload};
@@ -590,6 +590,9 @@ pub struct OutputClip<'a> {
 }
 
 /// Manual scan for `{{ ... }}` without regex; substitutes known references, unknown ones -> "".
+/// `seen` holds the rendered seen text of the playbook's `no_new_items`
+/// conditions, keyed `"<node>.<field>"` (spec loops-and-graphs D2); a
+/// caller outside a run's JudgeInputs passes an empty map.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     text: &str,
@@ -600,6 +603,7 @@ pub fn render(
     rejected_outputs: &BTreeMap<String, String>,
     hooks: &BTreeMap<String, String>,
     context: &str,
+    seen: &BTreeMap<String, String>,
     clip_outputs: &OutputClip<'_>,
 ) -> String {
     let mut out = String::with_capacity(text.len());
@@ -618,6 +622,7 @@ pub fn render(
                 rejected_outputs,
                 hooks,
                 context,
+                seen,
                 clip_outputs,
             ));
             rest = &after[close + 2..];
@@ -708,6 +713,7 @@ fn resolve(
     rejected_outputs: &BTreeMap<String, String>,
     hooks: &BTreeMap<String, String>,
     context: &str,
+    seen: &BTreeMap<String, String>,
     clip_outputs: &OutputClip<'_>,
 ) -> String {
     let parts: Vec<&str> = key.split('.').collect();
@@ -740,17 +746,19 @@ fn resolve(
         ["nodes", id, "output"] | ["nodes", id, "report"] => {
             clipped(id, outputs.get(*id).cloned().unwrap_or_default())
         }
-        // ONE top-level field of an output that parses as a JSON object, with
-        // the exact `output_field` edge-condition semantics (spec 2026-08-05
-        // section 2.5) through the one shared projection. Every shape it cannot
-        // read - no output, not JSON, not an object, an absent field, a null,
-        // array or object value - renders as the empty string, like every other
-        // reference `resolve` cannot fill.
+        // ONE top-level field of an output that parses as a JSON object. A
+        // string, bool or number renders as `output_field_value` reads it; an
+        // array or an object renders as compact JSON (`output_field_text`), so
+        // a reviewer's findings array reaches the next prompt whole. Edge
+        // conditions keep `output_field_value`: routing on an array field
+        // still does not match. Every other shape it cannot read - no output,
+        // not JSON, not an object, an absent field, a null value - renders as
+        // the empty string, like every other reference `resolve` cannot fill.
         ["nodes", id, "output" | "report", field] => clipped(
             id,
             outputs
                 .get(*id)
-                .and_then(|output| output_field_value(output, field))
+                .and_then(|output| output_field_text(output, field))
                 .unwrap_or_default(),
         ),
         ["nodes", id, "review_note"] => {
@@ -765,6 +773,14 @@ fn resolve(
         // The agent report a success_check discarded (spec
         // field-report-robustness): empty when the node was never rejected.
         ["nodes", id, "rejected_output"] => rejected_outputs.get(*id).cloned().unwrap_or_default(),
+        // The keys a loop's `no_new_items` condition has seen so far (spec
+        // loops-and-graphs D2), rendered by `loop_seen::seen_texts`: empty
+        // when the condition is absent from the map (a caller outside a
+        // run) or the node has not run yet.
+        ["nodes", id, "seen", field] => seen
+            .get(&format!("{id}.{field}"))
+            .cloned()
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }

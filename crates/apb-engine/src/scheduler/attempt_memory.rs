@@ -36,8 +36,11 @@ const MAX_FAILURE_CHARS: usize = 160;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AttemptMemory {
     attempts: Vec<AttemptRecall>,
-    /// A list item's check rejections in scope: `(round, note)`.
-    rejections: Vec<(u32, String)>,
+    /// A list item's check rejections in scope, oldest first:
+    /// `(seq, round, note)`.
+    rejections: Vec<(u64, u32, String)>,
+    /// The seq of the last `attempt_finished` in scope.
+    last_finished_seq: Option<u64>,
 }
 
 /// One earlier attempt and its effects.
@@ -52,6 +55,8 @@ struct AttemptRecall {
     model: Option<String>,
     ending: String,
     effects: Vec<Effect>,
+    rejected_for: Option<String>,
+    finished_seq: Option<u64>,
 }
 
 /// What became of one send or write.
@@ -105,13 +110,15 @@ pub(crate) fn recall(run_dir: &Path, events: &[Event], key: ExecKey<'_>) -> Opti
         }
     }
     Some(AttemptMemory {
+        last_finished_seq: attempts.iter().filter_map(|a| a.finished_seq).max(),
         attempts,
         rejections: rejections(events, key, floor),
     })
 }
 
-/// A list item's check rejections from `floor` on, as `(round, note)`.
-fn rejections(events: &[Event], key: ExecKey<'_>, floor: u64) -> Vec<(u32, String)> {
+/// A list item's check rejections from `floor` on, oldest first, as
+/// `(seq, round, note)`.
+fn rejections(events: &[Event], key: ExecKey<'_>, floor: u64) -> Vec<(u64, u32, String)> {
     let Some(id) = key.item else {
         return Vec::new();
     };
@@ -131,6 +138,7 @@ fn rejections(events: &[Event], key: ExecKey<'_>, floor: u64) -> Vec<(u32, Strin
                 && state == crate::list::ledger::settled::REJECTED =>
             {
                 Some((
+                    e.seq,
                     round.saturating_sub(1),
                     note.clone().unwrap_or_else(|| "no note".to_string()),
                 ))
@@ -180,6 +188,8 @@ fn started_attempts(events: &[Event], key: ExecKey<'_>, floor: u64) -> Vec<Attem
                 unreachable!("filtered to attempt_started above")
             };
             let until = starts.get(i + 1).map_or(events.len(), |(next, _)| *next);
+            let mut recall_rejected: Option<String> = None;
+            let mut recall_finished_seq: Option<u64> = None;
             let finished = events[*at..until].iter().find_map(|f| match &f.payload {
                 EventPayload::AttemptFinished {
                     attempt: a,
@@ -187,12 +197,18 @@ fn started_attempts(events: &[Event], key: ExecKey<'_>, floor: u64) -> Vec<Attem
                     failure_kind,
                     summary,
                     partial_output,
+                    rejected_for,
                     ..
-                } if key.finished(f) && a == attempt => Some(ending(
-                    status,
-                    failure_kind.as_deref(),
-                    summary.as_deref().or(partial_output.as_deref()),
-                )),
+                } if key.finished(f) && a == attempt => {
+                    recall_rejected = rejected_for.clone();
+                    recall_finished_seq = Some(f.seq);
+                    Some(ending(
+                        status,
+                        failure_kind.as_deref(),
+                        summary.as_deref().or(partial_output.as_deref()),
+                        rejected_for.as_deref(),
+                    ))
+                }
                 _ => None,
             });
             AttemptRecall {
@@ -202,13 +218,25 @@ fn started_attempts(events: &[Event], key: ExecKey<'_>, floor: u64) -> Vec<Attem
                 model: model.clone(),
                 ending: finished.unwrap_or_else(|| "ended with no result recorded".to_string()),
                 effects: Vec::new(),
+                rejected_for: recall_rejected,
+                finished_seq: recall_finished_seq,
             }
         })
         .collect()
 }
 
-/// How an attempt ended, in words.
-fn ending(status: &str, failure_kind: Option<&str>, said: Option<&str>) -> String {
+/// How an attempt ended, in words. A non-fatal rejection renders as the
+/// reason apb recorded, quoted as data, never the agent's own summary.
+fn ending(
+    status: &str,
+    failure_kind: Option<&str>,
+    said: Option<&str>,
+    rejected_for: Option<&str>,
+) -> String {
+    if let Some(reason) = rejected_for {
+        let quoted = serde_json::to_string(reason).unwrap_or_default();
+        return format!("reported success; apb rejected it: {quoted}");
+    }
     match (status, failure_kind) {
         ("succeeded", _) => "succeeded".to_string(),
         ("cancelled", _) => "was cancelled".to_string(),
@@ -356,6 +384,11 @@ fn write_effect(target: &str, outcome: &str, class: CallClass) -> Option<Effect>
     })
 }
 
+/// The fixed repair-scope paragraph the briefing ends with after a
+/// rejection. It makes no claim about what the tree holds, so it stays true
+/// for an isolated attempt in a fresh directory too.
+pub(crate) const REPAIR_SCOPE: &str = "Repair scope: change only what the rejection above names. Keep the parts of your earlier work it does not name; do not rework, reformat or refactor them, and make no unrelated edits. Write your full outputs again.";
+
 impl AttemptMemory {
     /// The briefing the next attempt gets, appended to its prompt.
     pub(crate) fn briefing(&self) -> String {
@@ -367,7 +400,7 @@ impl AttemptMemory {
             };
             let _ = writeln!(out, "Attempt {} ({binding}): {}.", a.ordinal, a.ending);
         }
-        for (round, note) in &self.rejections {
+        for (_seq, round, note) in &self.rejections {
             // The check's note is data: its first line, bounded, quoted.
             let note = first_line(note).unwrap_or_else(|| "no note".to_string());
             let note = serde_json::to_string(&note).unwrap_or_default();
@@ -431,7 +464,29 @@ impl AttemptMemory {
              - file changes and commits in the working tree (check git status and git log).\n\
              A missing line above is not evidence that an action did not happen.",
         );
+        if self.needs_repair_scope() {
+            out.push_str("\n\n");
+            out.push_str(REPAIR_SCOPE);
+        }
         out
+    }
+
+    /// Whether the briefing ends with the repair-scope paragraph: the last
+    /// attempt in scope carries `rejected_for`, or the latest list item
+    /// rejection is newer than the last `attempt_finished` in scope.
+    fn needs_repair_scope(&self) -> bool {
+        if self
+            .attempts
+            .last()
+            .is_some_and(|a| a.rejected_for.is_some())
+        {
+            return true;
+        }
+        match (self.rejections.last(), self.last_finished_seq) {
+            (Some((rseq, _, _)), Some(fseq)) => *rseq > fseq,
+            (Some(_), None) => true,
+            _ => false,
+        }
     }
 }
 
@@ -514,6 +569,7 @@ mod tests {
                 partial_output: None,
                 failure_kind: kind.map(str::to_string),
                 usage: None,
+                rejected_for: None,
                 output_truncated: Vec::new(),
                 transcript_incomplete: false,
             },
@@ -567,6 +623,48 @@ mod tests {
     fn briefing(events: &[Event]) -> Option<String> {
         let dir = tempfile::tempdir().unwrap();
         recall(dir.path(), events, ExecKey::node("send")).map(|m| m.briefing())
+    }
+
+    /// A `finished` with the rejection reason apb recorded.
+    fn finished_rejected(seq: u64, attempt: u32, reason: &str) -> Event {
+        let mut e = finished(seq, attempt, "failed", None);
+        if let EventPayload::AttemptFinished { rejected_for, .. } = &mut e.payload {
+            *rejected_for = Some(reason.into());
+        }
+        e
+    }
+
+    /// A list item check rejection for item `i1` of node `send`.
+    fn item_rejected(seq: u64, round: u32, note: &str) -> Event {
+        ev(
+            seq,
+            EventPayload::ListItemSettled {
+                node: "send".into(),
+                item: "i1".into(),
+                state: crate::list::ledger::settled::REJECTED.into(),
+                verdict: None,
+                note: Some(note.into()),
+                reason: None,
+                output: None,
+                round,
+                carried: false,
+                check: Some("output".into()),
+                digest: None,
+                result: None,
+            },
+        )
+    }
+
+    /// The event stamped with a list item, for list-item keys.
+    fn stamped(mut e: Event, item: &str) -> Event {
+        e.payload.stamp_item(item);
+        e
+    }
+
+    /// `briefing` under a list item key.
+    fn briefing_for_key(events: &[Event], key: ExecKey) -> Option<String> {
+        let dir = tempfile::tempdir().unwrap();
+        recall(dir.path(), events, key).map(|m| m.briefing())
     }
 
     #[test]
@@ -689,5 +787,94 @@ mod tests {
     fn an_attempt_with_no_finish_reads_as_having_no_result() {
         let text = briefing(&[started(1, 1, "claude", "sonnet")]).unwrap();
         assert!(text.contains("Attempt 1 (claude, sonnet): ended with no result recorded."));
+    }
+
+    /// A rejected attempt quotes the whole reason apb recorded, instead of
+    /// the agent's summary, and the briefing ends with the repair-scope
+    /// paragraph.
+    #[test]
+    fn a_rejected_attempt_quotes_the_reason_and_ends_with_the_repair_scope() {
+        // The briefing is read for the retry attempt: the rejected attempt is
+        // then the last one in scope.
+        let events = [
+            started(1, 1, "claude", "sonnet"),
+            finished_rejected(2, 1, "success check failed: no ANSWER marker"),
+        ];
+        let text = briefing(&events).unwrap();
+        assert!(
+            text.contains(
+                r#"reported success; apb rejected it: "success check failed: no ANSWER marker""#
+            ),
+            "missing the quoted rejection in:\n{text}"
+        );
+        // The agent's summary is not what is quoted for the rejected attempt.
+        let line1 = text.lines().find(|l| l.contains("Attempt 1 ")).unwrap();
+        assert!(!line1.contains("tests are red"));
+        assert!(text.ends_with(REPAIR_SCOPE));
+    }
+
+    /// A transient failure after a rejection is the last attempt in scope:
+    /// its work was not finished, so no repair-scope paragraph is added.
+    #[test]
+    fn a_transient_failure_after_a_rejection_carries_no_repair_scope() {
+        let events = [
+            started(1, 1, "claude", "sonnet"),
+            finished_rejected(2, 1, "missing the summary block"),
+            started(3, 2, "claude", "sonnet"),
+            finished(4, 2, "failed", Some("transient")),
+            node_finished(5, "failed"),
+        ];
+        let text = briefing(&events).unwrap();
+        assert!(text.contains(r#"apb rejected it: "missing the summary block""#));
+        assert!(!text.contains(REPAIR_SCOPE));
+    }
+
+    /// A list item's check rejection newer than the last `attempt_finished`
+    /// in scope adds the paragraph; an older one does not.
+    #[test]
+    fn a_list_item_rejection_newer_than_the_last_attempt_finished_gets_the_repair_scope() {
+        let started1 = {
+            let mut e = started(1, 1, "claude", "sonnet");
+            e.payload.stamp_item("i1");
+            e
+        };
+        let finished1 = {
+            let mut e = finished(2, 1, "succeeded", None);
+            e.payload.stamp_item("i1");
+            e
+        };
+        let started2 = {
+            let mut e = started(3, 2, "claude", "sonnet");
+            e.payload.stamp_item("i1");
+            e
+        };
+        let key = ExecKey::new("send", Some("i1"));
+        // Rejection at seq 3, the last attempt_finished at seq 2: newer.
+        let newer = [
+            started1.clone(),
+            finished1.clone(),
+            item_rejected(3, 1, "the diff is empty"),
+            started2.clone(),
+        ];
+        let text = briefing_for_key(&newer, key).unwrap();
+        assert!(
+            text.ends_with(REPAIR_SCOPE),
+            "missing the paragraph in:\n{text}"
+        );
+    }
+
+    /// The same rejection older than the last `attempt_finished` in scope
+    /// adds none. Journal seqs are ascending, so this order means older.
+    #[test]
+    fn an_older_list_item_rejection_adds_no_repair_scope() {
+        let events = [
+            stamped(started(1, 1, "claude", "sonnet"), "i1"),
+            item_rejected(2, 1, "the diff is empty"),
+            stamped(finished(3, 1, "succeeded", None), "i1"),
+            stamped(started(4, 2, "claude", "sonnet"), "i1"),
+        ];
+        let key = ExecKey::new("send", Some("i1"));
+        let text = briefing_for_key(&events, key).unwrap();
+        assert!(!text.contains(REPAIR_SCOPE));
     }
 }

@@ -7,7 +7,7 @@ description: >-
   project's own checks run side by side, then one report merges their
   verified findings. No file is changed and nothing is committed or
   published. A report is evidence that the review ran, not an approval.
-version: 1.1.1
+version: 1.1.2
 agent_launch: ask
 params:
   - name: target
@@ -69,7 +69,7 @@ nodes:
     type: agent_task
     title: Review correctness
     expected_duration: 10m
-    protect: ["**"]
+    read_only: true
     prompt: >-
       Your role: correctness (request fidelity, edge cases, API and state
       contracts, error handling). Use the apb-review skill. You are one
@@ -88,7 +88,7 @@ nodes:
     type: agent_task
     title: Review security
     expected_duration: 10m
-    protect: ["**"]
+    read_only: true
     prompt: >-
       Your role: security (permissions, secrets, injection, unsafe input,
       recovery boundaries). Use the apb-review skill, and always run the
@@ -110,7 +110,7 @@ nodes:
     type: agent_task
     title: Review tests and maintainability
     expected_duration: 10m
-    protect: ["**"]
+    read_only: true
     prompt: >-
       Your role: tests and maintainability (test value, behavior coverage,
       regression evidence, readability, coupling). Use the apb-review

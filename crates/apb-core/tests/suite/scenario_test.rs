@@ -418,6 +418,13 @@ fn each_rule_fires_on_its_case() {
             "state `set`",
         ),
         (
+            "visits: { work: 1 }",
+            "visits: { work: 1 }\n  status: { work: success }",
+            "V150",
+            Severity::Error,
+            "status `success`",
+        ),
+        (
             "outcome: [succeeded]",
             "outcome: [passed]",
             "V150",

@@ -73,6 +73,7 @@ fn attempt_finished_rejected_output_populates_rejected_outputs() {
                 partial_output: None,
                 failure_kind: None,
                 usage: None,
+                rejected_for: None,
             },
         ),
     ];
@@ -284,6 +285,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 partial_output: None,
                 failure_kind: None,
                 usage: None,
+                rejected_for: None,
             },
         ),
         ev(
@@ -794,4 +796,84 @@ fn a_run_end_settles_a_node_whose_retry_waits() {
         assert_eq!(state.nodes.get("work"), Some(&NodeStatus::Cancelled));
         assert!(state.deferred.is_empty());
     }
+}
+
+// `success_outputs` keeps only successful visits, appended in journal order,
+// so `no_new_items` folds the run's loop history over them.
+#[test]
+fn success_outputs_append_successful_visits_only() {
+    let events = vec![
+        ev(0, run_started("p")),
+        ev(
+            1,
+            EventPayload::node_finished("hunt", "succeeded", 1, r#"{"findings":["a"]}"#),
+        ),
+        ev(
+            2,
+            EventPayload::node_finished("hunt", "failed", 2, r#"{"findings":["b"]}"#),
+        ),
+        ev(
+            3,
+            EventPayload::node_finished("hunt", "timed_out", 3, r#"{"findings":["c"]}"#),
+        ),
+        ev(
+            4,
+            EventPayload::node_finished("hunt", "cancelled", 4, r#"{"findings":["d"]}"#),
+        ),
+        ev(
+            5,
+            EventPayload::node_finished("hunt", "succeeded", 5, r#"{"findings":["b"]}"#),
+        ),
+    ];
+    let s = RunState::fold(&events);
+    assert_eq!(
+        s.success_outputs.get("hunt").map(Vec::as_slice),
+        Some(
+            [
+                r#"{"findings":["a"]}"#.to_string(),
+                r#"{"findings":["b"]}"#.to_string()
+            ]
+            .as_slice()
+        ),
+        "only the succeeded visits fold, in journal order"
+    );
+}
+
+// History is never reset: a patch that continues the run from an earlier
+// node keeps every visit the node made before the patch, so a loop's seen
+// keys survive the resume.
+#[test]
+fn a_continue_from_keeps_earlier_visits() {
+    let events = vec![
+        ev(0, run_started("p")),
+        ev(
+            1,
+            EventPayload::node_finished("hunt", "succeeded", 1, r#"{"findings":["a"]}"#),
+        ),
+        ev(
+            2,
+            EventPayload::PatchApplied {
+                version: "1.0.1".into(),
+                classification: "improvement".into(),
+                continue_from: "hunt".into(),
+                definition: None,
+            },
+        ),
+        ev(
+            3,
+            EventPayload::node_finished("hunt", "succeeded", 2, r#"{"findings":["b"]}"#),
+        ),
+    ];
+    let s = RunState::fold(&events);
+    assert_eq!(
+        s.success_outputs.get("hunt").map(Vec::as_slice),
+        Some(
+            [
+                r#"{"findings":["a"]}"#.to_string(),
+                r#"{"findings":["b"]}"#.to_string()
+            ]
+            .as_slice()
+        ),
+        "the visit before the patch stays seen"
+    );
 }

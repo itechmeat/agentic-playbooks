@@ -55,6 +55,8 @@ pub mod list;
 pub mod liveness;
 // host execution mode (0.23.0)
 pub mod host_task;
+// seen text of the no_new_items loop exit (spec loops-and-graphs)
+pub mod loop_seen;
 pub mod manifest;
 pub mod next_action;
 pub mod notify;

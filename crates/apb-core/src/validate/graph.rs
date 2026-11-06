@@ -235,6 +235,9 @@ pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
                 // Reads one field of the source node's output, so it needs the
                 // same source node to exist and to be able to run first.
                 Some(EdgeCondition::OutputField { node, .. }) => Some(node),
+                // Reads the visited keys of the named loop node, so it needs
+                // the same node to exist and to be able to run first.
+                Some(EdgeCondition::NoNewItems { node, .. }) => Some(node),
                 _ => None,
             };
             if let Some(dep) = referenced {
@@ -561,6 +564,18 @@ pub(crate) fn describe_route_key(key: &RouteKey<'_>) -> String {
             question, min_p, ..
         }) => {
             format!("judge question=`{question}` min_p={}", min_p.0)
+        }
+        RouteKey::Conditional(EdgeCondition::NoNewItems {
+            node,
+            field,
+            key,
+            rounds,
+        }) => {
+            let key = key
+                .as_deref()
+                .map(|k| format!(" key=`{k}`"))
+                .unwrap_or_default();
+            format!("no_new_items node=`{node}` field=`{field}`{key} rounds={rounds}")
         }
     }
 }

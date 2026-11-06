@@ -108,7 +108,12 @@ export function outcomeEventNote(e: WfEvent): string | undefined {
       const list = changes.map((c) => `${str(c.change) ?? '?'} ${str(c.path) ?? ''}`.trim()).join(', ')
       const more = num(r.truncated) ? `, ${num(r.truncated)} more` : ''
       const tier = str(r.tier) ?? 'detected'
-      return `read-only (${tier}) node changed the tree: ${list || 'changed'}${more}`
+      // A batch member names the peers whose attempts overlapped its own.
+      const beside =
+        Array.isArray(r.concurrent_with) && r.concurrent_with.length
+          ? ` (ran beside ${(r.concurrent_with as string[]).join(', ')})`
+          : ''
+      return `read-only (${tier}) node changed the tree: ${list || 'changed'}${more}${beside}`
     }
     case 'goal_checked': {
       const idx = num(r.index)

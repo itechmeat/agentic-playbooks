@@ -334,6 +334,7 @@ pub(crate) fn build_reprompt_override(
         _ => "",
     };
     let base = render_node_prompt(
+        playbook,
         run_dir,
         run_id,
         state,

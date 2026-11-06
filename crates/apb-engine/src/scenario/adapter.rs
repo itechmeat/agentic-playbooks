@@ -7,10 +7,10 @@
 //! the success and completion checks, the journal) is the real drive's. It
 //! reports what an agent would have left behind:
 //!
-//! - `succeeded`: the output, and the declared output fields in the status
-//!   file, as an agent writes them;
-//! - `failed` without a kind (or `agent`): a failed report, as an agent that
-//!   says it failed;
+//! - `succeeded`: the output, and a `success` verdict with the declared
+//!   output fields in the status file, as an agent writes them;
+//! - `failed` without a kind (or `agent`): a failed report and a `failure`
+//!   verdict in the status file, as an agent that says it failed;
 //! - `failed` with `transient`, `quota`, `auth` or `budget`: a process
 //!   failure whose detail the failure classifier reads as that kind;
 //! - `question`: the question an interactive agent asks, the attempt's
@@ -89,21 +89,11 @@ impl ScenarioAdapter<'_> {
             a.failure_kind,
         ) {
             (ScriptedStatus::Succeeded, _) => {
-                if !a.outputs.is_empty()
-                    && let Some(path) = &task.status_file
-                {
-                    let doc = serde_json::json!({ "status": "success", "outputs": a.outputs });
-                    apb_core::fsutil::atomic_write_private(path, doc.to_string().as_bytes())
-                        .map_err(|e| {
-                            AgentFailure::new(
-                                ErrorClass::Transport,
-                                format!("scenario: the status file was not written: {e}"),
-                            )
-                        })?;
-                }
+                write_verdict(task, "success", &a.outputs)?;
                 Ok(report(NodeStatus::Succeeded, output))
             }
             (ScriptedStatus::Failed, None | Some(ScriptedFailure::Agent)) => {
+                write_verdict(task, "failure", &a.outputs)?;
                 Ok(report(NodeStatus::Failed, output))
             }
             (ScriptedStatus::Failed, Some(kind)) => {
@@ -124,6 +114,30 @@ impl ScenarioAdapter<'_> {
             }
         }
     }
+}
+
+/// The verdict an agent leaves in its status file, when the attempt was
+/// handed one: `status`, plus the scripted output fields when there are
+/// any. Without it a `require_verdict` node would read the attempt as
+/// interrupted, not as the success or failure the answer scripts.
+fn write_verdict(
+    task: &AgentTask,
+    status: &str,
+    outputs: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Result<(), AgentFailure> {
+    let Some(path) = &task.status_file else {
+        return Ok(());
+    };
+    let doc = match outputs.is_empty() {
+        true => serde_json::json!({ "status": status }),
+        false => serde_json::json!({ "status": status, "outputs": outputs }),
+    };
+    apb_core::fsutil::atomic_write_private(path, doc.to_string().as_bytes()).map_err(|e| {
+        AgentFailure::new(
+            ErrorClass::Transport,
+            format!("scenario: the status file was not written: {e}"),
+        )
+    })
 }
 
 fn report(status: NodeStatus, output: String) -> AgentReport {

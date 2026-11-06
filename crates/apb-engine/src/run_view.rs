@@ -139,7 +139,8 @@ pub struct ReadOnlyRow {
 }
 
 /// What a `read_only_violated` recorded: the changed paths (names, never
-/// content), how many were left out, and the evidence file.
+/// content), how many were left out, the evidence file, and, for a member
+/// of a concurrent batch, the members whose attempts overlapped its own.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ReadOnlyViolation {
@@ -152,6 +153,11 @@ pub struct ReadOnlyViolation {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub evidence: Option<String>,
+    /// The batch members whose attempts overlapped this one; the change
+    /// cannot be attributed to one of them. Absent when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<String>>", optional))]
+    pub concurrent_with: Vec<String>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -217,8 +223,18 @@ impl ReadOnlyRow {
                 .map(|ch| format!("{} {}", ch.path, ch.change))
                 .collect();
             let more = total.saturating_sub(named.len() as u64);
+            // A batch member names the peers it ran beside; without any,
+            // today's wording.
+            let dirty = if v.concurrent_with.is_empty() {
+                "changed the tree".to_string()
+            } else {
+                format!(
+                    "the tree changed while it ran beside {}",
+                    v.concurrent_with.join(", ")
+                )
+            };
             line.push_str(&format!(
-                "; changed the tree (read_only_dirty), {total} {}: {}",
+                "; {dirty} (read_only_dirty), {total} {}: {}",
                 if total == 1 { "path" } else { "paths" },
                 named.join(", ")
             ));
@@ -269,11 +285,13 @@ pub fn read_only_rows(events: &[Event]) -> Vec<ReadOnlyRow> {
                 changes,
                 truncated,
                 evidence,
+                concurrent_with,
             } => {
                 let violation = ReadOnlyViolation {
                     changes: changes.clone(),
                     truncated: *truncated,
                     evidence: evidence.clone(),
+                    concurrent_with: concurrent_with.clone(),
                 };
                 match rows
                     .iter_mut()
@@ -1009,6 +1027,42 @@ mod tests {
         assert_eq!(json["tier"], "detected_partial");
         assert_eq!(json["partial"], "entries");
         assert_eq!(json["violated"]["changes"][0]["path"], "a.txt");
+    }
+
+    /// A violation of a batch member names the peers it ran beside in the
+    /// line; without any, the line is exactly the sequential one.
+    #[test]
+    fn a_read_only_line_names_the_peers_it_ran_beside() {
+        let mut row = ReadOnlyRow {
+            node: "scan".into(),
+            item: None,
+            attempt: 2,
+            check: crate::event::ReadOnlyCheck {
+                tier: crate::event::ReadOnlyTier::Detected,
+                entries: 3,
+                bytes: 40,
+                partial: None,
+            },
+            violated: Some(ReadOnlyViolation {
+                changes: vec![crate::event::ReadOnlyChange {
+                    path: "a.txt".into(),
+                    change: "modified".into(),
+                }],
+                truncated: 0,
+                evidence: None,
+                concurrent_with: Vec::new(),
+            }),
+        };
+        assert_eq!(
+            row.line(),
+            "node `scan` attempt 2: detected (checked after the attempt over 3 entries, 40 bytes); changed the tree (read_only_dirty), 1 path: a.txt modified"
+        );
+        row.violated.as_mut().unwrap().concurrent_with =
+            vec!["write".to_string(), "other".to_string()];
+        assert_eq!(
+            row.line(),
+            "node `scan` attempt 2: detected (checked after the attempt over 3 entries, 40 bytes); the tree changed while it ran beside write, other (read_only_dirty), 1 path: a.txt modified"
+        );
     }
 
     /// The totals cover the attempts that reported usage; the count of all

@@ -11,7 +11,7 @@ Do not run the whole delivery flow inside one node.
 | Decompose | The triggers checked; no subtasks, or subtasks with their card outcomes, checks and dependencies in order |
 | Implement | A bounded end-to-end change against the card; causal or preservation evidence for the change kind; native check results |
 | Review | Independent read-only roles against the card and the actual candidate; findings with consequences, coverage and provenance |
-| Repair | Verify and dispose findings, fix the confirmed ones, rerun the affected checks; never restart the whole flow |
+| Repair | Verify and dispose findings; fix only what a confirmed finding names and keep the rest of the delivered change as it is; rerun the affected checks; never restart the whole flow |
 | Reconsider | After two repair rounds or repeated regressions, revise the approach with evidence; never lower the acceptance |
 | Integrate | Fresh required checks and review; push and pull request only within the authority the user or the project grants; merge and tags per project policy and apb consent |
 | Report | Outcome by outcome against the original request; conformance; assumptions; evidence; findings; measurements |

@@ -12,7 +12,7 @@ description: >-
   project's own tests are executed by apb before and after the work and
   reported with what changed. No commit, push or pull request is made by
   the run.
-version: 1.2.2
+version: 1.2.3
 agent_launch: ask
 params:
   - name: change_kind
@@ -256,7 +256,7 @@ nodes:
     title: Review correctness
     profile: apb-reviewer
     expected_duration: 10m
-    protect: ["**"]
+    read_only: true
     prompt: >-
       You are the correctness reviewer. Use the apb-review skill. Read-only:
       never edit files or run commands that change the tree. Start from
@@ -283,7 +283,7 @@ nodes:
     title: Review security
     profile: apb-reviewer
     expected_duration: 10m
-    protect: ["**"]
+    read_only: true
     prompt: >-
       You are the security reviewer. Use the apb-review skill, and always
       run the apb-security-audit skill on the whole diff; a general reading
@@ -368,7 +368,11 @@ nodes:
       Run only the Repair stage of the apb-delivery skill. Open findings:
       {{nodes.collect.output.findings}}. Card, which you must not change:
       {{nodes.intake.output}}. Verify each open finding against the source
-      first. Fix the confirmed ones; reject the others with a reason. Do
+      first. Fix the confirmed ones; reject the others with a reason.
+      Change only what a confirmed finding names; keep everything else of
+      the delivered change as it is; no unrelated edits, refactors or
+      formatting. A fix that needs a change outside a finding's location
+      says so in evidence with the reason. Do
       not drop reviewers, weaken checks, or delete or edit tests to make a
       finding go away. Rerun the affected project checks. Do not commit,
       push or open a pull request. Before you write the outputs, delete the

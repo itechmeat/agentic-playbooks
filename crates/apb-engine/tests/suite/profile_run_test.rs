@@ -18,18 +18,16 @@ fn lock() -> MutexGuard<'static, ()> {
     common::env_lock()
 }
 
-struct EnvGuard;
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("APB_AGENT_CMD");
-            std::env::remove_var("APB_CONFIG_DIR");
-            std::env::remove_var("HOME");
-            std::env::remove_var("APB_TEST_DUMP");
-            std::env::remove_var("APB_SANDBOX");
-        }
-    }
-}
+/// The process env these tests change, each var restored on drop to its
+/// value before the test (removing `HOME` outright broke later tests that
+/// read it).
+const TOUCHED_ENV: [&str; 5] = [
+    "APB_AGENT_CMD",
+    "APB_CONFIG_DIR",
+    "HOME",
+    "APB_TEST_DUMP",
+    "APB_SANDBOX",
+];
 
 /// The scratch-directory path of an isolated node: `best_effort` with the
 /// sandbox switched off. The forced allowlist still applies, so the profile
@@ -94,7 +92,7 @@ const DUMP_STUB: &str =
 #[test]
 fn run_with_profile_snapshots_and_writes_manifest() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -131,7 +129,7 @@ fn attempt_journaled_at_spawn_with_pid_and_duration() {
     // stub sleeps briefly so the spawn write and the return write land in
     // distinct milliseconds.
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -196,7 +194,7 @@ fn autonomous_run_does_not_bind_supervisor_from_defaults() {
     // otherwise the run would be forced to resolve/trust a profile that never
     // spawns. Check: the manifest carries the node binding but NOT "supervisor".
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -233,7 +231,7 @@ fn stale_expected_bundle_is_rejected() {
     // Anti-TOCTOU (spec 5.1): if the bundle captured by the gate does not match
     // the one recomputed from the snapshot, the engine refuses before start.
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -265,7 +263,7 @@ fn expected_bundle_key_set_must_match_exactly() {
     // An extra key in expected (a profile the run does not use) -> refusal:
     // the key sets must match exactly (fail closed).
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -329,7 +327,7 @@ fn manifest_is_write_once() {
 #[test]
 fn advisory_skills_line_appended_in_shared_workdir() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -368,7 +366,7 @@ fn isolated_workdir_materializes_skill_copies() {
     // The attempt is marked skills_mode: materialized. The sandboxed twin is
     // in `sandbox_run_test`.
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -427,7 +425,7 @@ fn isolated_retry_gets_fresh_skill_snapshot_per_attempt() {
     // the next attempt (fallback) must get a CLEAN skill snapshot -
     // per-attempt materialization in work/<node>/<attempt>.
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -479,7 +477,7 @@ fn non_isolated_node_uses_advisory_skills_mode() {
     // isolation: none -> advisory line with names, no materialized copies,
     // skills_mode: advisory.
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -520,7 +518,7 @@ fn non_isolated_node_uses_advisory_skills_mode() {
 #[test]
 fn fallback_event_carries_profile_ref() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -565,7 +563,7 @@ fn fallback_skips_identical_agent_and_model_binding() {
     // fallback_triggered, and the node fails once the one real step is
     // exhausted.
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -619,7 +617,7 @@ fn fallback_triggers_when_model_differs() {
     // different attempt and must still run normally (one fallback_triggered,
     // an attempt for each step).
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -676,7 +674,7 @@ fn fallback_guard_compares_consecutive_steps_only() {
     // immediately before it (sonnet) differs, even though the first step
     // shares its binding.
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -721,7 +719,7 @@ fn fallback_guard_compares_consecutive_steps_only() {
 #[test]
 fn env_drift_stops_resume_unless_allowed() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -762,7 +760,7 @@ fn resume_detached_preflight_returns_drift_error_without_spawning() {
     // `run_resume` reported `detached: true` for a run that never moved. The
     // drift preflight now runs in the parent and returns the error inline.
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -835,7 +833,7 @@ fn record_run_error_persists_failure_reason_visible_to_status() {
     // that folds into `failure_reason`, so `run_status` and `apb doctor --run`
     // show why the resume never moved the run.
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -897,7 +895,7 @@ fn legacy_run_resume_via_ephemeral_snapshot() {
     // rewrite the snapshot playbook.yaml to schema-1 executors and remove
     // manifest.yaml, then resume from the agent node.
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -947,7 +945,7 @@ fn legacy_run_resume_via_ephemeral_snapshot() {
 #[test]
 fn live_profile_edit_after_start_does_not_affect_resume() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -991,7 +989,7 @@ fn live_profile_edit_after_start_does_not_affect_resume() {
 #[test]
 fn live_profile_edit_mid_run_does_not_affect_a_fallback() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -1042,7 +1040,7 @@ fn live_profile_edit_mid_run_does_not_affect_a_fallback() {
 #[test]
 fn finish_answer_fallback_skips_identical_agent_and_model_binding() {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -1168,7 +1166,7 @@ fn model_stub(bin: &Path, primary: &str) -> String {
 
 fn run_walk(node_extra: &str, primary: &str) -> (RunStatus, Walk) {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -1306,7 +1304,7 @@ edges:
 /// with `apb-main` on claude and `apb-reviewer` on `reviewer_agent`.
 fn role_run_limits(reviewer_agent: &str) -> Vec<apb_engine::event::RunLimit> {
     let _l = lock();
-    let _g = EnvGuard;
+    let _g = TOUCHED_ENV.map(common::EnvVar::saved);
     let proj = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();

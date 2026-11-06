@@ -210,6 +210,7 @@ export function edgeLabel(e: PlaybookEdgeModel): string | undefined {
   if (c.type === 'output_match') return `match: ${c.pattern}`
   if (c.type === 'output_field') return `${c.field}: ${c.equals}`
   if (c.type === 'judge') return `judge p>=${c.min_p}`
+  if (c.type === 'no_new_items') return `no new items x${c.rounds}`
   return c.type
 }
 
@@ -362,6 +363,23 @@ function exitCaption(
     return {
       label: `judge: ${String(c.min_p)}`,
       title: `taken when a decision model answers yes to "${String(c.question)}" with p >= ${String(c.min_p)}; without an answer (no provider, the judge_edge use below enforce) it is ${fallback}; goes to ${e.to}`,
+      tone: 'default',
+    }
+  }
+  if (c.type === 'no_new_items') {
+    const own = c.node === nodeId
+    const rounds = Number(c.rounds)
+    // `key` is optional: without it an item's whole text is its identity, with
+    // it the named field of the item object is.
+    const key = c.key === undefined || c.key === null ? undefined : String(c.key)
+    const items = key
+      ? `"${String(c.field)}" items keyed by their "${key}"`
+      : `"${String(c.field)}" items`
+    return {
+      label: `no new items x${rounds}`,
+      title: own
+        ? `taken when the last ${rounds} successful visits of this node each added no new ${items}, goes to ${e.to}`
+        : `taken when the last ${rounds} successful visits of node ${c.node} each added no new ${items}, goes to ${e.to}`,
       tone: 'default',
     }
   }

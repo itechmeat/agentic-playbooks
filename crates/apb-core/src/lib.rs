@@ -58,6 +58,7 @@ pub mod judge_example;
 pub mod known_problems;
 pub mod launch;
 pub mod list;
+pub mod loop_items;
 pub mod migration;
 pub mod model_check;
 pub mod models_table;

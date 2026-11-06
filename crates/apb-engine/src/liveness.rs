@@ -1101,6 +1101,7 @@ mod tests {
                 300,
                 EventPayload::AttemptFinished {
                     item: None,
+                    rejected_for: None,
                     output_truncated: Vec::new(),
                     transcript_incomplete: false,
                     node: "a".into(),
@@ -1341,6 +1342,7 @@ mod tests {
                 3_000,
                 EventPayload::AttemptFinished {
                     item: None,
+                    rejected_for: None,
                     output_truncated: Vec::new(),
                     transcript_incomplete: false,
                     node: "a".into(),

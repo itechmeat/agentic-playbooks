@@ -91,6 +91,7 @@ pub(crate) fn resolve_at_start(
         &BTreeMap::new(),
         &BTreeMap::new(),
         "",
+        &BTreeMap::new(),
         &crate::context::OutputClip {
             run_dir: root,
             max_bytes: 0,
@@ -135,6 +136,7 @@ pub(crate) fn resolve_from_node(
         return Ok(None);
     }
     let rendered = render_node_prompt(
+        playbook,
         run_dir,
         run_id,
         state,

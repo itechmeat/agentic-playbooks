@@ -831,7 +831,12 @@ truncated?: number,
 /**
  * The run-relative evidence file.
  */
-evidence?: string, };
+evidence?: string, 
+/**
+ * The batch members whose attempts overlapped this one; the change
+ * cannot be attributed to one of them. Absent when empty.
+ */
+concurrent_with?: Array<string>, };
 
 export type ReadOnlyRow = { node: string, 
 /**
@@ -3713,8 +3718,9 @@ export type ScenarioVerdict = "passed" | "failed" | "invalid" | "stale" | "incom
 export type ExpectationResult = { 
 /**
  * `run.outcome`, `finish`, `route.path`, `route.visits`,
- * `route.not_visits`, `visits[<node>]`, `edges.taken[<address>]`,
- * `edges.not_taken[<address>]`, `joins.dead[<join>]`,
+ * `route.not_visits`, `visits[<node>]`, `status[<node>]`,
+ * `edges.taken[<address>]`, `edges.not_taken[<address>]`,
+ * `joins.dead[<join>]`,
  * `outputs[<node>]`, `outputs[<node>.<field>]`, `run_outputs[<name>]`,
  * `templates_empty`, `unused_answers`.
  */
@@ -3906,6 +3912,14 @@ reviews: { [key in string]: ReviewInput },
  * The output a rejection sent back, by node id.
  */
 rejected_outputs: { [key in string]: string }, hooks: { [key in string]: string }, 
+/**
+ * The rendered seen text of every `no_new_items` condition in the
+ * playbook, keyed `"<node>.<field>"` (spec loops-and-graphs D2).
+ * Absent when empty: a stored judge example of a playbook without the
+ * condition must not gain a key it cannot read back with
+ * `deny_unknown_fields`.
+ */
+seen?: { [key in string]: string }, 
 /**
  * `run.context` as it would render.
  */

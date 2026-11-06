@@ -318,6 +318,10 @@ fn from_run(
             .map(|(k, v)| (k.clone(), text(v)))
             .collect(),
         hooks: BTreeMap::new(),
+        seen: crate::loop_seen::seen_texts(&playbook, &state)
+            .into_iter()
+            .map(|(k, v)| (k, text(&v)))
+            .collect(),
         context: text(&context),
     };
     let inputs = super::sandbox::without_secrets(&playbook, &inputs);
@@ -1564,5 +1568,58 @@ note: ""
                 "accepted `{to}`"
             );
         }
+    }
+
+    /// `JudgeInputs` is `deny_unknown_fields` and lives inside stored
+    /// examples: an empty seen map must not be written at all, or every
+    /// example of a playbook without a `no_new_items` condition would stop
+    /// reading back (spec loops-and-graphs D2).
+    #[test]
+    fn an_empty_seen_map_is_serialized_as_absent() {
+        let inputs = JudgeInputs::default();
+        let json = serde_json::to_value(&inputs).unwrap();
+        assert!(json.get("seen").is_none(), "{json}");
+        let with_seen = JudgeInputs {
+            seen: BTreeMap::from([("hunt.findings".to_string(), "a\nb".to_string())]),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&with_seen).unwrap();
+        assert_eq!(
+            json.get("seen"),
+            Some(&serde_json::json!({"hunt.findings": "a\nb"}))
+        );
+    }
+
+    /// "Fill from a run" carries the seen text of the playbook's
+    /// `no_new_items` conditions, folded from the successful visits before
+    /// the judge execution started, redacted like the outputs.
+    #[test]
+    fn filling_from_a_run_fills_the_seen_text_of_the_loop() {
+        const LOOPED: &str = "schema: 2\nid: j\nname: j\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: hunt, type: script, script: 'true', runner: sh }\n  - id: triage\n    type: judge\n    title: Triage\n    state: { task: \"{{run.instruction}}\" }\n    questions:\n      verdict: { type: choice, instructions: \"Which?\", criteria: { clean: a, needs_fix: b } }\n    thresholds:\n      verdict: { min_confidence: 0.5, below: needs_fix }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: hunt }\n  - { from: hunt, to: triage }\n  - { from: triage, to: done, condition: { type: no_new_items, node: hunt, field: findings, rounds: 2 } }\n";
+        let root = tempfile::tempdir().unwrap();
+        let pb = root.path().join(".apb/playbooks/j");
+        std::fs::create_dir_all(pb.join("1.0.0")).unwrap();
+        std::fs::write(pb.join("1.0.0/playbook.yaml"), LOOPED).unwrap();
+        std::fs::write(pb.join("current"), "1.0.0\n").unwrap();
+        let run = root.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(run.join("playbook.yaml"), LOOPED).unwrap();
+        let mut log = crate::event::EventLog::create(&run).unwrap();
+        for e in [
+            serde_json::json!({ "type": "run_started", "playbook": "j", "version": "1.0.0" }),
+            serde_json::json!({ "type": "node_started", "node": "hunt", "attempt": 1 }),
+            serde_json::json!({ "type": "node_finished", "node": "hunt", "status": "succeeded", "attempt": 1, "output": "{\"findings\":[\"a\",\"b\"]}" }),
+            serde_json::json!({ "type": "node_started", "node": "triage", "attempt": 1 }),
+            serde_json::json!({ "type": "decision_made", "use_site": "judge_node", "node": "triage", "provider": "fake", "model": "fake-1", "mode": "enforce", "answers": serde_json::json!({ "verdict": { "value": "clean", "p": 0.9, "confidence": 0.9 } }) }),
+        ] {
+            log.append(payload(e)).unwrap();
+        }
+        let v = run_values(root.path(), "r1", "triage", None).unwrap();
+        assert_eq!(
+            v.inputs.seen.get("hunt.findings").map(String::as_str),
+            Some("a\nb"),
+            "{:?}",
+            v.inputs.seen
+        );
     }
 }
