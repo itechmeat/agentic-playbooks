@@ -36,6 +36,25 @@ pub(crate) fn render_node_prompt(
     Ok(inputs.render(prompt, run_dir, budget.output_max_bytes))
 }
 
+/// Renders a `writes` template (spec node-contracts D3): whole, with no
+/// context budget, since the value is parsed as a list (a clipped JSON
+/// array would refuse a valid scope). Prompts keep their budget.
+fn render_scope_template(
+    playbook: &Playbook,
+    run_dir: &Path,
+    run_id: &str,
+    state: &RunState,
+    cfg: &RunConfig,
+    template: &str,
+) -> Result<String, EngineError> {
+    const UNBOUNDED: apb_core::schema::ContextBudget = apb_core::schema::ContextBudget {
+        max_bytes: 0,
+        section_max_bytes: 0,
+        output_max_bytes: 0,
+    };
+    render_node_prompt(playbook, run_dir, run_id, state, cfg, template, &UNBOUNDED)
+}
+
 /// A single execution of a node. Returns an [`AttemptOutcome`]: `Finished`
 /// (status, output, events) for a normal execution, or `Suspended` when an
 /// interactive `agent_task` asked a question via the stdout marker instead of
@@ -960,15 +979,7 @@ fn execute_node_kind(
                     None
                 } else {
                     match super::write_scope::resolve(playbook, node_id, |t| {
-                        render_node_prompt(
-                            playbook,
-                            run_dir,
-                            run_id,
-                            state,
-                            cfg,
-                            t,
-                            &playbook.context_budget(node_id),
-                        )
+                        render_scope_template(playbook, run_dir, run_id, state, cfg, t)
                     })? {
                         Ok(scope) => scope,
                         Err(msg) => {
@@ -3938,15 +3949,7 @@ fn execute_node_kind(
                 None
             } else {
                 match super::write_scope::resolve(playbook, node_id, |t| {
-                    render_node_prompt(
-                        playbook,
-                        run_dir,
-                        run_id,
-                        state,
-                        cfg,
-                        t,
-                        &playbook.context_budget(node_id),
-                    )
+                    render_scope_template(playbook, run_dir, run_id, state, cfg, t)
                 })? {
                     Ok(scope) => scope,
                     Err(msg) => {

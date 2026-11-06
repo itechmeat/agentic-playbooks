@@ -752,3 +752,34 @@ edges:
         );
     }
 }
+
+/// A `writes` template renders whole: an array field larger than the
+/// node's `output_max_bytes` would get a clip note and stop being valid
+/// JSON, so a valid scope would refuse the node. Prompts keep the budget.
+#[test]
+fn a_template_scope_larger_than_the_output_budget_renders_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let yaml = TEMPLATE_PB.replace(
+        "defaults: { profile: main }",
+        "defaults: { profile: main, context: { output_max_bytes: 64 } }",
+    );
+    seed(
+        dir.path(),
+        &yaml,
+        &[("w.sh", "echo x > src/f19.rs\necho done\n".into())],
+    );
+    let files: Vec<String> = (0..20).map(|i| format!("\"src/f{i:02}.rs\"")).collect();
+    let stub = recording_stub(
+        dir.path(),
+        &format!(
+            "printf '%s' '{{\"status\":\"success\",\"outputs\":{{\"files\":[{}]}}}}' > \"$APB_STATUS_FILE\"; {OK}",
+            files.join(",")
+        ),
+    );
+    assert_eq!(
+        run_with_stub(dir.path(), "ws", &stub, None),
+        RunStatus::Succeeded,
+        "{}",
+        node_output(dir.path(), "w")
+    );
+}
