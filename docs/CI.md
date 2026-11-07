@@ -387,3 +387,32 @@ exit $code
 This is also the interim answer to scheduled and event-driven runs: an external
 scheduler starts the playbook, and `apb wait` turns the outcome into an exit
 code the scheduler understands.
+
+A scheduled routine does not need the scheduler to track its window: the
+playbook reads it from `run.previous_success.started_at` (see the authoring
+guide, "Previous success"). The playbook declares what a first run renders
+through `previous_success.when_none` over a param, and the scheduler passes
+nothing for the window:
+
+```yaml
+schema: 2
+id: nightly-triage
+name: Nightly triage
+version: 1.0.0
+params:
+  - { name: since, type: text, default: "2026-01-01T00:00:00Z" }
+previous_success:
+  when_none:
+    started_at: "{{params.since}}"
+nodes:
+  - { id: start, type: start }
+  - { id: triage, type: agent_task, prompt: "Triage the CI failures and the issues opened since {{run.previous_success.started_at}}." }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: triage }
+  - { from: triage, to: done }
+```
+
+Each successful run becomes the next one's window: a day the routine failed is
+read once by the next successful run, not twice and not lost. The scheduler
+stays as it is above; the playbook takes care of the window.

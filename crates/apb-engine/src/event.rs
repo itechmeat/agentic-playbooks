@@ -49,6 +49,58 @@ pub struct RunLimit {
     pub detail: String,
 }
 
+/// What `run.previous_success.*` renders in this run, read once at start
+/// (`crate::previous_success`). Data, never instructions.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviousSuccess {
+    /// The earlier run's id; absent when no earlier run succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub run_id: Option<String>,
+    /// RFC 3339; from the earlier run, else from `when_none`, else absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub started_at: Option<String>,
+    /// RFC 3339; from the earlier run, with `when_none` over it, else
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub finished_at: Option<String>,
+    /// The rendered text of every `nodes.<id>.output[.<field>]` reference
+    /// the start definition reads, keyed by `apb_core::previous_success::key`
+    /// (`nodes.a.output`), redacted and clipped. A node the earlier run did
+    /// not run is absent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<BTreeMap<String, String>>", optional))]
+    pub outputs: BTreeMap<String, String>,
+    /// Keys left out because the earlier run's secrets could not be read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<String>>", optional))]
+    pub withheld: Vec<String>,
+    /// The times came from `previous_success.when_none`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fallback: bool,
+}
+
+/// A follower that renders untrusted text, as the start definition says
+/// (display only, like `RunLimit`).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UntrustedNode {
+    pub node: String,
+    pub sources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<String>>", optional))]
+    pub outward: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<String>>", optional))]
+    pub secrets: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub accepted: Option<String>,
+}
+
 /// The `action` names of [`EventPayload::SupervisorAction`] that more than
 /// one site writes or reads: the drive writes them, the progress fold and the
 /// context assembler read them, so each is spelled once.
@@ -121,6 +173,19 @@ pub enum EventPayload {
         /// update them. Absent in older journals. Additive.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         limits: Vec<RunLimit>,
+        /// What `run.previous_success.*` renders in this run, read once at
+        /// start. Present exactly when the start definition reads the
+        /// namespace. Additive.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        previous_success: Option<PreviousSuccess>,
+        /// The nodes that render untrusted text, as the start definition
+        /// says (display only). Additive.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        untrusted: Vec<UntrustedNode>,
     },
     NodeStarted {
         node: String,
@@ -3291,7 +3356,7 @@ struct EventHeader {
 /// in sync: a bare `{"type": kind}` fails with "unknown variant" only when no
 /// variant carries that tag (a known one fails on its missing fields, or
 /// decodes when all of them are optional).
-fn is_known_kind(kind: &str) -> bool {
+pub(crate) fn is_known_kind(kind: &str) -> bool {
     match serde_json::from_value::<EventPayload>(serde_json::json!({ "type": kind })) {
         Ok(_) => true,
         Err(e) => !e.to_string().starts_with("unknown variant"),
@@ -4809,6 +4874,68 @@ mod deferral_tests {
         }
         assert_eq!(serde_json::to_string(&decode(line)).unwrap(), line);
         assert_eq!(apb_version().as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    }
+
+    /// The `run.previous_success` record on `run_provenance`: an older
+    /// line without it reads as absent and writes back byte for byte; a
+    /// present one round-trips.
+    /// The untrusted followers on `run_provenance`: an older line
+    /// without the field reads as empty and writes back byte for byte; a
+    /// present one round-trips.
+    #[test]
+    fn untrusted_is_additive_on_run_provenance() {
+        let decode = |line: &str| serde_json::from_str::<Event>(line).unwrap();
+        let old = r#"{"seq":1,"ts":5,"type":"run_provenance"}"#;
+        assert_eq!(serde_json::to_string(&decode(old)).unwrap(), old);
+        match decode(old).payload {
+            EventPayload::RunProvenance { untrusted, .. } => assert!(untrusted.is_empty()),
+            other => panic!("{other:?}"),
+        }
+        let line = r#"{"seq":2,"ts":5,"type":"run_provenance","untrusted":[{"node":"w","sources":["param issue_body"],"outward":["runs with network access"],"accepted":"labels come from params"}]}"#;
+        match decode(line).payload {
+            EventPayload::RunProvenance { untrusted, .. } => {
+                assert_eq!(untrusted.len(), 1);
+                assert_eq!(untrusted[0].node, "w");
+                assert_eq!(untrusted[0].sources, vec!["param issue_body"]);
+                assert_eq!(
+                    untrusted[0].accepted.as_deref(),
+                    Some("labels come from params")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(serde_json::to_string(&decode(line)).unwrap(), line);
+    }
+
+    #[test]
+    fn previous_success_is_additive_on_run_provenance() {
+        let decode = |line: &str| serde_json::from_str::<Event>(line).unwrap();
+        let old = r#"{"seq":1,"ts":5,"type":"run_provenance"}"#;
+        assert_eq!(serde_json::to_string(&decode(old)).unwrap(), old);
+        match decode(old).payload {
+            EventPayload::RunProvenance {
+                previous_success, ..
+            } => {
+                assert!(previous_success.is_none())
+            }
+            other => panic!("{other:?}"),
+        }
+        let line = r#"{"seq":2,"ts":5,"type":"run_provenance","previous_success":{"run_id":"r1","started_at":"2026-11-06T07:00:00Z","outputs":{"nodes.a.output":"[3,7]"}}}"#;
+        match decode(line).payload {
+            EventPayload::RunProvenance {
+                previous_success: Some(ps),
+                ..
+            } => {
+                assert_eq!(ps.run_id.as_deref(), Some("r1"));
+                assert_eq!(ps.started_at.as_deref(), Some("2026-11-06T07:00:00Z"));
+                assert_eq!(
+                    ps.outputs.get("nodes.a.output").map(String::as_str),
+                    Some("[3,7]")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(serde_json::to_string(&decode(line)).unwrap(), line);
     }
 
     /// The deferral events decode from their bare tag (every field has a

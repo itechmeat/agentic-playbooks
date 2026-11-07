@@ -2,6 +2,8 @@
 //! definition and is plain text. Search rules (V160 to V162): a searchable
 //! param is never secret and never named like a secret, and a playbook
 //! marks at most [`crate::run_search::MAX_SEARCH_PARAMS`] of them.
+//! Pattern rules (V177, V178): a text param's `pattern` compiles and is a
+//! bounded size, and the param's own default matches it.
 
 use super::*;
 
@@ -30,6 +32,55 @@ pub(crate) fn check_params(playbook: &Playbook, r: &mut ValidationReport) {
         }
     }
     check_search(playbook, r);
+    check_patterns(playbook, r);
+}
+
+/// V177 and V178: the shape of a text param's `pattern` and its default.
+fn check_patterns(playbook: &Playbook, r: &mut ValidationReport) {
+    for p in &playbook.params {
+        let Some(pattern) = &p.pattern else {
+            continue;
+        };
+        if p.kind != "text" {
+            r.error(
+                "V177",
+                None,
+                format!(
+                    "param `{}` has a pattern but is `type: {}`; a pattern applies to text params only",
+                    p.name, p.kind
+                ),
+            );
+            continue;
+        }
+        if pattern.is_empty() {
+            r.error(
+                "V177",
+                None,
+                format!("param `{}`: the pattern is empty", p.name),
+            );
+            continue;
+        }
+        if let Err(why) = crate::param_pattern::compile(pattern) {
+            r.error(
+                "V177",
+                None,
+                format!("param `{}`: pattern does not compile: {why}", p.name),
+            );
+            continue;
+        }
+        if let Some(default) = p.default_text()
+            && crate::param_pattern::check(p, &default).is_err()
+        {
+            r.error(
+                "V178",
+                None,
+                format!(
+                    "param `{}`: default does not match its pattern `{pattern}`",
+                    p.name
+                ),
+            );
+        }
+    }
 }
 
 /// V160 to V162: what a run search may list.

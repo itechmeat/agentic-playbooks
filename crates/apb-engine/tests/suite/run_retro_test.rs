@@ -323,6 +323,7 @@ fn run_retro_renders_into_a_prompt_bounded() {
         &empty,
         "",
         &BTreeMap::new(),
+        &BTreeMap::new(),
         &clip,
     );
     assert!(

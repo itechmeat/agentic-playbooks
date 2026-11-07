@@ -749,6 +749,20 @@ pub(super) fn journal_missing_inputs(
     )
 }
 
+/// The labels of the `## untrusted input` section for `node_id`, from
+/// the untrusted analysis of the playbook; `None` when the node renders
+/// no untrusted text. The section is appended per attempt, outside the
+/// cache-keyed render.
+fn untrusted_prompt_section(
+    playbook: &apb_core::schema::Playbook,
+    node_id: &str,
+) -> Option<String> {
+    let analysis = apb_core::untrusted::analyze(playbook);
+    let f = analysis.followers.iter().find(|f| f.node == node_id)?;
+    let labels: Vec<String> = f.sources.iter().map(|s| s.label()).collect();
+    Some(crate::context::untrusted_section(&labels))
+}
+
 // --- 0.23.0 run provenance (C7) ----------------------------------------------
 
 /// Executes one node: [`execute_node_kind`] plus the provenance record of a
@@ -2189,6 +2203,11 @@ fn execute_node_kind(
                         )),
                         _ => attempt_prompt,
                     };
+                    // The fixed `## untrusted input` section rides on the
+                    // task and is appended by the transport after every
+                    // other block, so it stays the last text the agent
+                    // reads, outside the cache-keyed render above.
+                    let untrusted_section = untrusted_prompt_section(playbook, node_id);
                     // The note named the earlier attempt in this prompt;
                     // clear it so a later attempt that fails some other way
                     // does not inherit it.
@@ -2201,6 +2220,7 @@ fn execute_node_kind(
                         .with_evidence(evidence_session.clone());
                     let task = AgentTask {
                         prompt: attempt_prompt.as_ref(),
+                        untrusted_section,
                         model: &step.model,
                         workdir: &attempt_workdir,
                         timeout,
@@ -4136,6 +4156,7 @@ pub(crate) fn execute_finish_answer(
         &hooks,
         &context,
         &crate::loop_seen::seen_texts(playbook, state),
+        &crate::previous_success::template_values(state),
         &crate::context::OutputClip {
             run_dir,
             max_bytes: budget.output_max_bytes,
@@ -4173,6 +4194,12 @@ pub(crate) fn execute_finish_answer(
         auto_context,
         for_people,
     );
+    // The finish prompt ends with the section too, when the finish
+    // renders untrusted text.
+    let text = match untrusted_prompt_section(playbook, node_id) {
+        Some(section) => format!("{text}{section}"),
+        None => text,
+    };
     let retries = playbook.defaults.max_retries.unwrap_or(0);
     let timeout = playbook.defaults.timeout_seconds.map(Duration::from_secs);
     let grant_autonomy = apb_core::effects::effective(playbook)
@@ -4380,6 +4407,7 @@ pub(crate) fn execute_finish_answer(
                 .with_process(step_env.process.clone());
             let task = AgentTask {
                 prompt: &text,
+                untrusted_section: None,
                 model: &ri.model,
                 workdir,
                 timeout,
@@ -4810,6 +4838,7 @@ pub(crate) fn run_playbook_node(
                 &hooks,
                 &context,
                 &crate::loop_seen::seen_texts(playbook, &state),
+                &crate::previous_success::template_values(&state),
                 &crate::context::OutputClip {
                     run_dir,
                     max_bytes: budget.output_max_bytes,
@@ -5232,6 +5261,7 @@ pub(crate) fn maybe_compact_context(
     };
     let task = AgentTask {
         prompt: &prompt,
+        untrusted_section: None,
         model: &model,
         workdir,
         timeout: Some(COMPACTION_TIMEOUT),

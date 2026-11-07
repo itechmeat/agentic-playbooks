@@ -48,6 +48,8 @@ export function incompatText(reason: Incompat): string {
       return 'the remembered value is no longer one of the options'
     case 'now_secret':
       return 'the param is a secret now; enter it every time'
+    case 'pattern_mismatch':
+      return 'the remembered value does not match the param pattern'
   }
 }
 
@@ -70,6 +72,9 @@ export function paramFields(params: PlaybookParam[], recall: Recall | null): Par
       note = `not using the remembered value: ${incompatText(recalled.status.reason)}`
     } else if (typeof recalled?.value === 'string') {
       remembered = recalled.value
+    }
+    if (note === null && p.pattern) {
+      note = `must match the pattern ${p.pattern}`
     }
     return {
       name: p.name,

@@ -34,6 +34,10 @@ pub(super) struct Report {
     pub(super) publish: Vec<crate::run_outcome::RunPublish>,
     pub(super) notify: Option<RunNotify>,
     pub(super) link: Option<String>,
+    /// What `run.previous_success.*` renders, as the start recorded it.
+    pub(super) previous_success: Option<crate::run_view::PreviousSuccessView>,
+    /// The nodes that render untrusted text, as the start recorded them.
+    pub(super) untrusted: Vec<crate::event::UntrustedNode>,
     pub(super) journal: Vec<Event>,
     /// Events left out of the journal section.
     pub(super) journal_cut: usize,
@@ -93,6 +97,8 @@ impl Report {
         let known_problems = crate::known_problems::of_run(&view.events);
         let (trusted, grades_left_out) = crate::grade::split_grades_of(run_dir);
         let (graph, definition) = view.graph_and_definition(run_dir);
+        let previous_success = crate::run_view::previous_success(&view.events);
+        let untrusted = crate::run_view::untrusted_nodes(&view.events);
         let mut events = view.events;
         let journal = events.split_off(journal_cut);
         Ok(Report {
@@ -102,6 +108,8 @@ impl Report {
             publish,
             notify,
             link: crate::people::link::run_link(root, &run_id),
+            previous_success,
+            untrusted,
             goal: readout.goal,
             outcome,
             steps,

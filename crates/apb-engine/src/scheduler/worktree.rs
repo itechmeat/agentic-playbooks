@@ -92,6 +92,7 @@ pub(crate) fn resolve_at_start(
         &BTreeMap::new(),
         "",
         &BTreeMap::new(),
+        &BTreeMap::new(),
         &crate::context::OutputClip {
             run_dir: root,
             max_bytes: 0,

@@ -177,6 +177,7 @@ fn adapter_scrubs_connector_env_and_injects_run_context() {
     let report = ad
         .run(&AgentTask {
             prompt: "hi",
+            untrusted_section: None,
             model: "haiku",
             workdir: dir.path(),
             timeout: None,

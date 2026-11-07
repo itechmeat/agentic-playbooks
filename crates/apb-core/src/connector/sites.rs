@@ -138,6 +138,7 @@ fn single_function_binding(name: &str, account: Option<&str>, function: &str) ->
         functions: FunctionsAllow::List(vec![function.to_string()]),
         max_calls: None,
         on_unknown: None,
+        untrusted: false,
     }
 }
 

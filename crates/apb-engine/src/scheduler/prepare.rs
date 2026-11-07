@@ -38,18 +38,6 @@ pub(crate) fn prepare_run(
 /// non-scalar its trimmed YAML serialization. This matches how callers already
 /// hand params in as strings, so a defaulted param and an explicitly passed one
 /// render identically.
-pub(crate) fn stringify_param_default(v: &yaml_serde::Value) -> String {
-    match v {
-        yaml_serde::Value::String(s) => s.clone(),
-        yaml_serde::Value::Bool(b) => b.to_string(),
-        yaml_serde::Value::Number(n) => n.to_string(),
-        other => yaml_serde::to_string(other)
-            .unwrap_or_default()
-            .trim_end()
-            .to_string(),
-    }
-}
-
 /// What this project remembers for playbook `id` of origin `origin_label`,
 /// checked against `params`, with the definition's legacy draft as the
 /// instruction fallback. The draft is read only when the start passes no
@@ -104,6 +92,7 @@ fn task_type_at_start(
             &BTreeMap::new(),
             &BTreeMap::new(),
             "",
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &crate::context::OutputClip {
                 run_dir: root,
@@ -903,12 +892,78 @@ pub(crate) fn prepare_placed(
     let remembered = applied.remembered;
     let mut params = applied.params;
     for p in &playbook.params {
-        if let Some(default) = &p.default
-            && !params.contains_key(&p.name)
-        {
-            params.insert(p.name.clone(), stringify_param_default(default));
+        if p.default.is_some() && !params.contains_key(&p.name) {
+            params.insert(p.name.clone(), p.default_text().unwrap_or_default());
         }
     }
+
+    // The launch surfaces refuse a value that does not match its param's
+    // pattern; this backstop covers the paths that do not pass the gate:
+    // a trial, an eval case, a detached drive. A scenario run's secret
+    // placeholder is apb's own and is never checked. Nothing is written
+    // yet, so a refusal leaves no run behind.
+    for p in &playbook.params {
+        if let Some(value) = params.get(&p.name) {
+            let placeholder = scenario.is_some()
+                && p.secret
+                && value == crate::scenario::session::SECRET_PLACEHOLDER;
+            if !placeholder && apb_core::param_pattern::check(p, value).is_err() {
+                return Err(EngineError::Invalid(format!(
+                    "param `{}` does not match its pattern `{}`",
+                    p.name,
+                    p.pattern.as_deref().unwrap_or("")
+                )));
+            }
+        }
+    }
+
+    // The `run.previous_success` window (spec recurring-routines D3), read
+    // once here where the params are final and nothing is written yet: a
+    // refusal here (unreadable history, a bad `when_none` time) leaves no
+    // run behind. Only a definition that reads the namespace looks at all.
+    let previous_success = if !apb_core::previous_success::reads(&playbook) {
+        None
+    } else if scenario.is_some() || opts.eval.is_some() {
+        // Repeatable by design: no lookup, so every play renders the same.
+        Some(crate::previous_success::snapshot(
+            root, None, &playbook, &params,
+        )?)
+    } else if let Some(pred) = opts.continued_from.as_deref() {
+        // A continued run keeps its predecessor's window: the predecessor's
+        // own record, copied unchanged. When the predecessor recorded none
+        // (its definition did not read the namespace), look up as a fresh
+        // start does.
+        let pred_dir = place.runs.join(pred);
+        let pred_events = crate::event::read_all(&pred_dir).map_err(|_| {
+            EngineError::Invalid(format!(
+                "previous_success_unreadable: run `{pred}`: its journal does not read; repair or remove it, then start again"
+            ))
+        })?;
+        let recorded = pred_events.iter().find_map(|e| match &e.payload {
+            EventPayload::RunProvenance {
+                previous_success, ..
+            } => previous_success.clone(),
+            _ => None,
+        });
+        Some(match recorded {
+            Some(ps) => ps,
+            None => look_up_previous_success(root, id, t.origin_label, &playbook, &params)?,
+        })
+    } else if opts.parent_run.is_some() {
+        // A child start records the none window: two parent routines that
+        // run the same child would otherwise share one history.
+        Some(crate::previous_success::snapshot(
+            root, None, &playbook, &params,
+        )?)
+    } else {
+        Some(look_up_previous_success(
+            root,
+            id,
+            t.origin_label,
+            &playbook,
+            &params,
+        )?)
+    };
 
     // The run's working tree (issue #67 item 8), when it is known at start:
     // passed by the caller, or the playbook's `worktree` template over params.
@@ -1255,6 +1310,18 @@ pub(crate) fn prepare_placed(
         remembered,
         apb: crate::event::apb_version(),
         limits: run_limits(&manifest),
+        previous_success,
+        untrusted: apb_core::untrusted::analyze(&playbook)
+            .followers
+            .iter()
+            .map(|f| crate::event::UntrustedNode {
+                node: f.node.clone(),
+                sources: f.sources.iter().map(|s| s.label()).collect(),
+                outward: f.outward.clone(),
+                secrets: f.secrets.clone(),
+                accepted: f.accepted.clone(),
+            })
+            .collect(),
     })?;
     // A definition using a feature an older apb would drop is guarded from
     // here on: every checkpoint carries the guard, so such an apb refuses
@@ -1571,4 +1638,24 @@ fn run_limits(manifest: &crate::manifest::RunExecutionManifest) -> Vec<crate::ev
         }
         _ => Vec::new(),
     }
+}
+
+/// The `run.previous_success` window of a top-level start: the latest
+/// earlier success of `id` in scope `scope_label` (spec recurring-routines
+/// D2), snapshotted, or the none window. A run directory that cannot be
+/// classified refuses the start.
+fn look_up_previous_success(
+    root: &std::path::Path,
+    id: &str,
+    scope_label: &str,
+    playbook: &Playbook,
+    params: &std::collections::BTreeMap<String, String>,
+) -> Result<crate::event::PreviousSuccess, EngineError> {
+    let found = crate::previous_success::find(root, id, scope_label).map_err(|h| {
+        EngineError::Invalid(format!(
+            "previous_success_unreadable: run `{}`: its {} does not read; repair or remove it, then start again",
+            h.run, h.what
+        ))
+    })?;
+    crate::previous_success::snapshot(root, found.as_deref(), playbook, params)
 }

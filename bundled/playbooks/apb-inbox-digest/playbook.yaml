@@ -18,7 +18,7 @@ description: >-
   written to inbox-digest.md in the current project. Inactive until the
   imap connector and an account for it exist on this machine (apb
   connector install imap).
-version: 1.0.0
+version: 1.0.1
 agent_launch: ask
 params:
   - { name: mail_folder, type: text, default: "INBOX", label: "IMAP folder to read" }
@@ -69,6 +69,7 @@ nodes:
     type: agent_task
     title: List the unread messages
     expected_duration: 3m
+    accept_untrusted: the imap functions it binds are read-only; message text is copied into the outputs, never followed
     prompt: >-
       Search folder {{params.mail_folder}} with the imap connector's
       search_messages function: unread_only true, since_days
@@ -88,7 +89,7 @@ nodes:
       when total is larger than the number of messages listed, else
       false).
     connectors:
-      - { name: imap, accounts: [default], functions: [search_messages, get_message], max_calls: 52 }
+      - { name: imap, accounts: [default], functions: [search_messages, get_message], max_calls: 52, untrusted: true }
     outputs: { fields: [messages, total, truncated] }
   # Classification reads the text anyone can write, so it runs with no
   # connector: only the item section. The sandbox keeps it from writing
@@ -99,6 +100,7 @@ nodes:
     type: agent_task
     title: Classify each message
     expected_duration: 15m
+    accept_untrusted: names only a category and a summary; it binds no connector and the sandbox holds where this machine has one
     isolation: { level: best_effort }
     prompt: >-
       The item section holds one unread message: its uid, date, sender,
@@ -146,6 +148,7 @@ nodes:
     expected_duration: 5m
     audience: people
     isolation: { level: best_effort }
+    accept_untrusted: writes only inbox-digest.md in the project and copies message text without its links
     prompt: >-
       Write the file inbox-digest.md in the current directory, replacing
       it if it exists, and change no other file. Run no other command and
@@ -172,6 +175,7 @@ nodes:
     outcome: success
     expected_duration: 1m
     audience: people
+    accept_untrusted: its one-line answer names only the folder and window from params; it binds no connector and writes no file
     prompt: >-
       Begin with the line INBOX DIGEST: followed by the folder
       {{params.mail_folder}}, then say in one sentence that it holds no

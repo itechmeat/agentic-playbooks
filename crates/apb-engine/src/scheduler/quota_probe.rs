@@ -72,6 +72,7 @@ pub(crate) fn run_quota_probe(run_dir: &Path, node: &str, agent: &str, model: &s
     };
     let task = AgentTask {
         prompt: PROBE_PROMPT,
+        untrusted_section: None,
         model: &ri.model,
         workdir: &workdir,
         timeout: Some(PROBE_TIMEOUT),

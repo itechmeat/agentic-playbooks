@@ -182,6 +182,25 @@ fn gate_refusal_message(refusal: &serde_json::Value) -> String {
              <name>=<value>`, then re-run.",
             strings("missing").join(", ")
         ),
+        apb_engine::gate::PARAM_PATTERN_MISMATCH => {
+            let names = strings("invalid");
+            let patterns = |name: &str| {
+                refusal["patterns"][name]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let list = names
+                .iter()
+                .map(|n| format!("{} ({})", n, patterns(n)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "run refused ({policy}): param(s) not matching their pattern: {}. Pass a value \
+                 that matches with --param <name>=<value>, then re-run.",
+                list
+            )
+        }
         p if p == apb_engine::consent::REFUSAL_POLICY => crate::consent::refusal_message(refusal),
         apb_engine::run_config::UNATTENDED_UNSUPPORTED => format!(
             "run refused ({policy}): {}",
@@ -1813,6 +1832,28 @@ fn run_detail_text(
         say!(
             "  limit: {}",
             sanitize_for_terminal(&limit.detail, QUESTION_TEXT_MAX)
+        );
+    }
+    if let Some(ps) = apb_engine::run_view::previous_success(&view.events) {
+        say!(
+            "  previous success: {}",
+            sanitize_for_terminal(
+                &apb_engine::run_view::previous_success_line(&ps),
+                QUESTION_TEXT_MAX
+            )
+        );
+    }
+    for u in apb_engine::run_view::untrusted_nodes(&view.events) {
+        let sources = u.sources.join(", ");
+        let why = match &u.accepted {
+            Some(reason) => format!("accepted: {reason}"),
+            None => "not accepted".to_string(),
+        };
+        say!(
+            "  untrusted input: node `{}` renders {}; {}",
+            sanitize_for_terminal(&u.node, QUESTION_TEXT_MAX),
+            sanitize_for_terminal(&sources, QUESTION_TEXT_MAX),
+            sanitize_for_terminal(&why, QUESTION_TEXT_MAX)
         );
     }
     if view.driver_dead() {

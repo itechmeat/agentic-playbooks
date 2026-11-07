@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Recall } from './api.gen'
-import { instructionFrom, memoryNoteFrom, mergeRecalled, missingValues, paramFields, runInputFrom } from './runinput'
+import { instructionFrom, incompatText, memoryNoteFrom, mergeRecalled, missingValues, paramFields, runInputFrom } from './runinput'
 import type { PlaybookParam } from './types'
 
 const params: PlaybookParam[] = [
@@ -142,5 +142,29 @@ describe('instruction and run body', () => {
     const f = paramFields([], null)
     expect(runInputFrom(f, '', false, 'since the last tag')).toEqual({ params: {}, instruction: '' })
     expect(runInputFrom(f, '', false, '')).toEqual({ params: {} })
+  })
+})
+
+describe('param patterns', () => {
+  it('says what a pattern mismatch means for a remembered value', () => {
+    expect(incompatText('pattern_mismatch')).toBe(
+      'the remembered value does not match the param pattern',
+    )
+  })
+
+  it('shows the pattern as the note when there is no other one', () => {
+    const f = paramFields([{ name: 'repo', type: 'text', pattern: '[a-z]+' }], null)
+    expect(f[0].note).toBe('must match the pattern [a-z]+')
+    // An incompatible memory note wins over the pattern note.
+    const r = recall({
+      values: [{ name: 'repo', value: 'a b', status: { status: 'incompatible', reason: 'pattern_mismatch' } }],
+    })
+    const g = paramFields([{ name: 'repo', type: 'text', pattern: '[a-z]+' }], r)
+    expect(g[0].note).toBe(
+      'not using the remembered value: the remembered value does not match the param pattern',
+    )
+    // A param without a pattern has no note.
+    const h = paramFields([{ name: 'free', type: 'text' }], null)
+    expect(h[0].note).toBeNull()
   })
 })

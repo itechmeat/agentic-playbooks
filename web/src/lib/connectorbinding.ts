@@ -11,7 +11,10 @@
 // the resolved value even though the TS field is marked `?` for construction
 // convenience. `accounts` mirrors `Option<Vec<String>>` - undefined means
 // "every account". `maxCalls` mirrors `Option<u32>` - undefined means no
-// budget; 0 is invalid per validator V26 and is never emitted.
+// budget; 0 is invalid per validator V26 and is never emitted. `onUnknown`
+// mirrors `Option<OnUnknown>` (`on_unknown` in YAML, `refuse` when absent),
+// and `untrusted` the binding's bool marker (false when absent); both are
+// kept through parse and serialize so a save never drops them (D10).
 export type FunctionsAllow = 'all' | 'read_only' | string[]
 
 export interface ConnectorBinding {
@@ -19,6 +22,8 @@ export interface ConnectorBinding {
   accounts?: string[]
   functions?: FunctionsAllow
   maxCalls?: number
+  onUnknown?: 'refuse' | 'resend'
+  untrusted?: boolean
 }
 
 function normalizeFunctions(f: FunctionsAllow | undefined): FunctionsAllow {
@@ -45,6 +50,12 @@ export function parseBinding(yaml: unknown): ConnectorBinding {
     if (typeof o.max_calls === 'number' && Number.isFinite(o.max_calls)) {
       binding.maxCalls = o.max_calls
     }
+    if (o.on_unknown === 'resend' || o.on_unknown === 'refuse') {
+      binding.onUnknown = o.on_unknown
+    }
+    if (o.untrusted === true) {
+      binding.untrusted = true
+    }
     return binding
   }
   // Malformed/unsupported shape (number, array, null, ...): no valid name to
@@ -67,8 +78,10 @@ export function serializeBinding(b: ConnectorBinding): unknown {
   const hasFunctions = functions !== 'all'
   const hasMaxCalls =
     typeof b.maxCalls === 'number' && Number.isInteger(b.maxCalls) && b.maxCalls >= 1
+  const hasOnUnknown = b.onUnknown !== undefined
+  const hasUntrusted = b.untrusted === true
 
-  if (!hasAccounts && !hasFunctions && !hasMaxCalls) {
+  if (!hasAccounts && !hasFunctions && !hasMaxCalls && !hasOnUnknown && !hasUntrusted) {
     return b.name
   }
 
@@ -76,6 +89,8 @@ export function serializeBinding(b: ConnectorBinding): unknown {
   if (hasAccounts) obj.accounts = b.accounts
   if (hasFunctions) obj.functions = functions
   if (hasMaxCalls) obj.max_calls = b.maxCalls
+  if (hasOnUnknown) obj.on_unknown = b.onUnknown
+  if (hasUntrusted) obj.untrusted = true
   return obj
 }
 

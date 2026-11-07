@@ -26,3 +26,27 @@ describe('RunDriveNotes', () => {
     expect(body).not.toContain('run-driven-by')
   })
 })
+
+describe('RunDriveNotes untrusted', () => {
+  it('lists each node that renders untrusted text with its accepted reason', () => {
+    const { body } = render(RunDriveNotes, {
+      props: {
+        untrusted: [
+          {
+            node: 'classify',
+            sources: ['connector github on list_open'],
+            accepted: 'labels come from params',
+          },
+        ],
+      },
+    })
+    expect(body).toContain('data-testid="run-untrusted"')
+    expect(body).toContain('accepted: labels come from params')
+    expect(body).toContain('connector github on list_open')
+  })
+
+  it('lists nothing when no node renders untrusted text', () => {
+    const { body } = render(RunDriveNotes, { props: { untrusted: [] } })
+    expect(body).not.toContain('run-untrusted')
+  })
+})

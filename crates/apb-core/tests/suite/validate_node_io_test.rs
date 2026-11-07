@@ -297,3 +297,18 @@ fn a_declared_cache_key_is_validated() {
     let undeclared = issues_top("", &node("{ mode: auto, key: \"{{nodes.a.output.sha}}\" }"));
     assert!(has(&undeclared, "V46", Severity::Warning), "{undeclared:?}");
 }
+
+#[test]
+fn a_previous_success_field_read_of_an_undeclared_field_warns_v46() {
+    let got = issues_top(
+        "",
+        "  - { id: a, type: agent_task, prompt: p, outputs: { fields: [head] } }\n  - { id: b, type: agent_task, prompt: \"{{run.previous_success.nodes.a.output.lead_ids}}\" }\n",
+    );
+    assert!(has(&got, "V46", Severity::Warning), "{got:?}");
+    // A declared field stays silent.
+    let clean = issues_top(
+        "",
+        "  - { id: a, type: agent_task, prompt: p, outputs: { fields: [head, lead_ids] } }\n  - { id: b, type: agent_task, prompt: \"{{run.previous_success.nodes.a.output.lead_ids}}\" }\n",
+    );
+    assert!(!has(&clean, "V46", Severity::Warning), "{clean:?}");
+}

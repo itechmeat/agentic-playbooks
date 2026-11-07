@@ -130,7 +130,7 @@ pub(super) fn header(w: &Writer, title: &str, report: &Report) -> Markup {
             )
         })
         .unwrap_or_default();
-    Markup::el(
+    let head = Markup::el(
         "header",
         None,
         Markup::concat([
@@ -142,6 +142,53 @@ pub(super) fn header(w: &Writer, title: &str, report: &Report) -> Markup {
             ),
             w.el("p", None, &report.outcome.headline),
             link,
+        ]),
+    );
+    let previous = report
+        .previous_success
+        .as_ref()
+        .map(|ps| {
+            Markup::el(
+                "p",
+                Some("meta"),
+                Markup::text(&format!(
+                    "previous success: {}",
+                    crate::run_view::previous_success_line(ps)
+                )),
+            )
+        })
+        .unwrap_or_default();
+    Markup::concat([head, previous])
+}
+
+/// The nodes that render untrusted text, as the start recorded them;
+/// absent for a run without any.
+pub(super) fn untrusted(w: &Writer, nodes: &[crate::event::UntrustedNode]) -> Markup {
+    if nodes.is_empty() {
+        return Markup::default();
+    }
+    let rows = nodes
+        .iter()
+        .map(|u| {
+            let why = match &u.accepted {
+                Some(reason) => format!("accepted: {reason}"),
+                None => "not accepted".to_string(),
+            };
+            vec![
+                u.node.clone(),
+                u.sources.join(", "),
+                u.secrets.join(", "),
+                why,
+            ]
+        })
+        .collect();
+    section(
+        "Untrusted input",
+        Markup::concat([
+            Markup::text(
+                "These nodes render text from outside this playbook's author; their agents were told to treat it as data.",
+            ),
+            w.table(&["Node", "Sources", "Secrets", "Acceptance"], rows),
         ]),
     )
 }

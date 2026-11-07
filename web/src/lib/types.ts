@@ -73,6 +73,8 @@ export interface PlaybookParam {
   options?: string[] | null
   default?: unknown
   secret?: boolean
+  pattern?: string | null
+  untrusted?: boolean
 }
 
 // One validation issue of a playbook. `edges` holds the rendered addresses

@@ -18,6 +18,8 @@ pub enum Incompat {
     OptionGone,
     /// The param is a secret now: its value is never used from memory.
     NowSecret,
+    /// The param has a pattern now, and the value does not match it.
+    PatternMismatch,
 }
 
 impl Incompat {
@@ -27,6 +29,7 @@ impl Incompat {
             Incompat::TypeChanged => "type_changed",
             Incompat::OptionGone => "option_gone",
             Incompat::NowSecret => "now_secret",
+            Incompat::PatternMismatch => "pattern_mismatch",
         }
     }
 }
@@ -62,6 +65,6 @@ pub fn check_value(p: &Param, v: &str) -> Result<(), Incompat> {
         "enum" if !p.options.as_ref().is_some_and(|o| o.iter().any(|x| x == v)) => {
             Err(Incompat::OptionGone)
         }
-        _ => Ok(()),
+        _ => crate::param_pattern::check(p, v).map_err(|_| Incompat::PatternMismatch),
     }
 }

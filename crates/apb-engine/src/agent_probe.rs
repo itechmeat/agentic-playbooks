@@ -156,6 +156,7 @@ pub fn probe(
     };
     let task = AgentTask {
         prompt: PROMPT,
+        untrusted_section: None,
         model: &model,
         workdir: &workdir,
         timeout: Some(req.timeout),

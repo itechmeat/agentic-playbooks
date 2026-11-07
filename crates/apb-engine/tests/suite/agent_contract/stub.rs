@@ -220,6 +220,7 @@ impl Stub {
         let env = Default::default();
         adapter.run(&AgentTask {
             prompt: PROMPT,
+            untrusted_section: None,
             // zcode takes its model through a provider config, which needs a
             // ZCode login; an empty model keeps the user's own selection.
             model: if agent == "zcode" { "" } else { "m-1" },

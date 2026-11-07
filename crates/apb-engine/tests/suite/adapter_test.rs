@@ -50,6 +50,7 @@ fn hermes_adapter_sends_z_flag_prefixed_soul_and_model_flag() {
     let report = ad
         .run(&AgentTask {
             prompt: "ping",
+            untrusted_section: None,
             model: "hermes-large",
             workdir: dir.path(),
             timeout: None,
@@ -116,6 +117,7 @@ fn a_dash_led_prompt_never_reaches_an_agent_as_an_option() {
             let report = ad
                 .run(&AgentTask {
                     prompt: "--help me review this",
+                    untrusted_section: None,
                     model: "m-1",
                     workdir: dir.path(),
                     timeout: None,

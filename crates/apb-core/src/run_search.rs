@@ -257,6 +257,8 @@ mod tests {
             default: None,
             secret: false,
             search: true,
+            pattern: None,
+            untrusted: false,
         }
     }
 

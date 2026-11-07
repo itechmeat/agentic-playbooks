@@ -878,3 +878,79 @@ fn a_secret_written_into_the_journal_never_reaches_the_header_or_a_withheld_row(
         "a plain row stays readable:\n{text}"
     );
 }
+
+/// The `run.previous_success` record is one line of `apb runs <id>`: the
+/// earlier run's id and times, or the `when_none` window, or none; the
+/// withheld keys are named. A run without the record has no line.
+#[test]
+fn runs_with_an_id_shows_the_previous_success() {
+    // With an earlier run: id and both times.
+    let dir = project();
+    let run = dir.path().join(".apb/runs/prev-1");
+    fs::create_dir_all(&run).unwrap();
+    let journal = JOURNAL.replacen(
+        "\n",
+        &format!(
+            "\n{}\n",
+            r#"{"seq":100,"ts":1790000000000,"type":"run_provenance","previous_success":{"run_id":"routine-1","started_at":"2026-11-06T07:00:00Z","finished_at":"2026-11-06T07:05:00Z","outputs":{"nodes.a.output":"x"},"withheld":["nodes.b.output.y"]}}"#
+        ),
+        1,
+    );
+    fs::write(run.join("events.jsonl"), journal).unwrap();
+    apb()
+        .args(["runs", "prev-1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "previous success: routine-1, started 2026-11-06T07:00:00Z, finished 2026-11-06T07:05:00Z, withheld: nodes.b.output.y",
+        ));
+
+    // Without an earlier run: the when_none window.
+    let run = dir.path().join(".apb/runs/prev-2");
+    fs::create_dir_all(&run).unwrap();
+    let journal = JOURNAL.replacen(
+        "\n",
+        &format!(
+            "\n{}\n",
+            r#"{"seq":100,"ts":1790000000000,"type":"run_provenance","previous_success":{"fallback":true,"started_at":"2026-01-01T00:00:00Z"}}"#
+        ),
+        1,
+    );
+    fs::write(run.join("events.jsonl"), journal).unwrap();
+    apb()
+        .args(["runs", "prev-2"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "previous success: none (window from when_none: 2026-01-01T00:00:00Z)",
+        ));
+
+    // Neither: a bare none.
+    let run = dir.path().join(".apb/runs/prev-3");
+    fs::create_dir_all(&run).unwrap();
+    let journal = JOURNAL.replacen(
+        "\n",
+        &format!(
+            "\n{}\n",
+            r#"{"seq":100,"ts":1790000000000,"type":"run_provenance","previous_success":{}}"#
+        ),
+        1,
+    );
+    fs::write(run.join("events.jsonl"), journal).unwrap();
+    apb()
+        .args(["runs", "prev-3"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("previous success: none"));
+
+    // A run whose definition does not read the namespace has no line.
+    apb()
+        .args(["runs", "demo-1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("previous success").not());
+}

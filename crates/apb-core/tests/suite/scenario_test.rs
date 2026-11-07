@@ -696,3 +696,37 @@ fn a_scenario_is_stale_outside_its_versions_or_its_digest_pin() {
             .contains("pinned")
     );
 }
+
+/// A scenario param value that does not match its param's pattern is a
+/// V178; a secret param's placeholder is apb's own and is never checked.
+#[test]
+fn a_scenario_param_under_a_pattern_is_checked_and_a_secret_placeholder_is_not() {
+    let pb = Playbook::from_yaml(
+        "schema: 2\nid: p\nname: P\nversion: 1.0.0\nparams:\n  - { name: region, type: text, pattern: '[a-z]{2}' }\n  - { name: token, type: text, secret: true, pattern: '[a-z]{8,}' }\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+    )
+    .unwrap();
+    let dir = dir_with(&[
+        (
+            "green.yaml",
+            "schema: 1\nid: green\nparams: { region: eu }\nexpect: { status: { done: succeeded } }\n",
+        ),
+        (
+            "bad.yaml",
+            "schema: 1\nid: bad\nparams: { region: EU }\nexpect: { status: { done: succeeded } }\n",
+        ),
+        (
+            "secret.yaml",
+            "schema: 1\nid: secret\nparams: { token: abc }\nexpect: { status: { done: succeeded } }\n",
+        ),
+    ]);
+    let got = scenario::validate_all(dir.path(), &pb);
+    let v178: Vec<&Issue> = got.iter().filter(|i| i.code == "V178").collect();
+    assert_eq!(v178.len(), 1, "{:?}", show(&got));
+    assert!(
+        v178[0].message.contains("`region` does not match"),
+        "{}",
+        v178[0].message
+    );
+    // The secret placeholder value is not pattern-checked (no V149 issue
+    // is asserted here; that rule has its own test).
+}

@@ -267,6 +267,11 @@ pub struct RunState {
     /// with no drive event after it (a node or attempt start, a pause, a
     /// resume, a stop or the end).
     pub released: Option<Released>,
+    /// What `run.previous_success.*` renders in this run, from the first
+    /// `RunProvenance`. A resume, a re-drive and a crash recovery fold the
+    /// same journal, so they render the same values. A patch never changes
+    /// it.
+    pub previous_success: Option<crate::event::PreviousSuccess>,
     /// Every successful visit's whole output, by node, appended in journal
     /// order (the `no_new_items` edge condition, spec loops-and-graphs D2).
     /// History is never reset: a `continue_from`, a revive, a supervisor
@@ -562,7 +567,11 @@ impl RunState {
             s.fold_deferral(e);
             match &e.payload {
                 EventPayload::RunStarted { .. } => s.run_status = RunStatus::Running,
-                EventPayload::RunProvenance { .. } => {}
+                EventPayload::RunProvenance { previous_success, .. } => {
+                    if s.previous_success.is_none() {
+                        s.previous_success = previous_success.clone();
+                    }
+                }
                 EventPayload::NodeStarted { node, .. } => {
                     s.seqs.started.insert(node.clone(), e.seq);
                     s.nodes.insert(node.clone(), NodeStatus::Running);

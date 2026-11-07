@@ -132,6 +132,7 @@ fn spawn(
     };
     let task = AgentTask {
         prompt: "go",
+        untrusted_section: None,
         model,
         workdir,
         timeout: None,

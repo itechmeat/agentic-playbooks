@@ -221,6 +221,20 @@ pub struct RunDetail {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(test, ts(optional, as = "Option<bool>"))]
     pub unattended: bool,
+    /// What `run.previous_success.*` renders in this run, as the start
+    /// recorded it: times and output keys only, never the values. Left out
+    /// for a run whose definition does not read the namespace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub previous_success: Option<apb_engine::run_view::PreviousSuccessView>,
+    /// The nodes that render untrusted text, as the start recorded them.
+    /// Left out for a run without any.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        test,
+        ts(as = "Option<Vec<apb_engine::event::UntrustedNode>>", optional)
+    )]
+    pub untrusted: Vec<apb_engine::event::UntrustedNode>,
     /// Progress and every open gate (reviews, questions, waits, supervisor):
     /// the run page renders its panels from this, never from `events`.
     pub progress: Option<apb_engine::progress::ProgressSummary>,
@@ -568,6 +582,8 @@ pub(crate) async fn get_run_handler(
         isolation,
         read_only,
         unattended,
+        previous_success: apb_engine::run_view::previous_success(&events),
+        untrusted: apb_engine::run_view::untrusted_nodes(&events),
         goal,
         candidate_trial,
         known_problems,

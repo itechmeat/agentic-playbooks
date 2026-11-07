@@ -64,6 +64,7 @@ fn agent_task<'a>(
 ) -> AgentTask<'a> {
     AgentTask {
         prompt: "go",
+        untrusted_section: None,
         model: "haiku",
         workdir: work,
         timeout,

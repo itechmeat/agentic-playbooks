@@ -49,6 +49,12 @@ pub struct JudgeInputs {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     #[cfg_attr(feature = "ts", ts(as = "Option<BTreeMap<String, String>>", optional))]
     pub seen: BTreeMap<String, String>,
+    /// What `run.previous_success.*` renders, keyed by the reference text
+    /// after `run.previous_success.` (`id`, `started_at`, `finished_at`,
+    /// `nodes.<id>.output[.<field>]`). Absent when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<BTreeMap<String, String>>", optional))]
+    pub previous_success: BTreeMap<String, String>,
     /// `run.context` as it would render.
     #[serde(default)]
     pub context: String,
@@ -126,6 +132,7 @@ impl JudgeInputs {
             rejected_outputs: state.rejected_outputs.clone(),
             hooks,
             seen: crate::loop_seen::seen_texts(playbook, state),
+            previous_success: crate::previous_success::template_values(state),
             context,
         })
     }
@@ -156,6 +163,7 @@ impl JudgeInputs {
             &self.hooks,
             &self.context,
             &self.seen,
+            &self.previous_success,
             &OutputClip {
                 run_dir: clip_dir,
                 max_bytes,
@@ -180,6 +188,15 @@ impl JudgeInputs {
                 }
                 let why = match r.split('.').collect::<Vec<_>>().as_slice() {
                     ["nodes", node, ..] if !self.outputs.contains_key(*node) => "never ran",
+                    ["run", "previous_success", ..] => {
+                        // A time or an id the snapshot does not hold: no
+                        // earlier success, not an empty value of one.
+                        if self.previous_success.contains_key("id") {
+                            "empty"
+                        } else {
+                            "no earlier success"
+                        }
+                    }
                     ["nodes", node, "output", _, ..] => {
                         match serde_json::from_str::<serde_json::Value>(&self.outputs[*node]) {
                             Ok(serde_json::Value::Object(_)) => "field absent",
@@ -216,9 +233,11 @@ pub(crate) fn render_state(
     let mut rendered = Vec::new();
     for (name, template) in fields.iter() {
         let text = inputs.render(template, clip_dir, max_bytes);
-        let reads_output = apb_core::template::refs(template)
-            .iter()
-            .any(|r| r.starts_with("nodes.") || r == "run.context");
+        let reads_output = apb_core::template::refs(template).iter().any(|r| {
+            r.starts_with("nodes.")
+                || r == "run.context"
+                || r.starts_with("run.previous_success.nodes.")
+        });
         let field = state_field(name, text, reads_output);
         rendered.push(RenderedField {
             name: name.to_string(),
@@ -253,5 +272,39 @@ pub(crate) fn state_field(name: &str, text: String, reads_output: bool) -> State
         text,
         head: FIELD_HEAD,
         tail: FIELD_TAIL,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An empty `previous_success` map serializes no key: a stored judge
+    /// example of a playbook that does not read the namespace reads back
+    /// under `deny_unknown_fields`.
+    #[test]
+    fn an_empty_previous_success_map_serializes_no_key() {
+        let inputs = JudgeInputs::default();
+        let wire = serde_json::to_value(&inputs).unwrap();
+        assert!(wire.get("previous_success").is_none(), "{wire:?}");
+    }
+
+    /// A judge state field reading an earlier output is `output` material
+    /// under the state budget, like `nodes.*` and `run.context`.
+    #[test]
+    fn a_state_field_reading_an_earlier_output_is_output_class() {
+        let playbook = Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: j, type: judge, state: { s: \"{{run.previous_success.nodes.a.output}}\" }, questions: { q: { type: noul, instructions: i } } }\nedges: []\n",
+        )
+        .unwrap();
+        let mut inputs = JudgeInputs::default();
+        inputs
+            .previous_success
+            .insert("nodes.a.output".to_string(), "[3,7]".to_string());
+        let dir = std::env::temp_dir();
+        let (_, rendered) = render_state(&playbook, "j", &inputs, &dir).unwrap();
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(rendered[0].class, "output");
+        assert_eq!(rendered[0].unfilled, Vec::<String>::new());
     }
 }

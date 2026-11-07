@@ -30,6 +30,7 @@ fn task<'a>(
 ) -> AgentTask<'a> {
     AgentTask {
         prompt,
+        untrusted_section: None,
         model: "haiku",
         workdir,
         timeout: None,

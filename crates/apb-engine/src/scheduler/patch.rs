@@ -110,6 +110,14 @@ pub(crate) fn apply_patch(
     {
         return append_patch_rejected(log, reason);
     }
+    // The `run.previous_success` snapshot was taken at start over the
+    // definition in force then: a patch may add no read of it the start
+    // never snapshotted.
+    if let Some(reason) =
+        crate::previous_success::patch_refusal(playbook, &loaded.playbook, &events)
+    {
+        return append_patch_rejected(log, reason);
+    }
     // A person-only gate and an approval are a person's constraints: a
     // supervisor's patch never weakens them, nor continues past a gate no
     // decision answered.
@@ -604,6 +612,137 @@ mod tests {
             ),
             "{line}"
         );
+    }
+
+    /// Patches a run whose journal holds a `run_provenance` with a
+    /// `previous_success` record over `record_keys` (empty: none recorded),
+    /// continuing from `start`, and returns the one line the patch
+    /// journals.
+    fn patch_prev(running: &str, patched: &str, record_keys: &[&str]) -> String {
+        let root = tempfile::tempdir().unwrap();
+        apb_core::registry::init_project(root.path()).unwrap();
+        let next = patched.replace("version: 1.0.0", "version: 1.0.1");
+        for (version, yaml) in [("1.0.0", running), ("1.0.1", next.as_str())] {
+            let dir = root.path().join(format!(".apb/playbooks/p/{version}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("playbook.yaml"), yaml).unwrap();
+        }
+        std::fs::write(root.path().join(".apb/playbooks/p/current"), "1.0.0").unwrap();
+        let run_dir = root.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("playbook.yaml"), running).unwrap();
+        let mut log = EventLog::create(&run_dir).unwrap();
+        log.append(EventPayload::RunStarted {
+            playbook: "p".into(),
+            version: "1.0.0".into(),
+            definition: None,
+        })
+        .unwrap();
+        log.append(EventPayload::RunProvenance {
+            origin: Some("project".into()),
+            digest: None,
+            execution_root: None,
+            scripts_digest: None,
+            profiles: Vec::new(),
+            remembered: Vec::new(),
+            apb: None,
+            limits: Vec::new(),
+            untrusted: Vec::new(),
+            previous_success: (!record_keys.is_empty()).then(|| crate::event::PreviousSuccess {
+                run_id: Some("r0".into()),
+                outputs: record_keys
+                    .iter()
+                    .map(|k| ((*k).to_string(), "v".into()))
+                    .collect(),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
+        log.append(EventPayload::node_finished("start", "succeeded", 1, ""))
+            .unwrap();
+        let before = read_all(&run_dir).unwrap().len();
+        let mut playbook = Playbook::from_yaml(running).unwrap();
+        let mut current = "start".to_string();
+        let _result = apply_patch(
+            root.path(),
+            &run_dir,
+            &mut log,
+            &RunConfig::default(),
+            &mut playbook,
+            &mut current,
+            PatchCommand {
+                version: "1.0.1".into(),
+                classification: "improvement".into(),
+                continue_from: "start".into(),
+            },
+        )
+        .unwrap();
+        let events = read_all(&run_dir).unwrap()[before..]
+            .iter()
+            .map(|e| match &e.payload {
+                EventPayload::PatchRejected { reason } => format!("patch_rejected {reason}"),
+                p => serde_json::to_value(p).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            })
+            .collect::<Vec<_>>();
+        events.first().cloned().unwrap_or_else(|| "applied".into())
+    }
+
+    /// A patch that adds a read of the namespace to a run that recorded
+    /// none is refused.
+    #[test]
+    fn a_patch_adding_the_namespace_to_a_run_that_recorded_none_is_refused() {
+        let line = patch_prev(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: script, script: s, runner: sh }\n  - { id: review, type: agent_task, prompt: x }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: review }\n",
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: script, script: s, runner: sh }\n  - { id: review, type: agent_task, prompt: \"{{run.previous_success.nodes.a.output.x}}\" }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: review }\n",
+            &[],
+        );
+        assert!(
+            line.starts_with("patch_rejected previous_success_unrecorded: the run recorded no run.previous_success at start"),
+            "{line}"
+        );
+    }
+
+    /// A patch that adds a read of an output key the start did not read
+    /// is refused, naming the key.
+    #[test]
+    fn a_patch_adding_an_unsnapshotted_output_key_is_refused() {
+        let line = patch_prev(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: script, script: s, runner: sh }\n  - { id: review, type: agent_task, prompt: \"{{run.previous_success.nodes.a.output.x}}\" }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: review }\n",
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: script, script: s, runner: sh }\n  - { id: b, type: script, script: s, runner: sh }\n  - { id: review, type: agent_task, prompt: \"{{run.previous_success.nodes.a.output.x}} {{run.previous_success.nodes.b.output.y}}\" }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: b, to: review }\n",
+            &["nodes.a.output.x"],
+        );
+        assert!(
+            line.starts_with("patch_rejected previous_success_unrecorded: run.previous_success.nodes.b.output.y was not read at start"),
+            "{line}"
+       );
+    }
+
+    /// A read the start snapshotted, removed by an earlier patch, may come
+    /// back: the running definition no longer reads it, the record does.
+    #[test]
+    fn a_patch_restoring_a_snapshotted_read_applies() {
+        let line = patch_prev(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: script, script: s, runner: sh }\n  - { id: review, type: agent_task, prompt: x }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: review }\n",
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: script, script: s, runner: sh }\n  - { id: review, type: agent_task, prompt: \"{{run.previous_success.nodes.a.output.x}}\" }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: review }\n",
+            &["nodes.a.output.x"],
+        );
+        assert!(!line.starts_with("patch_rejected"), "{line}");
+    }
+
+    /// A patch that keeps the start's reads applies.
+    #[test]
+    fn a_patch_keeping_the_starts_reads_applies() {
+        let line = patch_prev(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: script, script: s, runner: sh }\n  - { id: review, type: agent_task, prompt: \"{{run.previous_success.nodes.a.output.x}}\" }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: review }\n",
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: script, script: s, runner: sh }\n  - { id: review, type: agent_task, prompt: \"{{run.previous_success.nodes.a.output.x}}\" }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: review }\n",
+            &["nodes.a.output.x"],
+        );
+        // The patched definition reads the namespace, so the guard is
+        // written before the snapshot replaces the running one.
+        assert_eq!(line, "run_guard");
     }
 
     /// Every way an approval weakens, judged on the definitions alone (an

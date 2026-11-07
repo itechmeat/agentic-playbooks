@@ -274,6 +274,16 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
     if !limits.is_empty() {
         out["limits"] = json!(limits);
     }
+    // What `run.previous_success.*` renders, as the start recorded it:
+    // times and keys only, never the snapshotted output values. Absent
+    // for a run whose definition does not read the namespace.
+    if let Some(ps) = apb_engine::run_view::previous_success(&view.events) {
+        out["previous_success"] = json!(ps);
+    }
+    let untrusted = apb_engine::run_view::untrusted_nodes(&view.events);
+    if !untrusted.is_empty() {
+        out["untrusted"] = json!(untrusted);
+    }
     if let Some(p) = progress.filter(|p| !p.pending_tasks.is_empty()) {
         out["pending_tasks"] = json!(p.pending_tasks);
     }
@@ -1520,6 +1530,58 @@ mod progress_tests {
             run_status(tmp.path(), "r1")
                 .unwrap()
                 .get("isolation")
+                .is_none()
+        );
+    }
+
+    /// The `run.previous_success` record reaches `run_status` with times
+    /// and keys, never the snapshotted output values; a run whose
+    /// definition does not read the namespace carries no key.
+    #[test]
+    fn run_status_lists_the_previous_success_without_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let journal = |provenance: &str| {
+            format!(
+                "{}\n{provenance}\n",
+                r#"{"seq":0,"ts":0,"type":"run_started","playbook":"p","version":"1.0.0"}"#
+            )
+        };
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            journal(
+                r#"{"seq":1,"ts":1,"type":"run_provenance","previous_success":{"run_id":"r0","started_at":"2026-11-06T07:00:00Z","outputs":{"nodes.a.output":"secret value"},"withheld":["nodes.b.output.y"]}}"#,
+            ),
+        )
+        .unwrap();
+        let out = run_status(tmp.path(), "r1").unwrap();
+        assert_eq!(out["previous_success"]["run_id"], "r0");
+        assert_eq!(
+            out["previous_success"]["started_at"],
+            "2026-11-06T07:00:00Z"
+        );
+        assert_eq!(
+            out["previous_success"]["keys"],
+            serde_json::json!(["nodes.a.output"])
+        );
+        assert_eq!(
+            out["previous_success"]["withheld"],
+            serde_json::json!(["nodes.b.output.y"])
+        );
+        let text = serde_json::to_string(&out["previous_success"]).unwrap();
+        assert!(!text.contains("secret value"), "{text}");
+        assert!(!text.contains("outputs"), "{text}");
+
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            journal(r#"{"seq":1,"ts":1,"type":"run_provenance"}"#),
+        )
+        .unwrap();
+        assert!(
+            run_status(tmp.path(), "r1")
+                .unwrap()
+                .get("previous_success")
                 .is_none()
         );
     }

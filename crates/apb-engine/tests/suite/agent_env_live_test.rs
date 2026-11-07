@@ -34,6 +34,7 @@ fn ask(
     };
     let task = AgentTask {
         prompt: "Reply with the single word PONG and nothing else.",
+        untrusted_section: None,
         model,
         workdir,
         timeout: Some(Duration::from_secs(300)),

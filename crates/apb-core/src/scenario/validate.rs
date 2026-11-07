@@ -598,6 +598,22 @@ fn check_params(cx: &mut Ctx, s: &Scenario) {
                     p.name
                 ),
             );
+            continue;
+        }
+        // A scenario value must match the param's pattern (the engine
+        // skips a secret param's placeholder at run time).
+        if let Some(value) = s.params.get(&p.name)
+            && crate::param_pattern::check(p, value).is_err()
+        {
+            cx.push(
+                "V178",
+                None,
+                format!(
+                    "scenario param `{}` does not match its pattern `{}`",
+                    p.name,
+                    p.pattern.as_deref().unwrap_or("")
+                ),
+            );
         }
     }
 }

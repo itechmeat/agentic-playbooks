@@ -119,6 +119,7 @@ fn render_params(v: &Value, ctx: &ReadCtx<'_>) -> Value {
             &BTreeMap::new(),
             "",
             &BTreeMap::new(),
+            &BTreeMap::new(),
             &crate::context::OutputClip {
                 run_dir: ctx.run_dir,
                 max_bytes: 0,

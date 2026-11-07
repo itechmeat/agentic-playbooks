@@ -19,6 +19,10 @@ use serde_json::{Value, json};
 /// The policy of the refusal [`check_params`] returns.
 pub const PARAM_NEEDS_VALUE: &str = "param_needs_value";
 
+/// The policy of the refusal a start gets when a given value does not
+/// match its param's pattern.
+pub const PARAM_PATTERN_MISMATCH: &str = "param_pattern_mismatch";
+
 /// Refuses a start of `wref` (the version that runs) that leaves a param
 /// without a value: no default, nothing remembered and nothing in `given`.
 /// The refusal names them in `missing`. A playbook that does not resolve
@@ -29,16 +33,49 @@ pub fn check_params(
     given: &BTreeMap<String, String>,
 ) -> Result<(), Value> {
     let missing = unfilled(root, wref, given);
-    if missing.is_empty() {
+    if !missing.is_empty() {
+        // A missing value is answered first.
+        return Err(json!({
+            "policy": PARAM_NEEDS_VALUE,
+            "id": wref.id,
+            "missing": missing,
+            "detail": format!(
+                "no default and nothing remembered for {}: a start must pass a value",
+                missing.join(", ")
+            ),
+        }));
+    }
+    // Every given value of a declared param must match its pattern.
+    // Names and patterns only, never the value (a secret included).
+    let Ok(resolved) = apb_core::store::resolve(root, wref) else {
+        return Ok(());
+    };
+    let Ok(loaded) = Registry::open_dir(&resolved.definition_parent)
+        .and_then(|reg| reg.load(&wref.id, Some(&resolved.version)))
+    else {
+        return Ok(());
+    };
+    let mut invalid = Vec::new();
+    let mut patterns = serde_json::Map::new();
+    for p in &loaded.playbook.params {
+        if let Some(value) = given.get(&p.name)
+            && let Err(m) = apb_core::param_pattern::check(p, value)
+        {
+            patterns.insert(m.name.clone(), json!(m.pattern));
+            invalid.push(m.name);
+        }
+    }
+    if invalid.is_empty() {
         return Ok(());
     }
     Err(json!({
-        "policy": PARAM_NEEDS_VALUE,
+        "policy": PARAM_PATTERN_MISMATCH,
         "id": wref.id,
-        "missing": missing,
+        "invalid": invalid,
+        "patterns": patterns,
         "detail": format!(
-            "no default and nothing remembered for {}: a start must pass a value",
-            missing.join(", ")
+            "{} does not match its pattern: pass a value that does",
+            invalid.join(", ")
         ),
     }))
 }
@@ -64,10 +101,10 @@ pub fn short_secret_warning(
     let mut values = given.clone();
     for p in &loaded.playbook.params {
         // The default as the start renders it (a number included).
-        if let Some(d) = p.default.as_ref() {
+        if p.default.is_some() {
             values
                 .entry(p.name.clone())
-                .or_insert_with(|| crate::scheduler::prepare::stringify_param_default(d));
+                .or_insert_with(|| p.default_text().unwrap_or_default());
         }
     }
     apb_core::run_params::short_secret_warning(&apb_core::run_params::too_short_to_scrub(
@@ -114,6 +151,14 @@ pub(crate) fn without_default(params: &[apb_core::schema::Param]) -> Vec<String>
 mod tests {
     use super::*;
     use apb_core::scope::Origin;
+
+    pub(crate) fn project_for_patterns(params: &str) -> tempfile::TempDir {
+        project(params)
+    }
+
+    pub(crate) fn wref_for_patterns() -> PlaybookRef {
+        wref()
+    }
 
     fn project(params: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -164,5 +209,50 @@ mod tests {
         let dir = project("  - { name: target, type: text }\n");
         let given = BTreeMap::from([("target".to_string(), "x".to_string())]);
         assert!(check_params(dir.path(), &wref(), &given).is_ok());
+    }
+    /// A given value that does not match its param's pattern is refused
+    /// with `param_pattern_mismatch`, naming the params and patterns and
+    /// never the value; a missing value is answered first.
+    #[test]
+    fn a_value_that_does_not_match_its_pattern_is_refused() {
+        let dir = project_for_patterns(
+            "  - { name: token, type: text, secret: true, pattern: '[a-z]{8,}' }\n  - { name: repo, type: text, pattern: '[A-Za-z0-9._-]{1,100}' }\n",
+        );
+        let mut given = BTreeMap::new();
+        given.insert("token".into(), "s3cr3t-value".into());
+        given.insert("repo".into(), "a b".into());
+        let refusal = check_params(dir.path(), &wref_for_patterns(), &given).unwrap_err();
+        assert_eq!(refusal["policy"], PARAM_PATTERN_MISMATCH);
+        assert_eq!(refusal["id"], "p");
+        assert_eq!(refusal["invalid"], json!(["token", "repo"]));
+        assert_eq!(refusal["patterns"]["token"], "[a-z]{8,}");
+        assert_eq!(refusal["patterns"]["repo"], "[A-Za-z0-9._-]{1,100}");
+        let text = serde_json::to_string(&refusal).unwrap();
+        assert!(!text.contains("s3cr3t-value"), "{text}");
+        // The start actions give one remedy per invalid name.
+        let actions = crate::next_action::start::from_refusal(
+            crate::next_action::start::StartOf::of(&wref_for_patterns()),
+            &refusal,
+        );
+        assert_eq!(actions.len(), 2);
+        assert_eq!(
+            actions[1].remedy,
+            Some(crate::next_action::start::Remedy::ProvideParam {
+                name: "repo".into()
+            })
+        );
+    }
+
+    /// A missing value is answered before a mismatching one: the
+    /// `param_needs_value` refusal wins.
+    #[test]
+    fn a_missing_value_is_answered_first() {
+        let dir = project_for_patterns(
+            "  - { name: need, type: text }\n  - { name: repo, type: text, pattern: '[a-z]+' }\n",
+        );
+        let mut given = BTreeMap::new();
+        given.insert("repo".into(), "a b".into());
+        let refusal = check_params(dir.path(), &wref_for_patterns(), &given).unwrap_err();
+        assert_eq!(refusal["policy"], PARAM_NEEDS_VALUE);
     }
 }
