@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+globset.workspace = true
 apb-core = { path = "../apb-core" }
 # Decision models (issue #165): the provider client the decision runner asks.
 apb-decide = { path = "../apb-decide" }

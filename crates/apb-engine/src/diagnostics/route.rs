@@ -102,11 +102,28 @@ fn observed(
             .get(from)
             .map(|r| Value::from(scrub.clip(&r.decision, OBSERVED_MAX))),
         EdgeCondition::OutputMatch { .. } => None,
-        EdgeCondition::OutputField { node, field, .. } => state
-            .outputs
-            .get(node)
-            .and_then(|o| output_field_value(o, field))
-            .map(|v| Value::from(scrub.clip(&v, OBSERVED_MAX))),
+        cond @ EdgeCondition::OutputField { node, field, .. } => {
+            let o = state.outputs.get(node)?;
+            // An `equals` keeps today's clipped text; a threshold names the
+            // text it read and the number it made of it (either may be null).
+            if matches!(
+                cond.field_compare(),
+                Some(apb_core::schema::FieldCompare::Equals(_))
+            ) {
+                output_field_value(o, field).map(|v| Value::from(scrub.clip(&v, OBSERVED_MAX)))
+            } else {
+                // The number is read from the raw value, the way routing
+                // reads it, never from the clipped text; and it is left out
+                // when the scrubber touched the text, so a numeric secret
+                // never leaves as its re-serialized number (`123456.000`
+                // as `123456.0`).
+                let raw = output_field_value(o, field);
+                let value = raw.as_deref().map(|v| scrub.clip(v, OBSERVED_MAX));
+                let number = apb_core::schema::output_field_number(o, field)
+                    .filter(|_| !raw.as_deref().is_some_and(|v| scrub.alters(v)));
+                Some(serde_json::json!({ "value": value, "number": number }))
+            }
+        }
         EdgeCondition::Judge { .. } => {
             let answers = state.judge_edges.get(from)?;
             if state.finished_counts.get(from) != Some(&answers.execution) {
@@ -377,5 +394,42 @@ mod tests {
                 "a fragment leaked"
             );
         }
+    }
+
+    /// A threshold's observed number is left out when the scrubber touched
+    /// the field's text: a numeric secret (`123456.000`) would leave as its
+    /// re-serialized number (`123456.0`), which no scrub recognizes. A plain
+    /// field keeps its number.
+    #[test]
+    fn a_threshold_never_records_the_number_of_a_redacted_text() {
+        let root = tempfile::tempdir().unwrap();
+        let run = root.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run).unwrap();
+        let secret = "123456.000";
+        crate::run_config::write_run_config(
+            &run,
+            &crate::run_config::RunConfig {
+                params: [("pin".to_string(), secret.to_string())].into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let yaml = "schema: 2\nid: g\nname: g\nversion: 1.0.0\nparams:\n  - { name: pin, type: text, secret: true }\nnodes:\n  - { id: start, type: start }\n  - { id: s, type: prompt, prompt: s }\n  - { id: a, type: finish, outcome: success }\n  - { id: z, type: finish, outcome: success }\nedges:\n  - { from: start, to: s }\n  - { from: s, to: a, condition: { type: output_field, node: s, field: f, gte: 1 } }\n  - { from: s, to: z, fallback: true }\n";
+        std::fs::write(run.join("playbook.yaml"), yaml).unwrap();
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        let observed = |value: &str| {
+            let mut s = state(None);
+            s.outputs
+                .insert("s".into(), serde_json::json!({ "f": value }).to_string());
+            let _ = std::fs::remove_file(run.join(super::super::FILE));
+            let log = EventLog::create(&run).unwrap();
+            record_decision(&log, &pb, "s", &s, &evaluate_live_route(&pb, "s", &s));
+            std::fs::read_to_string(run.join(super::super::FILE)).unwrap()
+        };
+        let text = observed(secret);
+        assert!(!text.contains("123456"), "{text}");
+        assert!(text.contains("\"number\":null"), "{text}");
+        let plain = observed("80");
+        assert!(plain.contains("\"number\":80.0"), "{plain}");
     }
 }

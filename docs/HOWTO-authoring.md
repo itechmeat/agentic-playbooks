@@ -428,6 +428,61 @@ interim text is rejected with `success report rejected: completion marker
 path outside `scripts/` is a V12 error. The script form also takes a map,
 `{ script, scope }`, described below.
 
+### A check that must fail first (prove_fails_first)
+
+A check that passes before the agent ran proves nothing: the test was
+already green, the ledger already holds the invoice. With the map form's
+`prove_fails_first: true`, apb runs the script once before the first
+attempt of the node's effect scope, as an observation:
+
+```yaml
+  - { id: fix, type: agent_task, prompt: "fix the failing test", profile: dev,
+      success_check: { script: scripts/test.sh, prove_fails_first: true } }
+```
+
+The same works outside code. A node that books an invoice checks the ledger
+first; when the invoice is already there, the work is done and the node
+settles without the agent:
+
+```yaml
+  - { id: book, type: agent_task, prompt: "book invoice {{params.invoice}}", profile: books,
+      success_check: { script: scripts/invoice_in_ledger.sh, prove_fails_first: true,
+                       on_green_before: skip } }
+```
+
+When it runs: once per effect scope (since the node last succeeded), on the
+first attempt's placement, before the agent is spawned. Not before a retry,
+a fallback step, a deferred retry or a resume (the tree may already hold
+that attempt's work, and the check would wrongly read green), and never in
+a scenario run. Only a plain `agent_task` proves: V173 refuses
+`prove_fails_first` on a list node (its items have no first attempt of the
+node to prove before) and on a `script` node. The run is journaled as a
+`check_proved` event, never as an attempt.
+
+The proof is an observation of the tree: apb compares the node's tree
+before and after the script. A check that changes a tracked file, or one
+whose comparison is cut short by a limit, fails the node at once with
+`check_changed_tree:` and no attempt starts. What the check does outside
+the tree (a network call, a write elsewhere) is not observed: a shell exit
+code cannot prove their absence, so a check that reaches outside the tree
+needs an environment that is read-only there (an `isolation` sandbox, a
+read-only credential).
+
+What a green proof means:
+
+- `fail` (the default): the node fails at once with
+  `check_green_before:` and no attempt; the run outcome needs a look for it
+  (`1 check green before work`). A pass after the agent ran would prove
+  nothing, so the person decides.
+- `skip`: the node settles `succeeded` with `already done:` and no attempt.
+  The task was already done. Such a node must not declare `outputs.fields`
+  or `results`, and no edge may read its output: it produced nothing to
+  read (V173).
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| V173 | error | `on_green_before` without `prove_fails_first: true`; a `{ script }` map with neither `scope` nor `prove_fails_first: true` (write the bare string); `prove_fails_first: true` on a list node, on a node that is not an `agent_task` or on a node with `cache`; `on_green_before: skip` on a node that declares `outputs.fields` or `results`, or whose output an edge condition reads |
+
 ### What a check reads, and when its pass goes stale
 
 A check's pass is a fact about the tree it ran on. When a later node of
@@ -840,6 +895,49 @@ fails the node, the same policy as `deliverable_missing`. Validation warns
 (**V46**) when a template or an `output_field` condition reads a field that the
 source node's `outputs.fields` does not declare. A node that declares nothing is
 not checked.
+
+An entry can also be a typed declaration, `{ name, type, values, required }`,
+which turns the declaration into a contract the attempt is held to:
+
+```yaml
+outputs:
+  fields:
+    - { name: role, type: enum, values: [correctness], required: true }
+    - { name: blocking, type: number, required: true }
+    - { name: findings, type: array, required: true }
+    - notes                       # a plain name, as before
+```
+
+| `type` | What the field must hold |
+| --- | --- |
+| `string` | a JSON string |
+| `number` | a JSON number, or a string that is exactly the text of a JSON number (`"80"`, `"-1.5"`, `"1e3"`; not `" 80"`, `"+80"`, `"inf"`, `"NaN"`) |
+| `bool` | `true` or `false`, either as JSON or as the exact string |
+| `array` | a JSON array, or a string that parses as one |
+| `object` | a JSON object, or a string that parses as one |
+| `enum` | the text of a string, number or boolean that is one of `values`, compared exactly (no case folding) |
+
+When an attempt reports success, apb checks every typed entry against the
+output. A required field that is absent or null, or a value of the wrong type,
+rejects the attempt: non-fatal, so it spends a retry, `rejected_for` carries a
+reason that starts with `output_contract:` and the retry briefing quotes it.
+When the retries are spent the node fails with that reason as its output. A
+plain name is never checked: its absence stays the `output_fields_missing`
+warning. The reason names the field, the expected type and the JSON kind it
+got, and never the offending value itself. An optional typed field left out is
+not rejected; the missing-field warning covers it.
+
+On a `script` node the stdout is checked the same way and a mismatch fails the
+node at once (a script has no retry). A list item's step is checked against the
+list's `item_outputs` (the same forms), never against the node's
+`outputs.fields`. A node with a typed entry gets a status-file note naming each
+key with its type and whether it is required, so the agent sees the contract
+before writing anything.
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| V167 | error | a typed entry is malformed: an empty name or one holding `.`, `{`, `}` or whitespace; a name declared twice where one of the two is typed; `values` without `type: enum`; `type: enum` with no `values`, an empty value or a repeated value |
+| V168 | warning | a reader cannot read a typed field's type: an `output_field` `equals` on a `bool` field other than `true`/`false`, on a `number` field no number reads as, on an `enum` field outside its `values`, or on an `array` or `object` field; a threshold on a field typed other than `number`; a list's `items.from` field typed other than `array`; a `no_new_items` field typed other than `array`; a `writes` template reading a field typed other than `array` or `string` |
 
 ### Result snapshots (results:)
 
@@ -1429,6 +1527,63 @@ not covered: [docs/ISOLATION.md](ISOLATION.md) ("Read-only nodes").
 A `read_only` node with a `workdir` cannot be isolated (V47), so it always
 gets the detected tier.
 
+### Write scope (writes, max_changed_files)
+
+A node may declare the files its attempt may change, relative to the node's
+directory:
+
+```yaml
+- id: export
+  type: agent_task
+  prompt: "refresh the export"
+  writes: ["src/export/**", "tests/export_*.rs"]
+  max_changed_files: 5
+```
+
+`writes` takes globs, or one template that renders the list:
+`writes: "{{nodes.plan.output.files}}"`, where the earlier node publishes a
+JSON array of strings or a newline list. The template renders once per
+execution, before the first attempt; a render that comes out empty or as an
+empty list, or names a path outside the node's directory (`../x`, `/abs`),
+refuses the node before anything starts. At most 200 entries.
+
+After every attempt apb compares the node's tree with its state before the
+attempt (the read-only check's tree comparison). A changed file outside
+`writes`, or more changed files than `max_changed_files`, fails the node at
+once: `failure_kind: write_scope`, an output that starts `write_scope:` and
+names the changed paths, no retry, no fallback, no deferral, and no restore.
+A retry would take a fresh before state that already holds the stray change
+and pass while it stays, so the check would launder it. To have changes put
+back, combine `writes` with `protect` (which copies and restores). A commit
+of an in-scope file is in scope: the repository state (HEAD, refs, index,
+control files) is not a file change.
+
+What the comparison observes: the files git tracks or would track, every
+`.gitignore`, initialized submodules, nothing below a symlinked directory.
+`writes` does not constrain git-ignored files (build output, a `.env`), the
+run's own `.apb` files, paths outside the node's tree, or external effects
+(a connector call, a network request). A comparison cut short by a limit
+(the entries or bytes cap) is an unknown result and fails the node: what the
+limit left out may hold the violation.
+
+A node with a scope never shares a concurrent batch with another writer,
+scoped or not (a whole-tree comparison cannot tell which process made a
+change, so one writer's stray write could pass as the other's in-scope one);
+two writers that can run side by side and neither declares a scope are a
+V171 warning, and a pair where at least one declares `writes` or
+`max_changed_files` is a V172 warning: they run one after another. A
+scoped node is never served from the node cache: a cache hit would settle it
+with no scope check in this run. An older apb drops `writes` in silence and
+runs the node unchecked: a run this version created carries the `write_scope`
+run guard, so such an apb refuses to continue it, but a fresh launch by an
+older apb is not protected.
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| V170 | error | `writes` or `max_changed_files` on a node that is not an `agent_task` or `script`, on a `read_only` node, on a list node or on a node with `cache`; `writes: []`; more than 200 entries; an entry that is not a path inside the node's directory or not a valid glob; the template form not exactly one `{{...}}` reference to `nodes.<id>.output.<field>` of an existing node or `params.<name>` of a declared param; `max_changed_files: 0` |
+| V171 | warning | two writers can run side by side and neither declares `writes` or `max_changed_files` |
+| V172 | warning | two sibling writers where at least one declares `writes` or `max_changed_files`: they run one after another |
+
 ### Declared cache key (cache.key)
 
 `cache: auto` keys a node's result on its definition, rendered prompt, profile
@@ -1926,8 +2081,11 @@ rendered and are surfaced literally, same as the option strings.
 
 An edge's `condition` gates traversal on one of four types:
 
-- `node_status { node, equals: success|failure }` - matches when the named
-  node's status is `success` or `failure` (which also covers a timeout).
+- `node_status { node, equals: success|failure|stalled }` - matches when the
+  named node's status is `success` or `failure` (which also covers a
+  timeout), or `stalled`: the node's latest execution ended stalled (the
+  same rejection repeated `stall_after` times in a row, see "Stopping a
+  retry loop that repeats itself"). `failure` still matches a stalled node.
 - `review_status { equals: <option string> }` - matches when the
   `human_review` node this edge starts from was decided with exactly that
   option string.
@@ -1945,6 +2103,24 @@ An edge's `condition` gates traversal on one of four types:
   (`true`, `3`). The same projection is available inside a prompt as
   `{{nodes.<id>.output.<field>}}` (see "Template variables"), so a downstream
   node can quote one field of a verdict instead of the whole JSON blob.
+
+  A threshold reads the field as a number: a JSON number, or a string that is
+  exactly the text of a JSON number (`"72.5"` reads as `72.5`; `" 80"`,
+  `"inf"`, `"NaN"` and `"+80"` read as nothing). A threshold never matches,
+  and never errors, on a boolean, null, an array, an object, a non-numeric
+  string, a missing field or an output that is not JSON: routing falls
+  through to the next edge. The dashboard and the HTML report label a
+  threshold edge `coverage < 80` (`<=`, `>`, `>=`).
+
+```yaml
+edges:
+  - { from: score, to: repair, condition: { type: output_field, node: score, field: coverage, lt: 80 } }
+  - { from: score, to: done, fallback: true }
+```
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| V169 | error | an `output_field` condition names no comparator or more than one of `equals`, `lt`, `lte`, `gt`, `gte`, or a threshold that is not a finite number |
 
 ```yaml
 edges:
@@ -2623,6 +2799,58 @@ resume, a supervisor retry, or the next node walks the chain from the top again
 and hits the same expired credential unless a human fixed it in between, which is
 the point: between two drives, someone may have.
 
+### Stopping a retry loop that repeats itself (stall_after)
+
+A retry that meets the same rejection every time is a loop the agent cannot
+win: with `stall_after` on an `agent_task` (or on `defaults`), apb stops
+retrying once the same rejection repeats that many times in a row.
+
+```yaml
+- id: fix
+  type: agent_task
+  prompt: "fix the failing test"
+  max_retries: 5
+  stall_after: 3
+```
+
+What "the same rejection" means: every rejection records a fingerprint, the
+normalized text of `rejected_for`. The normalization replaces the run
+directory and id, timestamps, UUIDs, long hex ids and plain digit runs, and
+collapses whitespace, so a rejection whose text embeds a clock or a counter
+still counts as the same one. The fingerprints are journaled on
+`attempt_finished.rejection_fingerprint` whether or not `stall_after` is set,
+so later tooling can group rejections too.
+
+The streak spans the node's effect scope (since its last success, the same
+window the retry briefing reads), so a deferred retry, a resume or a
+supervisor retry that meets the same rejection stalls again at once. A
+transient attempt, or one that was interrupted, never finished its work: it
+neither joins nor breaks the streak. A fatal rejection (a protected path, a
+write outside a scope) never stalls; it ends the node on its own.
+
+The stalled node ends `failed` with an output that starts with `stalled:` and
+names the rejection; no retry, no fallback step and no deferral runs after
+it. The journal keeps the node `failed`, so an older apb reads it as an
+ordinary failure and resumes it as one.
+
+Route on the stall with a `node_status` edge whose `equals` is `stalled`,
+listed before the `failure` edge (first match wins):
+
+```yaml
+edges:
+  - { from: fix, to: ask_person, condition: { type: node_status, node: fix, equals: stalled } }
+  - { from: fix, to: reconsider, condition: { type: node_status, node: fix, equals: failure } }
+  - { from: fix, to: next_round, condition: { type: node_status, node: fix, equals: success } }
+```
+
+A `stalled` subscription can also notify a person; see docs/NOTIFY.md (it is
+opt-in, like `host_task` and `supervisor`).
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| V174 | error | `stall_after` outside 2 to 10 (on a node or `defaults`), or on a node that is not an `agent_task`, or on a list node |
+| V175 | warning | a `node_status` edge with `equals: stalled` whose node has no effective `stall_after` (it never matches), or that comes after an edge from the same source with `node_status` `equals: failure` on the same node (the failure edge is always taken first) |
+
 ### Retry delay
 
 An ordinary retry (one that spends `max_retries`) starts at once by default.
@@ -2803,7 +3031,7 @@ cut at 500 characters, and only a non-fatal rejection carries
 it: a transient failure, a timeout or an interruption after a rejection
 gets no paragraph, because its work was not finished. List item check
 rejections are covered too, when they are newer than the last attempt
-that ended.
+that ended. The rejection's journal line also carries its `rejection_fingerprint`, the normalized text's hash: the one field the `stall_after` streak reads, and a stable key for any later grouping of repeated rejections.
 
 ### Continuing another node's session (continue_session)
 

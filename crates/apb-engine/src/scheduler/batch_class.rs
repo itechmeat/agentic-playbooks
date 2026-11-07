@@ -45,11 +45,31 @@ pub(crate) fn write_class(playbook: &Playbook, node: &str) -> WriteClass {
 pub(crate) fn batch_admits(playbook: &Playbook, batch: &[String], candidate: &str) -> bool {
     let is_detected = |n: &str| write_class(playbook, n) == WriteClass::Detected;
     let is_writer = |n: &str| write_class(playbook, n) == WriteClass::Writer;
+    let candidate_scoped = is_scoped(playbook, candidate);
+    let batch_scoped = batch.iter().any(|m| is_scoped(playbook, m));
+    // A scoped writer never shares a batch with any other writer, scoped or
+    // not: a whole-tree comparison cannot tell which process made a change,
+    // so one writer's stray write could pass as the other's in-scope one.
+    if candidate_scoped && batch.iter().any(|m| is_writer(m)) {
+        return false;
+    }
+    if batch_scoped && write_class(playbook, candidate) == WriteClass::Writer {
+        return false;
+    }
     match write_class(playbook, candidate) {
         WriteClass::Enforced => true,
         WriteClass::Writer => !batch.iter().any(|m| is_detected(m)),
         WriteClass::Detected => !batch.iter().any(|m| is_writer(m)),
     }
+}
+
+/// Whether the node declares a write scope (`writes` or
+/// `max_changed_files`): its check blames the whole tree, so it runs alone
+/// among writers.
+pub(crate) fn is_scoped(playbook: &Playbook, node_id: &str) -> bool {
+    playbook
+        .node(node_id)
+        .is_some_and(|n| n.writes.is_some() || n.max_changed_files.is_some())
 }
 
 /// Whether `node` is read-only in a tier that may be the detected one.
@@ -110,6 +130,52 @@ edges:
         assert!(batch_admits(&pb, &batch(&["d"]), "e"));
         assert!(batch_admits(&pb, &batch(&["e"]), "w"));
         assert!(batch_admits(&pb, &batch(&["e"]), "d"));
+    }
+
+    /// A scoped candidate is refused beside a writer, a writer beside a
+    /// scoped member; a scoped node beside an enforced read-only one is
+    /// admitted (spec node-contracts D3).
+    #[test]
+    fn a_scoped_node_never_batches_with_another_writer() {
+        let pb = playbook();
+        assert!(!is_scoped(&pb, "w"));
+        // A scoped candidate beside a writer.
+        let pb = scoped_playbook("w");
+        assert!(is_scoped(&pb, "w"));
+        assert!(!batch_admits(&pb, &batch(&["w2"]), "w"));
+        // A writer beside a scoped member.
+        assert!(!batch_admits(&pb, &batch(&["w"]), "w2"));
+        // Two scoped members are still refused: neither is the other's alibi.
+        assert!(!batch_admits(&pb, &batch(&["w"]), "w3"));
+        // A scoped node beside an enforced read-only one mixes.
+        let both = scoped_playbook("s1");
+        assert!(batch_admits(&both, &batch(&["e"]), "s1"));
+        assert!(batch_admits(&both, &batch(&["s1"]), "e"));
+        // Unscoped writers keep today's behaviour.
+        let plain = playbook();
+        assert!(!batch_admits(&plain, &batch(&["w"]), "d"));
+    }
+
+    fn scoped_playbook(scoped_id: &str) -> Playbook {
+        let yaml = format!(
+            r#"
+schema: 2
+id: t
+name: T
+version: 1.0.0
+nodes:
+  - {{ id: start, type: start }}
+  - {{ id: {scoped_id}, type: script, script: s, runner: sh, writes: ["src/**"] }}
+  - {{ id: w2, type: script, script: s, runner: sh }}
+  - {{ id: w3, type: script, script: s, runner: sh, max_changed_files: 3 }}
+  - {{ id: e, type: agent_task, prompt: p, read_only: true, isolation: {{ level: full }} }}
+  - {{ id: done, type: finish, outcome: success }}
+edges:
+  - {{ from: start, to: {scoped_id} }}
+  - {{ from: {scoped_id}, to: done }}
+"#
+        );
+        yaml_serde::from_str(&yaml).unwrap()
     }
 
     /// The rule weighs the whole logical batch: a member that already

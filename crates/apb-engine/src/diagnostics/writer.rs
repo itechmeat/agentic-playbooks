@@ -146,6 +146,13 @@ impl Scrub<'_> {
             None => scrubbed,
         }
     }
+
+    /// Whether the scrubber changes `text` at all (a secret value replaced,
+    /// or the run's text withheld): a value derived from such a text, such
+    /// as the number it reads as, must not be recorded beside it.
+    pub fn alters(&self, text: &str) -> bool {
+        self.0.redact_text(text) != text
+    }
 }
 
 /// One record: its kind, the journal seq it follows, the dedup key the

@@ -65,7 +65,7 @@ export const NODE_FIELDS = {
   },
   output_fields: {
     label: 'Output fields',
-    hint: 'Named values this node publishes, comma separated. An agent is told to write exactly these keys into its status file; a script prints them as a JSON object. Later nodes read one as {{ nodes.<id>.output.<field> }} or route on it with an output_field edge. A missing field is reported as a warning event, never a failure.',
+    hint: 'Named values this node publishes, comma separated. An agent is told to write exactly these keys into its status file; a script prints them as a JSON object. Later nodes read one as {{ nodes.<id>.output.<field> }} or route on it with an output_field edge. A missing field is reported as a warning event, never a failure. A typed field (a YAML map with a type) rejects a wrong or missing value and retries; edit types in the YAML.',
   },
   timeout_seconds: {
     label: 'Timeout, seconds',

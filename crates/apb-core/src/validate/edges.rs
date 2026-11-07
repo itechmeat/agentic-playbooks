@@ -183,6 +183,43 @@ fn is_decided_by(value: &str) -> bool {
         .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
 }
 
+/// V169 (error): an `output_field` condition names no comparator or more
+/// than one of `equals`, `lt`, `lte`, `gt`, `gte`, or a threshold that is
+/// not a finite number.
+pub(crate) fn check_output_field_comparators(playbook: &Playbook, r: &mut ValidationReport) {
+    for e in &playbook.edges {
+        let Some(cond @ EdgeCondition::OutputField { .. }) = &e.condition else {
+            continue;
+        };
+        let count = cond.comparator_count();
+        if count != 1 {
+            r.error(
+                "V169",
+                Some(&e.from),
+                format!(
+                    "edge from `{}` carries {} comparators of `equals`, `lt`, `lte`, `gt`, `gte`; an `output_field` condition carries exactly one",
+                    e.from, count
+                ),
+            );
+            continue;
+        }
+        if let Some(t) = cond
+            .field_compare()
+            .and_then(|c| c.threshold())
+            .filter(|t| !t.is_finite())
+        {
+            r.error(
+                "V169",
+                Some(&e.from),
+                format!(
+                    "edge from `{}` carries the threshold {t}, which is not a finite number",
+                    e.from
+                ),
+            );
+        }
+    }
+}
+
 /// V125 (warning): an `output_field` edge compares a judge node's question
 /// field, or its `decided_by`, with a value the node never writes, so the
 /// edge never matches.
@@ -191,7 +228,8 @@ pub(crate) fn check_judge_values(playbook: &Playbook, r: &mut ValidationReport) 
         let Some(EdgeCondition::OutputField {
             node,
             field,
-            equals,
+            equals: Some(equals),
+            ..
         }) = &e.condition
         else {
             continue;
@@ -641,5 +679,64 @@ edges:
         let v = serde_json::to_value(no_node).unwrap();
         assert!(v.get("node").is_none());
         assert_eq!(v["edges"], serde_json::json!([]));
+    }
+
+    // --- V169: the one comparator of an output_field condition ---------------
+
+    fn output_field_edge(extra: &str) -> Playbook {
+        pb(&format!(
+            r#"
+nodes:
+  - {{ id: s, type: start }}
+  - {{ id: a, type: agent_task, prompt: hi }}
+  - {{ id: done, type: finish, outcome: success }}
+  - {{ id: bad, type: finish, outcome: failure }}
+edges:
+  - {{ from: s, to: a }}
+  - {{ from: a, to: done }}
+  - {{ from: a, to: bad{extra} }}
+"#
+        ))
+    }
+
+    #[test]
+    fn v169_refuses_zero_two_or_three_comparators() {
+        for extra in [
+            ", condition: { type: output_field, node: a, field: f }",
+            ", condition: { type: output_field, node: a, field: f, equals: x, gt: 5 }",
+            ", condition: { type: output_field, node: a, field: f, gt: 5, lte: 5 }",
+            ", condition: { type: output_field, node: a, field: f, equals: x, gt: 5, lt: 1 }",
+        ] {
+            let p = output_field_edge(extra);
+            let all = found(&p, "V169");
+            assert_eq!(all.len(), 1, "{extra}: {all:?}");
+            assert_eq!(all[0].severity, Severity::Error);
+        }
+    }
+
+    #[test]
+    fn v169_refuses_a_threshold_that_is_not_a_finite_number() {
+        for extra in [
+            ", condition: { type: output_field, node: a, field: f, gt: .inf }",
+            ", condition: { type: output_field, node: a, field: f, lt: -.inf }",
+            ", condition: { type: output_field, node: a, field: f, gte: .nan }",
+        ] {
+            let p = output_field_edge(extra);
+            assert_eq!(found(&p, "V169").len(), 1, "{extra}");
+        }
+    }
+
+    #[test]
+    fn v169_stays_quiet_on_exactly_one_comparator() {
+        for extra in [
+            ", condition: { type: output_field, node: a, field: f, equals: x }",
+            ", condition: { type: output_field, node: a, field: f, lt: 80 }",
+            ", condition: { type: output_field, node: a, field: f, lte: 80.5 }",
+            ", condition: { type: output_field, node: a, field: f, gt: 0 }",
+            ", condition: { type: output_field, node: a, field: f, gte: -1.5 }",
+        ] {
+            let p = output_field_edge(extra);
+            assert!(found(&p, "V169").is_empty(), "{extra}");
+        }
     }
 }

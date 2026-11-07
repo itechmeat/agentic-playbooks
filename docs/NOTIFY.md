@@ -26,7 +26,7 @@ spaces.
 ## What is sent
 
 A run notifies about these transitions; the first four are the default,
-the last two are asked for by name:
+the last three are asked for by name:
 
 | Transition | When |
 | --- | --- |
@@ -36,6 +36,7 @@ the last two are asked for by name:
 | `finished` | The run ended, or something other than a person stopped it |
 | `host_task` | A host task waits for the host driving the run to carry it out and submit it |
 | `supervisor` | A failed or timed-out step waits for the run's supervisor to retry it, continue from another step, or stop the run |
+| `stalled` | A step stopped retrying: the same rejection came back `stall_after` times in a row (opt-in, like `host_task` and `supervisor`) |
 
 `host_task` and `supervisor` are sent while the wait is still open: the
 attempt waiting for the host and the run waiting for its supervisor check

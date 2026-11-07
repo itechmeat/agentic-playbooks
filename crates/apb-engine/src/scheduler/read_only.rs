@@ -36,9 +36,9 @@ use std::sync::{Arc, Mutex};
 
 use apb_core::fingerprint::{TreeChange, TreeLimit, TreeLimits, TreeState};
 
-use super::super::journal::Journal;
 use crate::error::EngineError;
 use crate::event::{EventPayload, ReadOnlyChange, ReadOnlyCheck, ReadOnlyLimit, ReadOnlyTier};
+use crate::scheduler::journal::Journal;
 
 /// The failure prefix of a read-only node that changed its tree.
 pub const READ_ONLY_DIRTY: &str = "read_only_dirty";
@@ -282,8 +282,8 @@ impl Drop for OpenInterval {
 
 /// The tree's state before one detected attempt.
 pub(crate) struct Before {
-    node: String,
-    attempt: u32,
+    pub(crate) node: String,
+    pub(crate) attempt: u32,
     root: PathBuf,
     state: TreeState,
     /// The batch peers of the execution and the tick this attempt opened
@@ -330,15 +330,31 @@ impl Before {
     /// members whose attempts overlapped this one. The failure reason when
     /// anything changed. `project` is the workspace whose scrubber cleans
     /// the paths.
+    /// The after state against the before state, with the limit the after
+    /// walk hit (`None` when it read the tree whole). Split from `finish`
+    /// so the write-scope check and the proof reuse the one comparison.
+    pub(crate) fn compare(&self) -> Comparison {
+        let after = TreeState::take(&self.root, limits());
+        let after_partial = after.partial().map(limit);
+        let changes = self.state.changes(&after);
+        Comparison {
+            changes,
+            before_partial: self.state.partial().map(limit),
+            after_partial,
+        }
+    }
+
     pub(crate) fn finish(
         self,
         run_dir: &Path,
         project: &Path,
         journal: &Journal,
     ) -> Result<Option<String>, EngineError> {
-        let after = TreeState::take(&self.root, limits());
-        let after_partial = after.partial().map(limit);
-        let changes = self.state.changes(&after);
+        let Comparison {
+            changes,
+            after_partial,
+            ..
+        } = self.compare();
         let scrubber = (!changes.is_empty())
             .then(|| apb_core::scrub::Scrubber::for_workspace(project, Vec::new()));
         let listed: Vec<ReadOnlyChange> = changes
@@ -510,10 +526,34 @@ fn limit(l: TreeLimit) -> ReadOnlyLimit {
     }
 }
 
+/// What [`Before::compare`] answers: the changed paths and the limit, if
+/// any, that cut the before or the after walk short.
+pub(crate) struct Comparison {
+    pub changes: Vec<TreeChange>,
+    pub before_partial: Option<ReadOnlyLimit>,
+    pub after_partial: Option<ReadOnlyLimit>,
+}
+
+impl Comparison {
+    /// The limit that cut either walk short (the before state's first):
+    /// a comparison over a tree neither walk saw whole shows nothing.
+    pub(crate) fn partial(&self) -> Option<ReadOnlyLimit> {
+        self.before_partial.or(self.after_partial)
+    }
+}
+
+/// The words a message names a limit with.
+pub(crate) fn limit_words(limit: ReadOnlyLimit) -> &'static str {
+    match limit {
+        ReadOnlyLimit::Entries => "the entries limit",
+        ReadOnlyLimit::Bytes => "the bytes limit",
+    }
+}
+
 /// The directory name of node `node`'s evidence: the id itself when it is a
 /// safe path segment, else `node-<digest>` of it, so an id like `../x` never
 /// leads the evidence out of the run's `read_only/` directory.
-fn evidence_stem(node: &str) -> String {
+pub(super) fn evidence_stem(node: &str) -> String {
     if apb_core::registry::is_safe_segment(node) {
         node.to_string()
     } else {
@@ -523,7 +563,7 @@ fn evidence_stem(node: &str) -> String {
 }
 
 /// One more than the highest `<n>.json` in `dir`.
-fn next_ordinal(dir: &Path) -> u64 {
+pub(super) fn next_ordinal(dir: &Path) -> u64 {
     std::fs::read_dir(dir)
         .map(|rd| {
             rd.flatten()
@@ -544,6 +584,7 @@ fn next_ordinal(dir: &Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     /// An attempt that leaves without reaching its close (an error return,
     /// an engine pause) still closes its interval when the guard drops: a

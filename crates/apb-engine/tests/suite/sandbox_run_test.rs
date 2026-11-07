@@ -1065,3 +1065,124 @@ fn an_enforced_read_only_node_shares_a_batch_with_a_writer() {
     );
     assert!(f.root.join("written.txt").exists());
 }
+
+/// A write scope is checked whatever the isolation tier: the sandbox binds
+/// the tree writable and cannot enforce globs, so a sandboxed attempt that
+/// writes outside `writes` fails with `write_scope:` like any other.
+#[test]
+fn a_sandboxed_scoped_attempt_is_checked_against_its_scope() {
+    let _l = common::env_lock();
+    if !common::sandbox_or_skip(false) {
+        return;
+    }
+    let f = fixture(
+        "{ level: full, network: none }",
+        "mkdir -p docs; echo x > docs/x.md\nprintf '{\"status\":\"success\"}' > \"$APB_STATUS_FILE\"\necho done",
+    );
+    let pb = f.root.join(".apb/playbooks/iso/1.0.0/playbook.yaml");
+    let text = fs::read_to_string(&pb).unwrap();
+    fs::write(
+        &pb,
+        text.replace("max_retries: 1,", "max_retries: 1, writes: [\"src/**\"],"),
+    )
+    .unwrap();
+    let _env = env(&f);
+    let res = run(&f.root, "iso", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let ev = events(&f.root, &res.run_id);
+    let (_, output) = node_output(&ev, "work").unwrap();
+    assert!(output.starts_with("write_scope:"), "{output}");
+    assert!(output.contains("docs/x.md"), "{output}");
+}
+
+/// A sandboxed proof that plants a file redirecting git is put back and
+/// ends the node like a changed tree, named by the git guard: the agent
+/// never starts on a redirected git.
+#[test]
+fn a_proof_that_redirects_git_is_put_back_and_fails_the_node() {
+    let _l = common::env_lock();
+    if !common::sandbox_or_skip(false) {
+        return;
+    }
+    let f = fixture(
+        "{ level: full, network: none }",
+        "printf '{\"status\":\"success\"}' > \"$APB_STATUS_FILE\"; echo done",
+    );
+    let dir = f.root.join(".apb/playbooks/iso/1.0.0");
+    fs::create_dir_all(dir.join("scripts")).unwrap();
+    fs::write(
+        dir.join("scripts/prove.sh"),
+        "printf '[core]\\n\\tfsmonitor = /bin/false\\n' > .git/config.worktree\nexit 1\n",
+    )
+    .unwrap();
+    let pb = dir.join("playbook.yaml");
+    let text = fs::read_to_string(&pb).unwrap();
+    fs::write(
+        &pb,
+        text.replace(
+            "max_retries: 1,",
+            "max_retries: 1, success_check: { script: scripts/prove.sh, prove_fails_first: true },",
+        ),
+    )
+    .unwrap();
+    let _env = env(&f);
+    let res = run(&f.root, "iso", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let ev = events(&f.root, &res.run_id);
+    let (_, output) = node_output(&ev, "work").unwrap();
+    assert!(output.starts_with("check_changed_tree:"), "{output}");
+    // The git guard's verdict, not only the tree comparison's: the guard
+    // also covers a git directory outside the node's tree.
+    assert!(output.contains("redirects git"), "{output}");
+    assert!(
+        !f.root.join(".git/config.worktree").exists(),
+        "the planted file was put back"
+    );
+    assert!(
+        isolation_of(&ev).is_empty(),
+        "no attempt started after the proof"
+    );
+}
+
+/// A `best_effort` attempt without a sandbox runs in a scratch directory,
+/// but its proof observes the node's own tree: a proof script that edits a
+/// tracked file of the tree by its absolute path ends the node with
+/// `check_changed_tree`, and no attempt starts.
+#[test]
+fn an_unsandboxed_proof_that_edits_the_tree_by_path_fails_the_node() {
+    let _l = common::env_lock();
+    let f = fixture(
+        "{ level: best_effort, network: none }",
+        "printf '{\"status\":\"success\"}' > \"$APB_STATUS_FILE\"; echo done",
+    );
+    let dir = f.root.join(".apb/playbooks/iso/1.0.0");
+    fs::create_dir_all(dir.join("scripts")).unwrap();
+    let tracked = f.root.join(".agents/skills/cs/SKILL.md");
+    fs::write(
+        dir.join("scripts/prove.sh"),
+        format!("echo edited >> '{}'\nexit 1\n", tracked.display()),
+    )
+    .unwrap();
+    let pb = dir.join("playbook.yaml");
+    let text = fs::read_to_string(&pb).unwrap();
+    fs::write(
+        &pb,
+        text.replace(
+            "max_retries: 1,",
+            "max_retries: 1, success_check: { script: scripts/prove.sh, prove_fails_first: true },",
+        ),
+    )
+    .unwrap();
+    let _env = env(&f);
+    let _off = EnvVar::set("APB_SANDBOX", "off");
+    let res = run(&f.root, "iso", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let ev = events(&f.root, &res.run_id);
+    let (_, output) = node_output(&ev, "work").unwrap();
+    assert!(output.starts_with("check_changed_tree:"), "{output}");
+    assert!(output.contains("SKILL.md"), "{output}");
+    assert!(
+        isolation_of(&ev).is_empty(),
+        "no attempt started after the proof"
+    );
+}

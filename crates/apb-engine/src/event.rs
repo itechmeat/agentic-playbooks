@@ -307,6 +307,14 @@ pub enum EventPayload {
         /// most 500 characters. Set only for a non-fatal rejection. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rejected_for: Option<String>,
+        /// `rejection::fingerprint` of `rejected_for`; set exactly when it is.
+        /// Additive, old logs read unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rejection_fingerprint: Option<String>,
+        /// This rejection made the same fingerprint repeat `stall_after`
+        /// times in a row, so the node stopped retrying. Additive.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        stalled: bool,
         /// The list item this belongs to, for an item of a list node
         /// (`list:`). Absent everywhere else. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2077,6 +2085,25 @@ pub enum EventPayload {
     DeferredRetryGuard {
         #[serde(default)]
         open: Vec<String>,
+    },
+    /// A `success_check` with `prove_fails_first` ran before the first
+    /// attempt of an effect scope (spec node-contracts D4). The proof's red
+    /// result is the only record that a later pass means something, and a
+    /// green one is no attempt, so no existing event could carry it without
+    /// faking an attempt. Safe to skip: not a checkpoint; an older apb loses
+    /// only the proof line. Additive.
+    CheckProved {
+        node: String,
+        script: String,
+        /// The check failed, so a later pass can be told from no work.
+        failed_first: bool,
+        /// `fail` or `skip`; set only when `failed_first` is false.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_green_before: Option<String>,
+        /// The check changed the observed tree, or the comparison was
+        /// partial: the node failed and the outcome above decides nothing.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        changed_tree: bool,
     },
     /// The features of the run's definition an older apb would silently
     /// drop (`apb_core::validate::GuardedFeature` names). Written after
@@ -3931,6 +3958,8 @@ mod tests {
         let payload = EventPayload::AttemptFinished {
             item: None,
             rejected_for: None,
+            rejection_fingerprint: None,
+            stalled: false,
             output_truncated: Vec::new(),
             transcript_incomplete: false,
             node: "a".into(),
@@ -3952,6 +3981,143 @@ mod tests {
             } => assert_eq!(rejected_output.as_deref(), Some("interim progress only")),
             other => panic!("expected AttemptFinished, got {other:?}"),
         }
+    }
+
+    // D5: the stall fingerprint and flag are additive; an old line reads
+    // None/false, a new one round-trips, and unset values write neither key.
+    #[test]
+    fn attempt_finished_without_stall_fields_deserializes_to_none_and_false() {
+        let line = r#"{"type":"attempt_finished","node":"a","attempt":1,"status":"failed"}"#;
+        let back: EventPayload = serde_json::from_str(line).unwrap();
+        match back {
+            EventPayload::AttemptFinished {
+                rejection_fingerprint,
+                stalled,
+                ..
+            } => {
+                assert_eq!(rejection_fingerprint, None);
+                assert!(!stalled);
+            }
+            other => panic!("expected AttemptFinished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attempt_finished_stall_fields_round_trip_and_stay_out_when_unset() {
+        let payload = EventPayload::AttemptFinished {
+            item: None,
+            rejected_for: Some("output_contract: field `b` must be a number".into()),
+            rejection_fingerprint: Some("0123456789abcdef".into()),
+            stalled: true,
+            output_truncated: Vec::new(),
+            transcript_incomplete: false,
+            node: "a".into(),
+            attempt: 2,
+            status: "failed".into(),
+            duration_ms: Some(42),
+            session: None,
+            summary: None,
+            rejected_output: None,
+            partial_output: None,
+            failure_kind: None,
+            usage: None,
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        assert!(
+            line.contains(r#""rejection_fingerprint":"0123456789abcdef""#),
+            "{line}"
+        );
+        assert!(line.contains(r#""stalled":true"#), "{line}");
+        let back: EventPayload = serde_json::from_str(&line).unwrap();
+        match back {
+            EventPayload::AttemptFinished {
+                rejection_fingerprint,
+                stalled,
+                ..
+            } => {
+                assert_eq!(rejection_fingerprint.as_deref(), Some("0123456789abcdef"));
+                assert!(stalled);
+            }
+            other => panic!("expected AttemptFinished, got {other:?}"),
+        }
+        // Neither key is written when unset.
+        let payload = EventPayload::AttemptFinished {
+            item: None,
+            rejected_for: None,
+            rejection_fingerprint: None,
+            stalled: false,
+            output_truncated: Vec::new(),
+            transcript_incomplete: false,
+            node: "a".into(),
+            attempt: 2,
+            status: "failed".into(),
+            duration_ms: Some(42),
+            session: None,
+            summary: None,
+            rejected_output: None,
+            partial_output: None,
+            failure_kind: None,
+            usage: None,
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        assert!(!line.contains("rejection_fingerprint"), "{line}");
+        assert!(!line.contains(r#""stalled""#), "{line}");
+    }
+
+    // D4: the proof event round-trips, its optional fields stay out when
+    // unset, and an older reader skips it (it is not a checkpoint, so an
+    // unknown event after a later checkpoint is just counted).
+    #[test]
+    fn check_proved_round_trips_with_and_without_changed_tree() {
+        let payload = EventPayload::CheckProved {
+            node: "w".into(),
+            script: "scripts/x.sh".into(),
+            failed_first: true,
+            on_green_before: None,
+            changed_tree: false,
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        assert!(!line.contains("on_green_before"), "{line}");
+        assert!(!line.contains("changed_tree"), "{line}");
+        let back: EventPayload = serde_json::from_str(&line).unwrap();
+        match back {
+            EventPayload::CheckProved {
+                node,
+                failed_first,
+                on_green_before,
+                changed_tree,
+                ..
+            } => {
+                assert_eq!(node, "w");
+                assert!(failed_first);
+                assert_eq!(on_green_before, None);
+                assert!(!changed_tree);
+            }
+            other => panic!("expected CheckProved, got {other:?}"),
+        }
+        let payload = EventPayload::CheckProved {
+            node: "w".into(),
+            script: "scripts/x.sh".into(),
+            failed_first: false,
+            on_green_before: Some("skip".into()),
+            changed_tree: true,
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        let back: EventPayload = serde_json::from_str(&line).unwrap();
+        match back {
+            EventPayload::CheckProved {
+                on_green_before,
+                changed_tree,
+                ..
+            } => {
+                assert_eq!(on_green_before.as_deref(), Some("skip"));
+                assert!(changed_tree);
+            }
+            other => panic!("expected CheckProved, got {other:?}"),
+        }
+        // Not a checkpoint: an older apb counts it as an unknown event and
+        // still sees the next checkpoint.
+        assert!(!payload.is_checkpoint());
     }
 
     /// An old journal line, written before `failure_kind` existed, still parses
@@ -3990,6 +4156,8 @@ mod tests {
             failure_kind: None,
             usage: None,
             rejected_for: Some("missing required section".into()),
+            rejection_fingerprint: None,
+            stalled: false,
         };
         let line = serde_json::to_string(&payload).unwrap();
         match serde_json::from_str::<EventPayload>(&line).unwrap() {
@@ -4018,6 +4186,8 @@ mod tests {
             failure_kind: None,
             usage: None,
             rejected_for: None,
+            rejection_fingerprint: None,
+            stalled: false,
         };
         let line = serde_json::to_string(&payload).unwrap();
         assert!(!line.contains("rejected_for"));
@@ -4055,6 +4225,8 @@ mod tests {
             failure_kind: Some("transient".into()),
             usage: None,
             rejected_for: None,
+            rejection_fingerprint: None,
+            stalled: false,
         };
         let line = serde_json::to_string(&payload).unwrap();
         let back: EventPayload = serde_json::from_str(&line).unwrap();
@@ -4193,6 +4365,8 @@ mod tests {
         let payload = EventPayload::AttemptFinished {
             item: None,
             rejected_for: None,
+            rejection_fingerprint: None,
+            stalled: false,
             output_truncated: Vec::new(),
             transcript_incomplete: false,
             node: "a".into(),

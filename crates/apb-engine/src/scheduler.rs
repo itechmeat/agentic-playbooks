@@ -67,14 +67,19 @@ mod listing;
 mod live;
 mod node;
 mod node_workdir;
+// The read-only check's tree comparison (a leaf the node execution, the
+// write scope and the proof share); declared here so no module has to go
+// through `node` to reach it.
 mod outcome;
 mod patch;
 mod pipeline;
 pub(crate) mod prepare;
 mod protect;
+pub(crate) mod prove;
 pub(crate) mod provenance;
 mod publish;
 mod quota_probe;
+pub(crate) mod read_only;
 mod rebind;
 mod result;
 mod resume;
@@ -82,12 +87,14 @@ mod review_gate;
 mod revive;
 mod run_ref;
 mod skills_copy;
+pub(crate) mod stall_exit;
 mod status_file;
 mod stop_context;
 mod supervisor;
 mod transcript;
 mod unattended;
 mod worktree;
+pub(crate) mod write_scope;
 
 pub(crate) use crate::run_origin::parent_run_origin;
 pub(crate) use control_apply::{ControlScan, scan_control};
@@ -231,6 +238,9 @@ fn dead_end_reason(
                 apb_core::schema::StatusEq::Success => status == NodeStatus::Succeeded,
                 apb_core::schema::StatusEq::Failure => {
                     matches!(status, NodeStatus::Failed | NodeStatus::TimedOut)
+                }
+                apb_core::schema::StatusEq::Stalled => {
+                    status == NodeStatus::Failed && state.stalled.contains(node)
                 }
             }
         }
@@ -1427,7 +1437,7 @@ fn drive_inner(
                 // D1): every member's attempt records when it ran, and a
                 // detected read-only check names the members whose attempts
                 // overlapped its own.
-                let batch_peers = Arc::new(node::read_only::BatchIntervals::new());
+                let batch_peers = Arc::new(read_only::BatchIntervals::new());
                 // A shared cancel flag: once join:any is ready we set it, and
                 // still-running branches kill their processes (7c-3).
                 let cancel = Arc::new(AtomicBool::new(false));

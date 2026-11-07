@@ -56,6 +56,9 @@ pub enum NeedsLookReason {
     UnknownSends,
     /// List items that need a look.
     ListItems,
+    /// A check passed before the agent ran, so the node failed as needing a
+    /// look (a `prove_fails_first` check with `on_green_before: fail`).
+    ChecksGreenBefore,
 }
 
 /// A run with a baseline regression, findings or warnings its attempts
@@ -77,6 +80,10 @@ pub struct NeedsLook {
     #[serde(skip_serializing_if = "is_zero")]
     #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
     pub list_items: u32,
+    /// Checks that passed before the work (`on_green_before: fail`).
+    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
+    pub green_checks: u32,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -111,6 +118,7 @@ impl NeedsLook {
                 .iter()
                 .map(|l| l.needs_look)
                 .sum(),
+            green_checks(events),
         )
     }
 
@@ -119,6 +127,7 @@ impl NeedsLook {
         notes: &RunNotes,
         intents: &[RunIntent],
         list_items: u32,
+        green_checks: u32,
     ) -> Option<Self> {
         let findings = notes.findings.len() as u32;
         let warnings = notes.warnings.len() as u32;
@@ -129,6 +138,7 @@ impl NeedsLook {
             (warnings, NeedsLookReason::Warnings),
             (unknown_sends, NeedsLookReason::UnknownSends),
             (list_items, NeedsLookReason::ListItems),
+            (green_checks, NeedsLookReason::ChecksGreenBefore),
         ]
         .into_iter()
         .filter(|(n, _)| *n > 0)
@@ -141,6 +151,7 @@ impl NeedsLook {
             warnings,
             unknown_sends,
             list_items,
+            green_checks,
         })
     }
 
@@ -152,6 +163,11 @@ impl NeedsLook {
             (self.warnings, "warning", "warnings"),
             (self.unknown_sends, "unknown send", "unknown sends"),
             (self.list_items, "list item", "list items"),
+            (
+                self.green_checks,
+                "check green before work",
+                "checks green before work",
+            ),
         ]
         .into_iter()
         .filter(|(n, ..)| *n > 0)
@@ -344,6 +360,7 @@ impl Inputs<'_> {
             notes,
             &self.intents,
             self.list_outcomes.iter().map(|l| l.needs_look).sum(),
+            green_checks(&self.view.events),
         );
         let verified = self.verified();
         let unverified = self.unverified();
@@ -735,4 +752,115 @@ fn count_by<K: PartialEq>(
         }
     }
     out
+}
+
+/// The nodes whose latest `check_proved` passed before the work with
+/// `on_green_before: fail` and that have no `node_finished` `succeeded`
+/// after it (spec node-contracts D4): one look per such node.
+fn green_checks(events: &[Event]) -> u32 {
+    let mut nodes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for e in events {
+        match &e.payload {
+            // Every proof re-decides its node: only the latest one counts.
+            EventPayload::CheckProved {
+                node,
+                failed_first,
+                on_green_before,
+                changed_tree,
+                ..
+            } => {
+                if !failed_first && !changed_tree && on_green_before.as_deref() == Some("fail") {
+                    nodes.insert(node.clone());
+                } else {
+                    nodes.remove(node);
+                }
+            }
+            EventPayload::NodeFinished { node, status, .. } if status == "succeeded" => {
+                nodes.remove(node);
+            }
+            _ => {}
+        }
+    }
+    nodes.len() as u32
+}
+#[cfg(test)]
+mod green_check_tests {
+    use super::*;
+
+    fn payload(json: &str) -> EventPayload {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn events(list: Vec<EventPayload>) -> Vec<Event> {
+        list.into_iter()
+            .enumerate()
+            .map(|(i, payload)| Event {
+                seq: i as u64 + 1,
+                ts: 0,
+                payload,
+            })
+            .collect()
+    }
+
+    fn proved(failed_first: bool, on_green: Option<&str>) -> EventPayload {
+        let green = on_green
+            .map(|g| format!(r#","on_green_before":"{g}""#))
+            .unwrap_or_default();
+        payload(&format!(
+            "{{\"type\":\"check_proved\",\"node\":\"w\",\"script\":\"scripts/x.sh\",\"failed_first\":{failed_first}{green}}}"
+        ))
+    }
+
+    fn finished(node: &str, status: &str) -> EventPayload {
+        payload(&format!(
+            "{{\"type\":\"node_finished\",\"node\":\"{node}\",\"status\":\"{status}\",\"attempt\":1,\"output\":\"\"}}"
+        ))
+    }
+
+    #[test]
+    fn a_green_fail_proof_without_a_success_needs_a_look() {
+        let events = events(vec![proved(false, Some("fail"))]);
+        assert_eq!(green_checks(&events), 1);
+    }
+
+    #[test]
+    fn a_red_proof_a_skip_or_a_changed_tree_count_nothing() {
+        let events = events(vec![
+            proved(true, None),
+            proved(false, Some("skip")),
+            payload(
+                "{\"type\":\"check_proved\",\"node\":\"w\",\"script\":\"s\",\"failed_first\":false,\"changed_tree\":true,\"on_green_before\":\"fail\"}",
+            ),
+        ]);
+        assert_eq!(green_checks(&events), 0);
+    }
+
+    /// A supervisor retry whose proof is red, then failing attempts: the
+    /// node's latest proof is not green, so it needs no look for it.
+    #[test]
+    fn a_later_red_proof_replaces_a_green_one() {
+        let events = events(vec![
+            proved(false, Some("fail")),
+            finished("w", "failed"),
+            proved(true, None),
+            finished("w", "failed"),
+        ]);
+        assert_eq!(green_checks(&events), 0);
+    }
+
+    #[test]
+    fn a_later_success_clears_the_node() {
+        let events = events(vec![
+            proved(false, Some("fail")),
+            finished("w", "failed"),
+            finished("w", "succeeded"),
+        ]);
+        assert_eq!(green_checks(&events), 0);
+    }
+
+    #[test]
+    fn a_failed_node_keeps_the_look() {
+        let events = events(vec![proved(false, Some("fail")), finished("w", "failed")]);
+        assert_eq!(green_checks(&events), 1);
+    }
 }

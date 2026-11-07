@@ -117,21 +117,51 @@ pub(crate) fn notes_note(known_problems: bool) -> String {
 pub(crate) fn status_file_note(
     has_success_check: bool,
     require_verdict: bool,
-    fields: &[String],
+    fields: &[apb_core::schema::FieldDecl],
 ) -> String {
+    use apb_core::schema::FieldDecl;
     let mut note = match (require_verdict, has_success_check || !fields.is_empty()) {
         (true, _) => format!("{STATUS_FILE_NOTE} {VERDICT_REQUIRED_NOTE}"),
         (false, true) => STATUS_FILE_NOTE.to_string(),
         (false, false) => return String::new(),
     };
     if !fields.is_empty() {
-        let keys: Vec<String> = fields.iter().map(|f| format!("`{f}`")).collect();
-        note.push_str(&format!(
-            " This step publishes named outputs: write the status file with an outputs object \
-             that carries these keys, each a string (or a number or boolean): {}. \
-             Later steps read them by name.",
-            keys.join(", ")
-        ));
+        if fields.iter().all(|f| f.typed().is_none()) {
+            // Every entry is a plain name: today's sentence, byte for byte.
+            let keys: Vec<String> = fields.iter().map(|f| format!("`{}`", f.name())).collect();
+            note.push_str(&format!(
+                " This step publishes named outputs: write the status file with an outputs object \
+                 that carries these keys, each a string (or a number or boolean): {}. \
+                 Later steps read them by name.",
+                keys.join(", ")
+            ));
+        } else {
+            // At least one typed entry: each key carries its type and
+            // whether it is required, and the note states the rejection.
+            let keys: Vec<String> = fields
+                .iter()
+                .map(|f| match f {
+                    FieldDecl::Name(n) => format!("`{n}`"),
+                    FieldDecl::Typed(t) => {
+                        let mut s = format!("`{}`", t.name);
+                        if let Some(kind) = t.kind {
+                            let phrase = apb_core::output_contract::want_phrase(kind, &t.values);
+                            let required = if t.required { "; required" } else { "" };
+                            s.push_str(&format!(" ({phrase}{required})"));
+                        } else if t.required {
+                            s.push_str(" (required)");
+                        }
+                        s
+                    }
+                })
+                .collect();
+            note.push_str(&format!(
+                " This step publishes named outputs: write the status file with an outputs object \
+                 that carries these keys: {}. A required key that is missing, or a value of the \
+                 wrong type, rejects the attempt. Later steps read them by name.",
+                keys.join(", ")
+            ));
+        }
     }
     note
 }
@@ -469,6 +499,58 @@ mod tests {
     fn note_gated_on_success_check() {
         assert!(status_file_note(true, false, &[]).contains("APB_STATUS_FILE"));
         assert_eq!(status_file_note(false, false, &[]), "");
+    }
+
+    // The plain-only note is byte-for-byte today's sentence (spec
+    // node-contracts D1): an existing playbook must see no change.
+    #[test]
+    fn plain_only_note_is_byte_for_byte_todays() {
+        let fields = vec![
+            apb_core::schema::FieldDecl::Name("a".into()),
+            apb_core::schema::FieldDecl::Name("b".into()),
+        ];
+        let note = status_file_note(false, false, &fields);
+        assert!(
+            note.ends_with(
+                " This step publishes named outputs: write the status file with an outputs \
+                 object that carries these keys, each a string (or a number or boolean): \
+                 `a`, `b`. Later steps read them by name."
+            ),
+            "got: {note}"
+        );
+    }
+
+    // A declaration with a typed entry names each key with its type and
+    // whether it is required, and states the rejection (spec node-contracts
+    // D1).
+    #[test]
+    fn typed_note_names_each_key_with_its_type() {
+        use apb_core::schema::{FieldDecl, FieldType, TypedFieldDecl};
+        let typed = |name: &str, kind: Option<FieldType>, values: &[&str], required: bool| {
+            FieldDecl::Typed(TypedFieldDecl {
+                name: name.to_string(),
+                kind,
+                values: values.iter().map(|v| v.to_string()).collect(),
+                required,
+            })
+        };
+        let fields = vec![
+            typed("role", Some(FieldType::Enum), &["correctness"], true),
+            typed("blocking", Some(FieldType::Number), &[], true),
+            typed("findings", Some(FieldType::Array), &[], true),
+            FieldDecl::Name("notes".into()),
+        ];
+        let note = status_file_note(false, false, &fields);
+        assert!(
+            note.ends_with(
+                " This step publishes named outputs: write the status file with an outputs \
+                 object that carries these keys: `role` (one of `correctness`; required), \
+                 `blocking` (a number; required), `findings` (a JSON array; required), `notes`. \
+                 A required key that is missing, or a value of the wrong type, rejects the \
+                 attempt. Later steps read them by name."
+            ),
+            "got: {note}"
+        );
     }
 
     // Spec 2026-08-05 section 2.2: `require_verdict` alone (no success_check)

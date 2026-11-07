@@ -671,3 +671,115 @@ fn a_notice_names_who_is_expected_and_never_a_prompt_or_a_wake_detail() {
     assert!(!sup.text.contains("secret detail"), "{}", sup.text);
     assert!(!sup.text.contains("run `"), "{}", sup.text);
 }
+
+/// D5: a stalled attempt opens `stalled` at its seq, the run's end does not
+/// close it, the default transitions do not include it, and the notice
+/// names the step and quotes the reason.
+#[test]
+fn a_stalled_attempt_opens_an_opt_in_stalled_transition() {
+    let stalled_attempt = ev(
+        2,
+        EventPayload::AttemptFinished {
+            item: None,
+            rejected_for: Some("success_check `scripts/verify.sh` failed".into()),
+            rejection_fingerprint: Some("aaaabbbbccccdddd".into()),
+            stalled: true,
+            output_truncated: Vec::new(),
+            transcript_incomplete: false,
+            node: "fix".into(),
+            attempt: 3,
+            status: "failed".into(),
+            duration_ms: Some(10),
+            session: None,
+            summary: None,
+            rejected_output: None,
+            partial_output: None,
+            failure_kind: None,
+            usage: None,
+        },
+    );
+    // The stalled attempt opens the transition whatever the subscription
+    // says; `due` filters by it. The defaults never cover it.
+    assert!(
+        !apb_core::notify::Transition::DEFAULT.contains(&apb_core::notify::Transition::Stalled)
+    );
+    {
+        let events = vec![subscribed(1, &["stalled"]), stalled_attempt.clone()];
+        let open = apb_engine::notify::transitions::open_transitions(&events);
+        let stalled: Vec<_> = open
+            .iter()
+            .filter(|t| t.kind == apb_core::notify::Transition::Stalled)
+            .collect();
+        assert_eq!(stalled.len(), 1);
+        assert_eq!(stalled[0].seq, 2);
+        // The run's end does not close it.
+        let ended = {
+            let mut e = events.clone();
+            e.push(ev(
+                3,
+                EventPayload::RunFinished {
+                    outcome: "failed".into(),
+                },
+            ));
+            e
+        };
+        let open = apb_engine::notify::transitions::open_transitions(&ended);
+        assert!(
+            open.iter()
+                .any(|t| t.kind == apb_core::notify::Transition::Stalled),
+            "the run's end leaves the stalled transition open"
+        );
+    }
+
+    // The notice, composed late: a supervisor retry already succeeded after
+    // the stall. The count is the stall's own, through the transition's
+    // event, never what came after it.
+    let retried: EventPayload = serde_json::from_value(serde_json::json!({
+        "type": "attempt_finished", "node": "fix", "attempt": 4, "status": "succeeded",
+    }))
+    .unwrap();
+    let events = vec![
+        subscribed(1, &["stalled"]),
+        stalled_attempt,
+        ev(3, retried),
+        ev(
+            4,
+            EventPayload::node_finished("fix", "succeeded", 4, String::new()),
+        ),
+    ];
+    let root = tempfile::tempdir().unwrap();
+    let rd = tempfile::tempdir().unwrap();
+    let notice = apb_engine::notify::notice::Notice::compose(
+        root.path(),
+        rd.path(),
+        "r-1",
+        &events,
+        &apb_engine::notify::transitions::TransitionId {
+            kind: apb_core::notify::Transition::Stalled,
+            seq: 2,
+        },
+        &[],
+    );
+    assert!(
+        notice.subject.contains("stalled at fix"),
+        "{}",
+        notice.subject
+    );
+    assert!(
+        notice.text.contains("Step fix of run r-1"),
+        "{}",
+        notice.text
+    );
+    assert!(
+        notice
+            .text
+            .contains("success_check `scripts/verify.sh` failed"),
+        "{}",
+        notice.text
+    );
+    assert!(
+        notice.text.contains("came back 1 times in a row"),
+        "{}",
+        notice.text
+    );
+}

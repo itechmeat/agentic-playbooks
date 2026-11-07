@@ -529,6 +529,8 @@ impl ProfileEmulation<'_, '_> {
             failure_kind: None,
             usage,
             rejected_for: None,
+            rejection_fingerprint: None,
+            stalled: false,
         })?;
         Ok(output.filter(|_| status == NodeStatus::Succeeded))
     }

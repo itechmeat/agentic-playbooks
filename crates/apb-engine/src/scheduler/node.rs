@@ -4,7 +4,7 @@
 use super::*;
 
 mod exposure;
-pub(crate) mod read_only;
+use crate::scheduler::read_only;
 mod sandbox;
 mod step_env;
 
@@ -34,6 +34,25 @@ pub(crate) fn render_node_prompt(
     let inputs =
         crate::judge_eval::JudgeInputs::from_state(playbook, run_dir, run_id, state, cfg, budget)?;
     Ok(inputs.render(prompt, run_dir, budget.output_max_bytes))
+}
+
+/// Renders a `writes` template (spec node-contracts D3): whole, with no
+/// context budget, since the value is parsed as a list (a clipped JSON
+/// array would refuse a valid scope). Prompts keep their budget.
+fn render_scope_template(
+    playbook: &Playbook,
+    run_dir: &Path,
+    run_id: &str,
+    state: &RunState,
+    cfg: &RunConfig,
+    template: &str,
+) -> Result<String, EngineError> {
+    const UNBOUNDED: apb_core::schema::ContextBudget = apb_core::schema::ContextBudget {
+        max_bytes: 0,
+        section_max_bytes: 0,
+        output_max_bytes: 0,
+    };
+    render_node_prompt(playbook, run_dir, run_id, state, cfg, template, &UNBOUNDED)
 }
 
 /// A single execution of a node. Returns an [`AttemptOutcome`]: `Finished`
@@ -226,6 +245,11 @@ struct Rejection {
     /// The attempt's journaled failure kind: `check_rejected` for claims
     /// the evidence check refused, else none.
     failure_kind: Option<String>,
+    /// The reason is self-contained and the rejected output must not ride
+    /// into the retry prompt: the output contract's reason (it names the
+    /// field and the type, never the value, which is exactly what must not
+    /// be re-sent).
+    reason_only: bool,
 }
 
 impl Rejection {
@@ -234,6 +258,7 @@ impl Rejection {
             reason,
             fatal: false,
             failure_kind: None,
+            reason_only: false,
         }
     }
 }
@@ -242,26 +267,22 @@ impl Rejection {
 /// under `on_invalid: fail`.
 pub(crate) const CHECK_REJECTED: &str = "check_rejected";
 
-/// Why a rejected report failed its attempt, as `attempt_finished.rejected_for`
-/// carries it and the retry briefing quotes it: scrubbed of the secret
-/// values of the run's tree and the workspace's connectors, token shapes and
-/// the workspace's and attempt directory's paths (the run redactor's text
-/// that leaves the machine, since the retry prompt goes to a model
-/// provider), then cut to 500 characters by `chars`, never a byte slice (a
-/// cut in the middle of a code point would panic). The scrub comes before
-/// the bound, so a cut never leaves a fragment of a value behind.
-pub(crate) fn rejected_for_text(run_dir: &Path, workdir: &Path, reason: &str) -> String {
-    let run = crate::run_redact::RunRedactor::for_run_dir(run_dir).redact_text(reason);
-    apb_core::scrub::Scrubber::for_workspace(workdir, Vec::new())
-        .scrub(&run)
-        .chars()
-        .take(500)
-        .collect()
+/// The discarded output of a rejected report as
+/// `attempt_finished.rejected_output` stores it: the secret values of the
+/// workspace's connectors and of the run's tree, and token-shaped strings,
+/// replaced (the run redactor's stored text). A typed field the contract
+/// refused can hold anything the agent wrote, a secret included. When the
+/// redactor cannot resolve every secret, nothing of the output is stored.
+pub(crate) fn rejected_output_text(run_dir: &Path, output: &str) -> String {
+    crate::run_redact::RunRedactor::for_run_dir(run_dir)
+        .secret_text(output)
+        .unwrap_or_else(|_| crate::run_redact::WITHHELD.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
 fn success_check_rejection(
     protect_violation: Option<&str>,
+    contract: &[apb_core::schema::FieldDecl],
     evidence: Option<(&str, &apb_core::schema::Evidence)>,
     check: Option<&apb_core::schema::SuccessCheck>,
     run_dir: &Path,
@@ -276,6 +297,18 @@ fn success_check_rejection(
     if let Some(reason) = protect_violation {
         return Ok(Some(Rejection::retry(reason.to_string())));
     }
+    // The declared typed-field contract (spec node-contracts D1), checked
+    // before the evidence and the check: they would judge an output that is
+    // already known bad. Non-fatal, so the retry briefing quotes the reason.
+    let mismatches = apb_core::output_contract::check(contract, output);
+    if let Some(reason) = apb_core::output_contract::reason(contract, &mismatches) {
+        return Ok(Some(Rejection {
+            reason,
+            fatal: false,
+            failure_kind: None,
+            reason_only: true,
+        }));
+    }
     // The claims of an attempt with `evidence:`, checked against its
     // session before the success decision; the verdicts are stored either
     // way, and `on_invalid: fail` refuses an invalid outcome.
@@ -286,6 +319,7 @@ fn success_check_rejection(
             reason,
             fatal: false,
             failure_kind: Some(CHECK_REJECTED.to_string()),
+            reason_only: false,
         }));
     }
     match check {
@@ -320,6 +354,7 @@ fn success_check_rejection(
                     reason: v.reason,
                     fatal: v.fatal,
                     failure_kind: None,
+                    reason_only: false,
                 }));
             }
             if r.status != NodeStatus::Succeeded {
@@ -480,7 +515,7 @@ fn route_execution(
     let outputs: Vec<String> = node
         .outputs
         .as_ref()
-        .map(|o| o.fields.clone())
+        .map(|o| apb_core::schema::field_names(&o.fields))
         .unwrap_or_default();
     let plan = routing::route(
         runner,
@@ -551,6 +586,8 @@ pub(super) fn journal_interrupted_attempt(
         failure_kind: attempt.failure_kind.map(|k| k.as_str().to_string()),
         usage: None,
         rejected_for: None,
+        rejection_fingerprint: None,
+        stalled: false,
     })
 }
 
@@ -932,6 +969,28 @@ fn execute_node_kind(
                     });
                 }
             };
+            // The declared write scope, resolved once per execution (spec
+            // node-contracts D3): the template renders here, before the
+            // first attempt, and a refusal starts nothing. A scenario run
+            // checks no scope, so it resolves none, on this arm as on the
+            // script arm.
+            let write_scope: Option<super::write_scope::ResolvedScope> =
+                if crate::scenario::session::is_scenario(run_dir) {
+                    None
+                } else {
+                    match super::write_scope::resolve(playbook, node_id, |t| {
+                        render_scope_template(playbook, run_dir, run_id, state, cfg, t)
+                    })? {
+                        Ok(scope) => scope,
+                        Err(msg) => {
+                            return Ok(AttemptOutcome::Finished {
+                                status: NodeStatus::Failed,
+                                output: msg,
+                                events,
+                            });
+                        }
+                    }
+                };
             // On a `resume` re-invocation the follow-up prompt IS the user's
             // answer (the prior context lives in the agent's own session); an
             // ordinary attempt renders the node prompt (or takes the reprompt
@@ -1209,6 +1268,29 @@ fn execute_node_kind(
             // A scenario run's scripted agent: nothing is spawned, so there
             // is nothing to isolate, no live channel and no tree to check.
             let scripted = crate::scenario::session::is_scenario(run_dir);
+            // The proof of a `prove_fails_first` check (spec node-contracts
+            // D4): due on the first attempt of an effect scope, never on a
+            // retry, a fallback step, a deferred retry, a resume or a list
+            // item, and never in a scenario run. An open proof from a crash
+            // decides without running the script again.
+            let mut proof = match (
+                node.success_check.as_ref().and_then(|c| {
+                    c.prove()
+                        .zip(c.script_path())
+                        .map(|(g, p)| (g, p.to_string()))
+                }),
+                item.is_none(),
+                resume.is_none(),
+                continuation.is_none(),
+                override_prompt.is_none(),
+                !scripted,
+            ) {
+                (Some((green, script)), true, true, true, true, true) => {
+                    let events = crate::event::read_all(run_dir)?;
+                    Some((green, script, crate::scheduler::prove::state(&events, key)))
+                }
+                _ => None,
+            };
             let iso = sandbox::NodeIsolation::new(
                 isolation.as_ref().filter(|_| !scripted),
                 steps.iter().filter(|s| !s.host).map(|s| s.agent.as_str()),
@@ -1318,6 +1400,13 @@ fn execute_node_kind(
             );
             if first_turn && !status_note.is_empty() {
                 text = format!("{text}\n\n{status_note}");
+            }
+            // The write scope's note (spec node-contracts D3): first turn
+            // only, outside the cache key.
+            if let Some(scope) = &write_scope
+                && first_turn
+            {
+                text = format!("{text}\n\n{}", super::write_scope::note(scope));
             }
 
             // Connector env isolation (spec 4.3) for every attempt's agent spawn:
@@ -1764,6 +1853,87 @@ fn execute_node_kind(
                         }
                     };
                     let attempt_workdir: PathBuf = place.cwd.clone();
+                    // The proof runs inside the first attempt's placement,
+                    // before the read-only or scope state is taken and
+                    // before anything is spawned (spec node-contracts D4).
+                    if let Some((green, script, state)) = proof.clone() {
+                        let outcome: Option<
+                            Result<Result<crate::scheduler::prove::Proved, String>, EngineError>,
+                        > = match state {
+                            crate::scheduler::prove::ProofState::Due => {
+                                Some(crate::scheduler::prove::run(
+                                    journal,
+                                    run_dir,
+                                    &script,
+                                    node_id,
+                                    &node_dir,
+                                    &attempt_workdir,
+                                    place.sandbox.as_deref(),
+                                    green,
+                                ))
+                            }
+                            crate::scheduler::prove::ProofState::Open(proved) => {
+                                Some(Ok(Ok(proved)))
+                            }
+                            crate::scheduler::prove::ProofState::NotDue => None,
+                        };
+                        if outcome.is_some() {
+                            // The proof ran (or an open one was consumed):
+                            // later attempts of this execution never prove.
+                            proof = None;
+                        }
+                        if let Some(proved) = outcome {
+                            match proved {
+                                // Red: go on with the attempt.
+                                Ok(Ok(crate::scheduler::prove::Proved::FailedFirst)) => {}
+                                // Green: the proof decides, the agent never runs.
+                                Ok(Ok(crate::scheduler::prove::Proved::GreenBefore(
+                                    crate::scheduler::prove::Green::Fail,
+                                ))) => {
+                                    return Ok(AttemptOutcome::Finished {
+                                        status: NodeStatus::Failed,
+                                        output: format!(
+                                            "check_green_before: success_check `{script}` passed before the agent ran, so a pass after it would prove nothing; the agent was not started"
+                                        ),
+                                        events,
+                                    });
+                                }
+                                Ok(Ok(crate::scheduler::prove::Proved::GreenBefore(
+                                    crate::scheduler::prove::Green::Skip,
+                                ))) => {
+                                    return Ok(AttemptOutcome::Finished {
+                                        status: NodeStatus::Succeeded,
+                                        output: format!(
+                                            "already done: success_check `{script}` passed before the agent ran; the agent was not started"
+                                        ),
+                                        events,
+                                    });
+                                }
+                                // An open proof that changed the tree (a
+                                // crash before its `node_finished`): the
+                                // same failure, without the paths it named.
+                                Ok(Ok(crate::scheduler::prove::Proved::ChangedTree)) => {
+                                    return Ok(AttemptOutcome::Finished {
+                                        status: NodeStatus::Failed,
+                                        output: format!(
+                                            "{}: success_check `{script}` changed the tree while proving it fails first, or could not be shown to leave it alone",
+                                            crate::scheduler::prove::CHECK_CHANGED_TREE
+                                        ),
+                                        events,
+                                    });
+                                }
+                                // A changed tree, or a comparison cut short.
+                                Ok(Err(reason)) => {
+                                    return Ok(AttemptOutcome::Finished {
+                                        status: NodeStatus::Failed,
+                                        output: reason,
+                                        events,
+                                    });
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    }
                     // A read-only node: the sandbox enforces it, or the
                     // tree's state is taken now and compared once the
                     // process ended (`node/read_only.rs`). Taken before
@@ -1786,6 +1956,14 @@ fn execute_node_kind(
                     let read_only_peers = read_only_interval
                         .as_ref()
                         .map(read_only::OpenInterval::peers);
+                    // A scoped node takes the same before state whatever its
+                    // isolation tier: the sandbox binds directories and
+                    // cannot enforce globs (spec node-contracts D3).
+                    // A scenario run resolved no scope above, so it takes
+                    // no tree state and checks nothing.
+                    let scope_before = write_scope
+                        .as_ref()
+                        .map(|_| read_only::Before::take(node_id, attempt, &node_dir, None));
                     let read_only_before =
                         (node.read_only && place.sandbox.is_none() && !scripted_check).then(|| {
                             read_only::Before::take(
@@ -2394,6 +2572,15 @@ fn execute_node_kind(
                     // An error of the check (its evidence or journal) is
                     // raised only after protect ran, so a protected path is
                     // put back whatever the check met.
+                    // A scoped node is never also read-only (V170): its
+                    // check runs at the same point, before protect puts
+                    // anything back.
+                    let write_violation = match (&scope_before, &write_scope) {
+                        (Some(before), Some(scope)) => {
+                            super::write_scope::finish(before, scope, attempt, run_dir, workdir)
+                        }
+                        _ => Ok(None),
+                    };
                     let read_only_violation = match read_only_before {
                         Some(before) => before.finish(run_dir, workdir, journal),
                         None if scripted_check => {
@@ -2421,6 +2608,7 @@ fn execute_node_kind(
                         None => None,
                     };
                     let read_only_violation = read_only_violation?;
+                    let write_violation = write_violation?;
                     // A sandboxed attempt's changes to what redirects git
                     // are put back and fail it like a protected path.
                     let protect_violation = super::protect::Violation::join(
@@ -2441,14 +2629,26 @@ fn execute_node_kind(
                     // tree is no longer the one it was asked to read, and no
                     // retry, fallback, deferral or pause path may run it
                     // again.
-                    let fatal = match (read_only_violation, &protect_violation) {
-                        (Some(ro), Some(p)) => Some(format!("{ro}; {}", p.reason)),
-                        (Some(ro), None) => Some(ro),
-                        (None, Some(p)) if p.fatal => Some(p.reason.clone()),
-                        (None, _) => None,
+                    // A write outside the scope is fatal like a read-only
+                    // violation: no retry, no fallback, no deferral; the
+                    // attempt journals `failed` with failure_kind
+                    // `write_scope` (spec node-contracts D3).
+                    let write_violated = write_violation.is_some();
+                    let fatal = match (&read_only_violation, &write_violation, &protect_violation) {
+                        (_, Some(ws), Some(p)) => Some(format!("{ws}; {}", p.reason)),
+                        (_, Some(ws), None) => Some(ws.clone()),
+                        (Some(ro), _, Some(p)) => Some(format!("{ro}; {}", p.reason)),
+                        (Some(ro), _, None) => Some(ro.clone()),
+                        (None, _, Some(p)) if p.fatal => Some(p.reason.clone()),
+                        (None, _, _) => None,
                     };
                     if let Some(reason) = fatal {
                         let duration_ms = spawn_at.get().map(|t| t.elapsed().as_millis() as u64);
+                        let kind = if write_violated {
+                            Some(super::write_scope::WRITE_SCOPE.to_string())
+                        } else {
+                            None
+                        };
                         journal.append(EventPayload::AttemptFinished {
                             item: None,
                             output_truncated: capture.truncated.clone(),
@@ -2459,11 +2659,16 @@ fn execute_node_kind(
                             duration_ms,
                             session: None,
                             summary: None,
-                            rejected_output: outcome.as_ref().ok().map(|r| r.output.clone()),
+                            rejected_output: outcome
+                                .as_ref()
+                                .ok()
+                                .map(|r| rejected_output_text(run_dir, &r.output)),
                             partial_output: None,
-                            failure_kind: None,
+                            failure_kind: kind,
                             usage: None,
                             rejected_for: None,
+                            rejection_fingerprint: None,
+                            stalled: false,
                         })?;
                         return Ok(AttemptOutcome::Finished {
                             status: NodeStatus::Failed,
@@ -2500,6 +2705,8 @@ fn execute_node_kind(
                             failure_kind: None,
                             usage: None,
                             rejected_for: None,
+                            rejection_fingerprint: None,
+                            stalled: false,
                         })?;
                         return Ok(AttemptOutcome::Finished {
                             status: NodeStatus::Failed,
@@ -2692,6 +2899,8 @@ fn execute_node_kind(
                                     failure_kind: None,
                                     usage: report.usage.clone(),
                                     rejected_for: None,
+                                    rejection_fingerprint: None,
+                                    stalled: false,
                                 })?;
                                 return Ok(AttemptOutcome::Suspended {
                                     question: q.question,
@@ -2768,8 +2977,10 @@ fn execute_node_kind(
                                 // AFTER this branch's agent has succeeded (meaning this
                                 // branch was not cancelled) - we do not propagate
                                 // cancellation here.
+                                let contract = output_contract_of(node, item);
                                 let rejection = success_check_rejection(
                                     protect_violation.as_deref(),
+                                    contract,
                                     evidence_session.as_deref().zip(node.evidence.as_ref()),
                                     node.success_check.as_ref(),
                                     run_dir,
@@ -2793,12 +3004,30 @@ fn execute_node_kind(
                                         reason,
                                         fatal,
                                         failure_kind,
+                                        reason_only,
                                     }) => {
                                         evidence_refused =
                                             failure_kind.is_some().then(|| reason.clone());
                                         end.protected = protect_violation.is_some();
                                         end.check_rejected = true;
                                         last_close = close_now(&end);
+                                        // The stall fingerprint rides every
+                                        // non-fatal rejection, whether or not
+                                        // `stall_after` is set (D5). A fatal
+                                        // rejection carries neither field and
+                                        // never stalls.
+                                        let stall = if fatal {
+                                            None
+                                        } else {
+                                            Some(super::stall_exit::rejection(
+                                                &reason,
+                                                run_dir,
+                                                ctx.workdir,
+                                                run_id,
+                                                key,
+                                                playbook.effective_stall_after(node),
+                                            )?)
+                                        };
                                         journal.append(EventPayload::AttemptFinished {
                                             item: None,
                                             output_truncated: capture.truncated.clone(),
@@ -2809,14 +3038,28 @@ fn execute_node_kind(
                                             duration_ms,
                                             session: report.session.clone(),
                                             summary: Some(report.summary.clone()),
-                                            rejected_output: Some(report.output.clone()),
+                                            rejected_output: Some(rejected_output_text(
+                                                run_dir,
+                                                &report.output,
+                                            )),
                                             partial_output: None,
                                             failure_kind,
                                             usage: report.usage.clone(),
-                                            rejected_for: (!fatal).then(|| {
-                                                rejected_for_text(run_dir, ctx.workdir, &reason)
-                                            }),
+                                            rejected_for: stall
+                                                .as_ref()
+                                                .map(|f| f.rejected_for.clone()),
+                                            rejection_fingerprint: stall
+                                                .as_ref()
+                                                .map(|f| f.fingerprint.clone()),
+                                            stalled: stall.as_ref().is_some_and(|f| f.stalled),
                                         })?;
+                                        if let Some(output) = stall.and_then(|f| f.output) {
+                                            return Ok(AttemptOutcome::Finished {
+                                                status: NodeStatus::Failed,
+                                                output,
+                                                events,
+                                            });
+                                        }
                                         if fatal {
                                             return Ok(AttemptOutcome::Finished {
                                                 status: NodeStatus::Failed,
@@ -2826,8 +3069,16 @@ fn execute_node_kind(
                                         }
                                         // Keep the human-readable reason on the
                                         // terminal failure message while the raw
-                                        // agent text lives in `rejected_output`.
-                                        last_msg = format!("{reason}: {}", report.output);
+                                        // agent text lives in `rejected_output`. A
+                                        // self-contained reason (the output
+                                        // contract) takes the raw text along to
+                                        // nobody: it names the value only as the
+                                        // kind it got.
+                                        last_msg = if reason_only {
+                                            reason.clone()
+                                        } else {
+                                            format!("{reason}: {}", report.output)
+                                        };
                                         last_timed_out = false;
                                     }
                                     None => {
@@ -2855,6 +3106,14 @@ fn execute_node_kind(
                                         if let Some(reason) = check.reject {
                                             end.check_rejected = true;
                                             last_close = close_now(&end);
+                                            let stall_fields = super::stall_exit::rejection(
+                                                &reason,
+                                                run_dir,
+                                                ctx.workdir,
+                                                run_id,
+                                                key,
+                                                playbook.effective_stall_after(node),
+                                            )?;
                                             journal.append(EventPayload::AttemptFinished {
                                                 item: None,
                                                 output_truncated: capture.truncated.clone(),
@@ -2866,18 +3125,28 @@ fn execute_node_kind(
                                                 duration_ms,
                                                 session: report.session.clone(),
                                                 summary: Some(report.summary.clone()),
-                                                rejected_output: Some(report.output.clone()),
+                                                rejected_output: Some(rejected_output_text(
+                                                    run_dir,
+                                                    &report.output,
+                                                )),
                                                 partial_output: None,
                                                 failure_kind: None,
                                                 usage: report.usage.clone(),
-                                                rejected_for: Some(rejected_for_text(
-                                                    run_dir,
-                                                    ctx.workdir,
-                                                    &reason,
-                                                )),
+                                                rejected_for: Some(stall_fields.rejected_for),
+                                                rejection_fingerprint: Some(
+                                                    stall_fields.fingerprint,
+                                                ),
+                                                stalled: stall_fields.stalled,
                                             })?;
                                             last_msg = format!("{reason}: {}", report.output);
                                             last_timed_out = false;
+                                            if let Some(stall_output) = stall_fields.output {
+                                                return Ok(AttemptOutcome::Finished {
+                                                    status: NodeStatus::Failed,
+                                                    output: stall_output,
+                                                    events,
+                                                });
+                                            }
                                             if !infra_retry {
                                                 try_i += 1;
                                                 retry_next = true;
@@ -2906,6 +3175,8 @@ fn execute_node_kind(
                                             failure_kind: None,
                                             usage: report.usage.clone(),
                                             rejected_for: None,
+                                            rejection_fingerprint: None,
+                                            stalled: false,
                                         })?;
                                         return Ok(AttemptOutcome::Finished {
                                             status: NodeStatus::Succeeded,
@@ -2937,6 +3208,8 @@ fn execute_node_kind(
                                     failure_kind: None,
                                     usage: report.usage.clone(),
                                     rejected_for: None,
+                                    rejection_fingerprint: None,
+                                    stalled: false,
                                 })?;
                                 last_msg = report.output;
                                 last_timed_out = false;
@@ -3028,6 +3301,8 @@ fn execute_node_kind(
                                         failure_kind: None,
                                         usage: failed_usage.clone(),
                                         rejected_for: None,
+                                        rejection_fingerprint: None,
+                                        stalled: false,
                                     })?;
                                     last_msg = msg;
                                 }
@@ -3055,8 +3330,10 @@ fn execute_node_kind(
                                     // exactly as on the Ok branch, and a rejection
                                     // consumes a retry with the discarded text
                                     // preserved (S3 behavior).
+                                    let contract = output_contract_of(node, item);
                                     match success_check_rejection(
                                         protect_violation.as_deref(),
+                                        contract,
                                         evidence_session.as_deref().zip(node.evidence.as_ref()),
                                         node.success_check.as_ref(),
                                         run_dir,
@@ -3089,6 +3366,14 @@ fn execute_node_kind(
                                                 last_close = close_now(&end);
                                                 // Completion enforce (issue #165
                                                 // Part 14.1), as on the Ok branch.
+                                                let stall_fields = super::stall_exit::rejection(
+                                                    &reason,
+                                                    run_dir,
+                                                    ctx.workdir,
+                                                    run_id,
+                                                    key,
+                                                    playbook.effective_stall_after(node),
+                                                )?;
                                                 journal.append(EventPayload::AttemptFinished {
                                                     item: None,
                                                     output_truncated: capture.truncated.clone(),
@@ -3100,18 +3385,27 @@ fn execute_node_kind(
                                                     duration_ms,
                                                     session: None,
                                                     summary: None,
-                                                    rejected_output: Some(output.clone()),
+                                                    rejected_output: Some(rejected_output_text(
+                                                        run_dir, &output,
+                                                    )),
                                                     partial_output: None,
                                                     failure_kind: None,
                                                     usage: failed_usage.clone(),
-                                                    rejected_for: Some(rejected_for_text(
-                                                        run_dir,
-                                                        ctx.workdir,
-                                                        &reason,
-                                                    )),
+                                                    rejected_for: Some(stall_fields.rejected_for),
+                                                    rejection_fingerprint: Some(
+                                                        stall_fields.fingerprint,
+                                                    ),
+                                                    stalled: stall_fields.stalled,
                                                 })?;
                                                 last_msg = format!("{reason}: {output}");
                                                 last_timed_out = false;
+                                                if let Some(stall_output) = stall_fields.output {
+                                                    return Ok(AttemptOutcome::Finished {
+                                                        status: NodeStatus::Failed,
+                                                        output: stall_output,
+                                                        events,
+                                                    });
+                                                }
                                             } else {
                                                 journal.append(EventPayload::AttemptFinished {
                                                     item: None,
@@ -3129,6 +3423,8 @@ fn execute_node_kind(
                                                     failure_kind: None,
                                                     usage: failed_usage.clone(),
                                                     rejected_for: None,
+                                                    rejection_fingerprint: None,
+                                                    stalled: false,
                                                 })?;
                                                 return Ok(AttemptOutcome::Finished {
                                                     status: NodeStatus::Succeeded,
@@ -3141,12 +3437,25 @@ fn execute_node_kind(
                                             reason,
                                             fatal,
                                             failure_kind,
+                                            reason_only,
                                         }) => {
                                             evidence_refused =
                                                 failure_kind.is_some().then(|| reason.clone());
                                             end.protected = protect_violation.is_some();
                                             end.check_rejected = true;
                                             last_close = close_now(&end);
+                                            let stall = if fatal {
+                                                None
+                                            } else {
+                                                Some(super::stall_exit::rejection(
+                                                    &reason,
+                                                    run_dir,
+                                                    ctx.workdir,
+                                                    run_id,
+                                                    key,
+                                                    playbook.effective_stall_after(node),
+                                                )?)
+                                            };
                                             journal.append(EventPayload::AttemptFinished {
                                                 item: None,
                                                 output_truncated: capture.truncated.clone(),
@@ -3158,14 +3467,27 @@ fn execute_node_kind(
                                                 duration_ms,
                                                 session: None,
                                                 summary: None,
-                                                rejected_output: Some(output.clone()),
+                                                rejected_output: Some(rejected_output_text(
+                                                    run_dir, &output,
+                                                )),
                                                 partial_output: None,
                                                 failure_kind,
                                                 usage: failed_usage.clone(),
-                                                rejected_for: (!fatal).then(|| {
-                                                    rejected_for_text(run_dir, ctx.workdir, &reason)
-                                                }),
+                                                rejected_for: stall
+                                                    .as_ref()
+                                                    .map(|f| f.rejected_for.clone()),
+                                                rejection_fingerprint: stall
+                                                    .as_ref()
+                                                    .map(|f| f.fingerprint.clone()),
+                                                stalled: stall.as_ref().is_some_and(|f| f.stalled),
                                             })?;
+                                            if let Some(output) = stall.and_then(|f| f.output) {
+                                                return Ok(AttemptOutcome::Finished {
+                                                    status: NodeStatus::Failed,
+                                                    output,
+                                                    events,
+                                                });
+                                            }
                                             if fatal {
                                                 return Ok(AttemptOutcome::Finished {
                                                     status: NodeStatus::Failed,
@@ -3173,7 +3495,11 @@ fn execute_node_kind(
                                                     events,
                                                 });
                                             }
-                                            last_msg = format!("{reason}: {output}");
+                                            last_msg = if reason_only {
+                                                reason.clone()
+                                            } else {
+                                                format!("{reason}: {output}")
+                                            };
                                             last_timed_out = false;
                                         }
                                     }
@@ -3200,6 +3526,8 @@ fn execute_node_kind(
                                         failure_kind: None,
                                         usage: failed_usage.clone(),
                                         rejected_for: None,
+                                        rejection_fingerprint: None,
+                                        stalled: false,
                                     })?;
                                     last_msg = sfr.outputs.clone().unwrap_or_else(|| msg.clone());
                                 }
@@ -3296,6 +3624,8 @@ fn execute_node_kind(
                                                 .map(|k| k.as_str().to_string()),
                                             usage: failed_usage.clone(),
                                             rejected_for: None,
+                                            rejection_fingerprint: None,
+                                            stalled: false,
                                         })?;
                                     }
                                     last_msg = msg;
@@ -3571,11 +3901,19 @@ fn execute_node_kind(
                 &script_key,
             ) {
                 crate::scenario::Resolution::Answer(crate::scenario::Answer::Script(a)) => {
+                    let status = match a.exit {
+                        0 => NodeStatus::Succeeded,
+                        _ => NodeStatus::Failed,
+                    };
+                    if let Some(reason) = script_contract(node, item, status, &a.stdout) {
+                        return Ok(AttemptOutcome::Finished {
+                            status: NodeStatus::Failed,
+                            output: reason,
+                            events,
+                        });
+                    }
                     return Ok(AttemptOutcome::Finished {
-                        status: match a.exit {
-                            0 => NodeStatus::Succeeded,
-                            _ => NodeStatus::Failed,
-                        },
+                        status,
                         output: a.stdout,
                         events,
                     });
@@ -3604,6 +3942,28 @@ fn execute_node_kind(
             let read_only_peers = read_only_interval
                 .as_ref()
                 .map(read_only::OpenInterval::peers);
+            // A scoped script takes its own before state (spec
+            // node-contracts D3), never journaled as a read-only check. A
+            // scenario run checks nothing (as for read-only).
+            let script_scope = if crate::scenario::session::is_scenario(run_dir) {
+                None
+            } else {
+                match super::write_scope::resolve(playbook, node_id, |t| {
+                    render_scope_template(playbook, run_dir, run_id, state, cfg, t)
+                })? {
+                    Ok(scope) => scope,
+                    Err(msg) => {
+                        return Ok(AttemptOutcome::Finished {
+                            status: NodeStatus::Failed,
+                            output: msg,
+                            events,
+                        });
+                    }
+                }
+            };
+            let scope_before = script_scope
+                .as_ref()
+                .map(|_| read_only::Before::take(node_id, 1, workdir, None));
             let read_only_before = node
                 .read_only
                 .then(|| read_only::Before::take(node_id, 1, workdir, read_only_peers.clone()));
@@ -3619,6 +3979,12 @@ fn execute_node_kind(
                 Some(cancel),
                 &env,
             )?;
+            let write_violation = match (&scope_before, &script_scope) {
+                (Some(before), Some(scope)) => {
+                    super::write_scope::finish(before, scope, 1, run_dir, ctx.workdir)?
+                }
+                _ => None,
+            };
             let read_only_violation = match read_only_before {
                 Some(before) => before.finish(run_dir, ctx.workdir, journal)?,
                 None => None,
@@ -3627,7 +3993,7 @@ fn execute_node_kind(
             if let Some(interval) = &mut read_only_interval {
                 interval.close();
             }
-            if let Some(reason) = read_only_violation {
+            if let Some(reason) = read_only_violation.or(write_violation) {
                 return Ok(AttemptOutcome::Finished {
                     status: NodeStatus::Failed,
                     output: reason,
@@ -3644,6 +4010,13 @@ fn execute_node_kind(
             } else {
                 r.stdout
             };
+            if let Some(reason) = script_contract(node, item, r.status, &output) {
+                return Ok(AttemptOutcome::Finished {
+                    status: NodeStatus::Failed,
+                    output: reason,
+                    events,
+                });
+            }
             Ok(AttemptOutcome::Finished {
                 status: r.status,
                 output,
@@ -3662,6 +4035,39 @@ fn execute_node_kind(
         | NodeKind::Playbook { .. }
         | NodeKind::Publish { .. }) => Err(drive_handled_refusal(node_id, kind)),
     }
+}
+
+/// The declared typed-field contract an output is checked against (spec
+/// node-contracts D1): a list item's `item_outputs`, else the node's
+/// `outputs.fields`.
+fn output_contract_of<'a>(
+    node: &'a apb_core::schema::Node,
+    item: Option<&'a super::outcome::ItemExec>,
+) -> &'a [apb_core::schema::FieldDecl] {
+    match item {
+        Some(i) => i.outputs.as_slice(),
+        None => node
+            .outputs
+            .as_ref()
+            .map_or(&[][..], |o| o.fields.as_slice()),
+    }
+}
+
+/// The output contract of a `script` step (spec node-contracts D1): its
+/// stdout against [`output_contract_of`] when the script succeeded.
+/// `None` for every other status and when nothing is typed.
+fn script_contract(
+    node: &apb_core::schema::Node,
+    item: Option<&super::outcome::ItemExec>,
+    status: NodeStatus,
+    stdout: &str,
+) -> Option<String> {
+    if status != NodeStatus::Succeeded {
+        return None;
+    }
+    let fields = output_contract_of(node, item);
+    let mismatches = apb_core::output_contract::check(fields, stdout);
+    apb_core::output_contract::reason(fields, &mismatches)
 }
 
 /// The reason a chain transition journals: `routing` when a tier-routing
@@ -4120,6 +4526,8 @@ pub(crate) fn execute_finish_answer(
                     failure_kind: None,
                     usage: None,
                     rejected_for: None,
+                    rejection_fingerprint: None,
+                    stalled: false,
                 })?;
                 return Ok((NodeStatus::Cancelled, "cancelled".to_string(), events));
             }
@@ -4140,6 +4548,8 @@ pub(crate) fn execute_finish_answer(
                         failure_kind: None,
                         usage: report.usage.clone(),
                         rejected_for: None,
+                        rejection_fingerprint: None,
+                        stalled: false,
                     })?;
                     if report.status == NodeStatus::Succeeded {
                         // The composed finish answer is the agent's reply body,
@@ -4178,6 +4588,8 @@ pub(crate) fn execute_finish_answer(
                         failure_kind: None,
                         usage: failed_usage,
                         rejected_for: None,
+                        rejection_fingerprint: None,
+                        stalled: false,
                     })?;
                     last_msg = msg;
                     if class == ErrorClass::Transport || class == ErrorClass::Timeout {

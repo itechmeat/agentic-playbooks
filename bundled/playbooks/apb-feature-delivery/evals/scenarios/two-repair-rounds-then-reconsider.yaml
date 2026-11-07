@@ -68,15 +68,15 @@ answers:
     - visit: 1
       attempts:
         - status: succeeded
-          outputs: { open_count: "1", findings: "[c1 open]", roles: "correctness, security, tests" }
+          outputs: { open_count: "1", findings: '[{"id": "c1", "disposition": "open"}]', roles: "correctness, security, tests" }
     - visit: 2
       attempts:
         - status: succeeded
-          outputs: { open_count: "1", findings: "[c1 open]", roles: "correctness, security, tests" }
+          outputs: { open_count: "1", findings: '[{"id": "c1", "disposition": "open"}]', roles: "correctness, security, tests" }
     - visit: 3
       attempts:
         - status: succeeded
-          outputs: { open_count: "1", findings: "[c1 open]", roles: "correctness, security, tests" }
+          outputs: { open_count: "1", findings: '[{"id": "c1", "disposition": "open"}]', roles: "correctness, security, tests" }
   fix:
     - visit: 1
       attempts:

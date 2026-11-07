@@ -56,8 +56,8 @@ pub(super) fn run(
     let missing: Vec<&str> = spec
         .item_outputs
         .iter()
-        .filter(|f| !outputs.contains_key(f.as_str()))
-        .map(String::as_str)
+        .filter(|f| !outputs.contains_key(f.name()))
+        .map(|f| f.name())
         .collect();
     if !missing.is_empty() {
         return Checked {

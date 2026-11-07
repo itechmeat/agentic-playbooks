@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+# CodeRabbit reviews the code, the bundled content and the user docs.
+# OpenSpec artifacts (proposals, designs, task lists and their archive) are
+# design notes and out of scope.
+language: en-US
+reviews:
+  path_filters:
+    - '!openspec/**'
+  auto_review:
+    enabled: true
+    drafts: false
+chat:
+  auto_reply: true

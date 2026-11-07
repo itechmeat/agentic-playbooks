@@ -508,7 +508,13 @@ fn edge_svg(
 fn edge_label(condition: &EdgeCondition) -> Option<String> {
     match condition {
         EdgeCondition::ReviewStatus { equals } => Some(format!("review: {equals}")),
-        EdgeCondition::OutputField { field, equals, .. } => Some(format!("{field}: {equals}")),
+        // The label matches the dashboard's (`graph.ts edgeLabel`). V169
+        // guarantees one comparator.
+        EdgeCondition::OutputField { field, .. } => Some(
+            condition
+                .field_compare()
+                .map_or_else(|| format!("{field}:"), |c| c.label(field)),
+        ),
         EdgeCondition::Judge { min_p, .. } => Some(format!("judge p>={}", min_p.0)),
         EdgeCondition::NoNewItems { rounds, .. } => Some(format!("no new items x{rounds}")),
         _ => None,
@@ -1228,5 +1234,37 @@ mod tests {
         }
         yaml.push_str(&format!("  - {{ from: n{}, to: done }}\n", n - 3));
         yaml
+    }
+
+    // --- D2: threshold edge labels --------------------------------------------
+
+    #[test]
+    fn a_threshold_edge_labels_each_comparator() {
+        let cases: [(&str, &str); 5] = [
+            (
+                "{ type: output_field, node: a, field: coverage, equals: x }",
+                "coverage: x",
+            ),
+            (
+                "{ type: output_field, node: a, field: coverage, lt: 80 }",
+                "coverage < 80",
+            ),
+            (
+                "{ type: output_field, node: a, field: coverage, lte: 80 }",
+                "coverage <= 80",
+            ),
+            (
+                "{ type: output_field, node: a, field: coverage, gt: 80 }",
+                "coverage > 80",
+            ),
+            (
+                "{ type: output_field, node: a, field: coverage, gte: 80 }",
+                "coverage >= 80",
+            ),
+        ];
+        for (cond, want) in cases {
+            let c: EdgeCondition = yaml_serde::from_str(cond).unwrap();
+            assert_eq!(edge_label(&c).as_deref(), Some(want), "{cond}");
+        }
     }
 }

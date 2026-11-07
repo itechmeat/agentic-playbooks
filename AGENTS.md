@@ -31,10 +31,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
-  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130, `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`); `nodes` also holds V68, ids that start with `@`
+  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`), `output_types` for the typed output field contract V167-V168, `write_scope` for a declared write scope V170-V172; `nodes` also holds V68, ids that start with `@`
   are the engine's, V101, `audience` on a finish without a prompt, and
   V163, a `success_check` `scope` that names no glob or one that does not
-  compile), the
+  compile, and V173, a `prove_fails_first` proof that cannot mean anything), the
   "Notify me" settings (`notify/`: the machine target, the project's
   narrowing, a run's request, the outcome classes and the journal names of
   a filtered `finished` (`Coverage`), and `precedence` combining them),
@@ -129,7 +129,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   to the installation by a MAC for a global playbook), the credential-shape
   detector of values and param names (`token_shape.rs`), a run's sensitive
   params (`run_params.rs`: `sensitive`, the one rule remembered input and
-  run redaction share, and `redacted`), run search fields (`run_search.rs`:
+  run redaction share, and `redacted`), the typed output field contract (`output_contract.rs`: the `check` of a declared output against `{ name, type, values, required }` entries, the mismatch reasons that never hold the offending value, `numeric` and `json_in` the tolerant readers), the declared write scope's pure rules (`write_scope.rs`: `entry_problem`, `parse_rendered` of a rendered template, `template_ref`), the stall fingerprint (`rejection.rs`: the normalized reason's SHA-256 prefix), run search fields (`run_search.rs`:
   the params a playbook marks `search: true` as one run's values, `normalize`
   by type, `parse_terms`, the equality `matches` and the limits; the engine
   computes them while listing, `scheduler/listing` `list_runs_filtered`
@@ -288,7 +288,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `unattended` the drive's outcome of each wait in an unattended run (the
   mode from the manifest, a gate's decision, a child's stop), `goal` the
   goal criteria
-  checked at run end, `evidence` the binding of a passing script
+  checked at run end, `prove` the once-per-effect-scope proof of a `prove_fails_first` success check (`check_proved`, the open proof a resume consumes), `stall` the stall exit (the journal streak of identical rejection fingerprints and the node it fails without a retry), `write_scope` the declared write scope (one resolution per execution, the after-attempt check over the read-only tree comparison, the evidence file), `evidence` the binding of a passing script
   `success_check` to its scope's fingerprint (`evidence_bound`) and the
   same fingerprints at the finish (`evidence_observed`), `provenance` the run id in the agent env and the
   commits a node made with the head each attempt left, `result` the
@@ -551,7 +551,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   themselves in `run_binaries.rs`), the paid agent probe behind `apb doctor
   --probe-agent` (`agent_probe.rs`), the expected tools of an attempt and its
   `tool_exposure_mismatch` (`scheduler/node/exposure`), the append-only event log
-  (`event.rs`, with `event/survey` the reader that classifies every line
+  (`event.rs`, with `check_proved` the journal of a proof that ran before the work, with `event/survey` the reader that classifies every line
   without failing and the guard state of its deferrals; `event/deferral_guard`
   the open deferred retries, the one closing rule the run state shares, and
   the guard written with every checkpoint while one is open, added on open

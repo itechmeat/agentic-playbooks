@@ -1,3 +1,16 @@
+describe('needsLookCounts', () => {
+  it('names the checks that passed before the work', () => {
+    expect(
+      needsLookCounts({
+        reasons: ['checks_green_before'],
+        regressions: 0,
+        findings: 0,
+        warnings: 0,
+        green_checks: 1,
+      } as never),
+    ).toBe('1 check green before work')
+  })
+})
 import { describe, expect, it } from 'vitest'
 import type { OutcomeSummary } from './api.gen'
 import { evidenceBasis, evidenceTone, freshnessText, gapIsWarning, gapLabel, goalReachedText, needsLookCounts, resultText } from './runverdict'

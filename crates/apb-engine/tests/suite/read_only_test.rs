@@ -763,6 +763,32 @@ fn protect_still_restores_a_read_only_node_s_change() {
     assert_eq!(fs::read_to_string(f.root.join("a.txt")).unwrap(), "alpha\n");
 }
 
+/// The write-scope check shares the read-only check's order: its evidence
+/// cannot be written (a file stands where `writes/` goes), and the check's
+/// error still leaves protect to put the protected file back.
+#[test]
+fn a_write_scope_evidence_error_still_lets_protect_restore() {
+    let f = line(
+        "{ id: work, type: agent_task, prompt: \"write\", writes: [\"*.txt\"], protect: [\"a.txt\"] }",
+    );
+    let _lock = common::env_lock();
+    let _env = [
+        EnvVar::set("APB_AGENT_CMD", &f.agent),
+        EnvVar::set(
+            "RO_AGENT",
+            "echo tampered > a.txt; : > .apb/runs/$APB_RUN_ID/writes",
+        ),
+        EnvVar::set("RO_SCRATCH", &f.scratch),
+    ];
+    let res = run(&f.root, "ro", None, RunOptions::default());
+    assert!(
+        res.as_ref()
+            .map_or(true, |r| r.outcome != RunStatus::Succeeded),
+        "the run went on past a check that could not finish"
+    );
+    assert_eq!(fs::read_to_string(f.root.join("a.txt")).unwrap(), "alpha\n");
+}
+
 /// A detected-tier read-only node never joins a batch, so a sibling's write
 /// during its attempt cannot be blamed on it: `ro` waits (bounded) for the
 /// writer to finish, which in a batch would happen while `ro` runs.

@@ -578,6 +578,8 @@ pub(crate) fn journal_interrupted(
         failure_kind: None,
         usage: None,
         rejected_for: None,
+        rejection_fingerprint: None,
+        stalled: false,
     })
 }
 
@@ -666,6 +668,8 @@ mod tests {
             payload: EventPayload::AttemptFinished {
                 item: None,
                 rejected_for: None,
+                rejection_fingerprint: None,
+                stalled: false,
                 output_truncated: Vec::new(),
                 transcript_incomplete: false,
                 node: node.into(),
@@ -745,6 +749,8 @@ mod tests {
                 EventPayload::AttemptFinished {
                     item: None,
                     rejected_for: None,
+                    rejection_fingerprint: None,
+                    stalled: false,
                     output_truncated: Vec::new(),
                     transcript_incomplete: false,
                     node: "work".into(),
@@ -830,6 +836,8 @@ mod tests {
                     EventPayload::AttemptFinished {
                         item: None,
                         rejected_for: None,
+                        rejection_fingerprint: None,
+                        stalled: false,
                         output_truncated: Vec::new(),
                         transcript_incomplete: false,
                         node: "work".into(),
@@ -905,6 +913,8 @@ mod tests {
                     failure_kind: None,
                     usage: None,
                     rejected_for: None,
+                    rejection_fingerprint: None,
+                    stalled: false,
                 },
             ),
         ];
@@ -1027,6 +1037,8 @@ mod tests {
                     EventPayload::AttemptFinished {
                         item: None,
                         rejected_for: None,
+                        rejection_fingerprint: None,
+                        stalled: false,
                         output_truncated: Vec::new(),
                         transcript_incomplete: false,
                         node: "work".into(),

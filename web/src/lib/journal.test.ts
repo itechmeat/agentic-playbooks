@@ -61,6 +61,38 @@ describe('runEventJournal', () => {
 })
 
 describe('runEventJournal notes', () => {
+  it('notes the rejection reason of a failed attempt, cut to 80 characters', () => {
+    const long =
+      'output_contract: field `blocking` must be a number, got a string; and much more text follows here to push the reason past the eighty character cut'
+    const entries = runEventJournal([
+      { seq: 1, ts: 1, type: 'attempt_finished', node: 'a', attempt: 1, status: 'failed', rejected_for: long },
+    ])
+    expect(entries[0].note).toBe(`rejected: ${long.slice(0, 80)}`)
+  })
+
+  it('says what a proof of the check decided', () => {
+    const entries = runEventJournal([
+      { seq: 1, ts: 1, type: 'check_proved', node: 'a', script: 'scripts/x.sh', failed_first: true },
+      { seq: 2, ts: 2, type: 'check_proved', node: 'b', script: 'scripts/y.sh', failed_first: false, on_green_before: 'skip' },
+    ])
+    expect(entries[0].note).toBe('the check failed before the work')
+    expect(entries[1].note).toBe('passed before the agent ran (skip)')
+  })
+
+  it('notes a stalled attempt', () => {
+    const entries = runEventJournal([
+      { seq: 1, ts: 1, type: 'attempt_finished', node: 'a', attempt: 3, status: 'failed', stalled: true, rejected_for: 'x' },
+    ])
+    expect(entries[0].note).toContain('stalled')
+  })
+
+  it('adds no rejection note when the attempt carries none', () => {
+    const entries = runEventJournal([
+      { seq: 1, ts: 1, type: 'attempt_finished', node: 'a', attempt: 1, status: 'failed' },
+    ])
+    expect(entries[0].note ?? '').not.toContain('rejected:')
+  })
+
   it('says how a session handoff started and which declared fields were missing', () => {
     const loss = [{ stream: 'stdout', kept_bytes: 8, dropped_bytes_at_least: 4 }]
     const entries = runEventJournal([

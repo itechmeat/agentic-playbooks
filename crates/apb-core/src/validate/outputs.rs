@@ -94,7 +94,7 @@ pub(crate) fn check_outputs(
                     ),
                     Some(list)
                         if !list.item_outputs.is_empty()
-                            && !list.item_outputs.iter().any(|f| f == item_field) =>
+                            && !list.item_outputs.iter().any(|f| f.name() == item_field) =>
                     {
                         r.warn(
                             "V135",
@@ -102,7 +102,7 @@ pub(crate) fn check_outputs(
                             format!(
                                 "output `{name}` reads item_field `{item_field}` of `{}`, which keeps only item_outputs [{}]",
                                 node.id,
-                                list.item_outputs.join(", ")
+                                list.item_output_names().join(", ")
                             ),
                         )
                     }

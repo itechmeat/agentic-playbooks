@@ -48,6 +48,17 @@ fn v09_still_fires_when_on_failure_is_not_route() {
     assert!(error_codes(&bad).contains(&"V09"));
 }
 
+// D5: Stalled covers neither outcome, so success plus stalled without a
+// fallback still leaves failure uncovered and reports V09 on a condition node.
+#[test]
+fn v09_stalled_does_not_count_as_coverage() {
+    let yaml = VALID.replace(
+        "  - { from: check, to: fix,  condition: { type: node_status, node: lint, equals: failure } }\n",
+        "  - { from: check, to: fix,  condition: { type: node_status, node: lint, equals: stalled } }\n",
+    );
+    assert!(error_codes(&yaml).contains(&"V09"));
+}
+
 #[test]
 fn v10_condition_references_downstream_only_node() {
     // the condition references a node that can't be reached before check

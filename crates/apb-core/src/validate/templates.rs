@@ -112,6 +112,20 @@ pub(crate) fn workdir_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
         .collect()
 }
 
+/// The template-form `writes` of a playbook (spec node-contracts D3) as
+/// `(owner node id, text)` pairs: rendered once before the node starts, so
+/// it races and reads declared fields exactly like a prompt does.
+pub(crate) fn writes_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
+    playbook
+        .nodes
+        .iter()
+        .filter_map(|n| match &n.writes {
+            Some(WriteScope::Template(t)) => Some((n.id.as_str(), t.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The declared cache key templates of a playbook (issue #67 item 6) as
 /// `(owner node id, text)` pairs.
 pub(crate) fn cache_key_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
@@ -158,6 +172,7 @@ pub(crate) fn check_cross_branch_reads(playbook: &Playbook, r: &mut ValidationRe
     let texts = template_texts(playbook)
         .into_iter()
         .chain(workdir_texts(playbook))
+        .chain(writes_texts(playbook))
         .chain(cache_key_texts(playbook));
     for (owner, text) in texts {
         if Some(owner) == failure_handler {

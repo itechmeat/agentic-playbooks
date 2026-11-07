@@ -69,7 +69,7 @@ pub(crate) fn snapshotted(playbook: &apb_core::schema::Playbook, node_id: &str) 
 pub(crate) struct ItemSubject<'a> {
     pub id: &'a str,
     /// The list's declared item outputs; empty keeps the whole object.
-    pub fields: &'a [String],
+    pub fields: &'a [apb_core::schema::FieldDecl],
 }
 
 /// A published snapshot whose stamp is not journaled yet.
@@ -501,14 +501,14 @@ fn files_wanted(req: &Request<'_>) -> bool {
 /// node's `outputs.fields`, a list item's declared item outputs (all of
 /// the object when the list declares none).
 fn fields_text(req: &Request<'_>) -> Option<Map<String, Value>> {
-    let keep: &[String] = match &req.item {
-        Some(item) => item.fields,
+    let keep: Vec<String> = match &req.item {
+        Some(item) => apb_core::schema::field_names(item.fields),
         None => {
             let declared = req.node.outputs.as_ref().map(|o| o.fields.as_slice())?;
             if declared.is_empty() {
                 return None;
             }
-            declared
+            apb_core::schema::field_names(declared)
         }
     };
     let Value::Object(obj) = serde_json::from_str::<Value>(req.output).ok()? else {
@@ -517,7 +517,9 @@ fn fields_text(req: &Request<'_>) -> Option<Map<String, Value>> {
     Some(if keep.is_empty() {
         obj
     } else {
-        obj.into_iter().filter(|(k, _)| keep.contains(k)).collect()
+        obj.into_iter()
+            .filter(|(k, _)| keep.iter().any(|f| f == k))
+            .collect()
     })
 }
 

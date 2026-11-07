@@ -347,10 +347,38 @@ pub struct NodeFiles {
     /// JSON); a script prints a JSON object on stdout. Later nodes read one
     /// with `{{nodes.<id>.output.<field>}}` or an `output_field` edge. A
     /// successful execution whose output lacks a declared field journals an
-    /// `output_fields_missing` warning; it never fails the node.
+    /// `output_fields_missing` warning; it never fails the node. Each entry
+    /// is a plain name or a typed entry (the output contract of
+    /// `apb_core::output_contract`); a
+    /// mismatch on a typed entry rejects the attempt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fields: Vec<String>,
+    pub fields: Vec<FieldDecl>,
 }
+
+/// The files an attempt may change: a list of globs, or one template that
+/// renders the list (spec node-contracts D3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WriteScope {
+    Globs(Vec<String>),
+    Template(String),
+}
+
+impl NodeFiles {
+    /// The names of `fields`, in declaration order.
+    pub fn field_names(&self) -> Vec<String> {
+        self.fields.iter().map(|f| f.name().to_string()).collect()
+    }
+}
+
+// The declared output field types and the two value readers (`numeric`,
+// `json_in`) live in the leaf module `crate::output_contract`, so the schema
+// and a list's `item_outputs` can both use them without importing each
+// other. Re-exported here: every path that named them under the schema keeps
+// working.
+pub use crate::output_contract::{
+    FieldDecl, FieldType, TypedFieldDecl, field_names, json_in, numeric,
+};
 
 impl Playbook {
     pub fn from_yaml(s: &str) -> Result<Self, SchemaError> {
@@ -395,6 +423,16 @@ impl Playbook {
             return None;
         }
         retry_delay.as_ref().or(self.defaults.retry_delay.as_ref())
+    }
+
+    /// The stall exit in force for `node`: its own `stall_after`, else
+    /// `defaults.stall_after`. `None` for anything but a non-list
+    /// `agent_task` (V174 refuses it elsewhere).
+    pub fn effective_stall_after(&self, node: &Node) -> Option<u32> {
+        if !matches!(node.kind, NodeKind::AgentTask { .. }) || node.list.is_some() {
+            return None;
+        }
+        node.stall_after.or(self.defaults.stall_after)
     }
 
     /// The baseline checks, empty without a `baseline_check` block.
@@ -884,6 +922,10 @@ pub struct Defaults {
     /// list node; a node's own `retry_delay` wins. Additive to schema 2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<RetryDelay>,
+    /// Playbook-wide stall exit for every `agent_task` that is not a list
+    /// node; a node's own `stall_after` wins. Additive to schema 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_after: Option<u32>,
 }
 
 /// The wait before an ordinary retry of an `agent_task` (one that spends
@@ -1433,6 +1475,20 @@ pub struct Node {
     /// older apb drops it and runs the node without the check.
     #[serde(default, skip_serializing_if = "is_false")]
     pub read_only: bool,
+    /// Stop retrying once the same rejection repeats this many times in a
+    /// row (`agent_task` only, spec node-contracts D5). Absent: off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_after: Option<u32>,
+    /// The files an `agent_task` or `script` attempt may change, relative to
+    /// the node's directory: globs, or one template that renders a list
+    /// (spec node-contracts D3). Checked after every attempt; a change
+    /// outside the scope fails the node without a retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writes: Option<WriteScope>,
+    /// At most this many files an attempt may change (within `writes` when
+    /// it is declared, else anywhere in the tree).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_changed_files: Option<u32>,
     /// What a `human_review` gate does in an unattended run: `fail` (the
     /// default) or `{ decide: <option>, note? }`. Sits next to
     /// `auto_decide`, never inside it: that block is strict in older
@@ -1750,7 +1806,33 @@ pub enum SuccessCheck {
     /// to, so the run outcome shows the pass as stale once a later node
     /// changes a file in it, and as still current after an edit elsewhere
     /// (spec 2026-11-03-evidence-freshness-design, V163).
-    Scoped { script: String, scope: Vec<String> },
+    Scoped {
+        script: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<Vec<String>>,
+        /// Run the check once before the first attempt of an effect scope,
+        /// as an observation: a check that changes the tree fails the node,
+        /// a check that passes before the agent ran decides the node
+        /// (spec node-contracts D4).
+        #[serde(default, skip_serializing_if = "is_false")]
+        prove_fails_first: bool,
+        /// What a green proof means: `fail` (the default, the pass proves
+        /// nothing and the node fails as needing a look) or `skip` (the
+        /// node settles as already done).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_green_before: Option<OnGreenBefore>,
+    },
+}
+
+/// What a green proof before the work means (spec node-contracts D4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnGreenBefore {
+    /// The node fails: a pass after the agent ran would prove nothing.
+    #[default]
+    Fail,
+    /// The node settles `succeeded` as already done, without the agent.
+    Skip,
 }
 
 /// The shapes a `success_check` is read from: the same as [`SuccessCheck`],
@@ -1773,7 +1855,12 @@ struct MarkerForm {
 #[serde(deny_unknown_fields)]
 struct ScopedForm {
     script: String,
-    scope: Vec<String>,
+    #[serde(default)]
+    scope: Option<Vec<String>>,
+    #[serde(default)]
+    prove_fails_first: bool,
+    #[serde(default)]
+    on_green_before: Option<OnGreenBefore>,
 }
 
 impl From<SuccessCheckForm> for SuccessCheck {
@@ -1781,9 +1868,17 @@ impl From<SuccessCheckForm> for SuccessCheck {
         match form {
             SuccessCheckForm::Script(path) => SuccessCheck::Script(path),
             SuccessCheckForm::Marker(MarkerForm { marker }) => SuccessCheck::Marker { marker },
-            SuccessCheckForm::Scoped(ScopedForm { script, scope }) => {
-                SuccessCheck::Scoped { script, scope }
-            }
+            SuccessCheckForm::Scoped(ScopedForm {
+                script,
+                scope,
+                prove_fails_first,
+                on_green_before,
+            }) => SuccessCheck::Scoped {
+                script,
+                scope,
+                prove_fails_first,
+                on_green_before,
+            },
         }
     }
 }
@@ -1801,8 +1896,21 @@ impl SuccessCheck {
     /// none (and for the marker form).
     pub fn scope(&self) -> &[String] {
         match self {
-            SuccessCheck::Scoped { scope, .. } => scope,
+            SuccessCheck::Scoped { scope, .. } => scope.as_deref().unwrap_or(&[]),
             _ => &[],
+        }
+    }
+
+    /// What a green proof decides, when this check proves first: the
+    /// script form with `prove_fails_first: true` only.
+    pub fn prove(&self) -> Option<OnGreenBefore> {
+        match self {
+            SuccessCheck::Scoped {
+                prove_fails_first: true,
+                on_green_before,
+                ..
+            } => Some(on_green_before.unwrap_or_default()),
+            _ => None,
         }
     }
 
@@ -2152,7 +2260,16 @@ pub enum EdgeCondition {
     OutputField {
         node: String,
         field: String,
-        equals: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        equals: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lt: Option<Threshold>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lte: Option<Threshold>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gt: Option<Threshold>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gte: Option<Threshold>,
     },
     // --- issue #165 Part 7: the judge edge condition -------------------------
     /// Matches once the last `rounds` successful visits of `node` each output
@@ -2215,6 +2332,162 @@ pub fn output_field_value(output: &str, field: &str) -> Option<String> {
     }
 }
 
+/// A numeric threshold of an `output_field` condition (`lt: 80`). Compared
+/// and hashed by its bits, so an edge condition carrying one can still be a
+/// routing key, exactly like [`crate::judge::Probability`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Threshold(pub f64);
+
+impl PartialEq for Threshold {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+impl Eq for Threshold {}
+impl std::hash::Hash for Threshold {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.0.to_bits().hash(h);
+    }
+}
+
+/// The one comparator of an [`EdgeCondition::OutputField`] condition.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FieldCompare<'a> {
+    Equals(&'a str),
+    Lt(f64),
+    Lte(f64),
+    Gt(f64),
+    Gte(f64),
+}
+
+impl FieldCompare<'_> {
+    /// The condition key that carries it: `equals`, `lt`, `lte`, `gt` or
+    /// `gte`.
+    pub fn key(&self) -> &'static str {
+        match self {
+            FieldCompare::Equals(_) => "equals",
+            FieldCompare::Lt(_) => "lt",
+            FieldCompare::Lte(_) => "lte",
+            FieldCompare::Gt(_) => "gt",
+            FieldCompare::Gte(_) => "gte",
+        }
+    }
+
+    /// The threshold of a numeric comparator; `None` for `equals`.
+    pub fn threshold(&self) -> Option<f64> {
+        match self {
+            FieldCompare::Equals(_) => None,
+            FieldCompare::Lt(t)
+            | FieldCompare::Lte(t)
+            | FieldCompare::Gt(t)
+            | FieldCompare::Gte(t) => Some(*t),
+        }
+    }
+
+    /// The label a graph shows for an edge reading `field`: `field: x`
+    /// for `equals`, `field < 80` (and `<=`, `>`, `>=`) for a threshold,
+    /// the number in Rust's shortest form (the dashboard's `edgeLabel`
+    /// writes the same).
+    pub fn label(&self, field: &str) -> String {
+        let op = match self {
+            FieldCompare::Equals(e) => return format!("{field}: {e}"),
+            FieldCompare::Lt(_) => "<",
+            FieldCompare::Lte(_) => "<=",
+            FieldCompare::Gt(_) => ">",
+            FieldCompare::Gte(_) => ">=",
+        };
+        format!("{field} {op} {}", self.threshold().unwrap_or_default())
+    }
+
+    /// The comparator as a routing key names it: ``equals=`x` `` or
+    /// `lt=80`.
+    pub fn route_key(&self) -> String {
+        match self {
+            FieldCompare::Equals(e) => format!("equals=`{e}`"),
+            _ => format!("{}={}", self.key(), self.threshold().unwrap_or_default()),
+        }
+    }
+}
+
+impl EdgeCondition {
+    /// How many of `equals`, `lt`, `lte`, `gt`, `gte` an `output_field`
+    /// condition carries; 0 for any other variant.
+    pub fn comparator_count(&self) -> usize {
+        let EdgeCondition::OutputField {
+            equals,
+            lt,
+            lte,
+            gt,
+            gte,
+            ..
+        } = self
+        else {
+            return 0;
+        };
+        usize::from(equals.is_some())
+            + [lt, lte, gt, gte]
+                .into_iter()
+                .filter(|t| t.is_some())
+                .count()
+    }
+
+    /// The one comparator of an `output_field` condition; `None` for any
+    /// other variant and for zero or several comparators (V169).
+    pub fn field_compare(&self) -> Option<FieldCompare<'_>> {
+        let EdgeCondition::OutputField {
+            equals,
+            lt,
+            lte,
+            gt,
+            gte,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if self.comparator_count() != 1 {
+            return None;
+        }
+        if let Some(e) = equals {
+            return Some(FieldCompare::Equals(e));
+        }
+        lt.map(|t| FieldCompare::Lt(t.0))
+            .or(lte.map(|t| FieldCompare::Lte(t.0)))
+            .or(gt.map(|t| FieldCompare::Gt(t.0)))
+            .or(gte.map(|t| FieldCompare::Gte(t.0)))
+    }
+}
+
+/// Whether field `field` of `output` satisfies `cmp`. `Equals` is today's
+/// `output_field_value(..) == equals`. A threshold reads the field with
+/// [`crate::output_contract::numeric`]; anything it cannot read is a
+/// non-match, never an error.
+pub fn output_field_matches(output: &str, field: &str, cmp: &FieldCompare<'_>) -> bool {
+    match cmp {
+        FieldCompare::Equals(equals) => {
+            output_field_value(output, field).is_some_and(|v| v == *equals)
+        }
+        FieldCompare::Lt(t) => threshold_matches(output, field, |v| v < *t),
+        FieldCompare::Lte(t) => threshold_matches(output, field, |v| v <= *t),
+        FieldCompare::Gt(t) => threshold_matches(output, field, |v| v > *t),
+        FieldCompare::Gte(t) => threshold_matches(output, field, |v| v >= *t),
+    }
+}
+
+/// The comparison of the field's numeric reading against a threshold.
+fn threshold_matches(output: &str, field: &str, f: impl Fn(f64) -> bool) -> bool {
+    output_field_number(output, field).is_some_and(f)
+}
+
+/// The numeric reading of `field` in a JSON-object output, as a threshold
+/// edge compares it ([`crate::output_contract::numeric`] over the raw
+/// value); `None` when the output, the field or the number cannot be read.
+pub fn output_field_number(output: &str, field: &str) -> Option<f64> {
+    let parsed: serde_json::Value = serde_json::from_str(output).ok()?;
+    crate::output_contract::numeric(parsed.as_object()?.get(field)?)
+}
+
 /// The text a `{{nodes.<id>.output.<field>}}` template renders: what
 /// [`output_field_value`] returns, plus an array or an object as compact
 /// JSON. Edge conditions keep [`output_field_value`].
@@ -2234,6 +2507,10 @@ pub fn output_field_text(output: &str, field: &str) -> Option<String> {
 pub enum StatusEq {
     Success,
     Failure,
+    /// The node's latest execution ended stalled (the same rejection
+    /// repeated `stall_after` times in a row). The node's status stays
+    /// `failed` in the journal; this label only routes.
+    Stalled,
 }
 
 #[cfg(test)]
@@ -3107,5 +3384,295 @@ edges: []
                 "{output}"
             );
         }
+    }
+
+    // --- D2: numeric thresholds on an output_field edge -----------------------
+
+    /// The one comparator of a condition built in YAML, matched inside the
+    /// scope that owns the parsed condition.
+    macro_rules! assert_compare {
+        ($yaml:expr, $pat:pat $(if $guard:expr)?) => {{
+            let cond: EdgeCondition = yaml_serde::from_str($yaml).unwrap();
+            let got = cond.field_compare();
+            let ok = match got {
+                $pat $(if $guard)? => true,
+                _ => false,
+            };
+            assert!(ok, "{:?} -> {:?}", $yaml, got);
+        }};
+    }
+
+    #[test]
+    fn field_compare_reads_each_comparator_alone() {
+        assert_compare!(
+            r#"{ type: output_field, node: n, field: f, equals: x }"#,
+            Some(FieldCompare::Equals("x"))
+        );
+        assert_compare!(
+            r#"{ type: output_field, node: n, field: f, lt: 80 }"#,
+            Some(FieldCompare::Lt(t)) if t == 80.0
+        );
+        assert_compare!(
+            r#"{ type: output_field, node: n, field: f, lte: 80 }"#,
+            Some(FieldCompare::Lte(t)) if t == 80.0
+        );
+        assert_compare!(
+            r#"{ type: output_field, node: n, field: f, gt: 10 }"#,
+            Some(FieldCompare::Gt(t)) if t == 10.0
+        );
+        assert_compare!(
+            r#"{ type: output_field, node: n, field: f, gte: 10 }"#,
+            Some(FieldCompare::Gte(t)) if t == 10.0
+        );
+    }
+
+    #[test]
+    fn field_compare_is_none_for_other_variants_and_malformed_output_field() {
+        assert_compare!(r#"{ type: node_status, node: n, equals: success }"#, None);
+        // Zero comparators (V169 catches it; the reader answers None).
+        assert_compare!(r#"{ type: output_field, node: n, field: f }"#, None);
+        // Two comparators.
+        assert_compare!(
+            r#"{ type: output_field, node: n, field: f, equals: x, lt: 5 }"#,
+            None
+        );
+    }
+
+    #[test]
+    fn output_field_matches_thresholds_by_number_or_numeric_string() {
+        let cases: [(FieldCompare, &str, bool); 12] = [
+            (FieldCompare::Lt(80.0), r#"{"coverage": 72.5}"#, true),
+            (FieldCompare::Lt(80.0), r#"{"coverage": "72.5"}"#, true),
+            (FieldCompare::Lt(80.0), r#"{"coverage": 80}"#, false),
+            (FieldCompare::Lte(80.0), r#"{"coverage": 80}"#, true),
+            (FieldCompare::Lte(80.0), r#"{"coverage": 80.5}"#, false),
+            (FieldCompare::Gt(80.0), r#"{"coverage": 80}"#, false),
+            (FieldCompare::Gt(80.0), r#"{"coverage": 91}"#, true),
+            (FieldCompare::Gte(80.0), r#"{"coverage": "91"}"#, true),
+            (FieldCompare::Gte(80.0), r#"{"coverage": 79.9}"#, false),
+            // 9 is below 10 as a number, where text comparison would lie.
+            (FieldCompare::Lt(10.0), r#"{"n": 9}"#, true),
+            (FieldCompare::Lt(10.0), r#"{"n": "9"}"#, true),
+            (FieldCompare::Lt(10.0), r#"{"n": 10}"#, false),
+        ];
+        for (cmp, output, want) in cases {
+            assert_eq!(
+                output_field_matches(output, "coverage", &cmp)
+                    || output_field_matches(output, "n", &cmp),
+                want,
+                "{cmp:?} on {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn output_field_matches_never_errors_on_unreadable_values() {
+        for output in [
+            r#"{"coverage": true}"#,
+            r#"{"coverage": null}"#,
+            r#"{"coverage": [1]}"#,
+            r#"{"coverage": {}}"#,
+            r#"{"coverage": "large"}"#,
+            r#"{"other": 1}"#,
+            "x",
+            "not json",
+        ] {
+            assert!(
+                !output_field_matches(output, "coverage", &FieldCompare::Lt(80.0)),
+                "{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn output_field_matches_equals_exactly_as_output_field_value() {
+        for (output, field, equals, want) in [
+            (r#"{"v": "x"}"#, "v", "x", true),
+            (r#"{"v": "x"}"#, "v", "y", false),
+            (r#"{"v": true}"#, "v", "true", true),
+            (r#"{"v": 3}"#, "v", "3", true),
+            (r#"{"v": [1]}"#, "v", "x", false),
+            (r#"{"v": null}"#, "v", "x", false),
+            ("x", "v", "x", false),
+        ] {
+            assert_eq!(
+                output_field_matches(output, field, &FieldCompare::Equals(equals)),
+                want,
+                "{output} {equals}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_threshold_condition_round_trips_through_yaml() {
+        let yaml = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: a, type: agent_task, prompt: p }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: s, to: a }\n  - { from: a, to: done, condition: { type: output_field, node: a, field: coverage, lt: 80 } }\n";
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        let back = yaml_serde::to_string(&pb).unwrap();
+        assert!(back.contains("lt: 80"), "{back}");
+        let reparsed = Playbook::from_yaml(&back).unwrap();
+        let EdgeCondition::OutputField { lt, .. } = &reparsed.edges[1].condition.as_ref().unwrap()
+        else {
+            panic!("not an output_field edge");
+        };
+        assert_eq!(*lt, Some(Threshold(80.0)));
+    }
+
+    #[test]
+    fn a_threshold_compares_and_hashes_by_its_bits() {
+        use std::collections::HashSet;
+        let a = Threshold(80.0);
+        let b = Threshold(80.0);
+        assert_eq!(a, b);
+        let mut set = HashSet::new();
+        set.insert(a);
+        assert!(set.contains(&b));
+        assert_ne!(Threshold(80.0), Threshold(80.5));
+    }
+
+    /// A plain `fields` list parses, serializes and keys the node JSON
+    /// exactly as the old `Vec<String>` did (D1 wrong implementation 1).
+    #[test]
+    fn plain_output_fields_round_trip_exactly_as_before() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: n1, type: agent_task, prompt: p, outputs: { fields: [a, b] } }
+edges: []
+"#;
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        let node = pb.node("n1").unwrap();
+        assert_eq!(
+            serde_json::to_string(node.outputs.as_ref().unwrap()).unwrap(),
+            r#"{"files":[],"fields":["a","b"]}"#
+        );
+        let back = Playbook::from_yaml(&yaml_serde::to_string(&pb).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_string(back.node("n1").unwrap()).unwrap(),
+            serde_json::to_string(node).unwrap()
+        );
+    }
+
+    #[test]
+    fn typed_output_fields_round_trip() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: n1, type: agent_task, prompt: p, outputs: { fields: [ { name: blocking, type: number, required: true }, notes ] } }
+edges: []
+"#;
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        let node = pb.node("n1").unwrap();
+        assert_eq!(
+            serde_json::to_string(node.outputs.as_ref().unwrap()).unwrap(),
+            r##"{"files":[],"fields":[{"name":"blocking","type":"number","required":true},"notes"]}"##
+        );
+        let back = Playbook::from_yaml(&yaml_serde::to_string(&pb).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_string(back.node("n1").unwrap()).unwrap(),
+            serde_json::to_string(node).unwrap()
+        );
+    }
+
+    // --- D4: a check that must fail first -------------------------------------
+
+    fn node_with_check(check: &str) -> Result<Playbook, crate::schema::SchemaError> {
+        Playbook::from_yaml(&format!(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - {{ id: n1, type: agent_task, prompt: p, success_check: {check} }}\n  - {{ id: d, type: finish, outcome: success }}\nedges:\n  - {{ from: n1, to: d }}\n"
+        ))
+    }
+
+    #[test]
+    fn a_scoped_check_with_a_scope_parses_and_serializes_as_today() {
+        let yaml = "{ script: scripts/x.sh, scope: [src/**] }";
+        let pb = node_with_check(yaml).unwrap();
+        let sc = pb.node("n1").unwrap().success_check.as_ref().unwrap();
+        assert_eq!(sc.script_path(), Some("scripts/x.sh"));
+        assert_eq!(sc.scope(), &["src/**".to_string()]);
+        let back = yaml_serde::to_string(&pb).unwrap();
+        assert!(back.contains("scope:"), "{back}");
+        assert!(!back.contains("prove_fails_first"), "{back}");
+        let reparsed = Playbook::from_yaml(&back).unwrap();
+        assert_eq!(
+            reparsed
+                .node("n1")
+                .unwrap()
+                .success_check
+                .as_ref()
+                .unwrap()
+                .scope(),
+            &["src/**".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_proving_check_parses_with_and_without_on_green_before() {
+        let pb = node_with_check("{ script: scripts/x.sh, prove_fails_first: true }").unwrap();
+        let sc = pb.node("n1").unwrap().success_check.as_ref().unwrap();
+        assert_eq!(sc.prove(), Some(crate::schema::OnGreenBefore::Fail));
+        assert!(sc.scope().is_empty());
+        let pb = node_with_check(
+            "{ script: scripts/x.sh, prove_fails_first: true, on_green_before: skip }",
+        )
+        .unwrap();
+        let sc = pb.node("n1").unwrap().success_check.as_ref().unwrap();
+        assert_eq!(sc.prove(), Some(crate::schema::OnGreenBefore::Skip));
+    }
+
+    #[test]
+    fn a_marker_check_cannot_prove() {
+        assert!(node_with_check("{ marker: m, prove_fails_first: true }").is_err());
+        // And a plain script form never proves.
+        let pb = node_with_check("'scripts/x.sh'").unwrap();
+        let sc = pb.node("n1").unwrap().success_check.as_ref().unwrap();
+        assert_eq!(sc.prove(), None);
+    }
+
+    // --- D3: the declared write scope -----------------------------------------
+
+    #[test]
+    fn the_write_scope_forms_round_trip() {
+        let yaml = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: w, type: agent_task, prompt: p, writes: [\"src/**\"], max_changed_files: 5 }\n  - { id: t, type: script, script: s, runner: sh, writes: \"{{nodes.w.output.files}}\" }\n  - { id: d, type: finish, outcome: success }\nedges:\n  - { from: s, to: w }\n  - { from: w, to: t }\n  - { from: t, to: d }\n";
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        let w = pb.node("w").unwrap();
+        assert_eq!(
+            w.writes,
+            Some(WriteScope::Globs(vec!["src/**".to_string()]))
+        );
+        assert_eq!(w.max_changed_files, Some(5));
+        let t = pb.node("t").unwrap();
+        assert_eq!(
+            t.writes,
+            Some(WriteScope::Template("{{nodes.w.output.files}}".to_string()))
+        );
+        assert_eq!(t.max_changed_files, None);
+        let back = Playbook::from_yaml(&yaml_serde::to_string(&pb).unwrap()).unwrap();
+        assert_eq!(back.node("w").unwrap().writes, w.writes);
+        assert_eq!(back.node("t").unwrap().writes, t.writes);
+        // A node without either key serializes without them.
+        let plain = serde_json::to_value(back.node("d").unwrap()).unwrap();
+        assert!(plain.get("writes").is_none(), "{plain}");
+        assert!(plain.get("max_changed_files").is_none(), "{plain}");
+        let t = serde_json::to_value(back.node("t").unwrap()).unwrap();
+        assert!(t.get("max_changed_files").is_none(), "{t}");
+    }
+
+    #[test]
+    fn unknown_key_in_a_typed_entry_is_a_parse_error() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: n1, type: agent_task, prompt: p, outputs: { fields: [ { name: n, type: number, bogus: 1 } ] } }
+edges: []
+"#;
+        assert!(Playbook::from_yaml(yaml).is_err());
     }
 }

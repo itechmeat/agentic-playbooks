@@ -93,6 +93,7 @@ export function needsLookCounts(n: NeedsLook | null | undefined): string | null 
   add(n.warnings, 'warning', 'warnings')
   add(n.unknown_sends ?? 0, 'unknown send', 'unknown sends')
   add(n.list_items ?? 0, 'list item', 'list items')
+  add(n.green_checks ?? 0, 'check green before work', 'checks green before work')
   return parts.length ? parts.join(', ') : null
 }
 

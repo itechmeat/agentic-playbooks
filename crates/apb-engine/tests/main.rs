@@ -420,6 +420,8 @@ mod notify_transitions_test;
 #[cfg(unix)]
 #[path = "suite/operator_pause_test.rs"]
 mod operator_pause_test;
+#[path = "suite/output_contract_test.rs"]
+mod output_contract_test;
 #[path = "suite/output_field_test.rs"]
 mod output_field_test;
 #[path = "suite/overrides_run_test.rs"]
@@ -445,6 +447,8 @@ mod prompt_cache_test;
 #[cfg(unix)]
 #[path = "suite/protect_test.rs"]
 mod protect_test;
+#[path = "suite/prove_test.rs"]
+mod prove_test;
 #[cfg(unix)]
 #[path = "suite/read_only_batch_test.rs"]
 mod read_only_batch_test;
@@ -460,6 +464,8 @@ mod save_nudge_test;
 #[cfg(unix)]
 #[path = "suite/scenario_parity_test.rs"]
 mod scenario_parity_test;
+#[path = "suite/write_scope_test.rs"]
+mod write_scope_test;
 // Unix-only: `runner: sh` scripts and shell hooks in the bare remote.
 #[cfg(unix)]
 #[path = "suite/publish_test.rs"]
@@ -536,6 +542,8 @@ mod send_intent_test;
 mod session_handoff_test;
 #[path = "suite/shell_portability_test.rs"]
 mod shell_portability_test;
+#[path = "suite/stall_test.rs"]
+mod stall_test;
 #[path = "suite/state_test.rs"]
 mod state_test;
 #[cfg(unix)]

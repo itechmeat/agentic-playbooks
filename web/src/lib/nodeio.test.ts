@@ -11,7 +11,23 @@ describe('fieldsToField', () => {
   })
 })
 
+describe('fieldsToField with typed entries', () => {
+  it('shows each entry by its name, never as an object', () => {
+    expect(
+      fieldsToField({ fields: [{ name: 'blocking', type: 'number', required: true }, 'notes'] }),
+    ).toBe('blocking, notes')
+  })
+})
+
 describe('fieldToOutputs', () => {
+  it('keeps a typed entry whose name is still listed, drops a removed one, adds new names plain', () => {
+    const typed = { name: 'blocking', type: 'number', required: true }
+    const other = { name: 'old', type: 'string' }
+    expect(fieldToOutputs('blocking, notes', { fields: [typed, other] })).toEqual({
+      fields: [typed, 'notes'],
+    })
+  })
+
   it('sets the fields and keeps the other outputs keys', () => {
     expect(fieldToOutputs('working_tree,  verdict ,', { files: ['a.md'], extract: 'X' })).toEqual({
       files: ['a.md'],

@@ -24,6 +24,7 @@ mod list;
 mod loop_items;
 mod node_io;
 pub(crate) mod nodes;
+mod output_types;
 mod outputs;
 mod params;
 mod publish;
@@ -34,14 +35,15 @@ mod retry;
 mod review;
 mod templates;
 mod unattended;
+mod write_scope;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::profile::{ProfileScope, QualifiedProfileRef};
 use crate::profile_store::PlaybookOrigin;
 use crate::schema::{
-    CacheMode, CacheSpec, Edge, EdgeCondition, FailurePolicy, FunctionsAllow, GoalCheck, NodeKind,
-    Playbook, SuccessCheck,
+    CacheMode, CacheSpec, Edge, EdgeCondition, FailurePolicy, FieldDecl, FieldType, FunctionsAllow,
+    GoalCheck, Node, NodeKind, Playbook, SuccessCheck, TypedFieldDecl, WriteScope,
 };
 
 use connectors::check_connectors;
@@ -384,16 +386,20 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     edges::check_one_of_order(playbook, &mut r); // V123, V124
     loop_items::check_loop_items(playbook, &mut r); // V164-V166
     edges::check_judge_values(playbook, &mut r); // V125
+    edges::check_output_field_comparators(playbook, &mut r); // V169
     review::check_review_caps(playbook, &mut r); // V136
     review::check_review_status_values(playbook, &mut r); // V144
     review::check_review_options_routed(playbook, &mut r); // V145
     retry::check_retry_delay(playbook, &mut r); // V126-V130
+    retry::check_stall_after(playbook, &mut r); // V174, V175
     outputs::check_outputs(playbook, ctx, &mut r); // V131-V135
     read_only::check_read_only(playbook, &mut r); // V137-V139
     results::check_results(playbook, &mut r); // V152-V154
     approval::check_approvals(playbook, &mut r); // V155-V158
     evidence::check_evidence(playbook, &mut r); // V159
     unattended::check_unattended(playbook, ctx, &mut r); // V141-V143
+    output_types::check_output_types(playbook, &mut r); // V167, V168
+    write_scope::check_write_scope(playbook, &mut r); // V170-V172
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10

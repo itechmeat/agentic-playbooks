@@ -74,6 +74,8 @@ fn attempt_finished_rejected_output_populates_rejected_outputs() {
                 failure_kind: None,
                 usage: None,
                 rejected_for: None,
+                rejection_fingerprint: None,
+                stalled: false,
             },
         ),
     ];
@@ -286,6 +288,8 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 failure_kind: None,
                 usage: None,
                 rejected_for: None,
+                rejection_fingerprint: None,
+                stalled: false,
             },
         ),
         ev(
@@ -876,4 +880,52 @@ fn a_continue_from_keeps_earlier_visits() {
         ),
         "the visit before the patch stays seen"
     );
+}
+
+/// The `stalled` label rides the node's latest execution (spec
+/// node-contracts D5): a stall keeps it on the failed node, and a later
+/// execution of the node that fails without stalling (a supervisor retry, a
+/// failure route back into it), with an attempt or with none, clears it, so
+/// an `equals: stalled` edge no longer matches.
+#[test]
+fn a_later_failure_that_did_not_stall_clears_the_stalled_label() {
+    let attempt = |seq: u64, stalled: bool| {
+        ev(
+            seq,
+            serde_json::from_value(serde_json::json!({
+                "type": "attempt_finished",
+                "node": "w",
+                "attempt": 1,
+                "status": "failed",
+                "rejected_for": "success_check `x.sh` failed",
+                "rejection_fingerprint": "0123456789abcdef",
+                "stalled": stalled,
+            }))
+            .unwrap(),
+        )
+    };
+    let failed = |seq: u64| ev(seq, EventPayload::node_finished("w", "failed", 1, "no"));
+    let mut events = vec![ev(0, run_started("p")), attempt(1, true), failed(2)];
+    assert!(RunState::fold(&events).stalled.contains("w"));
+    let stalled = events.clone();
+    events.extend([attempt(3, false), failed(4)]);
+    let s = RunState::fold(&events);
+    assert_eq!(s.nodes.get("w"), Some(&NodeStatus::Failed));
+    assert!(!s.stalled.contains("w"), "{:?}", s.stalled);
+    // A re-run that fails with no attempt at all (a green-before proof, a
+    // refused scope): the new start clears the label.
+    let mut events = stalled;
+    events.extend([
+        ev(
+            3,
+            serde_json::from_value(
+                serde_json::json!({"type": "node_started", "node": "w", "attempt": 1}),
+            )
+            .unwrap(),
+        ),
+        failed(4),
+    ]);
+    let s = RunState::fold(&events);
+    assert_eq!(s.nodes.get("w"), Some(&NodeStatus::Failed));
+    assert!(!s.stalled.contains("w"), "{:?}", s.stalled);
 }

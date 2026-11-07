@@ -174,7 +174,11 @@ export function edgeTone(e: PlaybookEdgeModel): EdgeTone {
   if (e.fallback) return 'else'
   const c = e.condition
   if (!c) return 'plain'
-  if (c.type === 'node_status' && String(c.equals) === 'failure') return 'fail'
+  if (
+    c.type === 'node_status' &&
+    (String(c.equals) === 'failure' || String(c.equals) === 'stalled')
+  )
+    return 'fail'
   return 'cond'
 }
 
@@ -208,7 +212,13 @@ export function edgeLabel(e: PlaybookEdgeModel): string | undefined {
   if (c.type === 'node_status') return `${c.node}: ${c.equals}`
   if (c.type === 'review_status') return `review: ${c.equals}`
   if (c.type === 'output_match') return `match: ${c.pattern}`
-  if (c.type === 'output_field') return `${c.field}: ${c.equals}`
+  if (c.type === 'output_field') {
+    if (c.lt != null) return `${c.field} < ${c.lt}`
+    if (c.lte != null) return `${c.field} <= ${c.lte}`
+    if (c.gt != null) return `${c.field} > ${c.gt}`
+    if (c.gte != null) return `${c.field} >= ${c.gte}`
+    return `${c.field}: ${c.equals}`
+  }
   if (c.type === 'judge') return `judge p>=${c.min_p}`
   if (c.type === 'no_new_items') return `no new items x${c.rounds}`
   return c.type
@@ -311,12 +321,17 @@ function exitCaption(
   if (c.type === 'node_status') {
     const own = c.node === nodeId
     const equals = String(c.equals)
+    const stalled = equals === 'stalled'
     return {
       label: own ? equals : `${c.node}: ${equals}`,
-      title: own
-        ? `taken when this node reports ${equals}, goes to ${e.to}`
-        : `taken when node ${c.node} reports ${equals}, goes to ${e.to}`,
-      tone: equals === 'failure' ? 'failure' : 'success',
+      title: stalled
+        ? own
+          ? `taken when this node stalls (the same rejection repeated), goes to ${e.to}`
+          : `taken when node ${c.node} stalls (the same rejection repeated), goes to ${e.to}`
+        : own
+          ? `taken when this node reports ${equals}, goes to ${e.to}`
+          : `taken when node ${c.node} reports ${equals}, goes to ${e.to}`,
+      tone: equals === 'failure' || stalled ? 'failure' : 'success',
     }
   }
   if (c.type === 'review_status') {
@@ -346,10 +361,26 @@ function exitCaption(
   if (c.type === 'output_field') {
     const own = c.node === nodeId
     const field = String(c.field)
-    const equals = String(c.equals)
     // Sibling exits normally read the SAME field and differ only in the value,
     // so the value has to survive truncation; the field name leads because it
     // is what says which verdict is being routed on.
+    const word = (v: unknown, w: string) =>
+      own
+        ? `taken when this node's output is a JSON object whose "${field}" is ${w} ${String(v)}, goes to ${e.to}`
+        : `taken when node ${c.node}'s output is a JSON object whose "${field}" is ${w} ${String(v)}, goes to ${e.to}`
+    if (c.lt != null) {
+      return { label: `${field} < ${c.lt}`, title: word(c.lt, 'below'), tone: 'default' }
+    }
+    if (c.lte != null) {
+      return { label: `${field} <= ${c.lte}`, title: word(c.lte, 'at most'), tone: 'default' }
+    }
+    if (c.gt != null) {
+      return { label: `${field} > ${c.gt}`, title: word(c.gt, 'above'), tone: 'default' }
+    }
+    if (c.gte != null) {
+      return { label: `${field} >= ${c.gte}`, title: word(c.gte, 'at least'), tone: 'default' }
+    }
+    const equals = String(c.equals)
     return {
       label: `${field}: ${equals}`,
       title: own

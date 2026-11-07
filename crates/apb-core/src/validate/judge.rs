@@ -376,8 +376,12 @@ fn check_fallback(
                     && !e.fallback
                     && matches!(
                         &e.condition,
-                        Some(EdgeCondition::OutputField { node, field, equals })
-                            if node == id && field == DECIDED_BY && equals == UNAVAILABLE
+                        Some(EdgeCondition::OutputField {
+                            node,
+                            field,
+                            equals: Some(equals),
+                            ..
+                        }) if node == id && field == DECIDED_BY && equals == UNAVAILABLE
                     )
             });
             if !routed {

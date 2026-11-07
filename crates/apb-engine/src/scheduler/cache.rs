@@ -82,6 +82,19 @@ fn cache_eligible<'a>(playbook: &'a Playbook, node_id: &str, cfg: &RunConfig) ->
     {
         return None;
     }
+    // A proving node (spec node-contracts D4) settles green before any
+    // attempt ran, and a scoped node (D3) is checked against its scope: a
+    // cache hit would settle either with no proof and no scope check in
+    // this run, so neither participates, even when validation was skipped.
+    if node
+        .success_check
+        .as_ref()
+        .is_some_and(|c| c.prove().is_some())
+        || node.writes.is_some()
+        || node.max_changed_files.is_some()
+    {
+        return None;
+    }
     match &node.kind {
         NodeKind::Script { .. } | NodeKind::AgentTask { .. } | NodeKind::Judge { .. } => Some(node),
         _ => None,
@@ -709,9 +722,9 @@ pub(crate) fn missing_output_fields(node: &apb_core::schema::Node, output: &str)
         .filter(|f| {
             parsed
                 .as_ref()
-                .is_none_or(|o| o.get(f.as_str()).is_none_or(|v| v.is_null()))
+                .is_none_or(|o| o.get(f.name()).is_none_or(|v| v.is_null()))
         })
-        .cloned()
+        .map(|f| f.name().to_string())
         .collect()
 }
 
@@ -1072,5 +1085,56 @@ mod tests {
         }
         // A rejected restore must never create a file outside the scope root.
         assert!(!root.parent().unwrap().join("escape.txt").exists());
+    }
+
+    /// A scoped node (spec node-contracts D3) and a proving node (D4) get
+    /// no cache context, on the sequential probe and on a batch member's
+    /// alike: a hit would settle either with no scope check or no proof in
+    /// this run, even when validation was skipped. A plain node does.
+    #[test]
+    fn prepare_gives_a_scoped_or_proving_node_no_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RunConfig {
+            cache: CacheRunMode::Auto,
+            ..RunConfig::default()
+        };
+        for (extra, participates) in [
+            ("", true),
+            (", writes: [\"src/**\"]", false),
+            (", max_changed_files: 3", false),
+            (
+                ", success_check: { script: scripts/x.sh, prove_fails_first: true }",
+                false,
+            ),
+        ] {
+            let pb = apb_core::schema::Playbook::from_yaml(&format!(
+                "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: {{ profile: x }}\nnodes:\n  - {{ id: start, type: start }}\n  - {{ id: w, type: agent_task, prompt: do, cache: auto{extra} }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: w }}\n  - {{ from: w, to: done }}\n"
+            ))
+            .unwrap();
+            for batch_member in [false, true] {
+                let ctx = prepare(
+                    &pb,
+                    "w",
+                    dir.path(),
+                    dir.path(),
+                    &cfg,
+                    Some("do"),
+                    Some("bundle"),
+                    Some(("claude", "haiku")),
+                    Vec::new(),
+                    ProbeContext {
+                        pre_fingerprint: Some("fp"),
+                        batch_member,
+                        store_root: None,
+                        declared_key: None,
+                    },
+                );
+                assert_eq!(
+                    ctx.is_some(),
+                    participates,
+                    "{extra:?} batch_member={batch_member}"
+                );
+            }
+        }
     }
 }

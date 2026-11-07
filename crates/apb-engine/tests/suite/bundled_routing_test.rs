@@ -98,8 +98,16 @@ fn plan_common(root: &Path) {
         "implement",
         r#"{"changed_paths":[],"evidence":"e","gaps":""}"#,
     );
-    for role in ["review_correctness", "review_security", "review_tests"] {
-        plan(root, role, r#"{"role":"r","blocking":0,"findings":[]}"#);
+    for (node, role) in [
+        ("review_correctness", "correctness"),
+        ("review_security", "security"),
+        ("review_tests", "tests"),
+    ] {
+        plan(
+            root,
+            node,
+            &format!(r#"{{"role":"{role}","blocking":0,"findings":[]}}"#),
+        );
     }
     plan(
         root,

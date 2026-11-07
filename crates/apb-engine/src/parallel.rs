@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use apb_core::schema::{Edge, EdgeCondition, Playbook, StatusEq, output_field_value};
+use apb_core::schema::{Edge, EdgeCondition, Playbook, StatusEq, output_field_matches};
 
 use crate::state::{NodeStatus, RunState};
 
@@ -37,10 +37,16 @@ fn succeeded(s: NodeStatus) -> bool {
     s == NodeStatus::Succeeded
 }
 
-fn status_matches(node_status: NodeStatus, equals: StatusEq) -> bool {
+/// Whether a `node_status` condition matches. `stalled` matches a node
+/// whose latest execution ended stalled: its status is `Failed` and the run
+/// state holds it (spec node-contracts D5). `failure` still matches a
+/// stalled node.
+pub(crate) fn status_matches(state: &RunState, node: &str, equals: StatusEq) -> bool {
+    let node_status = state.current_status(node);
     match equals {
         StatusEq::Success => node_status == NodeStatus::Succeeded,
         StatusEq::Failure => matches!(node_status, NodeStatus::Failed | NodeStatus::TimedOut),
+        StatusEq::Stalled => node_status == NodeStatus::Failed && state.stalled.contains(node),
     }
 }
 
@@ -67,9 +73,7 @@ fn judge_edge_p(state: &RunState, from: &str, index: usize) -> Option<f64> {
 pub fn edge_matches_at(edge: &Edge, index: Option<usize>, from: &str, state: &RunState) -> bool {
     match &edge.condition {
         None => true,
-        Some(EdgeCondition::NodeStatus { node, equals }) => {
-            status_matches(state.current_status(node), *equals)
-        }
+        Some(EdgeCondition::NodeStatus { node, equals }) => status_matches(state, node, *equals),
         Some(EdgeCondition::ReviewStatus { equals }) => state
             .reviews
             .get(from)
@@ -80,15 +84,12 @@ pub fn edge_matches_at(edge: &Edge, index: Option<usize>, from: &str, state: &Ru
             .get(node)
             .map(|o| o.contains(pattern))
             .unwrap_or(false),
-        Some(EdgeCondition::OutputField {
-            node,
-            field,
-            equals,
-        }) => state
+        Some(cond @ EdgeCondition::OutputField { node, field, .. }) => state
             .outputs
             .get(node)
-            .and_then(|o| output_field_value(o, field))
-            .is_some_and(|value| value == *equals),
+            .zip(cond.field_compare())
+            .map(|(o, cmp)| output_field_matches(o, field, &cmp))
+            .unwrap_or(false),
         Some(EdgeCondition::Judge {
             min_p,
             on_unavailable,
@@ -1407,7 +1408,11 @@ edges:
             condition: Some(EdgeCondition::OutputField {
                 node: "w".into(),
                 field: "verdict".into(),
-                equals: equals.into(),
+                equals: Some(equals.into()),
+                lt: None,
+                lte: None,
+                gt: None,
+                gte: None,
             }),
             fallback: false,
             join: None,
