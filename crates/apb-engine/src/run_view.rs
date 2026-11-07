@@ -359,6 +359,62 @@ pub fn run_limits(events: &[Event]) -> Vec<crate::event::RunLimit> {
         .unwrap_or_default()
 }
 
+/// The record of `run.previous_success.*` a surface shows: everything but
+/// the output values, which reach the prompts and stay there.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct PreviousSuccessView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub finished_at: Option<String>,
+    /// The snapshotted output keys, without their values.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<String>>", optional))]
+    pub keys: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<String>>", optional))]
+    pub withheld: Vec<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub fallback: bool,
+}
+
+/// The nodes that render untrusted text, as the start recorded them on
+/// `run_provenance.untrusted`.
+pub fn untrusted_nodes(events: &[Event]) -> Vec<crate::event::UntrustedNode> {
+    events
+        .iter()
+        .find_map(|e| match &e.payload {
+            crate::event::EventPayload::RunProvenance { untrusted, .. } => Some(untrusted.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// What the run's start recorded for `run.previous_success.*`
+/// (`run_provenance.previous_success`) as a surface shows it; `None` when
+/// its definition does not read the namespace.
+pub fn previous_success(events: &[Event]) -> Option<PreviousSuccessView> {
+    events.iter().find_map(|e| match &e.payload {
+        crate::event::EventPayload::RunProvenance {
+            previous_success, ..
+        } => previous_success.as_ref().map(|ps| PreviousSuccessView {
+            run_id: ps.run_id.clone(),
+            started_at: ps.started_at.clone(),
+            finished_at: ps.finished_at.clone(),
+            keys: ps.outputs.keys().cloned().collect(),
+            withheld: ps.withheld.clone(),
+            fallback: ps.fallback,
+        }),
+        _ => None,
+    })
+}
+
 /// What a run surface reports for a liveness it did not probe.
 pub const LIVENESS_UNKNOWN: &str = "unknown";
 
@@ -843,6 +899,33 @@ impl RunView {
     pub fn decisions(&self) -> Option<RunDecisions> {
         RunDecisions::from_events(&self.events)
     }
+}
+
+/// The one line of a `run.previous_success` record, as `apb runs <id>`
+/// and the HTML report show it (the dashboard mirrors it in
+/// `previoussuccess.ts`).
+pub fn previous_success_line(ps: &PreviousSuccessView) -> String {
+    let mut line = match &ps.run_id {
+        Some(id) => match (&ps.started_at, &ps.finished_at) {
+            (Some(started), Some(finished)) => {
+                format!("{id}, started {started}, finished {finished}")
+            }
+            (Some(started), None) => format!("{id}, started {started}"),
+            _ => id.clone(),
+        },
+        None if ps.fallback => {
+            let mut times: Vec<String> = ps.started_at.iter().cloned().collect();
+            if let Some(f) = &ps.finished_at {
+                times.push(format!("finished {f}"));
+            }
+            format!("none (window from when_none: {})", times.join(", "))
+        }
+        None => "none".to_string(),
+    };
+    if !ps.withheld.is_empty() {
+        line.push_str(&format!(", withheld: {}", ps.withheld.join(", ")));
+    }
+    line
 }
 
 #[cfg(test)]

@@ -289,6 +289,16 @@ fn policy_actions(of: StartOf<'_>, refusal: &Value) -> Vec<StartAction> {
                 of.fix(Remedy::ProvideParam { name }, reason)
             })
             .collect(),
+        crate::gate::PARAM_PATTERN_MISMATCH => strings(refusal, "invalid")
+            .into_iter()
+            .map(|name| {
+                let pattern = refusal["patterns"][&name].as_str().unwrap_or_default();
+                let reason = format!(
+                    "param `{name}` does not match its pattern `{pattern}`: pass a value that does"
+                );
+                of.fix(Remedy::ProvideParam { name }, reason)
+            })
+            .collect(),
         "requires_unmet" => strings(refusal, "missing")
             .into_iter()
             .map(|m| {

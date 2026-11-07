@@ -142,6 +142,8 @@ mod validate_known_problems_test;
 mod validate_node_io_test;
 #[path = "suite/validate_params_test.rs"]
 mod validate_params_test;
+#[path = "suite/validate_previous_success_test.rs"]
+mod validate_previous_success_test;
 #[path = "suite/validate_profiles_test.rs"]
 mod validate_profiles_test;
 #[path = "suite/validate_protect_test.rs"]
@@ -166,6 +168,8 @@ mod validate_semantics_test;
 mod validate_stall_test;
 #[path = "suite/validate_structure_test.rs"]
 mod validate_structure_test;
+#[path = "suite/validate_untrusted_test.rs"]
+mod validate_untrusted_test;
 #[path = "suite/validate_write_scope_test.rs"]
 mod validate_write_scope_test;
 #[path = "suite/versioning_test.rs"]

@@ -62,6 +62,7 @@ fn recorded_argv(dir: &Path) -> Vec<String> {
 fn task<'a>(dir: &'a Path, policy: &'a SpawnEnv, grant_autonomy: bool) -> AgentTask<'a> {
     AgentTask {
         prompt: "reply PONG",
+        untrusted_section: None,
         // Empty: no plan selection, so the test does not depend on a ZCode
         // login in the environment (model passing is covered in apb-core).
         model: "",

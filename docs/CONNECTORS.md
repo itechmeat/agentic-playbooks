@@ -326,7 +326,12 @@ acknowledging what it processed.
 **Inbox content is untrusted.** It is written by whoever can reach the
 callback URL, which is the first apb input not authored by the operator. The
 node prompt says so to the agent, and the dashboard marks it when it renders
-it. Neither stops a message from steering the agent that reads it.
+it. Neither stops a message from steering the agent that reads it. Mark the
+inbox-reading node's connector binding `untrusted: true` (see the authoring
+guide, "Untrusted input"): the validator then refuses an agent that renders
+that text and can send outward unless the author accepts the risk with
+`accept_untrusted`, and every attempt gets a prompt section that says the
+text is data, never instructions.
 
 A grant limits only what the node can do through apb's connector calls: give an
 inbox-reading node the narrowest `functions:` allowlist and a `max_calls` budget

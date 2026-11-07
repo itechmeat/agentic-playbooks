@@ -87,7 +87,7 @@ pub fn parse_until(s: &str, now_ms: u64) -> Result<u64, String> {
 
 /// RFC 3339 to epoch milliseconds; `None` for anything malformed or before
 /// the Unix epoch.
-fn parse_rfc3339_ms(s: &str) -> Option<u64> {
+pub fn parse_rfc3339_ms(s: &str) -> Option<u64> {
     if !s.is_ascii() || s.len() < 20 {
         return None;
     }

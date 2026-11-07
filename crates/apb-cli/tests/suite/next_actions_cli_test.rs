@@ -1181,3 +1181,32 @@ mod review_terminal {
         assert!(!journal.contains("run_resumed"), "{journal}");
     }
 }
+
+/// A start whose param does not match its pattern is refused with
+/// `param_pattern_mismatch`, naming the param and the pattern, and leaves
+/// no run directory behind.
+#[test]
+fn run_refuses_a_param_that_does_not_match_its_pattern() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = apb_in(dir.path(), &["init"]);
+    assert!(out.status.success(), "apb init failed: {out:?}");
+    let vdir = dir.path().join(".apb/playbooks/p/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        "schema: 2\nid: p\nname: p\nversion: 1.0.0\nparams:\n  - { name: repo, type: text, pattern: '[A-Za-z0-9._-]{1,100}' }\nnodes:\n  - { id: s, type: start }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: f }\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join(".apb/playbooks/p/current"), "1.0.0").unwrap();
+
+    let out = apb_in(dir.path(), &["run", "p", "--param", "repo=a b"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("run refused (param_pattern_mismatch)"),
+        "{err}"
+    );
+    assert!(err.contains("repo ([A-Za-z0-9._-]{1,100})"), "{err}");
+    let runs = dir.path().join(".apb/runs");
+    assert!(!runs.exists() || fs::read_dir(&runs).unwrap().next().is_none());
+}

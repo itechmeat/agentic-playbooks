@@ -119,3 +119,38 @@ async fn a_start_without_a_needed_param_is_refused_like_the_fit_report_says() {
     let runs = dir.path().join(".apb/runs");
     assert!(!runs.exists() || fs::read_dir(&runs).unwrap().next().is_none());
 }
+
+/// A start whose param value does not match its pattern is refused with
+/// `param_pattern_mismatch`, naming the param and the pattern and never
+/// the value, and nothing is written.
+#[tokio::test]
+async fn a_start_with_a_param_that_does_not_match_its_pattern_is_refused() {
+    let _sandbox = common::config_sandbox().await;
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    write_playbook(
+        &dir.path().join(".apb"),
+        "p",
+        "params:\n  - { name: repo, type: text, pattern: '[A-Za-z0-9._-]{1,100}' }\n",
+    );
+    let router = build_router(AppState::new(dir.path().to_path_buf()));
+    let res = router
+        .oneshot(
+            Request::post("/api/playbooks/p/run")
+                .header("content-type", "application/json")
+                .body(Body::from("{\"params\": {\"repo\": \"a b\"}}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(refusal["policy"], "param_pattern_mismatch", "{refusal}");
+    assert_eq!(refusal["invalid"], serde_json::json!(["repo"]));
+    assert_eq!(refusal["patterns"]["repo"], "[A-Za-z0-9._-]{1,100}");
+    let text = serde_json::to_string(&refusal).unwrap();
+    assert!(!text.contains("\"a b\""), "{text}");
+    let runs = dir.path().join(".apb/runs");
+    assert!(!runs.exists() || fs::read_dir(&runs).unwrap().next().is_none());
+}

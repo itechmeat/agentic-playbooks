@@ -2798,3 +2798,72 @@ edges:
     let channel = fs::read_to_string(dir.path().join(".apb/runs/pub-opt-1/reviews.jsonl")).unwrap();
     assert!(channel.contains("publish"), "{channel}");
 }
+
+/// The run detail's `previous_success` block carries the times and the
+/// output KEYS the start recorded, never the snapshotted values: no
+/// `outputs` key and no value text. A run whose definition does not read
+/// the namespace has no block.
+#[tokio::test]
+async fn get_run_detail_shows_previous_success_without_values() {
+    let dir = seed_with_run();
+    let run_dir = dir.path().join(".apb/runs").join("prev-1");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("playbook.yaml"), NOAGENT).unwrap();
+    let mut log = apb_engine::event::EventLog::open(&run_dir).unwrap();
+    log.append(apb_engine::event::EventPayload::RunStarted {
+        playbook: "noagent".into(),
+        version: "1.0.0".into(),
+        definition: None,
+    })
+    .unwrap();
+    log.append(apb_engine::event::EventPayload::RunProvenance {
+        origin: Some("project".into()),
+        digest: None,
+        execution_root: None,
+        scripts_digest: None,
+        profiles: Vec::new(),
+        remembered: Vec::new(),
+        apb: None,
+        limits: Vec::new(),
+        untrusted: Vec::new(),
+        previous_success: Some(apb_engine::event::PreviousSuccess {
+            run_id: Some("routine-1".into()),
+            started_at: Some("2026-11-06T07:00:00Z".into()),
+            finished_at: Some("2026-11-06T07:05:00Z".into()),
+            outputs: [("nodes.a.output".to_string(), "secret value".to_string())]
+                .into_iter()
+                .collect(),
+            withheld: vec!["nodes.b.output.y".to_string()],
+            fallback: false,
+        }),
+    })
+    .unwrap();
+    drop(log);
+
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = get_json(app, "/api/runs/prev-1").await;
+    assert_eq!(status, StatusCode::OK);
+    let ps = &json["previous_success"];
+    assert_eq!(ps["run_id"], "routine-1");
+    assert_eq!(ps["started_at"], "2026-11-06T07:00:00Z");
+    assert_eq!(ps["keys"], serde_json::json!(["nodes.a.output"]));
+    assert_eq!(ps["withheld"], serde_json::json!(["nodes.b.output.y"]));
+    // The view carries the keys only: no `outputs` key and no snapshotted
+    // value in it. (The raw `run_provenance` in the events list is the
+    // journal as every surface already showed it.)
+    let text = serde_json::to_string(ps).unwrap();
+    assert!(!text.contains("secret value"), "{text}");
+    assert!(ps.get("outputs").is_none(), "{ps}");
+
+    // A run whose definition does not read the namespace: no block.
+    let dir2 = seed_with_run();
+    let app = build_router(AppState::new(dir2.path().to_path_buf()));
+    let run_id = fs::read_dir(dir2.path().join(".apb/runs"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|n| n.starts_with("noagent-"))
+        .expect("the seeded run");
+    let (_, json) = get_json(app, &format!("/api/runs/{run_id}")).await;
+    assert!(json.get("previous_success").is_none(), "{json}");
+}

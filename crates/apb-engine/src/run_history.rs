@@ -42,6 +42,10 @@ pub struct RunHead {
     pub version: String,
     /// The `run_started` time, Unix milliseconds.
     pub ts: u128,
+    /// The run's origin label from its `run_provenance` (`project` or
+    /// `global`); `None` on an older journal without provenance, read as
+    /// `project` by the scope matching of a history lookup.
+    pub origin: Option<String>,
 }
 
 /// The playbook, version and start time a run's journal opens with, read
@@ -60,9 +64,48 @@ pub fn started(run_dir: &Path) -> Option<RunHead> {
                 playbook,
                 version,
                 ts: e.ts,
+                origin: None,
             }),
             _ => None,
         })
+}
+
+/// The head of a run the lookup must classify: `Ok(None)` when the journal
+/// has no `run_started` yet (a start in progress: the origin stamp is
+/// written before `run_started`) or `events.jsonl` does not exist;
+/// `Err("journal")` on an IO error or a head line that is not JSON. The
+/// origin label comes from the `run_provenance` line among the same first
+/// head lines.
+pub(crate) fn started_checked(run_dir: &Path) -> Result<Option<RunHead>, &'static str> {
+    let file = match std::fs::File::open(run_dir.join("events.jsonl")) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("journal"),
+        Ok(file) => file,
+    };
+    let mut head: Option<RunHead> = None;
+    for line in BufReader::new(file).lines().take(HEAD_LINES) {
+        let line = line.map_err(|_| "journal")?;
+        let e: Event = serde_json::from_str(&line).map_err(|_| "journal")?;
+        match e.payload {
+            EventPayload::RunStarted {
+                playbook, version, ..
+            } if head.is_none() => {
+                head = Some(RunHead {
+                    playbook,
+                    version,
+                    ts: e.ts,
+                    origin: None,
+                });
+            }
+            EventPayload::RunProvenance { origin, .. } => {
+                if let Some(h) = &mut head {
+                    h.origin = origin;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(head)
 }
 
 /// The production runs of playbook `id` (of `version` when given) among
@@ -182,6 +225,64 @@ mod tests {
                     names(super::all_runs_of(&roots, "p", Some("1.0.0"))),
                     ["prod", "old"]
                 );
+            },
+        );
+    }
+
+    /// The head a history lookup reads: the `run_provenance` origin label
+    /// among the first head lines, an IO or JSON head error, and a journal
+    /// with no `run_started` yet.
+    #[test]
+    fn started_checked_reads_the_origin_label_and_reports_head_errors() {
+        apb_core::process_mode::testing::in_plain_child(
+            "run_history::tests::started_checked_reads_the_origin_label_and_reports_head_errors",
+            || {
+                let cfg = tempfile::tempdir().unwrap();
+                // SAFETY: a child process runs this one test on one thread.
+                unsafe { std::env::set_var("APB_CONFIG_DIR", cfg.path()) };
+                apb_core::run_origin::ensure_key().unwrap();
+                let project = tempfile::tempdir().unwrap();
+                let root = project.path();
+                // With provenance: the label comes through.
+                seed(root, "with", 1, Some(RunOrigin::Production));
+                let with = root.join(".apb/runs/with");
+                let line = serde_json::json!({"seq": 2, "ts": 1, "type": "run_provenance", "origin": "global"});
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(with.join("events.jsonl"))
+                    .unwrap()
+                    .write_all(format!("{line}\n").as_bytes())
+                    .unwrap();
+                let head = super::started_checked(&with).unwrap().unwrap();
+                assert_eq!(head.origin.as_deref(), Some("global"));
+                assert_eq!(head.playbook, "p");
+
+                // Without provenance: absent reads as None.
+                seed(root, "without", 2, Some(RunOrigin::Production));
+                let head = super::started_checked(&root.join(".apb/runs/without"))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(head.origin, None);
+
+                // A head line that is not JSON: an error naming the journal.
+                seed(root, "torn", 3, Some(RunOrigin::Production));
+                let torn = root.join(".apb/runs/torn");
+                use std::io::Write as _;
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(torn.join("events.jsonl"))
+                    .unwrap()
+                    .write_all(b"not json\n")
+                    .unwrap();
+                assert_eq!(super::started_checked(&torn), Err("journal"));
+
+                // No `run_started` yet (a start in progress, the origin stamp
+                // is written before `run_started`): Ok(None), no refusal.
+                let running = root.join(".apb/runs/inprogress");
+                std::fs::create_dir_all(&running).unwrap();
+                let line = serde_json::json!({"seq": 1, "ts": 1, "type": "run_queued", "reason": "waiting for the workdir"});
+                std::fs::write(running.join("events.jsonl"), format!("{line}\n")).unwrap();
+                assert_eq!(super::started_checked(&running), Ok(None));
             },
         );
     }

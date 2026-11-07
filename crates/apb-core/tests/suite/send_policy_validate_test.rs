@@ -212,6 +212,7 @@ fn binding(on_unknown: Option<OnUnknown>, functions: FunctionsAllow) -> Connecto
         functions,
         max_calls: None,
         on_unknown,
+        untrusted: false,
     }
 }
 

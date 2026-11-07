@@ -23,7 +23,7 @@ pub(crate) mod params;
 pub(crate) mod trust_scan;
 pub mod unattended;
 
-pub use params::{PARAM_NEEDS_VALUE, check_params, short_secret_warning};
+pub use params::{PARAM_NEEDS_VALUE, PARAM_PATTERN_MISMATCH, check_params, short_secret_warning};
 pub use unattended::{UnattendedStart, check_start as check_unattended};
 
 use std::path::Path;

@@ -50,6 +50,12 @@ pub(crate) fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
                     "instruction" | "context" | "id" | "retro" | "active_elapsed_seconds",
                 ] => true,
                 ["run", "hooks", key] => hooks.contains(key),
+                // The earlier-success namespace: V176 owns its grammar and
+                // node checks, so anything it can judge defers to it (the
+                // same call the list item check makes below).
+                _ if crate::previous_success::parse(&cap).is_some() => true,
+                // Reported by V86, which says why the item is not a namespace.
+                _ if crate::list::is_item_ref(&cap) => true,
                 // Reported by V86, which says why the item is not a namespace.
                 _ if crate::list::is_item_ref(&cap) => true,
                 _ => false,
@@ -69,48 +75,13 @@ pub(crate) fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
     }
 }
 
-/// The template-bearing texts of a playbook as `(owner node id, text)` pairs.
-/// The single place that knows which node kinds carry a template, so V13 and
-/// V38 always scan exactly the same texts.
-pub(crate) fn template_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
-    // A judge node's state fields are templates too (issue #165 Part 5).
-    let judge_state = playbook.nodes.iter().flat_map(|n| match &n.kind {
-        NodeKind::Judge { state, .. } => state
-            .iter()
-            .map(|(_, text)| (n.id.as_str(), text.as_str()))
-            .collect::<Vec<_>>(),
-        _ => Vec::new(),
-    });
-    playbook
-        .nodes
-        .iter()
-        .filter_map(|n| {
-            let text = match &n.kind {
-                NodeKind::AgentTask { prompt, .. } | NodeKind::Prompt { prompt } => prompt.as_str(),
-                NodeKind::Playbook {
-                    instruction: Some(instruction),
-                    ..
-                } => instruction.as_str(),
-                NodeKind::Finish {
-                    prompt: Some(prompt),
-                    ..
-                } => prompt.as_str(),
-                _ => return None,
-            };
-            Some((n.id.as_str(), text))
-        })
-        .chain(judge_state)
-        .collect()
-}
-
-/// The `workdir` templates of a playbook as `(owner node id, text)` pairs.
-pub(crate) fn workdir_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
-    playbook
-        .nodes
-        .iter()
-        .filter_map(|n| n.kind.workdir_template().map(|w| (n.id.as_str(), w)))
-        .collect()
-}
+// The three text collectors live in `crate::schema` next to the node kinds
+// they read, so a reader outside `validate` (the `run.previous_success`
+// grammar of `crate::previous_success`) does not depend on the validator;
+// re-exported here under the names every rule family already uses.
+pub(crate) use crate::schema::cache_key_texts;
+pub(crate) use crate::schema::template_texts;
+pub(crate) use crate::schema::workdir_texts;
 
 /// The template-form `writes` of a playbook (spec node-contracts D3) as
 /// `(owner node id, text)` pairs: rendered once before the node starts, so
@@ -123,16 +94,6 @@ pub(crate) fn writes_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
             Some(WriteScope::Template(t)) => Some((n.id.as_str(), t.as_str())),
             _ => None,
         })
-        .collect()
-}
-
-/// The declared cache key templates of a playbook (issue #67 item 6) as
-/// `(owner node id, text)` pairs.
-pub(crate) fn cache_key_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
-    playbook
-        .nodes
-        .iter()
-        .filter_map(|n| n.cache_key_template().map(|k| (n.id.as_str(), k)))
         .collect()
 }
 
@@ -229,7 +190,8 @@ pub(crate) const V13_KNOWN_NAMESPACES: &str = "; known namespaces: params.*, nod
     nodes.<id>.report, nodes.<id>.output.<field>, nodes.<id>.report.<field>, \
     nodes.<id>.seen.<field>, \
     nodes.<id>.review_note, nodes.<id>.review_decision, nodes.<id>.rejected_output, \
-    run.instruction, run.context, run.id, run.retro, run.active_elapsed_seconds, run.hooks.*";
+    run.instruction, run.context, run.id, run.retro, run.active_elapsed_seconds, run.hooks.*, \
+    run.previous_success.*";
 
 pub(crate) fn check_refs(playbook: &Playbook, ctx: &ValidationContext, r: &mut ValidationReport) {
     // Checking a profile reference (schema 2): scope:project in a global

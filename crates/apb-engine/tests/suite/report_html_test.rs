@@ -367,3 +367,55 @@ fn the_graph_section_draws_the_definition_the_run_executed() {
     assert!(again.contains(">work</text>"), "{again}");
     assert!(!again.contains(">moved</text>"), "{again}");
 }
+
+/// The header line of the run's `run.previous_success` record: present
+/// when the start recorded one, absent otherwise.
+#[test]
+fn the_report_shows_the_previous_success_line_when_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = run_dir(dir.path(), true, "done", 0);
+    // A run_provenance with a record, right after run_started.
+    let path = d.join("events.jsonl");
+    let content = std::fs::read_to_string(&path).unwrap();
+    let mut lines: Vec<String> = content.lines().map(String::from).collect();
+    lines.insert(
+        1,
+        r#"{"seq":100,"ts":1,"type":"run_provenance","previous_success":{"run_id":"routine-9","started_at":"2026-11-06T07:00:00Z"}}"#.into(),
+    );
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    let html = render(dir.path(), &d).unwrap();
+    assert!(
+        html.contains("previous success: routine-9, started 2026-11-06T07:00:00Z",),
+        "{html}"
+    );
+
+    // Without the record: no line.
+    let dir2 = tempfile::tempdir().unwrap();
+    let d2 = run_dir(dir2.path(), true, "done", 0);
+    let html = render(dir2.path(), &d2).unwrap();
+    assert!(!html.contains("previous success:"), "{html}");
+}
+
+/// The untrusted-input section: present when the run recorded followers,
+/// absent otherwise.
+#[test]
+fn the_report_shows_the_untrusted_section_when_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = run_dir(dir.path(), true, "done", 0);
+    let path = d.join("events.jsonl");
+    let content = std::fs::read_to_string(&path).unwrap();
+    let mut lines: Vec<String> = content.lines().map(String::from).collect();
+    lines.insert(
+        1,
+        r#"{"seq":100,"ts":1,"type":"run_provenance","untrusted":[{"node":"classify","sources":["connector github on list_open"],"outward":["binds connector github"],"accepted":"labels come from params"}]}"#.into(),
+    );
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    let html = render(dir.path(), &d).unwrap();
+    assert!(html.contains("Untrusted input"), "{html}");
+    assert!(html.contains("accepted: labels come from params"), "{html}");
+
+    let dir2 = tempfile::tempdir().unwrap();
+    let d2 = run_dir(dir2.path(), true, "done", 0);
+    let html = render(dir2.path(), &d2).unwrap();
+    assert!(!html.contains("Untrusted input"), "{html}");
+}

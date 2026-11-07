@@ -30,7 +30,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
-  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`), `output_types` for the typed output field contract V167-V168, `write_scope` for a declared write scope V170-V172; `nodes` also holds V68, ids that start with `@`
+  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`), `output_types` for the typed output field contract V167-V168, `write_scope` for a declared write scope V170-V172, `previous_success` for the `run.previous_success` grammar, the `when_none` block and V176; `nodes` also holds V68, ids that start with `@`
   are the engine's, V101, `audience` on a finish without a prompt, and
   V163, a `success_check` `scope` that names no glob or one that does not
   compile, and V173, a `prove_fails_first` proof that cannot mean anything), the
@@ -60,7 +60,11 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   loading with ids and the `where` filter in `items`, the per-item state
   machine in `verdict`), the loop visit fold behind `no_new_items`
   (`loop_items.rs`: the readable visits, the seen keys and the dry
-  streak), the baseline check
+  streak), the `run.previous_success` grammar and the `when_none` block
+  (`previous_success.rs`), a text param's anchored pattern
+  (`param_pattern.rs`; V177 and V178 live in `validate/params`), the
+  untrusted markers and how untrusted text reaches agents (`untrusted.rs`;
+  V179 to V182 live in `validate/untrusted`), the baseline check
   (`baseline/`: the `baseline_check` block, the observation path reader and
   the rule comparison), the project's own test and lint commands
   (`project_checks.rs`), the findings and warnings an attempt reports and
@@ -301,7 +305,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   (`list/`: `ledger` the journal fold of a visit, `prompt` the `## item`
   prompt section, `stamp` the item stamp on item-scoped events, `view` the
   surface view), `loop_seen` the rendered seen keys of `no_new_items`
-  fed to every prompt, judge state field and cache key, the execution key
+  fed to every prompt, judge state field and cache key, `previous_success.rs`
+  the earlier successful top-level run (the checked lookup, its snapshot
+  journaled on `run_provenance` and the patch refusal), the execution key
   that pairs attempts, files and sends by
   node and list item (`exec_key.rs`), the host task store behind `run_task_submit` and
   `apb tasks` (`host_task.rs`), the baseline check's journal fold and its

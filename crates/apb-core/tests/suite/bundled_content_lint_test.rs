@@ -951,3 +951,39 @@ fn inbox_digest_steps_that_read_mail_text_are_isolated() {
     }
     assert_eq!(readers, ["classify", "digest"]);
 }
+
+/// Issue text and mail text are untrusted, and both shipped playbooks mark
+/// their listing connector as the entry point. Every agent that renders
+/// that text and can send outward must say why it accepts the risk (no
+/// V179), and no acceptance may hang on a node with nothing to accept
+/// (no V182). The V180 warnings about reached secrets are expected and
+/// fine.
+#[test]
+fn bundled_agents_that_read_untrusted_text_say_why() {
+    use apb_core::validate::{ValidationContext, validate};
+    for id in ["apb-issue-triage", "apb-inbox-digest"] {
+        let yaml = std::fs::read_to_string(
+            bundled_root()
+                .join("playbooks")
+                .join(id)
+                .join("playbook.yaml"),
+        )
+        .unwrap_or_else(|e| panic!("{id}/playbook.yaml: {e}"));
+        let pb = Playbook::from_yaml(&yaml).unwrap_or_else(|e| panic!("{id}: {e}"));
+        let report = validate(&pb, &ValidationContext::default());
+        let blocking: Vec<String> = report
+            .issues
+            .iter()
+            .filter(|i| i.code == "V179" || i.code == "V182")
+            .map(|i| match &i.node {
+                Some(node) => format!("{} {node}: {}", i.code, i.message),
+                None => format!("{}: {}", i.code, i.message),
+            })
+            .collect();
+        assert!(
+            blocking.is_empty(),
+            "{id}: untrusted input not accounted for:\n{}",
+            blocking.join("\n")
+        );
+    }
+}

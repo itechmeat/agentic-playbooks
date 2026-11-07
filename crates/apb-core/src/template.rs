@@ -22,3 +22,22 @@ pub fn refs(text: &str) -> Vec<String> {
     }
     out
 }
+
+/// Whether `text` places recorded run context itself: it reads
+/// `{{run.context}}` or ANY `{{nodes.<id>.<field>}}` reference (spec
+/// 2026-08-05 section 2.7).
+///
+/// Used by the engine's finish composer to decide whether the terminal
+/// context has to be appended for it. Every `nodes.*` field counts, not
+/// just `output`/`report`: a template that deliberately quotes one node's
+/// review note or rejected output has chosen what the composer should
+/// see, and appending the whole run on top of that would override the
+/// author's choice.
+pub fn reads_recorded_context(text: &str) -> bool {
+    refs(text).into_iter().any(|key| {
+        matches!(
+            key.split('.').collect::<Vec<&str>>().as_slice(),
+            ["run", "context"] | ["nodes", _, ..]
+        )
+    })
+}

@@ -184,3 +184,23 @@ describe('toggleListEntry', () => {
     expect(toggleListEntry(['a'], 'a', ALL)).toEqual([])
   })
 })
+
+describe('untrusted and on_unknown survive a save', () => {
+  it('keeps on_unknown and untrusted through parse and serialize', () => {
+    const parsed = parseBinding({ name: 'github', on_unknown: 'resend', untrusted: true })
+    expect(parsed.onUnknown).toBe('resend')
+    expect(parsed.untrusted).toBe(true)
+    const written = serializeBinding(parsed)
+    expect(written).toEqual({ name: 'github', on_unknown: 'resend', untrusted: true })
+    // refuse is the backend default but an explicit key is kept as written.
+    const refused = parseBinding({ name: 'gh', on_unknown: 'refuse' })
+    expect(serializeBinding(refused)).toEqual({ name: 'gh', on_unknown: 'refuse' })
+  })
+
+  it('still collapses the defaults to the bare name', () => {
+    expect(serializeBinding(parseBinding('jira'))).toBe('jira')
+    expect(serializeBinding(parseBinding({ name: 'gh' }))).toBe('gh')
+    // untrusted: false is default and writes nothing.
+    expect(serializeBinding(parseBinding({ name: 'gh', untrusted: false }))).toBe('gh')
+  })
+})

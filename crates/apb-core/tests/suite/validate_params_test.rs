@@ -16,7 +16,12 @@ fn codes(yaml: &str) -> Vec<&'static str> {
     validate(&p, &ValidationContext::default())
         .issues
         .into_iter()
-        .filter(|i| matches!(i.code, "V99" | "V100" | "V160" | "V161" | "V162"))
+        .filter(|i| {
+            matches!(
+                i.code,
+                "V99" | "V100" | "V160" | "V161" | "V162" | "V177" | "V178"
+            )
+        })
         .map(|i| i.code)
         .collect()
 }
@@ -90,4 +95,60 @@ fn nine_search_params_are_v162() {
         .map(|i| format!("  - {{ name: field{i}, type: text, search: true }}\n"))
         .collect();
     assert!(codes(&playbook(&eight)).is_empty());
+}
+
+/// A pattern applies to text params only, must compile, and holds the
+/// default to it.
+#[test]
+fn a_pattern_on_a_param_that_is_not_text_is_v177() {
+    let yaml = playbook("  - { name: n, type: int, pattern: '[0-9]+' }\n");
+    assert_eq!(codes(&yaml), vec!["V177"]);
+}
+
+#[test]
+fn an_empty_or_overlong_or_uncompilable_pattern_is_v177() {
+    assert_eq!(
+        codes(&playbook("  - { name: n, type: text, pattern: '' }\n")),
+        vec!["V177"]
+    );
+    let long = format!(
+        "  - {{ name: n, type: text, pattern: '{}' }}\n",
+        "a".repeat(513)
+    );
+    assert_eq!(codes(&playbook(&long)), vec!["V177"]);
+    assert_eq!(
+        codes(&playbook(
+            "  - { name: n, type: text, pattern: '(unclosed' }\n"
+        )),
+        vec!["V177"]
+    );
+}
+
+#[test]
+fn a_default_that_does_not_match_its_pattern_is_v178() {
+    let yaml = playbook("  - { name: n, type: text, default: EU, pattern: '[a-z]{2}' }\n");
+    assert_eq!(codes(&yaml), vec!["V178"]);
+    // A number default on a text param is checked through its text.
+    let yaml = playbook("  - { name: n, type: text, default: 42, pattern: '[0-9]{2}' }\n");
+    assert_eq!(codes(&yaml), Vec::<&str>::new());
+}
+
+#[test]
+fn a_secret_param_may_have_a_pattern() {
+    let yaml = playbook("  - { name: token, type: text, secret: true, pattern: '[a-z]{8,}' }\n");
+    assert_eq!(codes(&yaml), Vec::<&str>::new());
+}
+
+#[test]
+fn a_matching_default_and_a_plain_param_are_clean() {
+    assert_eq!(
+        codes(&playbook(
+            "  - { name: n, type: text, default: eu, pattern: '[a-z]{2}' }\n"
+        )),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        codes(&playbook("  - { name: n, type: text }\n")),
+        Vec::<&str>::new()
+    );
 }

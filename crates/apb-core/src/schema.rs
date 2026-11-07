@@ -195,6 +195,11 @@ pub struct Playbook {
     /// schema 2; no migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub known_problems: Option<crate::known_problems::block::KnownProblemsBlock>,
+    /// What `run.previous_success.*` renders when no earlier run of this
+    /// playbook succeeded (see [`crate::previous_success`]). Additive to
+    /// schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_success: Option<PreviousSuccessBlock>,
     /// Every node that runs an agent must be `isolation: full`, so the
     /// publish step is the only way a push leaves the run (V120), and a
     /// credential variable passed to an agent refuses the start. Additive to
@@ -872,6 +877,33 @@ pub struct Param {
     /// older apb drops the key and runs the playbook unchanged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub search: bool,
+    /// A regular expression the whole value must match (Rust `regex`
+    /// syntax, anchored at both ends). Only on `type: text` (V177); a
+    /// `default` must match (V178). Checked at every start and on
+    /// remembered input; an older apb drops the key and skips the check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    /// The value comes from outside the author's control (an issue body,
+    /// a mail): every agent that renders it is checked (V179 to V182). An
+    /// older apb drops the key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub untrusted: bool,
+}
+
+impl Param {
+    /// The default as the text a run renders it as: strings verbatim,
+    /// booleans and numbers as their text, anything else as its YAML.
+    pub fn default_text(&self) -> Option<String> {
+        self.default.as_ref().map(|v| match v {
+            yaml_serde::Value::String(s) => s.clone(),
+            yaml_serde::Value::Bool(b) => b.to_string(),
+            yaml_serde::Value::Number(n) => n.to_string(),
+            other => yaml_serde::to_string(other)
+                .unwrap_or_default()
+                .trim_end()
+                .to_string(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -1260,6 +1292,9 @@ pub struct ConnectorBinding {
     /// What a repeat of a send whose outcome is unknown does (`None` reads
     /// as [`OnUnknown::Refuse`]).
     pub on_unknown: Option<OnUnknown>,
+    /// What the node's calls of this connector return is outside text
+    /// (V179 to V182 check what renders it).
+    pub untrusted: bool,
 }
 
 /// What a repeat of a send does when an earlier attempt's outcome is not
@@ -1301,6 +1336,8 @@ struct ConnectorBindingFull {
     max_calls: Option<u32>,
     #[serde(default)]
     on_unknown: Option<OnUnknown>,
+    #[serde(default)]
+    untrusted: bool,
 }
 
 /// An intermediate form for deserializing "string or object", mirroring
@@ -1321,6 +1358,7 @@ impl<'de> Deserialize<'de> for ConnectorBinding {
                 functions: FunctionsAllow::All,
                 max_calls: None,
                 on_unknown: None,
+                untrusted: false,
             },
             ConnectorBindingForm::Full(ConnectorBindingFull {
                 name,
@@ -1328,12 +1366,14 @@ impl<'de> Deserialize<'de> for ConnectorBinding {
                 functions,
                 max_calls,
                 on_unknown,
+                untrusted,
             }) => Self {
                 name,
                 accounts,
                 functions,
                 max_calls,
                 on_unknown,
+                untrusted,
             },
         })
     }
@@ -1349,6 +1389,7 @@ impl Serialize for ConnectorBinding {
             && self.functions == FunctionsAllow::All
             && self.max_calls.is_none()
             && self.on_unknown.is_none()
+            && !self.untrusted
         {
             return s.serialize_str(&self.name);
         }
@@ -1363,6 +1404,9 @@ impl Serialize for ConnectorBinding {
             len += 1;
         }
         if self.on_unknown.is_some() {
+            len += 1;
+        }
+        if self.untrusted {
             len += 1;
         }
         let mut state = s.serialize_struct("ConnectorBinding", len)?;
@@ -1380,6 +1424,9 @@ impl Serialize for ConnectorBinding {
         }
         if let Some(on_unknown) = self.on_unknown {
             state.serialize_field("on_unknown", &on_unknown)?;
+        }
+        if self.untrusted {
+            state.serialize_field("untrusted", &true)?;
         }
         state.end()
     }
@@ -1489,6 +1536,15 @@ pub struct Node {
     /// it is declared, else anywhere in the tree).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_changed_files: Option<u32>,
+    /// This node's own attempt reads outside text (its tools fetch a page,
+    /// a script downloads a feed). Only on `agent_task` and `script` (V181).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub untrusted: bool,
+    /// Why the author accepts that this node renders untrusted text and
+    /// can still send outward (V179 is then not reported). 1 to 300
+    /// characters (V181).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accept_untrusted: Option<String>,
     /// What a `human_review` gate does in an unattended run: `fail` (the
     /// default) or `{ decide: <option>, note? }`. Sits next to
     /// `auto_decide`, never inside it: that block is strict in older
@@ -2513,8 +2569,134 @@ pub enum StatusEq {
     Stalled,
 }
 
+/// What `run.previous_success.*` renders when no earlier run of this
+/// playbook succeeded. Additive to schema 2; no migration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreviousSuccessBlock {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when_none: Option<WhenNone>,
+}
+
+/// The times a run renders when there is no earlier success: a literal
+/// RFC 3339 time or a template over `params.*` only. `id` and node outputs
+/// render empty then.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WhenNone {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+}
+
+/// The template-bearing texts of a playbook as `(owner node id, text)` pairs.
+/// The single place that knows which node kinds carry a template, so V13 and
+/// V38 always scan exactly the same texts, and the readers of earlier runs
+/// (`crate::previous_success`) can use it without reaching into the
+/// validator.
+pub fn template_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
+    // A judge node's state fields are templates too (issue #165 Part 5).
+    let judge_state = playbook.nodes.iter().flat_map(|n| match &n.kind {
+        NodeKind::Judge { state, .. } => state
+            .iter()
+            .map(|(_, text)| (n.id.as_str(), text.as_str()))
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    });
+    playbook
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            let text = match &n.kind {
+                NodeKind::AgentTask { prompt, .. } | NodeKind::Prompt { prompt } => prompt.as_str(),
+                NodeKind::Playbook {
+                    instruction: Some(instruction),
+                    ..
+                } => instruction.as_str(),
+                NodeKind::Finish {
+                    prompt: Some(prompt),
+                    ..
+                } => prompt.as_str(),
+                _ => return None,
+            };
+            Some((n.id.as_str(), text))
+        })
+        .chain(judge_state)
+        .collect()
+}
+
+/// The `workdir` templates of a playbook as `(owner node id, text)` pairs.
+pub fn workdir_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
+    playbook
+        .nodes
+        .iter()
+        .filter_map(|n| n.kind.workdir_template().map(|w| (n.id.as_str(), w)))
+        .collect()
+}
+
+/// The declared cache key templates of a playbook (issue #67 item 6) as
+/// `(owner node id, text)` pairs.
+pub fn cache_key_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
+    playbook
+        .nodes
+        .iter()
+        .filter_map(|n| n.cache_key_template().map(|k| (n.id.as_str(), k)))
+        .collect()
+}
 #[cfg(test)]
 mod tests {
+    /// A bare-string binding still round-trips to the bare string; a
+    /// binding marked `untrusted` round-trips as an object and an older
+    /// apb's object without the key reads as not untrusted.
+    #[test]
+    fn a_connector_binding_round_trips_its_untrusted_marker() {
+        let pb = |bindings: &str| {
+            Playbook::from_yaml(&format!(
+                "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: {{ profile: dev }}\nnodes:\n  - {{ id: start, type: start }}\n  - {{ id: w, type: agent_task, prompt: p, connectors: {bindings} }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: w }}\n  - {{ from: w, to: done }}\n"
+            ))
+            .unwrap()
+        };
+        // The bare string keeps its shorthand.
+        let plain = pb("[{ name: gh }]");
+        let yaml = yaml_serde::to_string(&plain).unwrap();
+        assert!(
+            yaml.contains("- gh") || yaml.contains("connector:\n      - gh"),
+            "{yaml}"
+        );
+        assert!(!yaml.contains("untrusted"), "{yaml}");
+
+        // An `untrusted: true` binding round-trips as an object.
+        let marked = pb("[{ name: gh, untrusted: true }]");
+        assert!(marked.node("w").unwrap().kind.connector_bindings()[0].untrusted);
+        let yaml = yaml_serde::to_string(&marked).unwrap();
+        assert!(yaml.contains("untrusted: true"), "{yaml}");
+
+        // An object without the key reads as false (an older apb's save).
+        let older = pb("[{ name: gh, max_calls: 3 }]");
+        assert!(!older.node("w").unwrap().kind.connector_bindings()[0].untrusted);
+    }
+
+    /// A `pattern` on a param round-trips; a param without one writes
+    /// none.
+    #[test]
+    fn a_param_pattern_round_trips() {
+        let pb = Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nparams:\n  - { name: repo, type: text, pattern: '[A-Za-z0-9._-]{1,100}' }\n  - { name: plain, type: text }\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            pb.params[0].pattern.as_deref(),
+            Some("[A-Za-z0-9._-]{1,100}")
+        );
+        assert_eq!(pb.params[1].pattern, None);
+        let wire = serde_json::to_value(&pb).unwrap();
+        assert_eq!(wire["params"][0]["pattern"], "[A-Za-z0-9._-]{1,100}");
+        assert!(wire["params"][1].get("pattern").is_none());
+        let yaml = yaml_serde::to_string(&pb).unwrap();
+        assert!(yaml.contains("pattern:"), "{yaml}");
+    }
+
     use super::*;
 
     /// NODE_TYPES is the one list of node type tags (the dashboard's generated
@@ -2852,6 +3034,7 @@ edges: []
             functions: FunctionsAllow::All,
             max_calls: None,
             on_unknown: None,
+            untrusted: false,
         };
         let yaml = yaml_serde::to_string(&bare).unwrap();
         assert_eq!(yaml.trim(), "jira");
@@ -2865,6 +3048,7 @@ edges: []
             functions: FunctionsAllow::List(vec!["send_message".into()]),
             max_calls: Some(50),
             on_unknown: None,
+            untrusted: false,
         };
         let yaml = yaml_serde::to_string(&full).unwrap();
         assert!(yaml.contains("name: telegram"));
@@ -2881,6 +3065,7 @@ edges: []
             functions: FunctionsAllow::ReadOnly,
             max_calls: None,
             on_unknown: None,
+            untrusted: false,
         };
         let yaml = yaml_serde::to_string(&read_only).unwrap();
         assert!(yaml.contains("functions: read_only"));

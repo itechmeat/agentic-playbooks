@@ -27,14 +27,16 @@ pub(crate) mod nodes;
 mod output_types;
 mod outputs;
 mod params;
+mod previous_success;
 mod publish;
 mod quality;
 mod read_only;
 mod results;
 mod retry;
 mod review;
-mod templates;
+pub(crate) mod templates;
 mod unattended;
+mod untrusted;
 mod write_scope;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -377,7 +379,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     decisions::check_undeclared_shipping(playbook, &mut r); // V90
     list::check_lists(playbook, ctx, &mut r); // V85-V89, V93-V95
     budget::check_budget(playbook, &mut r); // V96-V98
-    params::check_params(playbook, &mut r); // V99, V100
+    params::check_params(playbook, &mut r); // V99, V100, V177, V178
     quality::check_quality(playbook, &mut r); // V102-V107
     known_problems::check_known_problems(playbook, &mut r); // V108-V111
     publish::check_publish(playbook, &mut r); // V116-V120, V140
@@ -410,9 +412,11 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
         check_scripts(playbook, &mut r); // V12
         check_templates(playbook, &mut r); // V13
         check_cross_branch_reads(playbook, &mut r); // V38
+        previous_success::check_previous_success(playbook, &mut r); // V176
         check_refs(playbook, ctx, &mut r); // V14, V15
         // V16 is retired (isolation is enforced now); its number stays reserved.
         isolation::check_isolation(playbook, &mut r); // V112-V115
+        untrusted::check_untrusted(playbook, &mut r); // V179-V182
         check_trigger(playbook, &mut r); // V17
         check_goal(playbook, &mut r); // V41
         check_session_handoff(playbook, &mut r); // V44, V45

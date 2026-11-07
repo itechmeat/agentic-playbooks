@@ -79,6 +79,7 @@ fn acp(program: String) -> ClaudeAdapter {
 fn task<'a>(workdir: &'a Path, policy: &'a apb_engine::adapter::SpawnEnv) -> AgentTask<'a> {
     AgentTask {
         prompt: "go",
+        untrusted_section: None,
         model: "haiku",
         workdir,
         timeout: None,

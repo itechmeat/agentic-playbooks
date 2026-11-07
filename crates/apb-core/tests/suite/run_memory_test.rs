@@ -440,3 +440,47 @@ fn a_global_save_without_an_installation_key_fails() {
     assert!(remember(root.path(), &global, &params(V1), "1.0.0", input).is_err());
     assert!(!root.path().join(".apb/memory/global/p.json").exists());
 }
+
+/// A remembered value that does not match its param's pattern is
+/// incompatible with `pattern_mismatch` (shown as missing), and a value
+/// that does not match is never remembered.
+#[test]
+fn a_remembered_value_under_a_new_pattern_is_incompatible_and_not_saved() {
+    let root = tempfile::tempdir().unwrap();
+    let no_pattern = params("  - { name: region, type: text }\n");
+    store(root.path(), &no_pattern, &[("region", "emea")], None);
+
+    let with_pattern = params("  - { name: region, type: text, pattern: '[a-z]{2}' }\n");
+    // `emea` is four letters: no longer a match.
+    let got = recall(root.path(), &key(), &with_pattern, None).unwrap();
+    let region = got.values.iter().find(|v| v.name == "region").unwrap();
+    assert_eq!(
+        region.status,
+        ValueStatus::Incompatible {
+            reason: Incompat::PatternMismatch
+        }
+    );
+    assert!(got.missing.iter().any(|m| m == "region"));
+
+    // A value that does not match is refused at save time.
+    let input = RememberInput {
+        params: values(&[("region", "EU")]),
+        instruction: None,
+    };
+    let saved = remember(root.path(), &key(), &with_pattern, "1.0.0", input).unwrap();
+    assert_eq!(saved.refused.len(), 1);
+    assert_eq!(saved.refused[0].name, "region");
+    assert_eq!(saved.refused[0].reason, "pattern_mismatch");
+    // Nothing was stored for the param.
+    let got = recall(root.path(), &key(), &with_pattern, None).unwrap();
+    assert!(got.missing.iter().any(|m| m == "region"));
+
+    // A matching value still saves and recalls.
+    let input = RememberInput {
+        params: values(&[("region", "eu")]),
+        instruction: None,
+    };
+    remember(root.path(), &key(), &with_pattern, "1.0.0", input).unwrap();
+    let got = recall(root.path(), &key(), &with_pattern, None).unwrap();
+    assert!(got.missing.is_empty(), "{:?}", got.missing);
+}

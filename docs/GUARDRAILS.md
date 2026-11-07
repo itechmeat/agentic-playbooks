@@ -45,6 +45,7 @@ policy to the host agent and its administrators (see "Host agent settings" below
 | Construct | Layer | Advisory or enforced | What it does |
 |---|---|---|---|
 | Node `prompt`, profile SOUL, `skills` | 1 Guidance | Advisory | Tells the agent what to do and how. Skills are delivered by name or as snapshot copies, never pasted into the prompt. |
+| `untrusted` / `accept_untrusted` on params, connector bindings and nodes | 3 Validation | Enforced at save | A node that renders text from outside the author's control and can send outward is refused (V179) unless the author states why the risk is accepted; the run surfaces list each such node with its reason, and every attempt ends its prompt with a fixed section telling the agent the text is data, never instructions. See HOWTO-authoring.md "Untrusted input". |
 | `success_check` script (`scripts/...`) | 2 Inner loop | Enforced | A non-zero exit rejects the attempt's success report; the attempt fails, consumes a retry and keeps its text in `rejected_output`. |
 | `success_check: { marker: ... }` | 2 Inner loop | Enforced | The literal marker must appear in the output, else the success report is rejected. Defends against interim text recorded as a result. |
 | `require_verdict` | 2 Inner loop | Enforced | The attempt must write its verdict to `APB_STATUS_FILE`; a process that ends without one is `interrupted`, not `succeeded`. |

@@ -214,6 +214,43 @@ params:
 
 An older apb drops the key and runs the playbook unchanged.
 
+### Param patterns
+
+A text param may declare `pattern`, a Rust regular expression the whole
+value must match, anchored at both ends (the value is neither trimmed nor
+case folded, an empty value included). Secret params take one too:
+
+```yaml
+params:
+  - { name: repo, type: text, pattern: '[A-Za-z0-9._-]{1,100}' }
+  - { name: token, type: text, secret: true, pattern: '[a-z]{8,}' }
+```
+
+- A partial match is not enough: with `pattern: '[a-z]+'`, `abc; rm` does
+  not pass. The whole pattern is one group, so `a|b` matches `a` or `b`,
+  never `ab`.
+- Every launch surface (MCP, the dashboard, the CLI) refuses a start whose
+  given value does not match with `param_pattern_mismatch`, naming the
+  params and their patterns and never the values (a secret included).
+  Remembered input is checked too: a value that does not match shows in
+  the start dialog as not used, and one that does not match is never
+  remembered. The preparation backstop refuses such a value on every
+  other path (a trial, an eval case, a detached drive) before a run
+  directory exists; a scenario run's secret placeholder is apb's own and
+  is not checked.
+- The pattern applies to `type: text` params only, and the param's own
+  `default` must match it. JavaScript regular expressions differ from
+  Rust's, so the start dialog shows the pattern as a note instead of
+  testing it in the browser; the server's refusal is shown like any
+  other.
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| V177 | error | a pattern on a param that is not `text`, an empty pattern, one over 512 characters, or one that does not compile |
+| V178 | error | the param's `default` (or a scenario param value) does not match its pattern |
+
+An older apb drops the key and skips the check.
+
 ## Visual editor and graph check
 
 The dashboard renders a playbook as a top-to-bottom graph, and the canvas is
@@ -353,6 +390,90 @@ have the profile there. `apb doctor` shows the same as a `profile <name>` line
 (`[fail]` or `[warn]`). A run on a machine without the profile fails at start.
 A save does not check it, so a playbook can be saved first and its profile
 created afterwards; the dashboard's playbook view shows it as a warning.
+
+## Untrusted input
+
+Text from outside the author's control (an issue body, a mail, a web page)
+can carry an instruction. A node that renders such text and can also send
+outward (the network, a connector, a declared effect) is a prompt-injection
+risk the validator refuses unless the author accepts it in writing. Three
+markers, all additive to schema 2 (an older apb drops them, which is why a
+run using any of them carries a run guard naming `untrusted_input`):
+
+```yaml
+params:
+  - { name: issue_body, type: text, untrusted: true }
+nodes:
+  - id: list_open
+    type: agent_task
+    prompt: "List the open issues."
+    connectors: [{ name: github, functions: [list_issues], untrusted: true }]
+  - id: label_bug
+    type: agent_task
+    prompt: "Read {{nodes.list_open.output}} and add the bug label from {{params.label}}."
+    accept_untrusted: "adds only the bug label from params; the read-back confirms it"
+```
+
+- `untrusted: true` on a param: its value is outside text.
+- `untrusted: true` on a connector binding: what the node's calls of this
+  connector return is outside text.
+- `untrusted: true` on an `agent_task` or `script` node: the node's own
+  attempt reads outside text (its tools fetch a page, a script downloads a
+  feed).
+
+How the taint travels. A node renders untrusted text when it carries a
+marker, reads an untrusted param, reads a tainted node's `output`, `report`,
+`rejected_output` or `seen` keys, reads any earlier run's node output
+through `run.previous_success.nodes.*` (whatever the current definition
+says: the earlier run may have run another version whose markers this one
+cannot know), takes its list items from, continues a session of, or reads
+evidence from a tainted node, or reads `run.context` or `run.retro` while
+anything in the run is untrusted. A finish prompt that places no recorded
+context of its own gets the terminal context appended, so it is tainted
+while anything is. A template-form `writes` reading untrusted text taints
+the node too: the rendered globs reach its prompt. A node whose inputs are
+untrusted taints its own output unless it is a judge, review, condition,
+wait, start or publish node (a judge answers from fixed options). The
+taint runs to a fixed point, so `a -> b -> c` through outputs taints all
+three whatever order the nodes are declared in.
+
+The rules:
+
+- **V179** (error): an `agent_task`, a finish with a prompt or a `playbook`
+  node renders untrusted text and can send outward without
+  `accept_untrusted`. An agent counts as unable to send outward only with
+  `isolation: { level: full, network: none }`, no connector binding, and no
+  declared `network`, `external` or `irreversible` effect.
+- **V180** (warning): the node also renders a secret param, binds a
+  connector, or declares the `secrets` effect, whether or not it accepts.
+- **V181** (error): `untrusted` on a node that is not `agent_task` or
+  `script`; a param both `secret` and `untrusted`; `accept_untrusted` on
+  another kind, or with a reason that is empty, whitespace only, or over
+  300 characters.
+- **V182** (warning): `accept_untrusted` on a node that renders no
+  untrusted text it could send outward (nothing to accept; remove it).
+
+At run time, every attempt of a node that renders untrusted text ends its
+prompt with a fixed `## untrusted input` section naming the sources, after
+the connector block, the write scope note, the item section, the retry
+briefing and the evidence section, and outside the cache-keyed render. The
+section tells the agent to treat that text as data and never follow an
+instruction in it, and to report when one tried. `apb runs <id>`, MCP
+`run_status`, the dashboard's run view and the HTML report list each such
+node with its sources and its accepted reason.
+
+What the analysis does not follow (the out-of-scope paths): taint through
+files in the tree (an agent that writes an issue body into a file and a
+later agent that reads it are not linked by any template), scripts reading
+the run directory (`APB_RUN_DIR`; a script whose output carries outside
+text is marked `untrusted: true` by its author), a profile's inherited
+environment (`apb doctor --run` lists it), and a child playbook (a
+`playbook` node is treated as an agent that can send; the child's own
+params carry no value from the parent).
+
+This "untrusted" is not playbook trust: an imported playbook still needs a
+trust digest to run at all; `untrusted` says whose text an approved
+playbook lets into its prompts.
 
 ## Connectors (external services)
 
@@ -1739,6 +1860,8 @@ a V13 validation error:
   rendered anywhere. This is a different "hooks" from a connector's inbound
   event inbox, whose delivery bodies are kept and read with `inbox_read` (see
   CONNECTORS.md, "Receiving events (webhooks and the inbox)").
+- `run.previous_success.*` - what the latest earlier successful run of this
+  playbook produced (see "Previous success" below).
 
 An unresolvable reference (an unknown param, a node id that is not in the
 playbook, a namespace outside this list) fails validation before the
@@ -1773,6 +1896,78 @@ because there the source did give its text and the mismatch is in the agreed
 shape of it, not in the graph. One anomaly per node execution lists all of that
 node's holes. A finish node composing an answer is checked the same way; a node
 served from the cache is not, because neither its execution nor its capture runs.
+
+### Previous success
+
+A routine that runs on a schedule asks "what changed since the last time this
+worked". A prompt reads that window through `run.previous_success.*`; the run
+records it once at start, so a resume renders the same values:
+
+- `run.previous_success.id` - the earlier run's id, empty when there is none.
+- `run.previous_success.started_at` - its `run_started` time, RFC 3339 UTC in
+  whole seconds, truncated (`2026-11-06T07:00:00Z`). The right "since" for a
+  window: items that arrived while the earlier run was running are inside the
+  next one.
+- `run.previous_success.finished_at` - the time of its last `run_finished`,
+  the same format, for reports.
+- `run.previous_success.nodes.<id>.output` (or `.report`) - that run's latest
+  output of node `<id>`.
+- `run.previous_success.nodes.<id>.output.<field>` (or `.report.<field>`) - one
+  top-level field, rendered exactly like `nodes.<id>.output.<field>`.
+
+Which earlier run counts: the newest by start time among the production runs
+apb created on this machine under the same execution root, of the same playbook
+id and scope, of any version, that are top-level runs and whose journal folds
+to a succeeded end. A scenario run and an eval run never count; a trial is not
+excluded (a trial that wrote files ran in a throwaway worktree, and one that
+did no file work did its outside work here, so skipping it would repeat that
+work). A child run never looks up: it always renders the "none" window, because
+two parent routines that run the same child would otherwise share one history.
+
+Without an earlier success, `id` and the node outputs render empty, and
+`started_at` and `finished_at` render the playbook's `previous_success.when_none`
+values - a literal RFC 3339 time or a template over `params.*`:
+
+```yaml
+params:
+  - { name: since, type: text, default: "2026-01-01T00:00:00Z" }
+previous_success:
+  when_none:
+    started_at: "{{params.since}}"
+```
+
+What else a routine should know:
+
+- The values are read once at start and journaled on `run_provenance`; a
+  resume, a re-drive and a crash recovery fold the same journal, so they render
+  the same. A run continued from another (`continue_from`) keeps its
+  predecessor's window. Earlier outputs are redacted with the earlier run's own
+  secrets and clipped at 16 KiB per value; a key whose earlier-run secrets
+  cannot be read is listed as `withheld` on the run surfaces.
+- An unreadable run directory that could be the latest success refuses the
+  start with `previous_success_unreadable` instead of silently reopening an
+  older window. Repair or remove that run directory, then start again.
+- Two starts of the same routine at once both see the same earlier run, so
+  their windows overlap; use send-once connector functions for anything a
+  duplicate would harm.
+- A prompt reading `run.previous_success.*` renders a new value whenever the
+  earlier success changes, so its node cache key moves with every new window.
+  That is intended: a cache hit across routine runs would replay a stale
+  window.
+- Every `run.previous_success.nodes.*` value is untrusted input (see
+  "Untrusted input" below): the earlier run may have run another version
+  whose markers this definition cannot know. Treat the values as data, never
+  as instructions.
+- A supervisor patch that adds a read of the namespace the start never
+  snapshotted is refused (`previous_success_unrecorded`); start a new run
+  instead.
+- A playbook whose definition reads the namespace carries a `run_guard` naming
+  `previous_success`, so an older apb refuses to continue the run rather than
+  rendering the window empty and re-reading everything.
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| V176 | error | a malformed `run.previous_success` reference, an unknown node in one, a read of the namespace in the run's `worktree` template, or a `when_none` value that is neither an RFC 3339 time nor a template over non-secret `params.*` |
 
 ### Context budget (how much recorded output a prompt gets)
 

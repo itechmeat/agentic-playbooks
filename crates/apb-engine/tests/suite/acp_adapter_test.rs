@@ -39,6 +39,7 @@ fn acp_success_extracts_result_and_streams_to_log() {
     let report = ad
         .run(&AgentTask {
             prompt: "go",
+            untrusted_section: None,
             model: "haiku",
             workdir: dir.path(),
             timeout: None,
@@ -80,6 +81,7 @@ fn acp_result_is_error_maps_to_failed_status() {
     let report = ad
         .run(&AgentTask {
             prompt: "go",
+            untrusted_section: None,
             model: "haiku",
             workdir: dir.path(),
             timeout: None,
@@ -111,6 +113,7 @@ fn acp_no_result_event_is_structured_output_missing() {
     let err = ad
         .run(&AgentTask {
             prompt: "go",
+            untrusted_section: None,
             model: "haiku",
             workdir: dir.path(),
             timeout: None,
@@ -143,6 +146,7 @@ fn acp_nonzero_exit_is_process_exit() {
     let err = ad
         .run(&AgentTask {
             prompt: "go",
+            untrusted_section: None,
             model: "haiku",
             workdir: dir.path(),
             timeout: None,
@@ -177,6 +181,7 @@ fn acp_stream_result_marker_parses_into_question() {
     let report = ad
         .run(&AgentTask {
             prompt: "go",
+            untrusted_section: None,
             model: "haiku",
             workdir: dir.path(),
             timeout: None,
@@ -213,6 +218,7 @@ fn acp_stream_marker_malformed_json_fails_naming_the_node() {
     let err = ad
         .run(&AgentTask {
             prompt: "go",
+            untrusted_section: None,
             model: "haiku",
             workdir: dir.path(),
             timeout: None,
@@ -249,6 +255,7 @@ fn acp_stream_marker_ignored_on_non_interactive_node() {
     let report = ad
         .run(&AgentTask {
             prompt: "go",
+            untrusted_section: None,
             model: "haiku",
             workdir: dir.path(),
             timeout: None,
@@ -282,6 +289,7 @@ fn acp_timeout_kills_streaming_agent() {
     let err = ad
         .run(&AgentTask {
             prompt: "go",
+            untrusted_section: None,
             model: "haiku",
             workdir: dir.path(),
             timeout: Some(Duration::from_secs(1)),
@@ -320,6 +328,7 @@ fn acp_cancel_stops_streaming_agent() {
         .run_cancellable(
             &AgentTask {
                 prompt: "go",
+                untrusted_section: None,
                 model: "haiku",
                 workdir: dir.path(),
                 timeout: None,
@@ -370,6 +379,7 @@ fn acp_passes_one_output_format_and_reads_the_result_usage() {
     let report = ad
         .run(&AgentTask {
             prompt: "go",
+            untrusted_section: None,
             model: "haiku",
             workdir: dir.path(),
             timeout: None,
@@ -439,6 +449,7 @@ fn acp_timeout_keeps_the_usage_the_agent_printed_on_sigterm() {
     let err = acp(program)
         .run(&AgentTask {
             prompt: "go",
+            untrusted_section: None,
             model: "haiku",
             workdir: dir.path(),
             timeout: Some(Duration::from_secs(1)),
@@ -474,6 +485,7 @@ fn acp_nonzero_exit_keeps_the_usage_of_the_errored_result() {
     let err = ad
         .run(&AgentTask {
             prompt: "go",
+            untrusted_section: None,
             model: "haiku",
             workdir: dir.path(),
             timeout: None,
@@ -502,6 +514,7 @@ fn acp_nonzero_exit_keeps_the_usage_of_the_errored_result() {
 fn bounded_task<'a>(dir: &'a Path, policy: &'a apb_engine::adapter::SpawnEnv) -> AgentTask<'a> {
     AgentTask {
         prompt: "go",
+        untrusted_section: None,
         model: "haiku",
         workdir: dir,
         timeout: None,

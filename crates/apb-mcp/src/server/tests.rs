@@ -3062,3 +3062,58 @@ async fn an_unattended_start_records_the_mode_and_gets_no_host_fallback() {
         ]
     );
 }
+
+/// `playbook_run` with a value that does not match its param's pattern is
+/// refused with `param_pattern_mismatch` before anything starts, naming
+/// the param and the pattern and never the value.
+#[tokio::test]
+async fn playbook_run_refuses_a_param_that_does_not_match_its_pattern() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_noagent(dir.path());
+    let vdir = dir.path().join(".apb/playbooks/noagent_sv/1.0.0");
+    fs::write(
+        vdir.join("playbook.yaml"),
+        NOAGENT.replace(
+            "version: 1.0.0\n",
+            "version: 1.0.0\nparams:\n  - { name: who, type: text, pattern: '[a-z]+' }\n",
+        ),
+    )
+    .unwrap();
+    let server = WfMcp::new(dir.path().to_path_buf());
+    let mut params_map = BTreeMap::new();
+    params_map.insert("who".to_string(), "a b".to_string());
+    let result = server
+        .playbook_run(Parameters(PlaybookRunArgs {
+            id: "noagent_sv".to_string(),
+            version: None,
+            params: params_map,
+            instruction: None,
+            supervise: None,
+            background: None,
+            acknowledge_untrusted: Some(true),
+            confirm_irreversible: None,
+            scope: None,
+            continued_from: None,
+            worktree: None,
+            execution: None,
+            budget: None,
+            remember: None,
+            notify: None,
+            launch_version: None,
+            launch_choice: None,
+            unattended: None,
+            confirm_launch: None,
+        }))
+        .await;
+    let answer = result_text(&result);
+    assert!(
+        answer.contains(apb_engine::gate::PARAM_PATTERN_MISMATCH),
+        "{answer}"
+    );
+    assert!(answer.contains("[a-z]+"), "{answer}");
+    assert!(!answer.contains("a b"), "{answer}");
+    assert!(
+        runs_in(dir.path()).is_empty(),
+        "a refused start wrote a run"
+    );
+}

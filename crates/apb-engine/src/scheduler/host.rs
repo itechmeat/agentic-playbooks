@@ -162,7 +162,9 @@ fn task_env(task: &AgentTask) -> BTreeMap<String, String> {
 /// it names: a host subagent may not see the environment the host was asked
 /// to set, and a path in the prompt costs nothing.
 fn task_prompt(task: &AgentTask, env: &BTreeMap<String, String>) -> String {
-    let mut prompt = crate::adapter::transport_prompt(task);
+    // The `## untrusted input` section stays the last text, after the
+    // environment line too.
+    let mut prompt = crate::adapter::transport_body(task);
     let named: Vec<String> = env
         .iter()
         .filter(|(k, _)| prompt.contains(k.as_str()))
@@ -173,6 +175,9 @@ fn task_prompt(task: &AgentTask, env: &BTreeMap<String, String>) -> String {
             "\n\nEnvironment of this step: {}",
             named.join(", ")
         ));
+    }
+    if let Some(section) = &task.untrusted_section {
+        prompt.push_str(section);
     }
     prompt
 }
@@ -534,8 +539,12 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
                 super::live::observe_live_channels(self.run_dir, task.node, self.journal)
                     .map_err(failure)?;
                 let answer = self.await_answer(task, answers_before, cancel, control)?;
+                // The `## untrusted input` section stays the last text of
+                // every follow-up too.
+                let section = task.untrusted_section.as_deref().unwrap_or("");
+                let body = prompt.strip_suffix(section).unwrap_or(&prompt);
                 prompt = format!(
-                    "{prompt}\n\nYou stopped to ask the person: {}\nTheir answer: {answer}\nContinue the task from where you stopped.",
+                    "{body}\n\nYou stopped to ask the person: {}\nTheir answer: {answer}\nContinue the task from where you stopped.{section}",
                     sub.output.trim()
                 );
                 let next = self.request(task, &prompt, &env, false).map_err(failure)?;

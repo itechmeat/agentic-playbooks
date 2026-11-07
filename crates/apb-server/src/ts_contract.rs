@@ -125,6 +125,8 @@ fn render_types() -> String {
         apb_engine::event::ReadOnlyChange::decl(&cfg),
         apb_engine::run_view::ReadOnlyViolation::decl(&cfg),
         apb_engine::run_view::ReadOnlyRow::decl(&cfg),
+        apb_engine::run_view::PreviousSuccessView::decl(&cfg),
+        apb_engine::event::UntrustedNode::decl(&cfg),
         // --- 0.23.0 stats (C3) ---
         apb_engine::run_stats::Rate::decl(&cfg),
         apb_engine::run_stats::PerRun::decl(&cfg),

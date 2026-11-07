@@ -630,7 +630,7 @@
               >
             {/if}
           </div>
-          <RunDriveNotes released={detail.released} drivenBy={detail.driven_by} />
+          <RunDriveNotes released={detail.released} drivenBy={detail.driven_by} previousSuccess={detail.previous_success} untrusted={detail.untrusted} />
         </header>
 
         <RunProgress progress={detail.progress} status={detail.run_status} runKey={`${workspace}/${id}`} />

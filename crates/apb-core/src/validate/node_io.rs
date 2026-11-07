@@ -135,6 +135,16 @@ pub(crate) fn check_declared_fields(
                 cap.split('.').collect::<Vec<&str>>().as_slice()
             {
                 report(owner, source, field, None, r);
+            } else if let [
+                "run",
+                "previous_success",
+                "nodes",
+                source,
+                "output" | "report",
+                field,
+            ] = cap.split('.').collect::<Vec<&str>>().as_slice()
+            {
+                report(owner, source, field, None, r);
             }
         }
     }

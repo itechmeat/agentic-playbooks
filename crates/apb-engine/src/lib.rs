@@ -61,6 +61,7 @@ pub mod manifest;
 pub mod next_action;
 pub mod notify;
 pub mod parallel;
+pub mod previous_success;
 // operator pause (issue #200)
 pub mod pause;
 pub mod people;

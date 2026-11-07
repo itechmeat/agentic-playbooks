@@ -865,6 +865,14 @@ bytes?: number,
  */
 partial?: ReadOnlyLimit, };
 
+export type PreviousSuccessView = { run_id?: string, started_at?: string, finished_at?: string, 
+/**
+ * The snapshotted output keys, without their values.
+ */
+keys?: Array<string>, withheld?: Array<string>, fallback: boolean, };
+
+export type UntrustedNode = { node: string, sources: Array<string>, outward?: Array<string>, secrets?: Array<string>, accepted?: string, };
+
 export type Rate = { count: number, of: number, rate?: number, };
 
 export type PerRun = { total: number, runs: number, per_run?: number, };
@@ -2405,6 +2413,17 @@ read_only?: Array<ReadOnlyRow>,
  */
 unattended?: boolean, 
 /**
+ * What `run.previous_success.*` renders in this run, as the start
+ * recorded it: times and output keys only, never the values. Left out
+ * for a run whose definition does not read the namespace.
+ */
+previous_success?: PreviousSuccessView, 
+/**
+ * The nodes that render untrusted text, as the start recorded them.
+ * Left out for a run without any.
+ */
+untrusted?: Array<UntrustedNode>, 
+/**
  * Progress and every open gate (reviews, questions, waits, supervisor):
  * the run page renders its panels from this, never from `events`.
  */
@@ -2705,7 +2724,7 @@ compatible: boolean,
  */
 setup: number, trusted: boolean, needs_consent: boolean, };
 
-export type Incompat = "removed" | "type_changed" | "option_gone" | "now_secret";
+export type Incompat = "removed" | "type_changed" | "option_gone" | "now_secret" | "pattern_mismatch";
 
 export type InstructionSource = "memory" | "legacy_draft" | "none";
 
@@ -3924,6 +3943,12 @@ rejected_outputs: { [key in string]: string }, hooks: { [key in string]: string 
  * `deny_unknown_fields`.
  */
 seen?: { [key in string]: string }, 
+/**
+ * What `run.previous_success.*` renders, keyed by the reference text
+ * after `run.previous_success.` (`id`, `started_at`, `finished_at`,
+ * `nodes.<id>.output[.<field>]`). Absent when empty.
+ */
+previous_success?: { [key in string]: string }, 
 /**
  * `run.context` as it would render.
  */

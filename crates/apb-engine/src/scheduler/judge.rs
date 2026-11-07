@@ -413,6 +413,7 @@ impl ProfileEmulation<'_, '_> {
             .join(format!("{}-{attempt}.jsonl", self.node_id));
         let task = AgentTask {
             prompt,
+            untrusted_section: None,
             model: &ri.model,
             workdir: self.workdir,
             timeout: self

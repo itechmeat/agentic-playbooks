@@ -322,6 +322,14 @@ fn from_run(
             .into_iter()
             .map(|(k, v)| (k, text(&v)))
             .collect(),
+        previous_success: state
+            .previous_success
+            .as_ref()
+            .map(crate::previous_success::record_values)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(k, v)| (k, text(&v)))
+            .collect(),
         context: text(&context),
     };
     let inputs = super::sandbox::without_secrets(&playbook, &inputs);

@@ -121,6 +121,7 @@ fn renders_all_template_refs() {
         &hooks,
         "CTXBODY",
         &BTreeMap::new(),
+        &BTreeMap::new(),
         &unlimited_outputs(),
     );
     assert_eq!(
@@ -195,6 +196,7 @@ fn renders_a_top_level_field_selector_on_output_and_report() {
         &BTreeMap::new(),
         "",
         &BTreeMap::new(),
+        &BTreeMap::new(),
         &unlimited_outputs(),
     );
     assert_eq!(out, "V: failed | C: 3 | O: true");
@@ -218,6 +220,7 @@ fn an_array_or_object_field_renders_as_compact_json() {
         &BTreeMap::new(),
         &BTreeMap::new(),
         "",
+        &BTreeMap::new(),
         &BTreeMap::new(),
         &unlimited_outputs(),
     );
@@ -254,6 +257,7 @@ fn a_field_selector_renders_empty_for_every_unreadable_shape() {
             &BTreeMap::new(),
             "",
             &BTreeMap::new(),
+            &BTreeMap::new(),
             &unlimited_outputs(),
         );
         assert_eq!(out, "[]", "{why} must render empty, got {out}");
@@ -271,6 +275,7 @@ fn unknown_refs_become_empty() {
         &BTreeMap::new(),
         &BTreeMap::new(),
         "",
+        &BTreeMap::new(),
         &BTreeMap::new(),
         &unlimited_outputs(),
     );
@@ -295,6 +300,7 @@ fn a_seen_reference_renders_from_the_map_and_empty_when_absent() {
         &BTreeMap::new(),
         "",
         &seen,
+        &BTreeMap::new(),
         &unlimited_outputs(),
     );
     assert_eq!(out, "S: [a\nb] E: []");

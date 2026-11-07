@@ -432,8 +432,12 @@ mod parallel_cancel_test;
 mod parallel_concurrency_test;
 #[path = "suite/parallel_e2e_test.rs"]
 mod parallel_e2e_test;
+#[path = "suite/param_pattern_test.rs"]
+mod param_pattern_test;
 #[path = "suite/passkey_gate_test.rs"]
 mod passkey_gate_test;
+#[path = "suite/previous_success_test.rs"]
+mod previous_success_test;
 #[cfg(unix)]
 #[path = "suite/process_group_test.rs"]
 mod process_group_test;
@@ -464,6 +468,8 @@ mod save_nudge_test;
 #[cfg(unix)]
 #[path = "suite/scenario_parity_test.rs"]
 mod scenario_parity_test;
+#[path = "suite/untrusted_prompt_test.rs"]
+mod untrusted_prompt_test;
 #[path = "suite/write_scope_test.rs"]
 mod write_scope_test;
 // Unix-only: `runner: sh` scripts and shell hooks in the bare remote.
