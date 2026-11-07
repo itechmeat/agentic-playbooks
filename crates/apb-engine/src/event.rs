@@ -3356,7 +3356,7 @@ struct EventHeader {
 /// in sync: a bare `{"type": kind}` fails with "unknown variant" only when no
 /// variant carries that tag (a known one fails on its missing fields, or
 /// decodes when all of them are optional).
-fn is_known_kind(kind: &str) -> bool {
+pub(crate) fn is_known_kind(kind: &str) -> bool {
     match serde_json::from_value::<EventPayload>(serde_json::json!({ "type": kind })) {
         Ok(_) => true,
         Err(e) => !e.to_string().starts_with("unknown variant"),

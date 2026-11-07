@@ -85,7 +85,19 @@ pub(crate) fn started_checked(run_dir: &Path) -> Result<Option<RunHead>, &'stati
     let mut head: Option<RunHead> = None;
     for line in BufReader::new(file).lines().take(HEAD_LINES) {
         let line = line.map_err(|_| "journal")?;
-        let e: Event = serde_json::from_str(&line).map_err(|_| "journal")?;
+        let e: Event = match serde_json::from_str(&line) {
+            Ok(e) => e,
+            // An event type a newer apb wrote is skipped, as `read_all`
+            // skips it; a line that is not JSON or a known event that does
+            // not decode is corruption.
+            Err(_) => {
+                let v: serde_json::Value = serde_json::from_str(&line).map_err(|_| "journal")?;
+                match v.get("type").and_then(serde_json::Value::as_str) {
+                    Some(kind) if !crate::event::is_known_kind(kind) => continue,
+                    _ => return Err("journal"),
+                }
+            }
+        };
         match e.payload {
             EventPayload::RunStarted {
                 playbook, version, ..

@@ -88,9 +88,8 @@ fn drive(root: &Path, cfg: &Path, agent: &str, id: &str, opts: RunOptions) -> (S
     // SAFETY: the env lock keeps every other env-touching test out.
     let _cfg = common::EnvVar::set("APB_CONFIG_DIR", cfg);
     apb_core::run_origin::ensure_key().unwrap();
-    unsafe { std::env::set_var("APB_AGENT_CMD", agent) };
+    let _agent = common::EnvVar::set("APB_AGENT_CMD", agent);
     let res = run(root, id, None, opts);
-    unsafe { std::env::remove_var("APB_AGENT_CMD") };
     let res = res.unwrap();
     (res.run_id, res.outcome)
 }

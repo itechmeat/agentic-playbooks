@@ -408,6 +408,7 @@ nodes:
     type: agent_task
     prompt: "List the open issues."
     connectors: [{ name: github, functions: [list_issues], untrusted: true }]
+    accept_untrusted: "read-only listing; issue text is copied, never followed"
   - id: label_bug
     type: agent_task
     prompt: "Read {{nodes.list_open.output}} and add the bug label from {{params.label}}."

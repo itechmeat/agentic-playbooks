@@ -90,8 +90,8 @@ pub(crate) fn find(
                 .unwrap_or_default()
         };
         // The manifest must read (a corrupt one refuses) and name a
-        // production run (an absent or non-production one is skipped, as
-        // `production_dir` reads it).
+        // production run (a non-production one is skipped; an absent one
+        // counts as production, as `production_dir` reads it).
         match crate::manifest::read(&d) {
             Err(_) => {
                 return Err(HistoryUnreadable {
@@ -99,7 +99,7 @@ pub(crate) fn find(
                     what: "manifest",
                 });
             }
-            Ok(None) => continue,
+            Ok(None) => {}
             Ok(Some(m)) => {
                 // An absent origin reads as production, as
                 // `RunOrigin::of_read` does for every reader of earlier
@@ -607,6 +607,49 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(id_of(find(root, "p", "project").unwrap()), "ok");
+            },
+        );
+    }
+
+    /// A success without a manifest counts as production, and a head line
+    /// of an event type a newer apb wrote is skipped, not refused.
+    #[test]
+    fn a_success_without_a_manifest_and_with_an_unknown_head_event_counts() {
+        child(
+            "previous_success::tests::a_success_without_a_manifest_and_with_an_unknown_head_event_counts",
+            |root| {
+                seed(
+                    root,
+                    "bare",
+                    10,
+                    crate::manifest::RunOrigin::Production,
+                    "project",
+                    None,
+                    true,
+                    false,
+                    false,
+                );
+                let dir = root.join(".apb/runs/bare");
+                std::fs::remove_file(dir.join("manifest.yaml")).unwrap();
+                let journal = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+                // Insert a newer apb's event after `run_started` and
+                // renumber, so `seq` stays in order.
+                let mut lines: Vec<serde_json::Value> = journal
+                    .lines()
+                    .map(|l| serde_json::from_str(l).unwrap())
+                    .collect();
+                lines.insert(1, serde_json::json!({"ts": 10, "type": "a_future_event"}));
+                let text: String = lines
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        v["seq"] = (i as u64 + 1).into();
+                        format!("{v}\n")
+                    })
+                    .collect();
+                std::fs::write(dir.join("events.jsonl"), text).unwrap();
+                apb_core::run_origin::stamp(&dir, "bare").unwrap();
+                assert_eq!(id_of(find(root, "p", "project").unwrap()), "bare");
             },
         );
     }
