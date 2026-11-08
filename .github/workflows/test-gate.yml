@@ -27,7 +27,7 @@ jobs:
   # Linux: one leg covers both Linux targets. The gnu and musl build legs ran
   # the same host tests on the same OS, so they only repeated this leg.
   # macOS: the arm and Intel legs run on the runners dist builds on
-  # (macos-14 and macos-15-intel), so a platform-specific break still stops
+  # (macos-15 and macos-15-intel), so a platform-specific break still stops
   # the release, now without delaying the build next to it.
   gate:
     name: gate (${{ matrix.name }})
@@ -49,7 +49,7 @@ jobs:
             # as CI. Without one the default is 360 minutes.
             timeout: 30
           - name: macos-arm
-            runner: macos-14
+            runner: macos-15
             linux: false
             # No cache saved on main matches this runner: a cold build plus
             # clippy and the suite. The ceiling is headroom; a stuck TEST is

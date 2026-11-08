@@ -53,10 +53,12 @@ include = ["THIRD-PARTY-NOTICES.txt"]
 # glibc, and the oldest image keeps it running on the most distributions.
 # Ubuntu 22.04 images are deprecated (retired 2027-04-17), so that leg must
 # move before then. The musl binary is static, so its build host does not
-# matter to users.
+# matter to users. The arm macOS build runs on macos-15: GitHub no longer
+# serves dist 0.32's default macos-14 image.
 [dist.github-custom-runners]
 global = "ubuntu-26.04"
 x86_64-unknown-linux-musl = "ubuntu-26.04"
+aarch64-apple-darwin = "macos-15"
 
 # Actions the generated release.yml uses, pinned to full commit SHAs
 # (tag in the comment). Dependabot's github-actions ecosystem bumps these.
