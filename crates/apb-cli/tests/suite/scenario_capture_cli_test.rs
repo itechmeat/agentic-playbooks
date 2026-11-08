@@ -191,16 +191,26 @@ impl Project {
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        let decided = apb()
-            .args(["review", &run_id, "approve", "--decision", "approve"])
-            .current_dir(self.root())
-            .output()
-            .unwrap();
-        assert!(
-            decided.status.success(),
-            "the review decision failed: {}",
-            String::from_utf8_lossy(&decided.stderr)
-        );
+        // The run view can report the gate before the drive accepts a
+        // decision for it (a slow machine), so the decision is retried
+        // while the gate says nothing is pending yet.
+        loop {
+            let decided = apb()
+                .args(["review", &run_id, "approve", "--decision", "approve"])
+                .current_dir(self.root())
+                .output()
+                .unwrap();
+            if decided.status.success() {
+                break;
+            }
+            let stderr = String::from_utf8_lossy(&decided.stderr);
+            assert!(
+                stderr.contains("no review decision pending")
+                    && started.elapsed() < std::time::Duration::from_secs(90),
+                "the review decision failed: {stderr}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
         let status = child.wait().expect("the run ended");
         if !status.success() {
             let why = apb()
