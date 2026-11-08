@@ -3774,12 +3774,17 @@ fn execute_node_kind(
                                         step.agent,
                                     ),
                                 })?;
-                            } else if class == ErrorClass::Transport || class == ErrorClass::Timeout
+                            } else if class == ErrorClass::Transport
+                                || (class == ErrorClass::Timeout && !scripted)
                             {
                                 // A transport error and a timeout break the retry loop for this
                                 // executor and go to fallback. Unchanged by the verdict
                                 // handling above: a step that cannot be re-run usefully is
-                                // still abandoned in favor of the next executor.
+                                // still abandoned in favor of the next executor. A scripted
+                                // timeout is the exception: the scripted agent has no
+                                // session to continue, so the node's own retry budget is
+                                // what replays the captured run's later attempts of the
+                                // visit; the answer book holds exactly what the run made.
                                 break;
                             }
                             // Retry advice and the routing cascade (issue #165

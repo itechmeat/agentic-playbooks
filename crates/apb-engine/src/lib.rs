@@ -22,6 +22,7 @@ pub mod connector;
 pub mod consent;
 pub mod context;
 pub mod control;
+pub mod corrections;
 pub mod decision;
 pub mod decision_channel;
 pub mod diagnostics;
@@ -31,6 +32,7 @@ pub mod error;
 pub mod event;
 pub mod exec_key;
 pub mod execution_identity;
+pub mod follow_up;
 // --- 0.24.0 eval suites ---
 pub mod eval;
 // --- end 0.24.0 eval suites ---
@@ -83,6 +85,7 @@ pub mod run_binaries;
 pub mod run_config;
 pub mod run_definitions;
 pub mod run_doctor;
+pub mod run_end;
 pub mod run_estimate;
 pub mod run_history;
 mod run_lineage;

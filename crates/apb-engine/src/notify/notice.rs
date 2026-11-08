@@ -71,6 +71,7 @@ impl Notice {
             Transition::HostTask => host_task(&playbook, run_id, opened, command),
             Transition::Supervisor => supervisor(&playbook, run_id, opened),
             Transition::Stalled => stalled(&playbook, run_id, events, t),
+            Transition::FollowUp => follow_up(&playbook, run_id, opened),
         };
         lines.push(match crate::people::link::run_link(root, run_id) {
             Some(url) => format!("Open the run: {url}"),
@@ -173,7 +174,10 @@ pub fn command_for(
         Transition::Paused => {
             matches!(a.code, ActionCode::ResumeRun | ActionCode::ResumeWithBudget)
         }
-        Transition::Finished | Transition::Supervisor | Transition::Stalled => false,
+        Transition::Finished
+        | Transition::Supervisor
+        | Transition::Stalled
+        | Transition::FollowUp => false,
     };
     actions
         .iter()
@@ -348,4 +352,54 @@ fn finished(
     let mut lines = vec![format!("Run {run} of {playbook} has ended: {ended}.")];
     lines.extend(headline.map(|h| format!("{h}.")));
     (format!("{playbook} {ended}"), lines)
+}
+
+/// The playbook's follow-up check, read after the run ended: the verdict,
+/// one line per result, and the reason when the check could not be read
+/// or was missed. A notice goes out for every verdict (the person opted
+/// in). The result details come from the journal, where the read scrubbed
+/// them, and the whole text is redacted again below.
+fn follow_up(playbook: &str, run: &str, opened: Option<&EventPayload>) -> (String, Vec<String>) {
+    let (status, verdict, reason, results) = match opened {
+        Some(EventPayload::FollowUpObserved {
+            status,
+            verdict,
+            reason,
+            results,
+            ..
+        }) => (
+            status.as_str(),
+            verdict.as_str(),
+            reason.as_deref().filter(|r| !r.is_empty()),
+            results.as_slice(),
+        ),
+        _ => ("unknown", "unknown", None, &[][..]),
+    };
+    let mut lines = match status {
+        "missed" => vec![format!(
+            "Run {run} of {playbook}: the follow-up check was missed; nothing was read."
+        )],
+        "unknown" => vec![format!(
+            "Run {run} of {playbook}: the follow-up check could not be read."
+        )],
+        _ => vec![format!(
+            "Run {run} of {playbook}: the follow-up check read {verdict}."
+        )],
+    };
+    for r in results {
+        let detail = r
+            .detail
+            .as_deref()
+            .filter(|d| !d.is_empty())
+            .map(|d| format!(" ({d})"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "{} {}: {}{detail}",
+            r.observation, r.rule, r.verdict
+        ));
+    }
+    if let Some(reason) = reason {
+        lines.push(format!("Reason: {reason}"));
+    }
+    (format!("{playbook}: follow-up {verdict}"), lines)
 }

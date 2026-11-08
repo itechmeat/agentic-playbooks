@@ -41,6 +41,20 @@ fn render_types() -> String {
     // numbers on the wire.
     let cfg = Config::new().with_large_int("number");
     let decls = [
+        // The scenario capture of a finished run (PR run-feedback).
+        apb_mcp::tools::scenario_capture::CapturePreview::decl(&cfg),
+        apb_mcp::tools::scenario_capture::CaptureArgs::decl(&cfg),
+        // The corrections ledger (PR run-feedback): the core types and the
+        // view the surfaces answer.
+        apb_core::corrections::CorrectionKind::decl(&cfg),
+        apb_core::corrections::CorrectionStatus::decl(&cfg),
+        apb_core::corrections::Correction::decl(&cfg),
+        apb_core::corrections::FixRecord::decl(&cfg),
+        apb_core::corrections::EvidenceRef::decl(&cfg),
+        apb_core::corrections::Draft::decl(&cfg),
+        apb_mcp::tools::corrections::FixRate::decl(&cfg),
+        apb_mcp::tools::corrections::CorrectionView::decl(&cfg),
+        apb_mcp::tools::corrections::CorrectionsView::decl(&cfg),
         // 0.23.0 run outcome blocks (C1, C7).
         apb_engine::event::CommittedArtifact::decl(&cfg),
         apb_engine::run_outcome::NodeCommits::decl(&cfg),
@@ -53,6 +67,12 @@ fn render_types() -> String {
         apb_engine::run_outcome::baseline::ObservationView::decl(&cfg),
         apb_engine::run_outcome::baseline::BaselineCheckView::decl(&cfg),
         apb_engine::run_outcome::RunBaseline::decl(&cfg),
+        // The follow-up check (PR run-feedback): the outcome block and the
+        // stats.
+        apb_engine::run_outcome::follow_up::RunFollowUp::decl(&cfg),
+        apb_engine::run_outcome::follow_up::FollowUpResultView::decl(&cfg),
+        apb_engine::run_stats::follow_up::FollowUpStats::decl(&cfg),
+        apb_engine::run_stats::follow_up::MetRate::decl(&cfg),
         apb_core::run_notes::Finding::decl(&cfg),
         apb_core::run_notes::NoteWarning::decl(&cfg),
         apb_engine::run_outcome::notes::RunFinding::decl(&cfg),

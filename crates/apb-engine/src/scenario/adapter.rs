@@ -83,6 +83,19 @@ impl ScenarioAdapter<'_> {
             });
             return Ok(r);
         }
+        // The scripted timeout: the failure a deadline kill reports, at
+        // once. Everything after (the `timed_out` status, the node's final
+        // status, the retry the timeout spends on the scripted agent, the
+        // timeout continuation, the supervisor wake `NodeTimeout`) is the
+        // real drive's, exactly as for a real timeout.
+        if a.timed_out {
+            const TIMEOUT_DETAIL: &str = "scenario: the attempt reached its deadline";
+            let message = match a.output.as_deref() {
+                Some(o) if !o.is_empty() => format!("{TIMEOUT_DETAIL}: {o}"),
+                _ => TIMEOUT_DETAIL.to_string(),
+            };
+            return Err(AgentFailure::new(ErrorClass::Timeout, message));
+        }
         let output = a.output.clone().unwrap_or_default();
         match (
             a.status.unwrap_or(ScriptedStatus::Succeeded),
@@ -182,6 +195,7 @@ impl AgentAdapter for ScenarioAdapter<'_> {
 mod tests {
     use super::*;
     use crate::failure_class::{FailureKind, classify};
+    use crate::scenario::session::{ScenarioPrep, ScenarioSession};
 
     /// Each scripted failure kind reads as itself to the failure
     /// classifier, which decides the infrastructure retry, the quota pause
@@ -198,4 +212,63 @@ mod tests {
             assert_eq!(classify(failure_detail(scripted)), kind, "{scripted:?}");
         }
     }
+
+    /// A timed-out answer makes the scripted agent report the failure a
+    /// deadline kill reports: an `AgentFailure` of the timeout class, at
+    /// once, with the output as its detail.
+    #[test]
+    fn a_timed_out_answer_is_a_timeout_failure_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let playbook = apb_core::schema::Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: agent_task, prompt: w }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n",
+        )
+        .unwrap();
+        let scenario: apb_core::scenario::Scenario = yaml_serde::from_str(
+            "schema: 1\nid: s\nanswers:\n  work:\n    - { visit: 1, attempts: [ { timed_out: true, output: partial } ] }\n",
+        )
+        .unwrap();
+        let prep = ScenarioPrep {
+            scenario: scenario.clone(),
+            level: apb_core::scenario::ScenarioLevel::Quick,
+            scenario_digest: apb_core::scenario::scenario_digest(&scenario),
+            max_requests: 0,
+            sent: Default::default(),
+        };
+        let session = std::sync::Arc::new(ScenarioSession::new(&prep, &playbook, dir.path()));
+        super::super::session::register(dir.path(), session);
+        let adapter = ScenarioAdapter {
+            run_dir: dir.path(),
+            node: "work",
+            item: None,
+        };
+        let task = AgentTask {
+            prompt: "w",
+            untrusted_section: None,
+            model: "m",
+            workdir: dir.path(),
+            timeout: Some(std::time::Duration::from_secs(600)),
+            stream_log: None,
+            soul: None,
+            grant_autonomy: false,
+            spawn_env: SPAWN_ENV.get_or_init(Default::default),
+            interactive: false,
+            report_contract: false,
+            node: "work",
+            agent: "scenario",
+            extract: None,
+            status_file: None,
+            hermetic_settings: None,
+            transcript_dir: None,
+            output_limits: Default::default(),
+        };
+        let err = adapter
+            .run(&task)
+            .expect_err("the timed-out answer is a failure");
+        assert_eq!(err.class, ErrorClass::Timeout, "{err:?}");
+        assert!(err.message.contains("deadline"), "{err:?}");
+        assert!(err.message.contains("partial"), "{err:?}");
+        super::super::session::unregister(dir.path());
+    }
+
+    static SPAWN_ENV: std::sync::OnceLock<crate::adapter::SpawnEnv> = std::sync::OnceLock::new();
 }

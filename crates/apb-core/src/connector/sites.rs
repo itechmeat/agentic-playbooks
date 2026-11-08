@@ -1,17 +1,20 @@
 //! Every place a playbook binds connectors: each node's own bindings, a
-//! list node's connector item check under `<node>#check`, and the baseline
-//! check's connector sources under the reserved [`BASELINE_SITE`]. Grant
-//! resolution, effects, the run gate, preflight and the validator all walk
-//! this one list, so a binding site cannot be resolved by one of them and
-//! missed by another.
+//! list node's connector item check under `<node>#check`, and the
+//! connector sources of the baseline check under the reserved
+//! [`BASELINE_SITE`] and of the follow-up check under the reserved
+//! [`FOLLOW_UP_SITE`]. Grant resolution, effects, the run gate, preflight
+//! and the validator all walk this one list, so a binding site cannot be
+//! resolved by one of them and missed by another.
 //!
 //! Sites whose id starts with [`ENGINE_SITE_PREFIX`] belong to the engine:
-//! [`BASELINE_SITE`] and [`NOTIFY_SITE`]. No node may take such an id
-//! (V68), and no caller outside the engine may call under one.
+//! [`BASELINE_SITE`], [`FOLLOW_UP_SITE`] and [`NOTIFY_SITE`]. No node may
+//! take such an id (V68), and no caller outside the engine may call under
+//! one.
 
 use std::borrow::Cow;
 
 use crate::baseline::{BASELINE_SITE, BaselineConnector};
+use crate::follow_up::FOLLOW_UP_SITE;
 use crate::list::{ConnectorCheck, check_site, check_site_node};
 use crate::schema::{ConnectorBinding, FunctionsAllow, Playbook};
 
@@ -34,9 +37,10 @@ pub type Site<'a> = (Cow<'a, str>, Cow<'a, [ConnectorBinding]>);
 impl Playbook {
     /// `(site id, bindings)` for every node, then `(<node>#check, ..)` for
     /// every list node whose item check reads a connector, then
-    /// `(BASELINE_SITE, ..)` when a baseline check reads a connector.
-    /// Baseline sources of one connector merge into one binding, as a node
-    /// binds a connector once.
+    /// `(BASELINE_SITE, ..)` when a baseline check reads a connector and
+    /// `(FOLLOW_UP_SITE, ..)` when the follow-up's check does. Sources of
+    /// one connector on one site merge into one binding, as a node binds a
+    /// connector once.
     pub fn connector_sites(&self) -> impl Iterator<Item = Site<'_>> {
         let nodes = self.nodes.iter().map(|n| {
             (
@@ -52,9 +56,18 @@ impl Playbook {
             ))
         });
         let baseline = self.baseline_bindings();
-        nodes.chain(checks).chain(
-            (!baseline.is_empty()).then_some((Cow::Borrowed(BASELINE_SITE), Cow::Owned(baseline))),
-        )
+        let follow_up: Option<ConnectorBinding> = self
+            .follow_up
+            .as_ref()
+            .and_then(|f| f.check.connector.as_ref())
+            .map(baseline_binding);
+        nodes
+            .chain(checks)
+            .chain(
+                (!baseline.is_empty())
+                    .then_some((Cow::Borrowed(BASELINE_SITE), Cow::Owned(baseline))),
+            )
+            .chain(follow_up.map(|b| (Cow::Borrowed(FOLLOW_UP_SITE), Cow::Owned(vec![b]))))
     }
 
     /// Whether any site binds a connector.
@@ -104,11 +117,14 @@ impl Playbook {
 
 /// A binding site as people read it: `node `<id>``, `the item check of
 /// node `<id>`` for a list node's check, `the baseline check` for the
-/// reserved [`BASELINE_SITE`] and `notifications` for [`NOTIFY_SITE`],
-/// which are not nodes.
+/// reserved [`BASELINE_SITE`], `the follow-up check` for the reserved
+/// [`FOLLOW_UP_SITE`] and `notifications` for [`NOTIFY_SITE`], which are
+/// not nodes.
 pub fn site_label(site: &str) -> String {
     if site == BASELINE_SITE {
         "the baseline check".to_string()
+    } else if site == FOLLOW_UP_SITE {
+        "the follow-up check".to_string()
     } else if site == NOTIFY_SITE {
         "notifications".to_string()
     } else if let Some(node) = check_site_node(site) {
@@ -124,8 +140,9 @@ pub fn check_binding(c: &ConnectorCheck) -> ConnectorBinding {
     single_function_binding(&c.name, c.account.as_deref(), &c.function)
 }
 
-/// The grant a baseline connector source needs, resolved at run start like
-/// a node's: the one function, the one account when named, no call budget.
+/// The grant a baseline or follow-up connector source needs, resolved at
+/// run start like a node's: the one function, the one account when named,
+/// no call budget.
 pub fn baseline_binding(c: &BaselineConnector) -> ConnectorBinding {
     single_function_binding(&c.name, c.account.as_deref(), &c.function)
 }
@@ -203,5 +220,79 @@ edges:
             + YAML.split("nodes:").nth(1).unwrap();
         let p = Playbook::from_yaml(&yaml).unwrap();
         assert!(p.connector_sites().all(|(id, _)| id != BASELINE_SITE));
+    }
+
+    /// A follow-up whose check reads a connector, with its own account.
+    const FOLLOW_YAML: &str = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+follow_up:
+  after: 3d
+  check:
+    id: deal_won
+    description: the deal moved to won
+    connector: { name: crm, account: main, function: get_deal }
+    observe: [{ id: stage, type: field, path: deal.stage, expect: { equals: won } }]
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: agent_task, prompt: hi, profile: x }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: a, to: done }
+"#;
+
+    #[test]
+    fn sites_include_the_follow_up_with_its_binding() {
+        let p = Playbook::from_yaml(FOLLOW_YAML).unwrap();
+        let sites: Vec<(String, Vec<ConnectorBinding>)> = p
+            .connector_sites()
+            .map(|(id, b)| (id.into_owned(), b.into_owned()))
+            .collect();
+        let follow_up = &sites.iter().find(|(id, _)| id == FOLLOW_UP_SITE).unwrap().1;
+        assert_eq!(follow_up.len(), 1);
+        assert_eq!(follow_up[0].name, "crm");
+        assert_eq!(
+            follow_up[0].functions,
+            FunctionsAllow::List(vec!["get_deal".into()])
+        );
+        assert_eq!(follow_up[0].accounts, Some(vec!["main".into()]));
+        // One site per kind: the follow-up's site is its own, even next to
+        // a baseline and nodes on the same connector.
+        assert_eq!(
+            sites.iter().filter(|(id, _)| id == FOLLOW_UP_SITE).count(),
+            1
+        );
+        assert!(p.binds_connectors());
+
+        // No connector in the check, no follow-up site.
+        let script = FOLLOW_YAML
+            .replace(
+                "    connector: { name: crm, account: main, function: get_deal }\n",
+                "    script: scripts/deal.sh\n",
+            )
+            .replace(
+                "    observe: [{ id: stage, type: field, path: deal.stage, expect: { equals: won } }]\n",
+                "    observe: [{ id: stage, type: number, path: deal.stage, expect: { equals: 1 } }]\n",
+            );
+        let p = Playbook::from_yaml(&script).unwrap();
+        assert!(p.connector_sites().all(|(id, _)| id != FOLLOW_UP_SITE));
+        // No block, no site.
+        let plain = FOLLOW_YAML.split("follow_up:").next().unwrap().to_string()
+            + "nodes:"
+            + FOLLOW_YAML.split("\nnodes:").nth(1).unwrap();
+        let p = Playbook::from_yaml(&plain).unwrap();
+        assert!(p.connector_sites().all(|(id, _)| id != FOLLOW_UP_SITE));
+    }
+
+    #[test]
+    fn the_follow_up_site_is_named_as_the_follow_up_check() {
+        assert_eq!(site_label(FOLLOW_UP_SITE), "the follow-up check");
+        assert!(is_engine_site(FOLLOW_UP_SITE));
+        // It stays an engine site of its own, not the baseline's.
+        assert_ne!(FOLLOW_UP_SITE, BASELINE_SITE);
+        assert_eq!(site_label(BASELINE_SITE), "the baseline check");
     }
 }

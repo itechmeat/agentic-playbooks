@@ -100,6 +100,8 @@ mod intent_cli_test;
 #[path = "suite/evidence_cli_test.rs"]
 mod evidence_cli_test;
 // Unix-only: kills run drivers by process group.
+#[path = "suite/corrections_cli_test.rs"]
+mod corrections_cli_test;
 #[cfg(unix)]
 #[path = "suite/journal_corpus_test.rs"]
 mod journal_corpus_test;
@@ -164,6 +166,9 @@ mod runs_detail_cli_test;
 mod runs_search_cli_test;
 #[path = "suite/sandbox_exec_test.rs"]
 mod sandbox_exec_test;
+#[cfg(unix)]
+#[path = "suite/scenario_capture_cli_test.rs"]
+mod scenario_capture_cli_test;
 #[cfg(unix)]
 #[path = "suite/scenario_fixture.rs"]
 mod scenario_fixture;

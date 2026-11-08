@@ -577,3 +577,70 @@ fn a_deep_eval_of_a_global_playbook_is_refused() {
     assert!(err.contains("project"), "{err}");
     assert!(p.started().is_empty(), "{}", p.started());
 }
+
+/// The scripted timeout: the attempt ends as a timeout at once, with no
+/// waiting. On a node without a retry left the node finishes `timed_out`
+/// well inside its 600 s node timeout; with one retry left the node's own
+/// budget pays for the next scripted attempt, so `[timed_out, succeeded]`
+/// makes the node succeed in the same visit.
+#[test]
+fn a_timed_out_attempt_ends_at_once_and_uses_the_node_retry() {
+    let p = Project::new(&["timeoutloop"]);
+    let started = std::time::Instant::now();
+    // The fixture carries no scenarios directory; the test writes its
+    // scenario at run time.
+    fs::create_dir_all(p.playbook("timeoutloop").join("evals/scenarios")).unwrap();
+
+    // No retry left: the node finishes timed_out and the run fails.
+    p.edit_playbook("timeoutloop", "max_retries: 1", "max_retries: 0");
+    p.scenario(
+        "timeoutloop",
+        "once",
+        "schema: 1\nid: once\nanswers:\n  work:\n    - { visit: 1, attempts: [ { timed_out: true } ] }\nexpect:\n  run: { outcome: [failed] }\n  finish: failed\n  status: { work: timed_out }\n  visits: { work: 1 }\n",
+    );
+    let (code, r) = p.play("timeoutloop", "quick", "once", &[]);
+    assert_eq!(
+        (code, r["verdict"].as_str()),
+        (0, Some("passed")),
+        "{:?}\n{r:#}",
+        failed_checks(&r)
+    );
+    assert_eq!(
+        attempts(&r, "work"),
+        vec![vec![(1, "timed_out".into(), "agent".into(), "used".into())]]
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "the run waited for the node timeout: {:?}",
+        started.elapsed()
+    );
+
+    // One retry left: the second answer is the same visit's second
+    // attempt, and the node succeeds.
+    p.edit_playbook("timeoutloop", "max_retries: 0", "max_retries: 1");
+    p.scenario(
+        "timeoutloop",
+        "once",
+        "schema: 1\nid: once\nanswers:\n  work:\n    - { visit: 1, attempts: [ { timed_out: true }, { status: succeeded } ] }\nexpect:\n  run: { outcome: [succeeded] }\n  finish: done\n  status: { work: succeeded }\n  visits: { work: 1 }\n",
+    );
+    let (code, r) = p.play("timeoutloop", "quick", "once", &[]);
+    assert_eq!(
+        (code, r["verdict"].as_str()),
+        (0, Some("passed")),
+        "{:?}\n{r:#}",
+        failed_checks(&r)
+    );
+    assert_eq!(
+        attempts(&r, "work"),
+        vec![vec![
+            (1, "timed_out".into(), "agent".into(), "used".into()),
+            (2, "succeeded".into(), String::new(), "used".into()),
+        ]]
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "the run waited for the node timeout: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(p.started(), "", "a quick run started a program");
+}

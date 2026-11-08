@@ -22,10 +22,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     Decided, EVIDENCE_KEPT, KnownProblem, OBSERVED_RUNS_KEPT, Observation, ProblemStatus,
-    RecheckRecord, RecheckVerdict, ReportedText, TEXTS_KEPT, leading,
+    RecheckRecord, RecheckVerdict, leading,
 };
-use crate::fsutil::{DirLock, atomic_write_private, lock_dir};
 use crate::scope::Scope;
+use crate::signed_store::{self, SignedDoc, StoreError};
 
 /// The file format this build reads and writes.
 pub const SCHEMA: u32 = 1;
@@ -45,6 +45,16 @@ pub enum ProblemsError {
     Refused(String),
     #[error(transparent)]
     Io(#[from] io::Error),
+}
+
+impl From<StoreError> for ProblemsError {
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::InvalidId(id) => ProblemsError::InvalidId(id),
+            StoreError::NewerSchema(s) => ProblemsError::NewerSchema(s),
+            StoreError::Io(e) => ProblemsError::Io(e),
+        }
+    }
 }
 
 /// One playbook's known problems.
@@ -74,8 +84,13 @@ pub struct Loaded {
     pub unsigned_problems: usize,
 }
 
-impl ProblemFile {
-    fn new(scope: Scope, playbook: &str) -> Self {
+impl SignedDoc for ProblemFile {
+    const MAC_DOMAIN: &'static str = MAC_DOMAIN;
+    const SCHEMA: u32 = SCHEMA;
+    const DIR: &'static str = "problems";
+    const ENTRIES_KEY: &'static str = "problems";
+
+    fn fresh(scope: Scope, playbook: &str) -> Self {
         ProblemFile {
             schema: SCHEMA,
             scope: scope.as_str().to_string(),
@@ -84,15 +99,24 @@ impl ProblemFile {
         }
     }
 
-    fn signed_bytes(&self) -> io::Result<Vec<u8>> {
-        let value = serde_json::to_value(ProblemFile {
-            mac: None,
-            ..self.clone()
-        })
-        .map_err(io::Error::other)?;
-        bytes_of(&value)
+    fn identity(&self) -> (&str, &str) {
+        (&self.scope, &self.playbook)
     }
 
+    fn mac(&self) -> Option<&str> {
+        self.mac.as_deref()
+    }
+
+    fn set_mac(&mut self, mac: Option<String>) {
+        self.mac = mac;
+    }
+
+    fn set_schema(&mut self, schema: u32) {
+        self.schema = schema;
+    }
+}
+
+impl ProblemFile {
     /// The problem `id`.
     pub fn get(&self, id: &str) -> Option<&KnownProblem> {
         self.problems.iter().find(|p| p.id == id)
@@ -264,31 +288,7 @@ impl KnownProblem {
         } else {
             (&mut self.symptoms, Some(self.symptom.clone()))
         };
-        match texts.iter_mut().find(|t| t.text == text) {
-            Some(t) => {
-                t.runs = t.runs.saturating_add(1);
-                t.last_seen_ms = t.last_seen_ms.max(at_ms);
-            }
-            None => texts.push(ReportedText {
-                text: text.to_string(),
-                runs: 1,
-                last_seen_ms: at_ms,
-            }),
-        }
-        // Full: the wording seen longest ago goes, never the leading one nor
-        // the one just reported (a new wording must be able to build up runs).
-        if texts.len() > TEXTS_KEPT {
-            let lead = leading(texts).map(|t| t.text.clone());
-            if let Some(i) = texts
-                .iter()
-                .enumerate()
-                .filter(|(_, t)| Some(&t.text) != lead.as_ref() && t.text != text)
-                .min_by_key(|(_, t)| (t.last_seen_ms, t.runs))
-                .map(|(i, _)| i)
-            {
-                texts.remove(i);
-            }
-        }
+        super::keep_wording(texts, text, at_ms);
         let lead = leading(texts).map(|t| t.text.clone());
         if lead != shown {
             if workaround {
@@ -310,21 +310,9 @@ pub enum PersonDecision {
     Reopen,
 }
 
-fn checked_id(playbook: &str) -> Result<(), ProblemsError> {
-    if crate::registry::is_safe_segment(playbook) {
-        Ok(())
-    } else {
-        Err(ProblemsError::InvalidId(playbook.to_string()))
-    }
-}
-
 /// The directory of `scope`'s files under the execution root `root`.
 pub fn dir(root: &Path, scope: Scope) -> PathBuf {
-    root.join(".apb").join("problems").join(scope.as_str())
-}
-
-fn file(root: &Path, scope: Scope, playbook: &str) -> PathBuf {
-    dir(root, scope).join(format!("{playbook}.json"))
+    signed_store::dir(root, "problems", scope)
 }
 
 /// Reads `playbook`'s file without changing anything: an empty signed file
@@ -332,87 +320,13 @@ fn file(root: &Path, scope: Scope, playbook: &str) -> PathBuf {
 /// write it (or it does not parse). Only a signed file's problems are ever
 /// read: an unsigned file's texts and ids reach no surface.
 pub fn read(root: &Path, scope: Scope, playbook: &str) -> Result<Loaded, ProblemsError> {
-    checked_id(playbook)?;
-    let raw = match std::fs::read(file(root, scope, playbook)) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok(Loaded {
-                file: ProblemFile::new(scope, playbook),
-                signed: true,
-                unsigned_problems: 0,
-            });
-        }
-        Err(e) => return Err(e.into()),
-    };
-    let unsigned = |count: usize| {
-        Ok(Loaded {
-            file: ProblemFile::new(scope, playbook),
-            signed: false,
-            unsigned_problems: count,
-        })
-    };
-    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&raw) else {
-        return unsigned(0);
-    };
-    let count = value
-        .get("problems")
-        .and_then(|p| p.as_array())
-        .map_or(0, Vec::len);
-    let mac = value
-        .as_object_mut()
-        .and_then(|o| o.remove("mac"))
-        .and_then(|m| m.as_str().map(str::to_string));
-    let signed_here = match (mac, bytes_of(&value)) {
-        (Some(mac), Ok(bytes)) => crate::run_origin::verify_tag(MAC_DOMAIN, &bytes, &mac),
-        _ => false,
-    };
-    if !signed_here {
-        return unsigned(count);
-    }
-    let schema = value.get("schema").and_then(|v| v.as_u64()).unwrap_or(0);
-    if schema > u64::from(SCHEMA) {
-        return Err(ProblemsError::NewerSchema(
-            u32::try_from(schema).unwrap_or(u32::MAX),
-        ));
-    }
-    let Ok(f) = serde_json::from_value::<ProblemFile>(value) else {
-        return unsigned(count);
-    };
-    // The MAC covers the scope and id inside the file: a signed file put
-    // under another playbook's name does not count for it.
-    if f.scope != scope.as_str() || f.playbook != playbook {
-        return unsigned(count);
-    }
-    Ok(Loaded {
-        file: f,
-        signed: true,
-        unsigned_problems: 0,
-    })
-}
-
-/// The bytes a MAC covers: the JSON value without `mac`, every object's
-/// keys sorted explicitly (so the bytes never depend on whether a crate in
-/// the build turns on serde_json's `preserve_order`).
-fn bytes_of(value: &serde_json::Value) -> io::Result<Vec<u8>> {
-    serde_json::to_vec(&canonical(value)).map_err(io::Error::other)
-}
-
-/// `value` with every object's keys in sorted order.
-fn canonical(value: &serde_json::Value) -> serde_json::Value {
-    use serde_json::Value;
-    match value {
-        Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            Value::Object(
-                keys.into_iter()
-                    .map(|k| (k.clone(), canonical(&map[k])))
-                    .collect(),
-            )
-        }
-        Value::Array(items) => Value::Array(items.iter().map(canonical).collect()),
-        other => other.clone(),
-    }
+    Ok(
+        signed_store::read::<ProblemFile>(root, scope, playbook).map(|l| Loaded {
+            file: l.file,
+            signed: l.signed,
+            unsigned_problems: l.unsigned_entries,
+        })?,
+    )
 }
 
 /// Changes `playbook`'s file under its lock: `change` gets the signed file
@@ -424,24 +338,89 @@ pub fn update<R>(
     playbook: &str,
     change: impl FnOnce(&mut ProblemFile) -> Result<(R, bool), ProblemsError>,
 ) -> Result<R, ProblemsError> {
-    checked_id(playbook)?;
-    let _held: DirLock = lock_dir(&dir(root, scope), &format!("{playbook}.json.lock"))?;
-    // An unsigned file reads as a fresh one: it is replaced.
-    let mut f = read(root, scope, playbook)?.file;
-    let (out, changed) = change(&mut f)?;
-    if changed {
-        write(root, scope, playbook, f)?;
-    }
-    Ok(out)
+    signed_store::update(root, scope, playbook, change)
 }
 
-fn write(root: &Path, scope: Scope, playbook: &str, f: ProblemFile) -> Result<(), ProblemsError> {
-    let mut f = ProblemFile {
-        mac: None,
-        schema: SCHEMA,
-        ..f
-    };
-    f.mac = Some(crate::run_origin::tag(MAC_DOMAIN, &f.signed_bytes()?)?);
-    let bytes = serde_json::to_vec_pretty(&f).map_err(io::Error::other)?;
-    Ok(atomic_write_private(&file(root, scope, playbook), &bytes)?)
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+
+    /// The bytes the pre-extraction code wrote for one problem, kept so the
+    /// generic store's MAC coverage is provably unchanged: this file must
+    /// still verify after the move.
+    const FIXTURE_BYTES: &str = r#"{
+  "schema": 1,
+  "scope": "project",
+  "playbook": "p",
+  "observed_runs": [
+    "p-1"
+  ],
+  "problems": [
+    {
+      "id": "kp-4a4045f986",
+      "scope": {
+        "kind": "node",
+        "name": "work"
+      },
+      "symptom": "the parser rejects an empty header line",
+      "symptoms": [
+        {
+          "text": "the parser rejects an empty header line",
+          "runs": 1,
+          "last_seen_ms": 1700000000000
+        }
+      ],
+      "origin": {
+        "type": "finding",
+        "kind": "tool_problem"
+      },
+      "evidence": [
+        {
+          "run_id": "p-1",
+          "seq": 9,
+          "node": "work"
+        }
+      ],
+      "runs": 1,
+      "first_seen_ms": 1700000000000,
+      "last_seen_ms": 1700000000000,
+      "status": "open"
+    }
+  ],
+  "mac": "a238430ff0e0166bd7bd78eb4653e56e933571180f8e9edc9ea790e3a505a4c3"
+}"#;
+
+    /// The installation key the fixture was written under, seeded into the
+    /// test's config dir so the MAC verifies whatever machine runs this.
+    const FIXTURE_KEY: &str =
+        "probe-key-please-replace-0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn a_file_the_previous_code_wrote_still_verifies() {
+        let _lock = crate::env_test_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        std::fs::write(cfg.path().join("run-origin.key"), FIXTURE_KEY).unwrap();
+        let prev = std::env::var_os("APB_CONFIG_DIR");
+        // SAFETY: under env_test_lock, the one env change at a time.
+        unsafe { std::env::set_var("APB_CONFIG_DIR", cfg.path()) };
+        let root = tmp.path();
+        let scope = Scope::Project;
+        let path = dir(root, scope).join("p.json");
+        std::fs::create_dir_all(dir(root, scope)).unwrap();
+        std::fs::write(&path, FIXTURE_BYTES).unwrap();
+        let loaded = read(root, scope, "p");
+        // SAFETY: under env_test_lock.
+        unsafe {
+            match &prev {
+                Some(v) => std::env::set_var("APB_CONFIG_DIR", v),
+                None => std::env::remove_var("APB_CONFIG_DIR"),
+            }
+        }
+        let loaded = loaded.unwrap();
+        assert!(loaded.signed, "the fixture bytes did not verify");
+        assert_eq!(loaded.file.playbook, "p");
+        assert_eq!(loaded.file.problems.len(), 1);
+        assert_eq!(loaded.unsigned_problems, 0);
+    }
 }

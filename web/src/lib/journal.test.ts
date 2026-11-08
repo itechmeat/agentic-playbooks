@@ -321,7 +321,7 @@ describe('notification rows', () => {
       { seq: 5, ts: 5, type: 'connector_call', node_id: '@notify', origin: 'notify', connector: 'telegram', function: 'send_message', outcome: 'ok' },
       { seq: 6, ts: 6, type: 'send_intent_recorded', node: 'post', connector: 'slack', function: 'send_message', label: 'x' },
       { seq: 7, ts: 7, type: 'connector_call', node_id: '@notify', origin: 'notify', connector: 'telegram', function: 'send_message', outcome: 'rate_limited' },
-      { seq: 8, ts: 8, type: 'connector_call', node_id: '@notify', origin: 'reconcile', connector: 'telegram', function: 'get_updates', outcome: 'ok' },
+      { seq: 8, ts: 8, type: 'connector_call', node_id: '@notify', origin: 'reconcile', connector: 'telegram', function: 'send_message', outcome: 'ok' },
     ] as WfEvent[])
     expect(entries.map((e) => e.note)).toEqual([
       'notifications on: telegram/me about review, finished (from run)',
@@ -331,6 +331,25 @@ describe('notification rows', () => {
       'notification sent through telegram.send_message',
       undefined,
       'notification through telegram.send_message failed (rate_limited)',
+      undefined,
+    ])
+  })
+})
+
+describe('follow-up rows', () => {
+  it('says what the follow-up check read, skipping the follow-up word when the check is unnamed', () => {
+    const entries = runEventJournal([
+      { seq: 1, ts: 1, type: 'follow_up_observed', check: 'deal_won', status: 'observed', verdict: 'met' },
+      { seq: 2, ts: 2, type: 'follow_up_observed', check: 'deal_won', status: 'observed', verdict: 'not_met' },
+      { seq: 3, ts: 3, type: 'follow_up_observed', check: '', status: 'unknown', verdict: 'met' },
+      { seq: 4, ts: 4, type: 'follow_up_observed', check: 'deal_won', status: 'missed', verdict: '' },
+      { seq: 5, ts: 5, type: 'follow_up_observed' },
+    ] as unknown as WfEvent[])
+    expect(entries.map((e) => e.note)).toEqual([
+      'follow-up deal_won: met',
+      'follow-up deal_won: not_met',
+      'met',
+      'follow-up deal_won',
       undefined,
     ])
   })

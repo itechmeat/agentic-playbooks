@@ -3331,7 +3331,7 @@ A transcript holds whatever the agent printed or read, secrets included, so it
 must never reach git. APB keeps `<project>/.apb/.gitignore` listing its
 machine-local paths (`workspace.local`, `runs/`, `cache/`, `trash/`,
 `backup-*/`, `workdir.lock`, `locks/`, `decisions.jsonl`, `memory/`,
-`problems/`, `scenario-runs/`, `launch-challenges/`, `handoff/`): `apb init` writes it and every run makes sure of
+`problems/`, `corrections/`, `scenario-runs/`, `launch-challenges/`, `handoff/`): `apb init` writes it and every run makes sure of
 it before its first node starts, adding only the lines that are missing and
 leaving your own lines as they are. Do not remove `runs/` from it.
 
@@ -4652,6 +4652,59 @@ each check and observation with both values and the verdict; `apb stats`
 counts each observation's results across runs.
 
 <!-- 0.24.0 eval suites -->
+## follow_up (read once after the run ended)
+
+Optional. A baseline says what the world looked like before and after; a
+follow-up says whether the run held up later: a deploy healthy an hour
+after the run, a customer reply within three days, a CRM deal moved to
+`won` days later. One check in the baseline check's shape, read once
+`after` the run's successful end by a detached reader, and journaled as
+one `follow_up_observed` event.
+
+```yaml
+follow_up:
+  after: 3d             # 1m to 30d: how long after the successful end
+  grace: 2d             # optional, default 24h, at most 7d: how late a read may still be taken
+  check:                # one check in the baseline check's shape
+    id: deal_won
+    description: the deal moved to won
+    connector: { name: crm, account: default, function: get_deal, args: { id: "{{params.deal_id}}" } }
+    observe:
+      - { id: stage, type: field, path: deal.stage, expect: { equals: won } }
+```
+
+**When it is read.** A run ends successfully and a detached waker reads
+the check at `run_finished` + `after`. `apb resume --all` reads due
+follow-ups when the machine was off, and re-arms the ones still ahead. A
+read later than `grace` past its time is journaled `missed` without
+reading the source. A failed, aborted or resumed-and-unfinished run has
+no follow-up, and a run has at most one.
+
+**What it shows.** The verdict is `met` when every observation met its
+rule, `not_met` when any did not, `unknown` when a source could not be
+read. The run outcome shows a pending follow-up with its due time and an
+observed one with its verdict and results; `not_met` marks the run as
+needing a look. `apb stats` counts met, not met, unknown, missed and
+pending per version, and an opt-in `follow_up` notification transition
+(not in the default subscription) sends one notice for the observation.
+
+**Rules and sources.** The check reads a connector or a script; the
+connector is granted under the engine site `@follow_up`. Absolute rules
+only: `equals`, `at_most`, `at_least`, `empty`, `contains`; a `change`
+rule is V186 (a follow-up has no before value). `project_checks` is V185
+(the project's own tests days later measure the commits made since, not
+this run). `after` outside 1 minute to 30 days is V183, `grace` outside
+1 minute to 7 days is V184.
+
+**Older versions of apb.** An apb older than this change drops the block
+on load and arms nothing: the run still works, the follow-up just never
+fires. The run's snapshot still holds the block, so a later apb's `apb
+resume --all` reads the follow-up (within `grace`) or journals it
+`missed`. A follow-up is guaranteed only when this apb (or a later one)
+drives the run's end or runs `apb resume --all`. An older apb refuses to
+resume or continue a run whose journal already has a
+`follow_up_observed`.
+
 ## Eval cases (evals/)
 
 A playbook can carry an eval suite under `.apb/playbooks/<id>/evals/`: one

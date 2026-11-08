@@ -7,7 +7,8 @@
 //!   `items` with `judge`, `judge` with `attempts`), a wait answer names not
 //!   exactly one of `elapsed`, `signal` and `timed_out`, an attempt's `then`
 //!   has no `question`, a question is both answered and timed out (or
-//!   neither), a succeeded attempt names a failure kind, a goal key is not
+//!   neither), a timed-out attempt names any field but an optional output, a
+//!   succeeded attempt names a failure kind, a goal key is not
 //!   an index.
 //! - **V147** (error): an answer key: an unknown node; an answer kind the
 //!   node does not take (`items` on a node without `list:` among them;
@@ -121,6 +122,18 @@ fn wait_outcomes(w: &WaitAnswer) -> usize {
 }
 
 fn attempt_shape(a: &AttemptAnswer, at: &str, out: &mut Vec<String>) {
+    if a.timed_out
+        && (a.status.is_some()
+            || a.failure_kind.is_some()
+            || !a.outputs.is_empty()
+            || a.check.is_some()
+            || a.read_only.is_some()
+            || a.question.is_some())
+    {
+        out.push(format!(
+            "{at}: a timed-out attempt carries only an optional output"
+        ));
+    }
     if a.status == Some(ScriptedStatus::Succeeded) && a.failure_kind.is_some() {
         out.push(format!("{at}: a succeeded attempt has no `failure_kind`"));
     }
@@ -779,4 +792,57 @@ pub fn validate_all(playbook_dir: &Path, playbook: &Playbook) -> Vec<Issue> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn problems(yaml: &str) -> Vec<String> {
+        let s: Scenario = yaml_serde::from_str(yaml).unwrap();
+        file_problems(&s, "s")
+    }
+
+    /// A timed-out attempt carries only an optional output: V146 for every
+    /// other field, none for a bare answer, an output, or a question's
+    /// `then`.
+    #[test]
+    fn a_timed_out_attempt_takes_only_an_output() {
+        let base = "schema: 1\nid: s\nanswers:\n  work:\n    - { visit: 1, attempts: [ ";
+        for extra in [
+            "status: succeeded",
+            "status: failed",
+            "failure_kind: transient",
+            "outputs: { a: 1 }",
+            "check: reject",
+            "read_only: { dirty: [src/a.rs] }",
+            "question: { text: q, answer: a }",
+        ] {
+            let yaml = format!("{base}{{ timed_out: true, {extra} }} ] }}\n");
+            let p = problems(&yaml);
+            assert!(
+                p.iter()
+                    .any(|m| m.contains("a timed-out attempt carries only an optional output")),
+                "{yaml}: {p:?}"
+            );
+        }
+        for ok in [
+            "{ timed_out: true }",
+            "{ timed_out: true, output: partial }",
+            // As a question's `then` it is an ordinary attempt.
+            "{ question: { text: q, answer: a }, then: { timed_out: true } }",
+        ] {
+            let yaml = format!("{base}{ok} ] }}\n");
+            assert!(problems(&yaml).is_empty(), "{yaml}: {:?}", problems(&yaml));
+        }
+    }
+
+    /// A question whose own attempt is the timed-out answer: `then` is
+    /// absent (no question follows), so the question rule and the
+    /// timed-out rule do not collide.
+    #[test]
+    fn a_question_with_a_timed_out_attempt_needs_no_then() {
+        let yaml = "schema: 1\nid: s\nanswers:\n  work:\n    - { visit: 1, attempts: [ { question: { text: q, answer: a }, then: { timed_out: true } } ] }\n";
+        assert!(problems(yaml).is_empty(), "{:?}", problems(yaml));
+    }
 }

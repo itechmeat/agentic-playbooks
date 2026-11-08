@@ -167,6 +167,8 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "playbook_known_problems",
         "known_problem_decide",
         "known_problem_recheck",
+        "playbook_corrections",
+        "correction_decide",
         "playbook_discover",
         "playbook_discover_results",
         "playbook_discover_save",
@@ -197,6 +199,7 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "judge_run_values",
         "playbook_scenarios",
         "playbook_scenario_run",
+        "run_scenario_capture",
     ];
     for name in expected {
         assert!(
@@ -1467,7 +1470,7 @@ async fn run_answer_requires_exactly_one_of_run_id_or_token() {
 
 // Cross-workspace reads (spec 7, Task 10). Env-dependent tests are
 // serialized with a lock, so as not to race APB_CONFIG_DIR in parallel.
-static CROSS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static CROSS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn seed_noagent_run(root: &Path) {
     apb_core::registry::init_project(root).unwrap();
@@ -2690,6 +2693,8 @@ mod billing;
 // The run budget on the playbook tools (the pre-start decision, the start
 // answer, the plan and playbook_get estimates).
 mod budget;
+// The corrections ledger: the list, a person's decision, and no run step.
+mod corrections;
 #[path = "../../../apb-engine/tests/support/driver_reaper.rs"]
 mod driver_reaper;
 // The launch policy of agents on the start and authoring tools.
@@ -2701,6 +2706,8 @@ mod problems;
 mod quality;
 // A run's secret values on the run surfaces, in every spelling apb writes.
 mod redaction;
+// The scenario capture preview on the run tools.
+mod scenario;
 
 /// Every next-action code maps to a tool this server really serves.
 #[test]

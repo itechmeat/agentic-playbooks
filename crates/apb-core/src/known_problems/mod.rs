@@ -351,6 +351,38 @@ pub struct ReportedText {
     pub last_seen_ms: u64,
 }
 
+/// Counts one run's `text` among `texts`: a known wording's runs and
+/// last-seen grow, a new one is pushed, and a full list loses the wording
+/// seen longest ago, never the leading one nor the one just reported (a
+/// new wording must be able to build up runs). The shared half of
+/// [`crate::known_problems::store::KnownProblem::add_wording`] the
+/// corrections ledger reuses.
+pub fn keep_wording(texts: &mut Vec<ReportedText>, text: &str, at_ms: u64) {
+    match texts.iter_mut().find(|t| t.text == text) {
+        Some(t) => {
+            t.runs = t.runs.saturating_add(1);
+            t.last_seen_ms = t.last_seen_ms.max(at_ms);
+        }
+        None => texts.push(ReportedText {
+            text: text.to_string(),
+            runs: 1,
+            last_seen_ms: at_ms,
+        }),
+    }
+    if texts.len() > TEXTS_KEPT {
+        let lead = leading(texts).map(|t| t.text.clone());
+        if let Some(i) = texts
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| Some(&t.text) != lead.as_ref() && t.text != text)
+            .min_by_key(|(_, t)| (t.last_seen_ms, t.runs))
+            .map(|(i, _)| i)
+        {
+            texts.remove(i);
+        }
+    }
+}
+
 /// The wording most runs reported (the earliest of a tie), if any.
 pub fn leading(texts: &[ReportedText]) -> Option<&ReportedText> {
     texts

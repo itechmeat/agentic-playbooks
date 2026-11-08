@@ -292,6 +292,8 @@ mod context_test;
 mod control_liveness_test;
 #[path = "suite/control_test.rs"]
 mod control_test;
+#[path = "suite/corrections_test.rs"]
+mod corrections_test;
 #[path = "suite/decision_channel_test.rs"]
 mod decision_channel_test;
 #[path = "suite/decision_test.rs"]
@@ -335,6 +337,8 @@ mod finish_answer_test;
 mod finish_context_test;
 #[path = "suite/fit_test.rs"]
 mod fit_test;
+#[path = "suite/follow_up_test.rs"]
+mod follow_up_test;
 #[cfg(unix)]
 #[path = "suite/fork_failure_test.rs"]
 mod fork_failure_test;
@@ -465,6 +469,8 @@ mod result_snapshot_test;
 mod run_search_test;
 #[path = "suite/save_nudge_test.rs"]
 mod save_nudge_test;
+#[path = "suite/scenario_capture_test.rs"]
+mod scenario_capture_test;
 #[cfg(unix)]
 #[path = "suite/scenario_parity_test.rs"]
 mod scenario_parity_test;

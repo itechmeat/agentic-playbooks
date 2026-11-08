@@ -2,14 +2,17 @@ import type {
   Evidence,
   EvidenceBasis,
   EvidenceSource,
+  FollowUpResultView,
   FreshnessState,
   Gap,
   GapKind,
   NeedsLook,
   RunFinding,
+  RunFollowUp,
   RunWarning,
 } from './api.gen'
 import { EVIDENCE_BASIS_LABELS, EVIDENCE_SOURCE_LABELS, FRESHNESS_LABELS, GAP_LABELS } from './consts.gen'
+import { when } from './pause'
 
 // The run page's verdict panel: pure formatting of the run's human outcome
 // (`RunDetail.outcome`). The panel keeps what the engine checked apart from
@@ -107,4 +110,25 @@ export function goalReachedText(reached: boolean | undefined): string {
   if (reached === true) return 'yes'
   if (reached === false) return 'no'
   return 'not known'
+}
+
+// The follow-up block's status line: the status word with the time that
+// matters (`due <utc>` while pending) and, once observed, the verdict
+// (`met`, not `not_met`) and the read time (`read <utc>`). Every other
+// status shows as the bare word; its reason line carries why.
+export function followUpStatusLine(f: RunFollowUp): string {
+  const parts = [f.status]
+  if (f.status === 'observed') {
+    if (f.verdict) parts.push(resultText(f.verdict))
+    if (f.observed_at_ms !== undefined) parts.push(`read ${when(f.observed_at_ms)}`)
+  }
+  if (f.status === 'pending' && f.due_at_ms !== undefined) parts.push(`due ${when(f.due_at_ms)}`)
+  return parts.length === 1 ? parts[0] : `${parts[0]}: ${parts.slice(1).join(', ')}`
+}
+
+// One result of the follow-up read: `equals won on stage (won)`, bare
+// without a detail.
+export function followUpResultLine(r: FollowUpResultView): string {
+  const detail = r.detail ? ` (${r.detail})` : ''
+  return `${r.rule} on ${r.observation}${detail}`
 }

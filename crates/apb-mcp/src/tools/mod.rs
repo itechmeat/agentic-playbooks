@@ -6,6 +6,7 @@ pub mod actions;
 pub mod budget;
 pub mod candidate;
 pub mod capture;
+pub mod corrections;
 pub mod decision;
 pub mod discover;
 pub mod evidence;
@@ -21,6 +22,7 @@ pub mod results;
 pub mod retro;
 pub mod run;
 pub mod scenario;
+pub mod scenario_capture;
 pub mod stats;
 pub mod supervisor;
 pub mod trial;
@@ -84,6 +86,19 @@ impl From<RegistryError> for ToolError {
         match e {
             RegistryError::NotFound(w) => ToolError::NotFound(w),
             other => ToolError::Engine(other.to_string()),
+        }
+    }
+}
+
+impl From<apb_core::signed_store::StoreError> for ToolError {
+    fn from(e: apb_core::signed_store::StoreError) -> Self {
+        use apb_core::signed_store::StoreError;
+        match e {
+            StoreError::InvalidId(id) => ToolError::NotFound(format!("playbook `{id}`")),
+            StoreError::NewerSchema(n) => ToolError::Engine(format!(
+                "the file has schema {n}, newer than this apb understands; upgrade apb to read it"
+            )),
+            StoreError::Io(e) => ToolError::Engine(e.to_string()),
         }
     }
 }

@@ -18,6 +18,7 @@
 mod ctx;
 pub(crate) mod project;
 pub(crate) mod read;
+pub(crate) use ctx::ReadCtx;
 
 use std::collections::BTreeMap;
 

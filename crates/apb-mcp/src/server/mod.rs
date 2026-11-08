@@ -22,6 +22,7 @@ use crate::tools::{self, ToolError};
 mod args;
 pub use args::*;
 
+mod corrections;
 mod decision;
 mod discover;
 mod evidence;
@@ -651,6 +652,7 @@ impl WfMcp {
             + Self::decision_router()
             + Self::quality_router()
             + Self::problems_router()
+            + Self::corrections_router()
             + Self::discover_router()
             + Self::judge_router()
             + Self::scenario_router()
@@ -704,4 +706,4 @@ pub async fn serve_stdio(root: PathBuf, mode: ServeMode) -> anyhow::Result<()> {
 #[cfg(test)]
 mod read_only_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

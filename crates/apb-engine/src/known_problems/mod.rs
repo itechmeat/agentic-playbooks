@@ -50,8 +50,22 @@ impl From<ProblemsError> for EngineError {
     }
 }
 
+impl From<apb_core::signed_store::StoreError> for EngineError {
+    fn from(e: apb_core::signed_store::StoreError) -> Self {
+        match e {
+            apb_core::signed_store::StoreError::InvalidId(id) => {
+                EngineError::Invalid(format!("playbook id `{id}` is not a safe name"))
+            }
+            apb_core::signed_store::StoreError::NewerSchema(s) => EngineError::Conflict(format!(
+                "the store file has schema {s}, newer than this apb understands"
+            )),
+            apb_core::signed_store::StoreError::Io(io) => EngineError::Io(io),
+        }
+    }
+}
+
 /// The playbook a run started, and the scope it came from.
-fn started(events: &[Event]) -> Option<(String, Scope)> {
+pub(crate) fn started(events: &[Event]) -> Option<(String, Scope)> {
     let id = events.iter().find_map(|e| match &e.payload {
         EventPayload::RunStarted { playbook, .. } => Some(playbook.clone()),
         _ => None,

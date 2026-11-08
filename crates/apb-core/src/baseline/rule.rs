@@ -1,5 +1,6 @@
 //! The comparison of an observation's before and after values under its
-//! rule. Pure: it reads nothing and journals nothing.
+//! rule, and the check of one value with no before value (a follow-up).
+//! Pure: it reads nothing and journals nothing.
 //!
 //! An unknown on either side, or a missing before snapshot, gives an
 //! unknown verdict: nothing is guessed. `regressed` is true only when the
@@ -99,7 +100,9 @@ pub struct Comparison {
 }
 
 impl Comparison {
-    fn unknown(detail: impl Into<String>) -> Self {
+    /// An unknown comparison with the reason: the one constructor a
+    /// follow-up read uses for a rule its block does not state.
+    pub fn unknown(detail: impl Into<String>) -> Self {
         Comparison {
             verdict: Verdict::Unknown,
             regressed: None,
@@ -143,6 +146,36 @@ pub fn compare(before: Option<&Observation>, after: &Observation, rule: &Rule) -
             fields(b, a, rule)
         }
         _ => Comparison::unknown("the before and after values do not have the same type"),
+    }
+}
+
+/// One observation checked under `rule` with no before value (a
+/// follow-up): `equals`, `at_most`, `at_least`, `empty` and `contains` only;
+/// a `change` rule is unknown. `regressed` is always `None`; `detail` is
+/// the observed value as people read it. An unknown verdict keeps its
+/// reason as the detail instead: the observation's own, or why the rule
+/// does not apply.
+pub fn check(observation: &Observation, rule: &Rule) -> Comparison {
+    let value = match observation {
+        Observation::Unknown { reason } => return Comparison::unknown(reason.clone()),
+        Observation::Value { value } => value,
+    };
+    if let Rule::Change(_) = rule {
+        return Comparison::unknown(format!(
+            "rule `{}` needs a before value, and a follow-up has none",
+            rule.describe()
+        ));
+    }
+    // An absolute rule reads only the after side, so the value as its own
+    // before gives the value's verdict.
+    let c = compare(Some(observation), observation, rule);
+    if c.verdict == Verdict::Unknown {
+        return c;
+    }
+    Comparison {
+        verdict: c.verdict,
+        regressed: None,
+        detail: Some(value.to_string()),
     }
 }
 
@@ -351,5 +384,118 @@ mod tests {
                 .misfit(ObservationType::Number)
                 .is_some()
         );
+    }
+
+    fn field(s: &str) -> Observation {
+        Observation::value(ObservedValue::Text(s.into()))
+    }
+
+    fn flag(b: bool) -> Observation {
+        Observation::value(ObservedValue::Bool(b))
+    }
+
+    /// One value under each absolute rule, on the observation types it
+    /// fits: the verdict is the value's, never a regression, and the detail
+    /// is the value as people read it.
+    #[test]
+    fn check_meets_and_misses_each_absolute_rule() {
+        let zero = Rule::Equals(Scalar::Number(0.0));
+        let won = Rule::Equals(Scalar::Text("won".into()));
+        let yes = Rule::Equals(Scalar::Bool(true));
+        let bug = Rule::Contains(Scalar::Text("bug".into()));
+        let cases = [
+            // number
+            (num(0.0), &zero, Verdict::Met, "0"),
+            (num(37.0), &zero, Verdict::NotMet, "37"),
+            (num(3.0), &Rule::AtMost(3.0), Verdict::Met, "3"),
+            (num(4.0), &Rule::AtMost(3.0), Verdict::NotMet, "4"),
+            (num(5.0), &Rule::AtLeast(5.0), Verdict::Met, "5"),
+            (num(4.5), &Rule::AtLeast(5.0), Verdict::NotMet, "4.5"),
+            // list
+            (list(&[]), &Rule::Empty, Verdict::Met, "0 item(s)"),
+            (list(&["a"]), &Rule::Empty, Verdict::NotMet, "1 item(s)"),
+            (list(&["a", "bug"]), &bug, Verdict::Met, "2 item(s)"),
+            (list(&["bugs"]), &bug, Verdict::NotMet, "1 item(s)"),
+            // field
+            (field("won"), &won, Verdict::Met, "`won`"),
+            (field("lost"), &won, Verdict::NotMet, "`lost`"),
+            (flag(true), &yes, Verdict::Met, "true"),
+            (flag(false), &yes, Verdict::NotMet, "false"),
+        ];
+        for (observation, rule, verdict, detail) in cases {
+            let c = check(&observation, rule);
+            let at = format!("{} on {observation:?}", rule.describe());
+            assert_eq!(c.verdict, verdict, "{at}");
+            assert_eq!(c.regressed, None, "{at}");
+            assert_eq!(c.detail.as_deref(), Some(detail), "{at}");
+        }
+    }
+
+    /// A rule on a type it does not fit (V64 refuses it) has no answer, and
+    /// says why.
+    #[test]
+    fn check_of_a_rule_that_does_not_fit_is_unknown() {
+        let cases = [
+            (list(&["a"]), Rule::Equals(Scalar::Text("a".into()))),
+            (list(&["a"]), Rule::AtMost(3.0)),
+            (field("won"), Rule::AtLeast(1.0)),
+            (num(0.0), Rule::Empty),
+            (field("a bug"), Rule::Contains(Scalar::Text("bug".into()))),
+        ];
+        for (observation, rule) in cases {
+            let c = check(&observation, &rule);
+            let at = format!("{} on {observation:?}", rule.describe());
+            assert_eq!((c.verdict, c.regressed), (Verdict::Unknown, None), "{at}");
+            assert!(
+                c.detail.as_deref().unwrap().contains("does not apply"),
+                "{at}: {c:?}"
+            );
+        }
+    }
+
+    /// A follow-up has no before value, so no `change` rule has an answer.
+    #[test]
+    fn check_of_a_change_rule_is_unknown() {
+        for (observation, change) in [
+            (num(3.0), Change::Decrease),
+            (num(3.0), Change::NoIncrease),
+            (list(&["a"]), Change::NoNew),
+            (list(&["a"]), Change::Shrink),
+            (field("won"), Change::Unchanged),
+        ] {
+            let rule = Rule::Change(change);
+            let c = check(&observation, &rule);
+            assert_eq!(
+                (c.verdict, c.regressed),
+                (Verdict::Unknown, None),
+                "{}",
+                rule.describe()
+            );
+            assert!(
+                c.detail.as_deref().unwrap().contains("before value"),
+                "{c:?}"
+            );
+        }
+    }
+
+    /// An unknown observation is unknown under every rule, with its reason.
+    #[test]
+    fn check_of_an_unknown_observation_is_unknown() {
+        let unknown = Observation::unknown("timeout");
+        for rule in [
+            Rule::Equals(Scalar::Number(0.0)),
+            Rule::AtMost(3.0),
+            Rule::Empty,
+            Rule::Contains(Scalar::Text("bug".into())),
+            Rule::Change(Change::Decrease),
+        ] {
+            let c = check(&unknown, &rule);
+            assert_eq!(
+                (c.verdict, c.regressed, c.detail.as_deref()),
+                (Verdict::Unknown, None, Some("timeout")),
+                "{}",
+                rule.describe()
+            );
+        }
     }
 }

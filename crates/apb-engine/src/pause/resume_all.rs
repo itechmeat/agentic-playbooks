@@ -200,9 +200,34 @@ pub fn resume_all_as(root: &Path, ask: &LaunchAsk<'_>) -> Result<Vec<ResumeAllEn
         let state = RunState::fold(&events);
         let status = state.run_status;
         // A finished run whose notify waker died with the machine: one
-        // sweep sends what is due (nothing is listed for it).
+        // sweep sends what is due (nothing is listed for it). Its due
+        // follow-up is read now (or journaled `missed` past its grace);
+        // one still ahead gets a waker.
         if status.is_terminal() {
             crate::notify::retry::sweep_finished(root, &run_dir, &run_id, &events);
+            // A run the trust check refuses prints one line and is left
+            // alone.
+            if matches!(
+                crate::follow_up::state(
+                    crate::legacy_snapshot::load_run_playbook(&run_dir).as_ref(),
+                    &events,
+                    true,
+                ),
+                crate::follow_up::FollowUpState::Pending { .. }
+            ) && crate::gate::check_resume(root, &run_id, true).is_err()
+            {
+                eprintln!(
+                    "apb: follow-up of run `{run_id}` not read: this run directory was not created by apb on this machine"
+                );
+            }
+            if let Err(e) =
+                crate::follow_up::read::observe_due(root, &run_id, u64::try_from(now).unwrap_or(0))
+            {
+                eprintln!("apb: follow-up of run `{run_id}`: {e}");
+            }
+            if let Err(e) = crate::follow_up::arm(root, &run_dir, &run_id) {
+                eprintln!("apb: follow-up of run `{run_id}`: {e}");
+            }
             continue;
         }
         // A released run's own driver exited on purpose: its waker resumes

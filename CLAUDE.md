@@ -157,7 +157,13 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `store` the signed per-playbook file under a lock, `recheck` the pure
   rule that settles a recheck and the changed passages), the one scrubber
   every stored or sent text goes through (`scrub.rs`: `Scrubber` and its
-  `flags` check), the
+  `flags` check), the one signed store behind both per-playbook ledgers
+  (`signed_store.rs`: `SignedDoc`, `read`, `update`, the MAC, the lock and
+  the no-clobber write), the corrections ledger
+  (`corrections/`: `mod` the types and the fold, `normalize` the key,
+  `store` the `SignedDoc` impl), the follow-up check a playbook reads
+  once after a successful run (`follow_up.rs`, with `validate/follow_up`
+  for V183 to V186), the
   one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   (`stats.rs`: rates, medians, the Wilson interval), copying a playbook into
   another scope's store (`scope_move.rs`, under the source's pointer lock,
@@ -231,7 +237,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   machine's suite approvals (`eval.rs`; `has_suite` is `suite.yaml` or a
   case file, so `evals/scenarios/` alone is no suite), scenario files
   (`scenario/`: `format` the types of
-  `evals/scenarios/<name>.yaml`, `mod` the loader of named regular files
+  `evals/scenarios/<name>.yaml` and the scripted timeout attempt answer
+  (`timed_out: true`, left out of the serialized form when false so
+  digests stay stable), `mod` the loader of named regular files
   below the playbook, the digest and `staleness`, `validate` V146-V151 and
   `validate_all` behind `apb validate`), the judge node digest
   (`judge::node_digest`, `j1:` over state, questions, thresholds and
@@ -328,6 +336,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   publish nodes' lines and done lines, `lists` the list
   nodes' counts, item-check evidence and items that need a look, `summary` the
   human outcome every surface shows and the "needs a look" marker,
+  `follow_up` the follow-up block every outcome surface shows,
   `route_evidence` what the journal proves about routing: raw traversal
   records, deliveries normalized by source execution, segment and edge, and
   routing episodes only a complete one of which supports a negative claim,
@@ -344,7 +353,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `stats_run` one run as the report reads it, `route` for membership over established
   definitions and the reasons a node did not run, `findings` for findings and baseline
   results, `quality` for the levels of signed grades per comparable key and
-  their `--compare` deltas, `interventions` the pure fold of a run's
+  their `--compare` deltas, `follow_up` the per-version counts of a
+  playbook's follow-up (met over observed only; unknown and missed apart),
+  `interventions` the pure fold of a run's
   interventions by category (review channel, questions, automatic
   decisions, operator, corrections through the supervisor channel, engine
   actions apart) with `known in N of M runs` for a fact an older writer did
@@ -482,7 +493,14 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   section and the supervisor line),
   the tree-scoped busy lock (`workdir.rs`), attempt failure
   classification and the bounded infrastructure backoff (`failure_class.rs`),
-  the immutable write-once run manifest (`manifest.rs`, with `RunOrigin`:
+  what an ending run records (`run_end.rs`: the one call every end path
+  makes, the known problems and the corrections), the corrections a run
+  contributes (`corrections/`: `extract` the sightings of a journal and
+  `observe` the strict read into the playbook's ledger), the follow-up
+  check a playbook reads once after a successful run (`follow_up/`:
+  `read` the one due check and `waker` the detached reader's body, behind
+  the `@follow_up` site and the `follow_up_observed` checkpoint), the
+  immutable write-once run manifest (`manifest.rs`, with `RunOrigin`:
   production, scenario, eval or unknown, absent read as production, and
   `RunOrigin::of_read`, where a manifest that does not read is unknown and
   so no history), the run limits a start records from the profiles it
@@ -497,7 +515,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   core loader, `decide` the scripted decision provider of a quick run,
   `adapter` the scripted agent behind the real attempt loop, `bind` the
   drive adapter (`drive`, `DriveRequest`, `Drive`, the book's use as the
-  report's boundaries and keys), `report` the report built from the run
+  report's boundaries and keys), `capture` the capture of a finished run
+  as a scenario (a strict whole-journal fold, every gap named, nothing
+  written), `report` the report built from the run
   with every expectation a named check and the trace, `store` `enter` over
   `guard::enter`, `DRIVE`, `execute`, `report.json`, the results index
   `index/<playbook>.jsonl` and its retention; the entry is
@@ -635,9 +655,13 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `apb eval --level` uses too; `Scope` picks the project or the global
   store, the runs always land in the project; a smoke run needs a cap and
   an approved version and is refused from a run step and a dashboard
-  without keys),
+  without keys) and `scenario_capture` the preview of a run's capture
+  (a save is a person's act on the CLI or the dashboard, never MCP),
   `problems` for a
   playbook's known problems, a person's decision, a recheck and a scan,
+  `corrections` for a playbook's corrections ledger (the list and a
+  person's dismiss or reopen; marking a fix is the CLI's and the
+  dashboard's),
   `results` for a run's result snapshots (`run_results`, `run_result_read`,
   the raw and live reads and `apb results clean`), `evidence` for
   `run_evidence_read` and `apb evidence read` (a session found by id, a
@@ -701,7 +725,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `--promote --expect <v>@<digest> [--ack <id>]` line), `judge.rs` is `apb
   judge eval|examples|save-example|values`, `demo.rs` is `apb demo`
   (`--run` starts the real `apb run demo-report --detach`), `problems.rs` is `apb
-  problems`, `discover.rs` is `apb discover`, `results.rs` is `apb results`
+  problems`, `corrections.rs` is `apb corrections` (the list, the draft's
+  show, a person's fixed, dismiss and reopen), `discover.rs` is `apb discover`, `results.rs` is `apb results`
   (`show`, `clean`, the evidence claims) and the results lines of `apb runs <id>`,
   `evidence.rs` is `apb evidence read`, `actions.rs` prints next
   actions and start actions (`apb runs <id>`, `apb wait`, `--follow-auto`),
@@ -716,7 +741,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `scenario.rs` is `apb eval --level quick|smoke` (the version's validator
   errors refused first, the smoke checks, one bounded `apb __scenario-run`
   child per scenario through `apb_mcp::tools::scenario::play`) and `apb
-  eval --scenarios`.
+  eval --scenarios`; `scenario_capture.rs` is `apb scenario capture`
+  (the preview, the terminal question, `--save --yes`).
 - `apb-server` - axum web API: a thin router in `lib.rs`, one module per
   resource in `routes/` (`estimate` for the estimate route and the run and
   resume budgets, `fit` for the fit report (`?version=` for one version),
@@ -731,7 +757,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   machine's passkey store (the assertion challenge for a decision
   derived from the run, gate, decision, request and nonce the engine
   re-derives), `problems` for
-  a playbook's known problems, `results` for a run's result snapshots
+  a playbook's known problems, `corrections` for a playbook's corrections
+  ledger, `results` for a run's result snapshots
   (the listing, one entry, the raw download and the live comparison),
   `discover` for history discovery, loopback
   only; `auth.rs` inserts the `RequestChannel` (keyless, bearer, session)
@@ -809,6 +836,39 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `Host`, no forwarding header) and never takes or returns a path.
   `rules/1` still reads tool facts from claude sessions only (codex facts
   are deferred to a `rules/2`, see `docs/QUALITY.md`).
+- **The corrections ledger** (`docs/CORRECTIONS.md`): every run end adds
+  what people corrected there (a non-approving review note, a
+  supervisor-channel note aimed at a node, a human answer, a rejection)
+  to its playbook's signed, scrubbed store (`.apb/corrections/<scope>/<id>.json`,
+  on `apb_core::signed_store`), grouped by an exact key (an engine
+  fingerprint for a rejection, else the tokens of the scrubbed text). An
+  entry that recurs in 2 runs is `proposed` with a draft prompt line for
+  a person to edit and apply with the existing ways of changing a
+  playbook; the person marks the version that carries the fix, the entry
+  is `fixed`, and it is `reopened` when its rate per run on that version
+  does not fall below the base rate snapshotted at marking. The ledger is
+  shown only to people: no prompt, supervisor line or run surface reads
+  it, and every entry point, reads included, is refused from a run step;
+  MCP lists and dismisses or reopens, marking a fix is the CLI's and the
+  dashboard's. Collecting goes through `crate::run_end::record`, the one
+  call every end path makes, which also records the known problems.
+- **The follow-up check** (`docs/HOWTO-authoring.md` "follow_up"): a
+  playbook's `follow_up:` is one baseline-shaped check read once `after`
+  a successful run ended, for production runs only, by a detached waker
+  or by `apb resume --all` when the machine was off, and journaled as one
+  `follow_up_observed` event appended after `run_finished`. That event is
+  a checkpoint, so an apb older than this change refuses to resume or
+  continue the run (its read-only surfaces skip and count the event) -
+  this is the accepted cost. The reader holds the lease
+  `follow-up-<finished seq>`, re-reads the journal under it, and trusts
+  the run first (`gate::check_resume`): a run directory this machine did
+  not create is never read. The verdict is computed from the raw values
+  in memory and the observations, details and reason are scrubbed with
+  the run's scrubber before the event is appended; with the run's secrets
+  unresolved the event is `unknown` with no observations. `unknown` and
+  `missed` never count as met, on any surface. The connector reads under
+  the engine site `@follow_up`; the validator refuses a `project_checks`
+  source (V185) and a `change` rule (V186).
 - **Result snapshots** (`docs/RESULTS.md`): a node that declares
   `results:` keeps a snapshot at every settlement of its work (`succeeded`,
   `failed`, `timed_out`; a cache hit after its restore, the finish answer,

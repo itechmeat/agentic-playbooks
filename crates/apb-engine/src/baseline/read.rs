@@ -215,7 +215,7 @@ fn connector(check: &BaselineCheck, conn: &BaselineConnector, ctx: &ReadCtx<'_>)
     );
     let inputs = vec![format!("{}.{}", conn.name, conn.function)];
     let read = ConnectorRead {
-        site: apb_core::baseline::BASELINE_SITE,
+        site: ctx.site,
         name: &conn.name,
         account: conn.account.as_deref(),
         function: &conn.function,

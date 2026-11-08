@@ -37,6 +37,7 @@ the last three are asked for by name:
 | `host_task` | A host task waits for the host driving the run to carry it out and submit it |
 | `supervisor` | A failed or timed-out step waits for the run's supervisor to retry it, continue from another step, or stop the run |
 | `stalled` | A step stopped retrying: the same rejection came back `stall_after` times in a row (opt-in, like `host_task` and `supervisor`) |
+| `follow_up` | The playbook's `follow_up` check was read after the run ended: one notice for the observation, for every verdict (opt-in, like `host_task`; not in the default subscription) |
 
 `host_task` and `supervisor` are sent while the wait is still open: the
 attempt waiting for the host and the run waiting for its supervisor check

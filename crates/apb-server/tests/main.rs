@@ -50,6 +50,8 @@ mod bind_interlock_test;
 mod budget_api_test;
 #[path = "suite/connectors_api_test.rs"]
 mod connectors_api_test;
+#[path = "suite/corrections_api_test.rs"]
+mod corrections_api_test;
 #[path = "suite/current_api_test.rs"]
 mod current_api_test;
 #[path = "suite/discover_api_test.rs"]
@@ -86,6 +88,8 @@ mod run_secrets_api_test;
 mod runs_api_test;
 #[path = "suite/runs_watch_test.rs"]
 mod runs_watch_test;
+#[path = "suite/scenario_capture_api_test.rs"]
+mod scenario_capture_api_test;
 #[path = "support/secret_runs.rs"]
 mod secret_runs;
 #[path = "suite/stats_api_test.rs"]

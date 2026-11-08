@@ -723,7 +723,7 @@ attempts after the judge is unavailable):
 
 | Node | Answer |
 |------|--------|
-| `agent_task`, `prompt`, a `finish` with a prompt | `attempts`: a list of attempts, each with `status` (`succeeded` or `failed`), `failure_kind` (`transient`, also written `infrastructure`, `quota`, `auth`, `budget`, `agent`), `output`, `outputs` (the declared fields), `check` (`pass` or `reject`, the success or completion check), `question` (`{ text, answer }` or `{ text, timeout: true }`) with `then` (the attempt after the answer) and `read_only` (`{ dirty: [paths] }`) |
+| `agent_task`, `prompt`, a `finish` with a prompt | `attempts`: a list of attempts, each with `status` (`succeeded` or `failed`), `failure_kind` (`transient`, also written `infrastructure`, `quota`, `auth`, `budget`, `agent`), `output`, `outputs` (the declared fields), `check` (`pass` or `reject`, the success or completion check), `question` (`{ text, answer }` or `{ text, timeout: true }`) with `then` (the attempt after the answer), `read_only` (`{ dirty: [paths] }`) and `timed_out` (a boolean, false by default) |
 | any node with `list:` | `items` by item id (`"*"` for every item not listed), each a list of attempts or one attempt; `source` lists the items when the list reads an external source |
 | `script` | `script`: `{ exit, stdout, stderr }` |
 | `human_review` | `review`: `{ decision, note }` |
@@ -739,6 +739,16 @@ A scripted attempt leaves what an agent would: a `succeeded` one writes a
 so a node with `require_verdict` reads it as the agent's own report of
 success or failure, never as an attempt that ended without a verdict.
 A `failed` one with another kind is a process failure and writes none.
+
+`timed_out: true` ends the attempt as a timeout at once, with no waiting:
+the scripted agent reports what an agent killed at its deadline reports,
+and everything after the attempt (the retries, the fallbacks, the node's
+final status) is the real drive's, exactly as for a real timeout. It
+carries nothing else: no `status`, `failure_kind`, `outputs`, `check`,
+`read_only` or `question` beside it, only the optional `output` (the text
+the attempt left). It may stand as the `then` of a question. The field is
+left out of the serialized form when false, so the digest of a scenario
+without it is unchanged.
 
 `judge_edges` rides along with any kind (or alone): answers for the judge
 edges out of the node, keyed by edge address (`id:<id>` or
@@ -856,6 +866,82 @@ held to it, but its file problems still are.
 - **V151** (warning): a visit answers more attempts than the node's
   `max_retries` allows (infrastructure and quota failures, which retry out
   of their own budget, are not counted).
+
+## Capturing a run as a scenario
+
+```
+apb scenario capture <run-id> --name <slug> [--node <id> ...] [--save] [--yes] [--json]
+```
+
+`apb scenario capture` reads a finished run's journal and builds the
+scenario that replays it: one answer per node execution, taken from the
+journal, in the same shape as a hand-written file. Without `--save` it
+prints the preview: the YAML, the warnings, the count of redacted texts
+and the digest, and on a terminal asks `Save as <path>? [y/N]`; a yes
+saves with the preview's digest. `--save` without a terminal needs
+`--yes`. `--node` (repeatable) narrows the asserted `expect.status` and
+`expect.visits` to the named nodes; the answers are always captured whole.
+
+The run must be a finished production run whose journal reads strictly
+whole: the lossy tail read a report forgives would silently drop facts
+from a capture that must replay exactly.
+
+What the capture writes:
+
+- one answer per node execution from the journal: the attempts (their
+  statuses, failure kinds, outputs, questions, rejections and timeouts), a
+  script's `exit` and `stdout`, a review decision, judge answers, waits,
+  child results and the publish consent;
+- `expect.run.outcome`, `expect.finish`, `expect.status` and
+  `expect.visits` from what the run did, `expect.templates_empty: report`
+  (a real run may legitimately render an empty reference), `baseline:
+  skip` when the playbook has a baseline check, and the script goal
+  criteria from the run's `goal_checked`.
+
+Every text that goes into the file (an attempt's output, a review note, a
+question and its answer, the instruction, a param value) passes the run's
+scrubber, and JSON values are redacted the same way; the preview shows how
+many texts the scrubber changed, and warns that a redaction can change
+routing.
+
+The save is two steps, and both are a person's act: a preview bound to
+its digest, then a save that recomputes the capture and is refused when
+the digest no longer matches (`stale_preview`). MCP
+`run_scenario_capture { run_id, name, nodes? }` and
+`POST /api/runs/{id}/scenario-capture` only ever preview: MCP writes
+nothing and its description says to show the YAML to the person, who
+saves it with `apb scenario capture` or on the dashboard. A preview is
+refused from a run step. The write never replaces a file: a second save
+of one name is refused `scenario_exists`.
+
+A capture is refused with every gap named and nothing written:
+
+| Gap | When |
+|-----|------|
+| `not_finished` | the run did not end (its outcome is neither `succeeded` nor `failed`) |
+| `aborted` | the run was aborted: a scenario has no answer that stops a run |
+| `journal_unreadable` | the strict journal read fails: an event type this apb does not know after the last checkpoint, or a torn or broken line |
+| `unknown_events` | the journal skipped an event of an unknown type, wherever it sits; its meaning cannot be replayed |
+| `not_production` | the run's manifest origin is not production (an eval or scenario run) |
+| `secrets_unresolved` | the run's secret values cannot be read, so its texts cannot be scrubbed |
+| `host_mode` | the run asked for a host task |
+| `baseline_enforced` | the run's playbook enforced its baseline check |
+| `directive` | an act with no boundary moved the run: a supervisor `node_retry` or `run_continue_from`, a patch, a profile rebind, a revival, a withdrawn review |
+| `param_withheld` | a param the run treats as sensitive is declared without a default, so it cannot be written into the file |
+| `list_node` | a list node: its item attempts are keyed across batches, which the format cannot replay |
+| `cache_hit` | a node execution was served from the node cache, so the journal holds no attempt for it |
+| `fatal_rejection` | an attempt was rejected fatally; the format has no answer for it |
+| `live_question` | a live agent asked and got its answer inside a running attempt; the format scripts only a question that ends its attempt |
+| `judge_cancelled` | a judge decision was cancelled |
+| `judge_edge_address` | a judge decision carries no edge addresses (an older journal) |
+| `wait_signal` | a signalled wait whose signal the journal does not hold |
+| `attempt_status` | an attempt ended in a state the format cannot script (`interrupted`, `cancelled`, an unknown word), or a timed-out script node |
+| `unknown_node` | a `--node` name the playbook does not have |
+| `credential_shaped` | text that still looks like a credential after scrubbing |
+
+The capture asserts what the run did. A person edits `expect` (and the
+answers) to what the playbook should do and keeps the file as the
+regression scenario.
 
 ## The repository's own suite
 

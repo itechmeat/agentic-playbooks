@@ -70,6 +70,7 @@ impl BaselineRun<'_> {
             events,
             guard_tree: true,
             scripts_label: "baseline scripts",
+            site: apb_core::baseline::BASELINE_SITE,
         }
     }
 }

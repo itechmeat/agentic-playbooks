@@ -239,6 +239,12 @@ pub struct AttemptAnswer {
     /// What the read-only check of a `read_only` node finds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only: Option<ReadOnlyAnswer>,
+    /// The attempt ends as a timeout at once: the scripted agent reports what
+    /// an agent killed at its deadline reports, and nothing waits. Left out
+    /// of the serialized form when false, so the digest of a scenario without it
+    /// is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timed_out: bool,
 }
 
 /// The verdict of a node's `success_check` or completion check.
@@ -539,6 +545,8 @@ answers:
     - { visit: 2, playbook: { status: succeeded, output: { pr_url: "x" } } }
   deploy_wait:
     - { visit: 1, wait: { elapsed: true } }
+  flaky_deploy:
+    - { visit: 1, attempts: [ { timed_out: true, output: "half written" } ] }
   ship:
     - { visit: 1, publish: { decision: approve, status: succeeded } }
 baseline: { before: { unowned: { count: 37 } }, after: { unowned: { count: 0 } } }
@@ -605,6 +613,14 @@ expect:
             })
         ));
         assert!(s.answers["deploy_wait"][0].wait.as_ref().unwrap().elapsed);
+        assert!(
+            s.answers["flaky_deploy"][0].attempts[0].timed_out,
+            "the timed-out answer reads"
+        );
+        assert_eq!(
+            s.answers["flaky_deploy"][0].attempts[0].output.as_deref(),
+            Some("half written")
+        );
         assert!(matches!(s.baseline, Some(BaselineAnswer::Observed { .. })));
         assert_eq!(s.goal["1"], GoalAnswer::Fail);
         assert_eq!(s.expect.route.as_ref().unwrap().path, ["start", "intake"]);
@@ -642,5 +658,75 @@ expect:
         ] {
             assert!(parse(bad).is_err(), "accepted: {bad}");
         }
+    }
+
+    /// A timed-out answer carries `timed_out: true` with an optional output,
+    /// and nothing else. A child answer has no timed-out status, so the word
+    /// is still refused there.
+    #[test]
+    fn a_timed_out_answer_is_an_attempt_with_only_an_output() {
+        let s = parse(
+            "schema: 1\nid: x\nanswers: { a: [ { visit: 1, attempts: [ { timed_out: true } ] } ] }\n",
+        )
+        .unwrap();
+        let a = &s.answers["a"][0].attempts[0];
+        assert!(a.timed_out);
+        assert_eq!(a.status, None);
+        let s = parse(
+            "schema: 1\nid: x\nanswers: { a: [ { visit: 1, attempts: [ { timed_out: true, output: partial } ] } ] }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            s.answers["a"][0].attempts[0].output.as_deref(),
+            Some("partial")
+        );
+        // A child answer's status is a `ScriptedStatus`, which has no
+        // timed-out word: the parse itself refuses it.
+        assert!(parse(
+            "schema: 1\nid: x\nanswers: { c: [ { visit: 1, playbook: { status: timed_out } } ] }\n",
+        )
+        .is_err());
+        // Left out of the serialized form when false, so the digest of
+        // every scenario without it is unchanged.
+        let v = serde_json::to_value(AttemptAnswer::default()).unwrap();
+        assert!(v.as_object().unwrap().get("timed_out").is_none(), "{v:#}");
+    }
+
+    /// The digest the previous apb computed over the worked example, taken
+    /// before `timed_out` existed.
+    const EXAMPLE_DIGEST_BEFORE_TIMED_OUT: &str =
+        "sha256:7af6dad8734f87e9e82e511eed0f1040d2f6e98530ed24f460d08f5b72040a77";
+
+    /// A scenario file that does not use `timed_out` keeps the digest any
+    /// older apb computed: stripping the timed-out answer from the worked
+    /// example reconstructs the pre-change file, and its digest is the
+    /// pre-change constant.
+    #[test]
+    fn a_scenario_without_timed_out_keeps_its_digest() {
+        let mut s = parse(EXAMPLE).unwrap();
+        for visits in s.answers.values_mut() {
+            for v in visits.iter_mut() {
+                v.attempts.retain(|a| !a.timed_out);
+            }
+            // A visit whose only answer was the timed-out one is gone with
+            // it; a node whose only visit is gone is gone with it.
+            visits.retain(|v| {
+                !v.attempts.is_empty()
+                    || v.script.is_some()
+                    || v.review.is_some()
+                    || v.judge.is_some()
+                    || !v.judge_edges.is_empty()
+                    || !v.items.is_empty()
+                    || v.source.is_some()
+                    || v.playbook.is_some()
+                    || v.wait.is_some()
+                    || v.publish.is_some()
+            });
+        }
+        s.answers.retain(|_, visits| !visits.is_empty());
+        assert_eq!(
+            crate::scenario::scenario_digest(&s),
+            EXAMPLE_DIGEST_BEFORE_TIMED_OUT
+        );
     }
 }

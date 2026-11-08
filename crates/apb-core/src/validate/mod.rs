@@ -14,6 +14,7 @@ mod connectors;
 mod decisions;
 mod edges;
 mod evidence;
+mod follow_up;
 mod forks;
 mod graph;
 pub mod guarded;
@@ -365,6 +366,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_playbook_ref(playbook, &mut r); // V22
     check_connectors(playbook, ctx, &mut r); // V23-V26, V42, V43, V69, V84
     baseline::check_baseline(playbook, ctx, &mut r); // V62-V67
+    follow_up::check_follow_up(playbook, ctx, &mut r); // V183-V186
     check_cache(playbook, &mut r); // V27, V28, V29
     check_edges(playbook, &mut r); // V30, V34
     check_interactive(playbook, &mut r); // V31, V32

@@ -7,7 +7,8 @@
 //! exactly as before.
 //!
 //! Submodules: `claims` (evidence and gaps), `freshness` (whether a
-//! check still describes the tree the run left), `baseline` (the baseline check's view), `notes` (findings and
+//! check still describes the tree the run left), `baseline` (the baseline check's view), `follow_up` (the
+//! follow-up check's view), `notes` (findings and
 //! warnings), `calls` (connector calls by what they say about the outcome),
 //! `commits` (the commits and their `Apb-Run` trailers), `graph` (what the
 //! journal proves about every node and edge, over `route_evidence`, with
@@ -22,6 +23,7 @@ pub mod baseline;
 pub mod calls;
 pub mod claims;
 pub mod commits;
+pub mod follow_up;
 pub mod freshness;
 pub mod graph;
 pub mod intents;
@@ -36,12 +38,13 @@ pub mod summary;
 
 pub use baseline::{RunBaseline, baseline_from};
 pub use commits::{NodeCommits, TrailerState, commit_lines, commits_from_events};
+pub use follow_up::{FollowUpResultView, RunFollowUp, follow_up_from};
 pub use graph::{EdgeRun, EdgeState, GraphInput, RunGraph};
 pub use intents::{RunIntent, intents_from, outcome_intents};
 pub use lists::ListOutcome;
 pub use notes::RunNotes;
 pub use publish::{RunPublish, publish_from};
-pub use summary::{AGENT_SUMMARY_TITLE, NeedsLook, OutcomeSummary};
+pub use summary::{AGENT_SUMMARY_TITLE, NeedsLook, NeedsLookReason, OutcomeSummary};
 
 use serde::Serialize;
 
@@ -129,16 +132,38 @@ impl RunView {
     /// The run's playbook snapshot and the blocks read against it, parsed
     /// once, for a surface that shows them next to the outcome.
     pub fn readout(&self, run_dir: &Path) -> RunReadout {
-        self.readout_of(crate::legacy_snapshot::load_run_playbook(run_dir))
+        let playbook = crate::legacy_snapshot::load_run_playbook(run_dir);
+        // The follow-up's state reads the manifest origin, which the
+        // journal alone does not carry: a scenario or eval run never
+        // scheduled its follow-up.
+        let production =
+            crate::manifest::RunOrigin::of_read(&crate::manifest::read(run_dir)).is_production();
+        self.readout_of_with(playbook, production)
     }
 
     /// [`RunView::readout`] over a playbook snapshot the caller already
     /// parsed.
     pub fn readout_of(&self, playbook: Option<apb_core::schema::Playbook>) -> RunReadout {
+        // No run directory here, so the manifest origin is not read: the
+        // surfaces that call this serve a run's own pages, and a journaled
+        // `follow_up_observed` implies a production run anyway. A pending
+        // follow-up of a scenario or eval run reads as scheduled here;
+        // `readout` corrects it with the origin.
+        self.readout_of_with(playbook, true)
+    }
+
+    /// [`RunView::readout_of`] with the run manifest's origin for the
+    /// follow-up's state.
+    fn readout_of_with(
+        &self,
+        playbook: Option<apb_core::schema::Playbook>,
+        production: bool,
+    ) -> RunReadout {
         RunReadout {
             goal: goal_from(playbook.as_ref(), &self.events),
             lists: crate::list::run_lists(playbook.as_ref(), &self.events),
             baseline: baseline_from(playbook.as_ref(), &self.events),
+            follow_up: follow_up_from(playbook.as_ref(), &self.events, production),
             notes: self.notes(),
             playbook,
         }
@@ -146,13 +171,15 @@ impl RunView {
 }
 
 /// What [`RunView::readout`] read: one parse of the playbook snapshot, so
-/// the goal, the baseline, the notes and the outcome a surface shows side
-/// by side come from the same reading.
+/// the goal, the baseline, the follow-up, the notes and the outcome a
+/// surface shows side by side come from the same reading.
 #[derive(Debug, Clone)]
 pub struct RunReadout {
     pub playbook: Option<apb_core::schema::Playbook>,
     pub goal: Option<RunGoal>,
     pub baseline: Option<RunBaseline>,
+    /// The run's follow-up check; absent for a playbook without one.
+    pub follow_up: Option<RunFollowUp>,
     pub notes: RunNotes,
     /// Every list node that started a visit, with its items.
     pub lists: Vec<crate::list::RunList>,
