@@ -95,6 +95,17 @@ function listOf(v: unknown): string {
   return Array.isArray(v) ? v.map(String).join(', ') : ''
 }
 
+// The follow-up check's read (`follow_up_observed`): `follow-up deal_won:
+// met`, the journal's verdict word as it is. The follow-up word is skipped
+// when the record names no check (a shape read leniently); a record with
+// neither word has no note.
+export function followUpNote(r: Record<string, unknown>): string | undefined {
+  const check = typeof r.check === 'string' ? r.check : ''
+  const verdict = typeof r.verdict === 'string' ? r.verdict : ''
+  const parts = [check ? `follow-up ${check}` : '', verdict].filter(Boolean)
+  return parts.length ? parts.join(': ') : undefined
+}
+
 // The detail line of an event kind that has one (issue #67): how a session
 // handoff started, which declared output fields a node left out, where an
 // attempt's transcript is, the tokens an attempt reported (issue #167) and
@@ -104,8 +115,9 @@ function listOf(v: unknown): string {
 // (issue #203), and what a re-run revives, the baseline check's snapshots
 // and comparisons, the notes an attempt reported, and what a process_env
 // allowlist withheld from an attempt, which tools an agent did not see of
-// what apb handed it, and the run's notifications (who
-// changed them, and each notification sent). Every other kind has none.
+// what apb handed it, the run's notifications (who
+// changed them, and each notification sent), and what a follow-up check
+// read after the run. Every other kind has none.
 function eventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
   // A notification's send rides the send ledger and the connector call
@@ -215,6 +227,8 @@ function eventNote(e: WfEvent): string | undefined {
     }
     case 'notify_set':
       return notifySetNote(r)
+    case 'follow_up_observed':
+      return followUpNote(r)
     case 'worktree_resolved':
       return typeof r.path === 'string'
         ? `working tree: ${r.path} (${r.source === 'node' ? `published by ${String(r.node ?? '')}` : `from ${String(r.source ?? '')}`})`

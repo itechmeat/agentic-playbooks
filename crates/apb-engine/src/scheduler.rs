@@ -488,8 +488,15 @@ fn drive(
             // once the lock is released and the waker armed, a resume may
             // start another that reads the same journal.
             notify_after();
-            // A paused run holds no driver (issue #200): keep its lock when
-            // the pause asked for it, and leave a waker behind for `until`.
+            // A succeeded run with a pending follow-up leaves a detached
+            // waker behind; a paused run holds no driver (issue #200): keep
+            // its lock when the pause asked for it, and leave a waker for
+            // `until`.
+            if r.outcome == RunStatus::Succeeded
+                && let Err(e) = crate::follow_up::arm(root, run_dir, &r.run_id)
+            {
+                eprintln!("apb: could not arm the run's follow-up: {e}");
+            }
             if r.outcome == RunStatus::Paused {
                 crate::pause::request::after_pause(root, run_dir, &r.run_id, lock);
             }
@@ -1010,7 +1017,7 @@ fn drive_inner(
         )? {
             ControlScan::Terminal(outcome) => {
                 if outcome == RunStatus::Aborted {
-                    crate::known_problems::observe_ended(run_dir);
+                    crate::run_end::record(run_dir);
                 }
                 return Ok(RunResult { run_id, outcome });
             }
@@ -3458,7 +3465,7 @@ fn drive_inner(
             )? {
                 WakeOutcome::Terminal(outcome) => {
                     if outcome == RunStatus::Aborted {
-                        crate::known_problems::observe_ended(run_dir);
+                        crate::run_end::record(run_dir);
                     }
                     return Ok(RunResult { run_id, outcome });
                 }

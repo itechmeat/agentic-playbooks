@@ -47,7 +47,7 @@ pub enum WakeOutcome {
     Refused(String),
 }
 
-fn poll() -> Duration {
+pub(crate) fn poll() -> Duration {
     std::env::var(POLL_ENV)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())

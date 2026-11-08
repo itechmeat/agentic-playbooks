@@ -33,6 +33,9 @@ pub(crate) struct ReadCtx<'a> {
     pub guard_tree: bool,
     /// What a tampered `scripts/` copy is named as in the reason.
     pub scripts_label: &'a str,
+    /// The engine site the read acts under (`@baseline`, `@follow_up`): a
+    /// connector call resolves the grant the manifest recorded for it.
+    pub site: &'a str,
 }
 
 impl ReadCtx<'_> {

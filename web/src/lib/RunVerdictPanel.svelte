@@ -6,6 +6,8 @@
     evidenceBasis,
     evidenceSource,
     evidenceTone,
+    followUpResultLine,
+    followUpStatusLine,
     freshnessText,
     gapIsWarning,
     gapLabel,
@@ -128,6 +130,27 @@
           <span class="muted">from the goal criteria, never from the baseline</span>
         </li>
       </ol>
+    </div>
+  {/if}
+
+  {#if outcome.follow_up}
+    <div class="block" data-testid="run-verdict-follow-up">
+      <h4>Follow-up</h4>
+      {#if outcome.follow_up.status === 'not_scheduled'}
+        <p data-testid="run-verdict-follow-up-status">not scheduled: the run did not succeed</p>
+      {:else}
+        <p data-testid="run-verdict-follow-up-status">{followUpStatusLine(outcome.follow_up)}</p>
+        {#if outcome.follow_up.results.length}
+          <ul>
+            {#each outcome.follow_up.results as res, i (i)}
+              <li data-testid="run-verdict-follow-up-result">{followUpResultLine(res)}</li>
+            {/each}
+          </ul>
+        {/if}
+        {#if outcome.follow_up.reason}
+          <p class="muted" data-testid="run-verdict-follow-up-reason">reason: {outcome.follow_up.reason}</p>
+        {/if}
+      {/if}
     </div>
   {/if}
 

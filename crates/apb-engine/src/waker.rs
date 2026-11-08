@@ -28,6 +28,8 @@ pub enum WakerFor {
     Release(u64),
     /// The retry of the run's last notifications.
     Notify,
+    /// The follow-up due after the `run_finished` at this journal sequence.
+    FollowUp(u64),
 }
 
 impl WakerFor {
@@ -36,6 +38,7 @@ impl WakerFor {
             WakerFor::Pause(seq) => format!("pause-{seq}"),
             WakerFor::Release(seq) => format!("release-{seq}"),
             WakerFor::Notify => "notify".into(),
+            WakerFor::FollowUp(seq) => format!("follow-up-{seq}"),
         }
     }
 
@@ -45,6 +48,7 @@ impl WakerFor {
             WakerFor::Pause(seq) => vec!["--seq".into(), seq.to_string()],
             WakerFor::Release(seq) => vec!["--release".into(), seq.to_string()],
             WakerFor::Notify => vec!["--notify".into()],
+            WakerFor::FollowUp(seq) => vec!["--follow-up".into(), seq.to_string()],
         }
     }
 
@@ -53,6 +57,7 @@ impl WakerFor {
         match self {
             WakerFor::Pause(_) | WakerFor::Release(_) => "it waits until a set time",
             WakerFor::Notify => "a notification waits for a retry",
+            WakerFor::FollowUp(_) => "a follow-up check waits for its time",
         }
     }
 
@@ -62,7 +67,7 @@ impl WakerFor {
             WakerFor::Pause(_) | WakerFor::Release(_) => {
                 format!("`apb resume {run_id}` or `apb resume --all` picks it up")
             }
-            WakerFor::Notify => "`apb resume --all` picks it up".into(),
+            WakerFor::Notify | WakerFor::FollowUp(_) => "`apb resume --all` picks it up".into(),
         }
     }
 }

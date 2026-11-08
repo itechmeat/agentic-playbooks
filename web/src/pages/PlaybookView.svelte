@@ -83,8 +83,10 @@
   import { effectTags, type EffectTag } from '../lib/effecttags'
   import FlaskConical from '@lucide/svelte/icons/flask-conical'
   import KnownProblemsCard from '../lib/KnownProblemsCard.svelte'
+  import CorrectionsCard from '../lib/CorrectionsCard.svelte'
   import { groupProblems, recheckResult } from '../lib/knownproblems'
   import Bug from '@lucide/svelte/icons/bug'
+  import SquarePen from '@lucide/svelte/icons/square-pen'
   import { verdictText } from '../lib/quality'
   import ListChecks from '@lucide/svelte/icons/list-checks'
   import CodeEditor from '../lib/CodeEditor.svelte'
@@ -398,6 +400,13 @@
     showProblems = !showProblems
     if (showProblems) void reveal('[data-testid="known-problems-panel"]')
   }
+  // The corrections ledger: what people said should change, read when the
+  // panel opens (it posts the person's decisions itself).
+  let showCorrections = $state(false)
+  function toggleCorrections() {
+    showCorrections = !showCorrections
+    if (showCorrections) void reveal('[data-testid="corrections-panel"]')
+  }
   let problems = $state<ProblemsView | null>(null)
   let problemsError = $state<string | null>(null)
   // The problems whose action is in flight: each is disabled on its own.
@@ -610,6 +619,8 @@
       showScenarios = false
     } else if (showProblems) {
       showProblems = false
+    } else if (showCorrections) {
+      showCorrections = false
     }
   })
 
@@ -1004,6 +1015,7 @@
     fitToken++
     showFit = false
     showProblems = false
+    showCorrections = false
     showScenarios = id === DEMO_PLAYBOOK
     showSandbox = false
     problems = null
@@ -1169,6 +1181,17 @@
             {#if problemsToLook > 0}
               <span class="pv-count" title="Known problems that need a look">{problemsToLook}</span>
             {/if}
+          </Button>
+          <Button
+            variant={showCorrections ? 'default' : 'outline'}
+            size="sm"
+            class="h-7"
+            onclick={toggleCorrections}
+            title="Corrections: what people said should change, with a draft a person applies and the version that carries the fix"
+            data-testid="corrections-toggle"
+          >
+            <SquarePen data-icon="inline-start" />
+            Corrections
           </Button>
           <Button
             variant="outline"
@@ -1498,6 +1521,23 @@
             onAct={actOnProblem}
             loadPassages={problemPassages}
           />
+        </section>
+      {/if}
+
+      {#if showCorrections}
+        <section class="box px-4 pt-3.5 pb-3.5" data-testid="corrections-panel">
+          <span class="box-cap">corrections</span>
+          <div class="box-close">
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              title="Hide the corrections"
+              onclick={() => (showCorrections = false)}
+            >
+              <X />
+            </Button>
+          </div>
+          <CorrectionsCard {id} {workspace} versions={versionsDesc.map((v) => v.version)} />
         </section>
       {/if}
 

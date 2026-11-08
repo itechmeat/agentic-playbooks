@@ -8,6 +8,7 @@ locks/
 decisions.jsonl
 memory/
 problems/
+corrections/
 scenario-runs/
 launch-challenges/
 handoff/

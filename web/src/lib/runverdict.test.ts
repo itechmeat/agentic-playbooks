@@ -12,8 +12,8 @@ describe('needsLookCounts', () => {
   })
 })
 import { describe, expect, it } from 'vitest'
-import type { OutcomeSummary } from './api.gen'
-import { evidenceBasis, evidenceTone, freshnessText, gapIsWarning, gapLabel, goalReachedText, needsLookCounts, resultText } from './runverdict'
+import type { OutcomeSummary, RunFollowUp } from './api.gen'
+import { evidenceBasis, evidenceTone, followUpResultLine, followUpStatusLine, freshnessText, gapIsWarning, gapLabel, goalReachedText, needsLookCounts, resultText } from './runverdict'
 
 const outcome: OutcomeSummary = {
   headline: 'Run succeeded; 1 of 2 checks passed; 3 not verified; needs a look (1 finding)',
@@ -105,11 +105,54 @@ describe('verdict wording', () => {
   })
 })
 
+describe('follow-up wording', () => {
+  const pending: RunFollowUp = {
+    check: 'deal_won',
+    description: 'the deal moved',
+    source: 'script',
+    status: 'pending',
+    due_at_ms: 1_700_000_062_000,
+    results: [],
+  }
+
+  it('shows the status word with the verdict and the time that matters', () => {
+    expect(followUpStatusLine(pending)).toBe('pending: due 2023-11-14T22:14:22Z')
+    expect(
+      followUpStatusLine({
+        ...pending,
+        status: 'observed',
+        observed_at_ms: 1_700_000_062_000,
+        verdict: 'not_met',
+        results: [{ observation: 'stage', rule: 'equals won', verdict: 'not_met' }],
+      }),
+    ).toBe('observed: not met, read 2023-11-14T22:14:22Z')
+    // A status without a verdict or a time of its own shows bare.
+    expect(followUpStatusLine({ ...pending, status: 'missed', due_at_ms: undefined, verdict: 'unknown' })).toBe('missed')
+    expect(followUpStatusLine({ ...pending, status: 'unknown', due_at_ms: undefined, verdict: 'unknown' })).toBe('unknown')
+  })
+
+  it('renders a result bare when it carries no detail', () => {
+    expect(followUpResultLine({ observation: 'stage', rule: 'equals won', verdict: 'met' })).toBe('equals won on stage')
+    expect(followUpResultLine({ observation: 'stage', rule: 'equals won', verdict: 'met', detail: 'won' })).toBe(
+      'equals won on stage (won)',
+    )
+  })
+})
+
 describe('RunVerdictPanel', () => {
   const html = async (o: OutcomeSummary) => {
     const { render } = await import('svelte/server')
     const Panel = (await import('./RunVerdictPanel.svelte')).default
     return render(Panel, { props: { outcome: o } }).body
+  }
+
+  const pendingFollowUp: RunFollowUp = {
+    check: 'deal_won',
+    description: 'the deal moved',
+    source: 'script',
+    status: 'pending',
+    due_at_ms: 1_700_000_062_000,
+    results: [],
   }
 
   it('keeps verified and not verified apart and tells the baseline as problem, change, goal', async () => {
@@ -131,10 +174,51 @@ describe('RunVerdictPanel', () => {
     expect(body).toContain('no comparison yet')
   })
 
+  it('shows the follow-up due time while the check is pending', async () => {
+    const body = await html({ ...outcome, follow_up: pendingFollowUp })
+    expect(body).toContain('data-testid="run-verdict-follow-up"')
+    expect(body).toContain('Follow-up')
+    expect(body).toContain('pending: due 2023-11-14T22:14:22Z')
+  })
+
+  it('shows the follow-up verdict and each result once the check ran', async () => {
+    const body = await html({
+      ...outcome,
+      follow_up: {
+        ...pendingFollowUp,
+        status: 'observed',
+        observed_at_ms: 1_700_000_062_000,
+        verdict: 'met',
+        results: [
+          { observation: 'stage', rule: 'equals won', verdict: 'met', detail: 'won' },
+          { observation: 'closed', rule: 'after close', verdict: 'met' },
+        ],
+      },
+    })
+    expect(body).toContain('observed: met, read 2023-11-14T22:14:22Z')
+    expect(body.match(/data-testid="run-verdict-follow-up-result"/g)?.length).toBe(2)
+    expect(body).toContain('equals won on stage (won)')
+    expect(body).toContain('after close on closed')
+  })
+
+  it('says when the follow-up was never scheduled, and the reason when the read failed', async () => {
+    const body = await html({
+      ...outcome,
+      follow_up: { ...pendingFollowUp, status: 'not_scheduled', due_at_ms: undefined },
+    })
+    expect(body).toContain('not scheduled: the run did not succeed')
+    const failed = await html({
+      ...outcome,
+      follow_up: { ...pendingFollowUp, status: 'unknown', due_at_ms: undefined, verdict: 'unknown', reason: 'the source failed' },
+    })
+    expect(failed).toContain('unknown')
+    expect(failed).toContain('reason: the source failed')
+  })
+
   it('shows only the headline for a run with nothing to tell', async () => {
     const body = await html({ headline: 'Run running; nothing checked by the engine', done: [], verified: [], unverified: [], findings: [], warnings: [] })
     expect(body).toContain('data-testid="run-verdict-headline"')
-    for (const block of ['done', 'verified', 'unverified', 'findings', 'warnings', 'baseline', 'needs-look']) {
+    for (const block of ['done', 'verified', 'unverified', 'findings', 'warnings', 'baseline', 'follow-up', 'needs-look']) {
       expect(body).not.toContain(`data-testid="run-verdict-${block}"`)
     }
   })

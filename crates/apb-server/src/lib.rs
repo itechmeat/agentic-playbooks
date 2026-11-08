@@ -232,6 +232,7 @@ pub fn build_router(state: AppState) -> Router {
         // The judge sandbox and labelled examples.
         .merge(routes::judge::router())
         .merge(routes::scenario::router())
+        .merge(routes::corrections::router())
         .route("/api/runs", get(routes::runs::list_runs_handler))
         .route("/api/runs/{id}", get(routes::runs::get_run_handler))
         .route(

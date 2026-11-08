@@ -195,3 +195,127 @@ fn a_waker_waits_out_a_busy_workdir() {
     assert_eq!(finishes(&events, "s"), 1);
     assert_eq!(finishes(&events, "t"), 1);
 }
+
+// --- a follow-up waker ---
+
+/// A playbook whose follow-up script prints the expected value; the run
+/// succeeds and the follow-up is due 1 m later (shortened by
+/// `APB_FOLLOW_UP_AFTER_MS`).
+const FOLLOW_UP_PLAYBOOK: &str = r#"
+schema: 2
+id: wake
+name: Wake
+version: 1.0.0
+follow_up:
+  after: 1m
+  check:
+    id: deal_won
+    description: the deal moved
+    script: scripts/check.sh
+    observe:
+      - { id: stage, type: field, path: stage, expect: { equals: won } }
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+"#;
+
+fn seed_follow_up(root: &Path) {
+    seed(root);
+    // A follow-up script read runs in the execution root under the tree
+    // guard: the root must be a git repository with a commit.
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "t@t"],
+        vec!["config", "user.name", "t"],
+        vec!["commit", "-q", "--allow-empty", "-m", "seed"],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(&args)
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "git {args:?} failed"
+        );
+    }
+    let vdir = root.join(".apb/playbooks/wake/1.0.0");
+    fs::write(vdir.join("playbook.yaml"), FOLLOW_UP_PLAYBOOK).unwrap();
+    fs::write(
+        vdir.join("scripts/check.sh"),
+        "echo '{\"stage\": \"won\"}'\n",
+    )
+    .unwrap();
+}
+
+/// A succeeded run with a pending follow-up leaves `wakers/follow-up-<seq>`
+/// held; with a short after and a short poll the waker journals
+/// `follow_up_observed` and exits.
+#[test]
+fn a_follow_up_waker_is_armed_and_reads_in_time() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_follow_up(tmp.path());
+    let out = crate::common::apb_std()
+        .args(["run", "wake"])
+        .env("APB_WAKER_POLL_MS", "50")
+        .env("APB_FOLLOW_UP_AFTER_MS", "300")
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{stdout} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run_id = tmp
+        .path()
+        .join(".apb/runs")
+        .read_dir()
+        .unwrap()
+        .flatten()
+        .next()
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .into_owned();
+    let dir = tmp.path().join(".apb/runs").join(&run_id);
+    let events = read_all(&dir).unwrap();
+    let finished_seq = events
+        .iter()
+        .find(|e| matches!(e.payload, EventPayload::RunFinished { .. }))
+        .unwrap()
+        .seq;
+    // The waker file the drive left behind.
+    poll("the waker lease", || {
+        dir.join(format!("wakers/follow-up-{finished_seq}"))
+            .is_file()
+            .then_some(())
+    });
+    // The waker reads the follow-up once its (shortened) time comes and
+    // exits, leaving the observation in the journal.
+    let started = std::time::Instant::now();
+    poll("the follow-up observation", || {
+        let events = read_all(&dir).ok()?;
+        if events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::FollowUpObserved { status, .. } if status == "observed"))
+        {
+            return Some(());
+        }
+        if started.elapsed() > Duration::from_secs(20) {
+            panic!("no observation: {events:?}");
+        }
+        None
+    });
+    let events = read_all(&dir).unwrap();
+    assert!(
+        events.iter().any(|e| matches!(&e.payload,
+        EventPayload::FollowUpObserved { verdict, .. } if verdict == "met")),
+        "{events:?}"
+    );
+}

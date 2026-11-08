@@ -1460,6 +1460,8 @@ pub(crate) enum WakerFor {
     Release(u64),
     /// The notifications the drive's last sweep could not send.
     Notify,
+    /// The follow-up due after the run's `run_finished` at this seq.
+    FollowUp(u64),
 }
 
 /// Body of the hidden `__pause-waker` subcommand (issue #200): sleeps until
@@ -1476,9 +1478,14 @@ pub(crate) fn pause_waker_cmd(root: &Path, run_id: &str, waker: WakerFor) -> Exi
         WakerFor::Pause(seq) => apb_engine::pause::run_waker(root, run_id, seq),
         WakerFor::Release(seq) => apb_engine::pause::run_release_waker(root, run_id, seq),
         // Retrying notifications resumes nothing: it ends like a waker
-        // with nothing to do.
+        // with nothing to do. A follow-up read resumes nothing either: it
+        // journals `follow_up_observed` and exits.
         WakerFor::Notify => apb_engine::notify::retry::run_retry_waker(root, run_id)
             .map(|_| apb_engine::pause::WakeOutcome::Superseded),
+        WakerFor::FollowUp(seq) => {
+            apb_engine::follow_up::waker::run_follow_up_waker(root, run_id, seq);
+            Ok(apb_engine::pause::WakeOutcome::Superseded)
+        }
     };
     match woke {
         Ok(apb_engine::pause::WakeOutcome::Refused(why)) => {

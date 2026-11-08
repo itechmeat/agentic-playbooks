@@ -14,6 +14,7 @@
 //! any released apb finds them.
 
 pub mod bind;
+pub mod capture;
 pub mod guard;
 pub mod report;
 pub mod store;

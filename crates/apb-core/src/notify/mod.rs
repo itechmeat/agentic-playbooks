@@ -38,11 +38,14 @@ pub enum Transition {
     /// A node stopped retrying: the same rejection came back `stall_after`
     /// times in a row (opt-in, spec node-contracts D5).
     Stalled,
+    /// The playbook's follow-up check was read after a successful run
+    /// ended, whatever its verdict (opt-in).
+    FollowUp,
 }
 
 impl Transition {
     /// Every transition, in the order they are reported.
-    pub const ALL: [Transition; 7] = [
+    pub const ALL: [Transition; 8] = [
         Transition::Review,
         Transition::Question,
         Transition::Paused,
@@ -50,11 +53,13 @@ impl Transition {
         Transition::HostTask,
         Transition::Supervisor,
         Transition::Stalled,
+        Transition::FollowUp,
     ];
 
     /// The transitions a subscription covers when nothing narrows it: the
-    /// waits on the person and the run's end. `host_task` and `supervisor`
-    /// wait on a host or an agent and are asked for by name.
+    /// waits on the person and the run's end. `host_task`, `supervisor`
+    /// and `follow_up` wait on a host, an agent, or the run's aftermath
+    /// and are asked for by name.
     pub const DEFAULT: [Transition; 4] = [
         Transition::Review,
         Transition::Question,
@@ -71,6 +76,7 @@ impl Transition {
             Transition::HostTask => "host_task",
             Transition::Supervisor => "supervisor",
             Transition::Stalled => "stalled",
+            Transition::FollowUp => "follow_up",
         }
     }
 
@@ -482,5 +488,26 @@ mod tests {
         assert!(FinishOutcome::ALL.iter().all(|o| all.covers_finish(*o)));
         let none = Coverage::new(&[Transition::Review], &FinishOutcome::ALL);
         assert!(!none.covers_finish(FinishOutcome::Failed));
+    }
+
+    /// The follow-up of an ended run is a transition a person can opt
+    /// into, and only by name.
+    #[test]
+    fn follow_up_is_reported_and_opt_in() {
+        assert!(Transition::ALL.contains(&Transition::FollowUp));
+        assert!(!Transition::DEFAULT.contains(&Transition::FollowUp));
+        assert_eq!(Transition::FollowUp.as_str(), "follow_up");
+        assert_eq!(Transition::parse("follow_up"), Some(Transition::FollowUp));
+        // The name the journal and the settings carry.
+        let json = serde_json::to_string(&Transition::FollowUp).unwrap();
+        assert_eq!(json, "\"follow_up\"");
+        assert_eq!(
+            serde_json::from_str::<Transition>(&json).unwrap(),
+            Transition::FollowUp
+        );
+        // A subscription naming it journals it as one plain name.
+        let cov = Coverage::new(&[Transition::FollowUp], &FinishOutcome::ALL);
+        assert_eq!(cov.journal_names(), vec!["follow_up".to_string()]);
+        assert_eq!(Coverage::from_journal_names(&["follow_up"]), cov);
     }
 }

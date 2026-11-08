@@ -15,6 +15,9 @@ for it again. Known problems make it stick:
    shown again. It is closed only by a quote of the new source that shows
    the fix, never because the source changed or disappeared.
 
+The corrections a person made along the way are collected the same way,
+in their own ledger: see CORRECTIONS.md.
+
 Collecting needs no block: every playbook's problems are listed on the
 dashboard and by `apb problems`. Only a playbook with the block is shown
 anything, and only then is anything journaled, so the prompts and the

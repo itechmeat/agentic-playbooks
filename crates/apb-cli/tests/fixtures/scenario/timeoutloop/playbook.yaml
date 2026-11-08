@@ -1,0 +1,15 @@
+schema: 2
+id: timeoutloop
+name: Timeout loop
+version: 1.0.0
+description: One agent step whose attempts can time out, then a finish on either route.
+defaults: { profile: main }
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: agent_task, prompt: "Do it", max_retries: 1, timeout_seconds: 600 }
+  - { id: done, type: finish, outcome: success }
+  - { id: failed, type: finish, outcome: failure }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: done, condition: { type: node_status, node: work, equals: success } }
+  - { from: work, to: failed, condition: { type: node_status, node: work, equals: failure } }

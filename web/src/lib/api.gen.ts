@@ -4,6 +4,115 @@
 
 import type { PlaybookEdge, PlaybookNode, WfEvent, WfLayout } from './types'
 
+export type CapturePreview = { run_id: string, playbook: string, version: string, 
+/**
+ * `project` or `global`: the scope the run's playbook was started
+ * from, where a save lands. Absent for a journal that records no
+ * origin.
+ */
+scope?: string, name: string, yaml: string, digest: string, redacted: number, warnings: Array<string>, 
+/**
+ * Set after a save: where the file was written.
+ */
+saved?: string, };
+
+export type CaptureArgs = { name: string, nodes: Array<string>, 
+/**
+ * Write the scenario. Requires `digest`. Refused on MCP.
+ */
+save: boolean, 
+/**
+ * The digest of the preview the person read.
+ */
+digest: string | null, };
+
+export type CorrectionKind = "review_note" | "node_note" | "human_answer" | "rejection";
+
+export type CorrectionStatus = "open" | "proposed" | "fixed" | "reopened" | "dismissed";
+
+export type Correction = { 
+/**
+ * `c-` and the first 12 hex of the key's digest (see
+ * [`entry_id`]).
+ */
+id: string, kind: CorrectionKind, 
+/**
+ * The node a draft fix would change, of the sighting that created the
+ * entry.
+ */
+node: string | null, 
+/**
+ * The review gate, for a review note.
+ */
+gate: string | null, key: string, 
+/**
+ * The leading wording of [`Correction::texts`], when any sighting
+ * carried text.
+ */
+text: string | null, 
+/**
+ * The distinct wordings runs reported, at most
+ * [`crate::known_problems::TEXTS_KEPT`].
+ */
+texts: Array<ReportedText>, 
+/**
+ * Distinct runs that reported it.
+ */
+runs: number, 
+/**
+ * Runs of this entry per version: the numerator of the reopen rule.
+ */
+runs_by_version: { [key in string]: number }, first_seen_ms: number, last_seen_ms: number, 
+/**
+ * The latest [`EVIDENCE_KEPT`] sightings.
+ */
+evidence: Array<CorrectionEvidenceRef>, 
+/**
+ * Any sighting came through the supervisor channel.
+ */
+via_supervisor: boolean, status: CorrectionStatus, fix?: FixRecord, decided?: Decided, 
+/**
+ * The version of the entry's latest sighting: the base a fix is
+ * judged against (see [`FixRecord`]).
+ */
+last_version?: string, };
+
+export type FixRecord = { 
+/**
+ * The version the person names as the fix.
+ */
+version: string, 
+/**
+ * The version of the entry's latest sighting then.
+ */
+base_version: string, 
+/**
+ * `runs_by_version[base_version]` of the file then.
+ */
+base_runs: number, 
+/**
+ * The entry's `runs_by_version[base_version]` then.
+ */
+base_hits: number, marked: Decided, };
+
+export type CorrectionEvidenceRef = { run_id: string, seq: number, };
+
+export type Draft = { 
+/**
+ * The node whose prompt the line belongs in.
+ */
+node: string, 
+/**
+ * The one-line instruction for that prompt.
+ */
+line: string, };
+
+export type FixRate = { base_runs: number, base_hits: number, fix_runs: number, fix_hits: number, };
+
+export type CorrectionView = { correction: Correction, draft?: Draft, rate?: FixRate, };
+
+export type CorrectionsView = { playbook: string, scope: string, signed: boolean, unsigned_entries: number, entries: Array<CorrectionView>, };
+
 export type CommittedArtifact = { sha: string, subject: string, 
 /**
  * The values of the commit's `Apb-Run` trailers: `None` when they were
@@ -128,6 +237,64 @@ enforce: boolean, checks: Array<BaselineCheckView>, met: number, not_met: number
  */
 regressions: number, };
 
+export type RunFollowUp = { check: string, description: string, 
+/**
+ * `connector` or `script`.
+ */
+source: string, 
+/**
+ * `pending`, `observed`, `unknown`, `missed`, or `not_scheduled`
+ * (the run did not succeed).
+ */
+status: string, 
+/**
+ * When the check was due (a pending one).
+ */
+due_at_ms?: number, 
+/**
+ * When the check was read.
+ */
+observed_at_ms?: number, 
+/**
+ * `met`, `not_met` or `unknown`; absent while pending.
+ */
+verdict?: string, 
+/**
+ * Why the check could not be read, or why it was missed.
+ */
+reason?: string, results: Array<FollowUpResultView>, };
+
+export type FollowUpResultView = { observation: string, 
+/**
+ * The rule as journaled (`equals won`).
+ */
+rule: string, 
+/**
+ * `met`, `not_met` or `unknown`.
+ */
+verdict: string, detail?: string, };
+
+export type FollowUpStats = { check: string, 
+/**
+ * Runs whose check was read and checked: `met`, `not_met` and
+ * `unknown` together, the denominator of the met rate.
+ */
+observed: number, met: number, not_met: number, 
+/**
+ * Runs whose verdict is unknown, or whose source could not be read.
+ */
+unknown: number, 
+/**
+ * Runs read past their grace; never in the met rate.
+ */
+missed: number, 
+/**
+ * Runs still ahead of their due time.
+ */
+pending: number, };
+
+export type MetRate = { base: number, against: number, };
+
 export type Finding = { kind: string, location: string, evidence: string, why_not_fixed: string, 
 /**
  * How the attempt got around the problem, when it did.
@@ -187,7 +354,7 @@ export type BaselineOutcome = { problem: Array<string>, change: Array<string>,
  */
 goal_reached?: boolean, };
 
-export type NeedsLookReason = "regression" | "findings" | "warnings" | "unknown_sends" | "list_items" | "checks_green_before";
+export type NeedsLookReason = "regression" | "findings" | "warnings" | "unknown_sends" | "list_items" | "checks_green_before" | "follow_up";
 
 export type NeedsLook = { reasons: Array<NeedsLookReason>, regressions: number, findings: number, warnings: number, 
 /**
@@ -201,7 +368,11 @@ list_items?: number,
 /**
  * Checks that passed before the work (`on_green_before: fail`).
  */
-green_checks?: number, };
+green_checks?: number, 
+/**
+ * A follow-up read after the run ended whose verdict is `not_met`.
+ */
+follow_up?: number, };
 
 export type ListOutcome = { node: string, total: number, processed: number, passed: number, passed_with_note: number, needs_look: number, 
 /**
@@ -224,6 +395,11 @@ verified: Array<Evidence>,
  * What nobody checked.
  */
 unverified: Array<Gap>, findings: Array<RunFinding>, warnings: Array<RunWarning>, baseline?: BaselineOutcome, 
+/**
+ * The follow-up check the playbook declared, with what the journal
+ * recorded; absent for a run without one.
+ */
+follow_up?: RunFollowUp, 
 /**
  * Each list node's counts; empty for a run without a list.
  */
@@ -1375,6 +1551,11 @@ findings: FindingStats,
  */
 baseline: Array<BaselineStats>, 
 /**
+ * The version's follow-up check over its runs; absent when no run's
+ * snapshot declares a `follow_up` block.
+ */
+follow_up?: FollowUpStats, 
+/**
  * The levels its runs' signed grades gave each criterion, one row per
  * comparable key ([`quality`]); empty when no run was graded.
  */
@@ -1413,7 +1594,12 @@ executor_changes?: Array<ExecutorChange>,
  * How each criterion both versions graded under the same definition
  * moved.
  */
-quality?: Array<QualityDelta>, };
+quality?: Array<QualityDelta>, 
+/**
+ * The follow-up met rates of the two versions; absent when either
+ * side has no observed run.
+ */
+follow_up_met_rate?: MetRate, };
 
 export type StatsReport = { runs: number, 
 /**
@@ -1702,7 +1888,7 @@ unestimated_tokens: Array<string>,
  */
 unestimated_cost: Array<string>, note?: string, };
 
-export type Transition = "review" | "question" | "paused" | "finished" | "host_task" | "supervisor" | "stalled";
+export type Transition = "review" | "question" | "paused" | "finished" | "host_task" | "supervisor" | "stalled" | "follow_up";
 
 export type FinishOutcome = "succeeded" | "needs_look" | "failed" | "aborted";
 

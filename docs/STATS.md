@@ -88,6 +88,14 @@ Per playbook version:
   how often it was met (over those runs), and in how many runs it regressed
   or was unknown, from the latest `baseline_compared` of each run. Text:
   `baseline unowned.count: met 3/4 (75%), regressed in 1`.
+- **follow_up**: per playbook with a `follow_up:` block, how many runs of
+  the version were observed (`met`, `not_met`, `unknown`), how many are
+  `missed` and how many still `pending`, from the latest
+  `follow_up_observed` of each run. Unknown and missed are counted apart,
+  never as met; the met rate is over observed runs only. Text:
+  `follow-up deal_won: met 3/4 (75%), unknown 1, missed 0, pending 2`.
+  `--compare VERSION` puts `follow_up_met_rate` (base and against, absent
+  when either side has no observed run) next to the baseline deltas.
 - **models**: how many attempts ran on each model, and `model_mismatch`, how
   many of them ran on another model than the node profile's primary model
   (from the run manifest). A CLI attempt counts under the model apb

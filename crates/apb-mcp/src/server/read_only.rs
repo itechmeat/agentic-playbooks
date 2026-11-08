@@ -37,6 +37,12 @@ pub const READ_ONLY: &[(&str, ReadOnlyUse)] = &[
     ("playbook_candidate", ReadOnlyUse::Full),
     ("playbook_stats", ReadOnlyUse::Full),
     ("playbook_known_problems", ReadOnlyUse::Full),
+    // The ledger is shown only to people, but listing it writes nothing and
+    // a run step is refused inside the tool layer.
+    ("playbook_corrections", ReadOnlyUse::Full),
+    // The capture preview writes nothing; a save is a person's act on the
+    // CLI or the dashboard, never MCP.
+    ("run_scenario_capture", ReadOnlyUse::Full),
     ("playbook_discover_results", ReadOnlyUse::Full),
     ("projects_list", ReadOnlyUse::Full),
     ("profile_list", ReadOnlyUse::Full),
@@ -103,6 +109,9 @@ pub const REMOVED_IN_READ_ONLY: &[&str] = &[
     "run_grade_submit",
     "known_problem_recheck",
     "known_problem_decide",
+    // A person's decision on a correction entry; marking a fix is never
+    // MCP's at all.
+    "correction_decide",
     // The judge sandbox and labelled examples: a live ask spends, a save
     // writes, and the reads serve the sandbox alone.
     "judge_evaluate",

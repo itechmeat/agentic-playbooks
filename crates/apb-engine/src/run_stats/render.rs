@@ -1,7 +1,7 @@
 //! `apb stats` as text for a terminal.
 
 use super::digests::DigestStats;
-use super::{PerRun, StatsReport, Waits, findings, interventions, quality};
+use super::{PerRun, StatsReport, Waits, findings, follow_up, interventions, quality};
 
 /// `12 s`, `3.4 min`, `1.2 h`.
 fn dur(ms: u64) -> String {
@@ -125,6 +125,9 @@ pub fn render_text(r: &StatsReport) -> String {
         for line in findings::lines(&v.findings, &v.baseline) {
             out.push_str(&format!("  {line}\n"));
         }
+        for line in v.follow_up.iter().flat_map(follow_up::lines) {
+            out.push_str(&format!("  {line}\n"));
+        }
         for line in quality::lines(&v.quality) {
             out.push_str(&format!("  {line}\n"));
         }
@@ -236,6 +239,13 @@ pub fn render_text(r: &StatsReport) -> String {
                     c.cost_per_run_delta_usd
                         .map_or("n/a".to_string(), |d| format!("{d:+.4} USD"))
                 ));
+                if let Some(f) = &c.follow_up_met_rate {
+                    out.push_str(&format!(
+                        "  follow-up met rate: {:.0}% -> {:.0}%\n",
+                        f.base * 100.0,
+                        f.against * 100.0
+                    ));
+                }
                 for q in &c.quality {
                     out.push_str(&format!(
                         "  quality {} ({}, {}): good {}, poor {}\n",

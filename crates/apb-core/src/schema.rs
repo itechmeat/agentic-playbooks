@@ -195,6 +195,10 @@ pub struct Playbook {
     /// schema 2; no migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub known_problems: Option<crate::known_problems::block::KnownProblemsBlock>,
+    /// One fact read once `after` a successful run ended (see
+    /// [`crate::follow_up`]). Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up: Option<crate::follow_up::FollowUp>,
     /// What `run.previous_success.*` renders when no earlier run of this
     /// playbook succeeded (see [`crate::previous_success`]). Additive to
     /// schema 2; no migration.

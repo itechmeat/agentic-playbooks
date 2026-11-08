@@ -824,6 +824,7 @@ impl RunState {
                 // the baseline for the drive.
                 EventPayload::BaselineObserved { .. }
                 | EventPayload::BaselineCompared { .. }
+                | EventPayload::FollowUpObserved { .. }
                 | EventPayload::AttemptNotes { .. }
                 | EventPayload::AgentEnvApplied { .. }
                 | EventPayload::ToolExposureMismatch { .. } => {}

@@ -9,16 +9,21 @@
 //!   60 s, smoke 300 s). A smoke run spends, so a dashboard without keys
 //!   refuses it (409);
 //! - `GET /api/playbooks/{id}/scenario-runs/{run}`: a stored scenario run's
-//!   report and graph.
+//!   report and graph;
+//! - `POST /api/runs/{id}/scenario-capture` (a `CaptureArgs`): the preview
+//!   of a finished run as a scenario, and a person's save bound to the
+//!   previewed digest (`CapturePreview`).
 //!
 //! Every handler reads or writes files, off the async runtime. These routes
 //! serve project playbooks only; MCP and `apb eval` also take a global one.
 
+use apb_core::launch::floor::SaveChannel;
 use apb_core::step_env::StepCaller;
 use apb_mcp::tools::ToolError;
 use apb_mcp::tools::scenario::{
     ScenarioCaller, ScenarioRunRequest, Scope, run_scenario, scenario_run_view, scenarios,
 };
+use apb_mcp::tools::scenario_capture::{CaptureArgs, capture as capture_run};
 use axum::Router;
 use axum::extract::{Path as AxPath, Query, State};
 use axum::response::{Json, Response};
@@ -38,6 +43,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/playbooks/{id}/scenario-runs/{run}",
             get(get_scenario_run_handler),
+        )
+        .route(
+            "/api/runs/{id}/scenario-capture",
+            post(post_scenario_capture_handler),
         )
 }
 
@@ -92,6 +101,32 @@ pub(crate) async fn get_scenario_run_handler(
     let pid = id.clone();
     answer(&state, &id, q.workspace.as_deref(), move |root| {
         scenario_run_view(&root, &pid, &run)
+    })
+    .await
+}
+
+/// Query of `POST /api/runs/{id}/scenario-capture`: the run's workspace.
+#[derive(Deserialize, Default)]
+pub(crate) struct CaptureQuery {
+    #[serde(default)]
+    workspace: Option<String>,
+}
+
+/// The body of `POST /api/runs/{id}/scenario-capture`: the preview by
+/// default, and a save only with the digest of the preview the person
+/// read.
+pub(crate) async fn post_scenario_capture_handler(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+    Query(q): Query<CaptureQuery>,
+    Json(args): Json<CaptureArgs>,
+) -> Response {
+    // The dashboard's save is a person's act at the page; only MCP's is
+    // the agent channel.
+    let channel = SaveChannel::Person;
+    let run_id = id.clone();
+    answer(&state, &id, q.workspace.as_deref(), move |root| {
+        capture_run(&root, &run_id, &args, channel, &StepCaller::from_env())
     })
     .await
 }

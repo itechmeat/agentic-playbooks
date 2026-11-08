@@ -72,6 +72,7 @@ export function onWords(on: Transition[]): string {
     host_task: 'a host task waiting',
     supervisor: 'a failed step waiting for the supervisor',
     stalled: 'a step that stopped retrying on the same rejection',
+    follow_up: 'the follow-up check read after the run',
   }
   const said = NOTIFY_TRANSITIONS.filter((t) => on.includes(t)).map((t) => words[t])
   if (said.length < 2) return said.join('')

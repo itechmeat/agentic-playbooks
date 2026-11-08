@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod connectors;
+pub mod corrections;
 pub mod current;
 pub mod demo;
 pub mod discover;

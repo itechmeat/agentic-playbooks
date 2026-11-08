@@ -1508,3 +1508,215 @@ fn resume_all_sweeps_a_finished_run_with_a_due_notification() {
     assert_eq!(try_outcomes(&run_dir), ["not_sent", "confirmed"]);
     assert_eq!(server.requests().len(), 2);
 }
+
+// --- the follow-up transition -----------------------------------------------
+
+const WITH_FOLLOW_UP: &str = "schema: 2\nid: p\nname: P\nversion: 1.0.0\nfollow_up:\n  after: 1m\n  check:\n    id: deal_won\n    description: the deal moved\n    script: scripts/check.sh\n    observe:\n      - { id: stage, type: field, path: stage, expect: { equals: won } }\nnodes:\n  - { id: s, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: s, to: done }\n";
+
+const FOLLOW_UP_SCRIPT: &str = "#!/bin/sh\necho '{\"stage\": \"won\"}'\n";
+
+fn git(root: &Path, args: &[&str]) {
+    let ok = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .unwrap()
+        .status
+        .success();
+    assert!(ok, "git {args:?} failed");
+}
+
+/// A succeeded run of a playbook whose follow-up reads a script that says
+/// the deal moved to won. The script read runs in the execution root
+/// under the tree guard, so the root is a git repository with a commit,
+/// and the origin key exists so the start stamps the run as its own.
+fn finished_follow_up_run(env: &Env, on: &[Transition]) -> (String, PathBuf) {
+    apb_core::run_origin::ensure_key().unwrap();
+    git(env.root(), &["init", "-q"]);
+    git(env.root(), &["config", "user.email", "t@t"]);
+    git(env.root(), &["config", "user.name", "t"]);
+    git(env.root(), &["commit", "-q", "--allow-empty", "-m", "seed"]);
+    env.add_playbook(
+        "p",
+        WITH_FOLLOW_UP,
+        &[("check.sh", FOLLOW_UP_SCRIPT.into())],
+    );
+    let res = run(env.root(), "p", None, Env::options(on)).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let run_dir = env.root().join(".apb/runs").join(&res.run_id);
+    (res.run_id, run_dir)
+}
+
+/// The follow-up of the run at `run_dir` is read now (its due time is the
+/// `run_finished` ts plus its `after`), whatever the real clock says.
+fn observe_follow_up(root: &Path, run_id: &str, run_dir: &Path) -> Event {
+    let finished = read_all(run_dir)
+        .unwrap()
+        .into_iter()
+        .find(|e| matches!(e.payload, EventPayload::RunFinished { .. }))
+        .expect("the run ended");
+    let due = u64::try_from(finished.ts).unwrap() + 60_000;
+    apb_engine::follow_up::read::observe_due(root, run_id, due + 1_000)
+        .unwrap()
+        .expect("the follow-up was read")
+}
+
+#[test]
+fn a_follow_up_subscription_sends_one_notice_after_the_read() {
+    let server = spawn_script(vec![Reply::Respond(200, r#"{"id":"m-1"}"#.into())]);
+    let env = Env::new(FINISH_ONLY, &server);
+    let (run_id, run_dir) = finished_follow_up_run(&env, &[Transition::FollowUp]);
+    let observed = observe_follow_up(env.root(), &run_id, &run_dir);
+    match &observed.payload {
+        EventPayload::FollowUpObserved {
+            status, verdict, ..
+        } => assert_eq!(
+            (status.as_str(), verdict.as_str()),
+            ("observed", "met"),
+            "{}",
+            observed.seq
+        ),
+        other => panic!("expected FollowUpObserved, got {other:?}"),
+    }
+
+    poll("the follow-up notice", || {
+        (server.requests().len() == 1).then_some(())
+    });
+    let body = request_json(&server.requests()[0]);
+    let subject = body["subject"].as_str().unwrap();
+    assert!(subject.contains("p: follow-up met"), "{subject}");
+    let text = body["text"].as_str().unwrap();
+    assert!(text.contains("the follow-up check read met"), "{text}");
+    // The rule and the value as the journal wrote them.
+    assert!(text.contains("stage equals `won`: met (`won`)"), "{text}");
+    // No command line: a follow-up notice asks for nothing.
+    assert!(!text.contains("or run `apb "), "{text}");
+
+    // One send, through the ledger, like every notification.
+    let events = read_all(&run_dir).unwrap();
+    let intents = notify_intents(&events);
+    assert_eq!(intents.len(), 1, "{intents:?}");
+    assert!(
+        intents[0].1.starts_with("notify:follow_up."),
+        "{}",
+        intents[0].1
+    );
+    assert_eq!(
+        settlement(&events, &intents[0].0),
+        Some(("confirmed".to_string(), "response".to_string()))
+    );
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[test]
+fn a_subscription_without_follow_up_sends_nothing_after_the_read() {
+    let server = spawn_script(vec![Reply::Respond(200, r#"{"id":"m-1"}"#.into())]);
+    let env = Env::new(FINISH_ONLY, &server);
+    let (run_id, run_dir) = finished_follow_up_run(&env, &[Transition::Review]);
+    observe_follow_up(env.root(), &run_id, &run_dir);
+    // The sweep is part of the read; a late retry would need a waker, and
+    // none is armed for a transition the subscription does not cover.
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(server.requests().is_empty());
+    assert!(notify_intents(&read_all(&run_dir).unwrap()).is_empty());
+}
+
+/// The notice arm: the subject names the verdict, the body carries one
+/// line per result, and a missed read says so with its reason.
+#[test]
+fn a_follow_up_notice_names_the_verdict_and_its_results() {
+    use apb_engine::event::FollowUpResult;
+    use apb_engine::notify::notice::Notice;
+    use apb_engine::notify::transitions::TransitionId;
+
+    let server = spawn_script(vec![]);
+    let env = Env::new(FINISH_ONLY, &server);
+    let run_dir = env.root().join(".apb/runs/r1");
+    let observed = ev(
+        3,
+        EventPayload::FollowUpObserved {
+            check: "deal_won".into(),
+            status: "observed".into(),
+            reason: None,
+            observations: Default::default(),
+            results: vec![FollowUpResult {
+                observation: "stage".into(),
+                rule: "equals won".into(),
+                verdict: "not_met".into(),
+                detail: Some("lost".into()),
+            }],
+            verdict: "not_met".into(),
+            finished_seq: 1,
+            due_at_ms: 100,
+            observed_at_ms: 200,
+            input_digest: String::new(),
+        },
+    );
+    let events = vec![started(), observed];
+    let notice = Notice::compose(
+        env.root(),
+        &run_dir,
+        "r1",
+        &events,
+        &TransitionId {
+            kind: Transition::FollowUp,
+            seq: 3,
+        },
+        &[],
+    );
+    assert!(
+        notice.subject.contains("p: follow-up not_met"),
+        "{}",
+        notice.subject
+    );
+    assert!(
+        notice.text.contains("the follow-up check read not_met"),
+        "{}",
+        notice.text
+    );
+    assert!(
+        notice.text.contains("stage equals won: not_met (lost)"),
+        "{}",
+        notice.text
+    );
+    assert!(notice.one_line().starts_with(&notice.subject));
+
+    let missed = ev(
+        3,
+        EventPayload::FollowUpObserved {
+            check: "deal_won".into(),
+            status: "missed".into(),
+            reason: Some("read too late".into()),
+            observations: Default::default(),
+            results: Vec::new(),
+            verdict: "unknown".into(),
+            finished_seq: 1,
+            due_at_ms: 100,
+            observed_at_ms: 200,
+            input_digest: String::new(),
+        },
+    );
+    let notice = Notice::compose(
+        env.root(),
+        &run_dir,
+        "r1",
+        &[started(), missed],
+        &TransitionId {
+            kind: Transition::FollowUp,
+            seq: 3,
+        },
+        &[],
+    );
+    assert!(
+        notice.subject.contains("p: follow-up unknown"),
+        "{}",
+        notice.subject
+    );
+    assert!(notice.text.contains("was missed"), "{}", notice.text);
+    assert!(
+        notice.text.contains("Reason: read too late"),
+        "{}",
+        notice.text
+    );
+}

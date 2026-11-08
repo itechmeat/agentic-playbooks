@@ -156,6 +156,7 @@ fn read_ctx<'b>(run: &'b ListRun<'_, '_, '_>, events: &'b [crate::event::Event])
         // Sibling items change the tree while this one is checked.
         guard_tree: run.workers == 1,
         scripts_label: "item check scripts",
+        site: apb_core::baseline::BASELINE_SITE,
     }
 }
 

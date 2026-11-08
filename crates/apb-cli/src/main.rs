@@ -18,6 +18,7 @@ mod cache;
 mod candidate;
 mod connector;
 mod consent;
+mod corrections;
 mod dashboard_check;
 mod demo;
 // --- issue #193 host-task decisions ---
@@ -54,6 +55,7 @@ mod run;
 mod run_items;
 mod run_outputs;
 mod scenario;
+mod scenario_capture;
 // --- 0.24.0 run execution mode lines ---
 mod run_mode;
 // --- end 0.24.0 run execution mode lines ---
@@ -92,6 +94,7 @@ use crate::run::{
     resume_all_cmd, resume_cmd, review_cmd, run_cmd, run_list, run_validate, runs_cmd, stop_cmd,
     wait_cmd,
 };
+use crate::scenario_capture::ScenarioAction;
 use crate::selfupdate::run_self_update;
 use crate::serve::{ask_server_cmd, dashboard, dev_cmd, ingest_cmd, mcp_cmd};
 use crate::server::{ServerAction, server_cmd};
@@ -573,6 +576,12 @@ enum Command {
     /// reopen or close one (a close quotes the source's new text); recheck
     /// the ones whose source changed; scan earlier runs to collect them
     Problems(crate::problems::ProblemsArgs),
+    /// A playbook's corrections ledger: the review notes, node notes,
+    /// question answers and rejections that recurred across its runs, with
+    /// the draft a person may add to a node's prompt. Without a subcommand,
+    /// list them; show one's draft, or mark the version that carries the
+    /// fix (fixed), dismiss or reopen one
+    Corrections(crate::corrections::CorrectionsArgs),
     /// Find step sequences your past agent sessions repeat (Claude Code and
     /// Codex history of the named projects) and offer them as playbook
     /// drafts; list or show stored results, save or decline a suggestion.
@@ -618,6 +627,11 @@ enum Command {
     },
     // --- end of 0.23.0 stats ---
     // --- 0.24.0 eval suites ---
+    /// Scenario files of a playbook
+    Scenario {
+        #[command(subcommand)]
+        action: ScenarioAction,
+    },
     /// Run a playbook's eval cases (`.apb/playbooks/<id>/evals/`), each
     /// repetition as a run in a disposable repository, check the outcomes,
     /// store the result per configuration and compare it with the previous
@@ -883,8 +897,8 @@ enum Command {
         /// The journal sequence of the `run_paused` this waker belongs to.
         #[arg(
             long,
-            required_unless_present_any = ["release", "notify"],
-            conflicts_with_all = ["release", "notify"]
+            required_unless_present_any = ["release", "notify", "follow_up"],
+            conflicts_with_all = ["release", "notify", "follow_up"]
         )]
         seq: Option<u64>,
         /// The journal sequence of the `drive_released` this waker belongs
@@ -895,6 +909,11 @@ enum Command {
         /// instead of resuming anything.
         #[arg(long)]
         notify: bool,
+        /// The `run_finished` this follow-up waker belongs to, instead of
+        /// resuming anything: it reads the run's follow-up check when its
+        /// time comes.
+        #[arg(long = "follow-up")]
+        follow_up: Option<u64>,
     },
     /// One scenario run (`apb eval --level quick|smoke`), in scenario
     /// mode: writes only below `.apb/scenario-runs/`, starts no program and
@@ -1267,6 +1286,7 @@ fn main() -> ExitCode {
         Some(Command::Connector { action }) => connector_cmd(&root, action),
         Some(Command::Cache { cmd }) => cache_cmd(&root, cmd),
         Some(Command::Decide(args)) => crate::decide::decide_cmd(&root, args),
+        Some(Command::Scenario { action }) => scenario_capture::scenario_action(&root, action),
         Some(Command::Decisions { action }) => decisions_cmd(&root, action),
         Some(Command::Grade(args)) => grade::grade_cmd(&root, args),
         Some(Command::Candidate(args)) => candidate::candidate_cmd(&root, args),
@@ -1274,6 +1294,7 @@ fn main() -> ExitCode {
         Some(Command::Judge(args)) => judge::judge_cmd(&root, args),
         Some(Command::Version(args)) => version::version_cmd(&root, args),
         Some(Command::Problems(args)) => problems::problems_cmd(&root, args),
+        Some(Command::Corrections(args)) => corrections::corrections_cmd(&root, args),
         Some(Command::Discover(args)) => discover::discover_cmd(&root, args),
         // --- 0.23.0 stats (C3) ---
         Some(Command::Stats {
@@ -1454,13 +1475,15 @@ fn main() -> ExitCode {
             seq,
             release,
             notify,
+            follow_up,
         }) => pause_waker_cmd(
             &run_root,
             &run_id,
-            match (seq, release) {
+            match (seq, release, follow_up) {
                 _ if notify => crate::run::WakerFor::Notify,
-                (_, Some(r)) => crate::run::WakerFor::Release(r),
-                (s, None) => crate::run::WakerFor::Pause(s.unwrap_or_default()),
+                (_, _, Some(f)) => crate::run::WakerFor::FollowUp(f),
+                (_, Some(r), _) => crate::run::WakerFor::Release(r),
+                (s, None, _) => crate::run::WakerFor::Pause(s.unwrap_or_default()),
             },
         ),
         Some(Command::ScenarioRun {

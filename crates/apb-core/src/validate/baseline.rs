@@ -1,6 +1,8 @@
 //! Baseline check rules (V62-V67): the `baseline_check` block's structure,
 //! the safety of its sources, its rules and paths, and its templates. The
-//! reserved grant site is V68, for every engine site (`nodes.rs`).
+//! reserved grant site is V68, for every engine site (`nodes.rs`). The four
+//! rules of one check (V62-V65) also check the follow-up's check, under its
+//! own label (`follow_up.rs`).
 
 use std::collections::HashSet;
 
@@ -8,6 +10,8 @@ use super::*;
 use crate::baseline::{BaselineCheck, BaselineSource, MAX_TIMEOUT_SECONDS};
 
 const ID_MAX: usize = 40;
+/// What every message of the baseline check's rules calls a check.
+const LABEL: &str = "baseline check";
 
 fn id_ok(id: &str) -> bool {
     (1..=ID_MAX).contains(&id.len())
@@ -38,10 +42,10 @@ pub(crate) fn check_baseline(
                 format!("baseline check `{}` is declared twice", c.id),
             );
         }
-        check_structure(c, r);
-        check_source(c, ctx, r);
-        check_observations(c, r);
-        check_templates(playbook, c, r);
+        check_structure(LABEL, c, r);
+        check_source(LABEL, c, ctx, r);
+        check_observations(LABEL, c, r);
+        check_templates(LABEL, playbook, c, r);
     }
     check_goal_pairing(playbook, r);
     check_tree(playbook, r);
@@ -49,9 +53,10 @@ pub(crate) fn check_baseline(
 
 /// V62: id format, exactly one source, `observe` present exactly when the
 /// source needs it, `complete_when` only on a connector, the timeout range,
-/// unique observation ids, and the project check kinds.
-fn check_structure(c: &BaselineCheck, r: &mut ValidationReport) {
-    let at = format!("baseline check `{}`", c.id);
+/// unique observation ids, and the project check kinds. `label` names the
+/// check's kind in each message (`baseline check`, `follow-up check`).
+pub(super) fn check_structure(label: &str, c: &BaselineCheck, r: &mut ValidationReport) {
+    let at = format!("{label} `{}`", c.id);
     if !id_ok(&c.id) {
         r.error(
             "V62",
@@ -143,8 +148,13 @@ fn check_structure(c: &BaselineCheck, r: &mut ValidationReport) {
 /// that is not an inbox function. The connector and function names are
 /// checked once, with every other binding site (V23), and a connector
 /// that does not load is reported there too (V42).
-fn check_source(c: &BaselineCheck, ctx: &ValidationContext, r: &mut ValidationReport) {
-    let at = format!("baseline check `{}`", c.id);
+pub(super) fn check_source(
+    label: &str,
+    c: &BaselineCheck,
+    ctx: &ValidationContext,
+    r: &mut ValidationReport,
+) {
+    let at = format!("{label} `{}`", c.id);
     match c.source() {
         Some(BaselineSource::Script(path)) if !nodes::script_check_path_ok(path) => r.error(
             "V63",
@@ -184,9 +194,9 @@ fn check_source(c: &BaselineCheck, ctx: &ValidationContext, r: &mut ValidationRe
 /// finite bound, a valid path that maps over an array (`[]`) only for a
 /// list or a count, and `count` only on a number; a connector's
 /// `complete_when` path is valid and reaches one value (no `[]`).
-fn check_observations(c: &BaselineCheck, r: &mut ValidationReport) {
+pub(super) fn check_observations(label: &str, c: &BaselineCheck, r: &mut ValidationReport) {
     for o in &c.observe {
-        let at = format!("baseline check `{}` observation `{}`", c.id, o.id);
+        let at = format!("{label} `{}` observation `{}`", c.id, o.id);
         match o.expect.rule() {
             Ok(rule) => {
                 if let Some(why) = rule.misfit(o.kind) {
@@ -233,7 +243,7 @@ fn check_observations(c: &BaselineCheck, r: &mut ValidationReport) {
             r.error(
                 "V64",
                 None,
-                format!("baseline check `{}` complete_when: {why}", c.id),
+                format!("{label} `{}` complete_when: {why}", c.id),
             );
         }
     }
@@ -252,7 +262,12 @@ fn strings<'a>(v: &'a serde_json::Value, out: &mut Vec<&'a str>) {
 /// V65: connector args and `complete_when` may template only
 /// `params.<declared>`: both snapshots must read the same input, and run
 /// state changes between them.
-fn check_templates(playbook: &Playbook, c: &BaselineCheck, r: &mut ValidationReport) {
+pub(super) fn check_templates(
+    label: &str,
+    playbook: &Playbook,
+    c: &BaselineCheck,
+    r: &mut ValidationReport,
+) {
     let mut texts = Vec::new();
     if let Some(conn) = &c.connector {
         conn.args.values().for_each(|v| strings(v, &mut texts));
@@ -272,7 +287,7 @@ fn check_templates(playbook: &Playbook, c: &BaselineCheck, r: &mut ValidationRep
                     "V65",
                     None,
                     format!(
-                        "baseline check `{}` templates `{{{{{reference}}}}}`; only a declared params.<name> is allowed, so both snapshots read the same input",
+                        "{label} `{}` templates `{{{{{reference}}}}}`; only a declared params.<name> is allowed, so both snapshots read the same input",
                         c.id
                     ),
                 );

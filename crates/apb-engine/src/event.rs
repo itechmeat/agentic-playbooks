@@ -1811,6 +1811,37 @@ pub enum EventPayload {
     /// comparison under `baseline_check.enforce: true`. Written before the
     /// finish node's `node_finished`, like `goal_checked`, so it is safe to
     /// skip up to that checkpoint.
+    /// The playbook's `follow_up` read once after a successful run ended.
+    /// Appended only after a `run_finished { outcome: succeeded }`, at most
+    /// once per run. A checkpoint (see `is_checkpoint`). Additive variant.
+    FollowUpObserved {
+        #[serde(default)]
+        check: String,
+        /// `observed`, `unknown` (the source could not be read, `reason`
+        /// says why) or `missed` (read later than `grace`; nothing was
+        /// read).
+        #[serde(default)]
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        observations: std::collections::BTreeMap<String, apb_core::baseline::Observation>,
+        /// One per observation, in `observe` order.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        results: Vec<FollowUpResult>,
+        /// `met` (every result met), `not_met` (any not met) or `unknown`.
+        #[serde(default)]
+        verdict: String,
+        /// The seq of the `run_finished` it follows.
+        #[serde(default)]
+        finished_seq: u64,
+        #[serde(default)]
+        due_at_ms: u64,
+        #[serde(default)]
+        observed_at_ms: u64,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        input_digest: String,
+    },
     BaselineCompared {
         #[serde(default)]
         check: String,
@@ -3242,6 +3273,22 @@ pub struct DecisionAnswer {
     pub invalid: Option<String>,
 }
 
+/// One observation's outcome of a follow-up read (`follow_up_observed`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(optional_fields))]
+pub struct FollowUpResult {
+    #[serde(default)]
+    pub observation: String,
+    /// The rule as `Rule::describe` wrote it.
+    #[serde(default)]
+    pub rule: String,
+    /// `met`, `not_met` or `unknown` (`Verdict::as_str`).
+    #[serde(default)]
+    pub verdict: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// A decision model's recommendation on a park wake
 /// ([`EventPayload::WakeRaised`] `triage`, issue #165 Part 10).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -3429,6 +3476,7 @@ impl EventPayload {
                 | EventPayload::RunPaused { .. }
                 | EventPayload::RunFinished { .. }
                 | EventPayload::RunAborted { .. }
+                | EventPayload::FollowUpObserved { .. }
         )
     }
 
@@ -3731,6 +3779,118 @@ fn parse_journal(bytes: &[u8], tolerate_torn_tail: bool) -> Result<JournalRead, 
 
 #[cfg(test)]
 mod tests {
+    /// A `follow_up_observed` line round-trips every field, and the event
+    /// is a checkpoint.
+    #[test]
+    fn follow_up_observed_round_trips_and_is_a_checkpoint() {
+        let line = r#"{"type":"follow_up_observed","check":"deal_won","status":"observed","observations":{"stage":{"state":"value","value":{"type":"text","value":"won"}}},"results":[{"observation":"stage","rule":"equals won","verdict":"met","detail":"won"}],"verdict":"met","finished_seq":41,"due_at_ms":1700003600000,"observed_at_ms":1700003601000,"input_digest":"sha256:x"}"#;
+        let payload: EventPayload = serde_json::from_str(line).unwrap();
+        assert!(
+            payload.is_checkpoint(),
+            "follow_up_observed is a checkpoint"
+        );
+        // The payload is not PartialEq (its decisions carry floats in
+        // maps); the wire form is the contract, so round-trip through it.
+        let back = serde_json::to_string(&payload).unwrap();
+        let reparsed: EventPayload = serde_json::from_str(&back).unwrap();
+        let back2 = serde_json::to_string(&reparsed).unwrap();
+        assert_eq!(back2, back);
+        match &payload {
+            EventPayload::FollowUpObserved {
+                check,
+                status,
+                verdict,
+                finished_seq,
+                results,
+                ..
+            } => {
+                assert_eq!(check, "deal_won");
+                assert_eq!(status, "observed");
+                assert_eq!(verdict, "met");
+                assert_eq!(*finished_seq, 41);
+                assert_eq!(results.len(), 1);
+            }
+            other => panic!("expected FollowUpObserved, got {other:?}"),
+        }
+    }
+
+    /// An absent field reads as its default (an older or a partial writer).
+    #[test]
+    fn follow_up_observed_reads_leniently() {
+        let payload: EventPayload =
+            serde_json::from_str(r#"{"type":"follow_up_observed"}"#).unwrap();
+        match &payload {
+            EventPayload::FollowUpObserved {
+                check,
+                status,
+                verdict,
+                observations,
+                results,
+                ..
+            } => {
+                assert_eq!(
+                    (check.as_str(), status.as_str(), verdict.as_str()),
+                    ("", "", "")
+                );
+                assert!(observations.is_empty() && results.is_empty());
+            }
+            other => panic!("expected FollowUpObserved, got {other:?}"),
+        }
+        assert!(payload.is_checkpoint());
+    }
+
+    /// The checkpoint rule over a real journal: `run_finished`, an event
+    /// type this apb does not know, then `follow_up_observed` reads whole
+    /// (the unknown event is settled by the checkpoint that follows it);
+    /// the unknown event after `follow_up_observed` is refused.
+    #[test]
+    fn follow_up_observed_settles_an_unknown_event_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let lines = [
+            r#"{"seq":1,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+            r#"{"seq":2,"ts":1,"type":"run_finished","outcome":"succeeded"}"#,
+            r#"{"seq":3,"ts":1,"type":"alien_kind_from_the_future"}"#,
+            r#"{"seq":4,"ts":1,"type":"follow_up_observed","check":"c","status":"missed","verdict":"unknown"}"#,
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let events = read_journal(dir.path()).unwrap();
+        // The tolerant reader skips the unknown line and counts it; the
+        // known lines keep their own seqs.
+        assert_eq!(
+            events.events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            [1, 2, 4]
+        );
+        assert_eq!(
+            events
+                .unknown
+                .iter()
+                .map(|u| (u.seq, u.kind.clone()))
+                .collect::<Vec<_>>(),
+            [(3, "alien_kind_from_the_future".to_string())]
+        );
+        // Strict read_all settles the unknown event on the checkpoint: the
+        // journal reads whole.
+        let strict = read_all(dir.path()).unwrap();
+        assert_eq!(
+            strict.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            [1, 2, 4],
+            "the settled line is gone from the strict read"
+        );
+        // After the checkpoint: refused.
+        std::fs::write(
+            &path,
+            lines[..3].join("\n")
+                + "\n"
+                + r#"{"seq":4,"ts":1,"type":"follow_up_observed"}"#
+                + "\n"
+                + r#"{"seq":5,"ts":1,"type":"another_alien_kind"}"#
+                + "\n",
+        )
+        .unwrap();
+        assert!(read_all(dir.path()).is_err());
+    }
+
     /// A journal that cannot be locked fails a durable append before its
     /// decision runs, and writes nothing. On Linux a file opened as a path
     /// only (`O_PATH`) cannot be locked.

@@ -14,7 +14,8 @@
 //! `question_answered`); run duration; tokens and cost per run; missing
 //! deliverables and output fields; the goal criteria results; the findings
 //! and warnings the attempts reported, and each baseline observation's
-//! results ([`findings`]); the levels the runs' signed grades gave each
+//! results ([`findings`]); each version's follow-up check
+//! ([`follow_up`]); the levels the runs' signed grades gave each
 //! criterion ([`quality`]); the interventions of its finished runs
 //! ([`interventions`]). Per node:
 //! runs it ran in, first-pass executions, retries, fallbacks, re-entries,
@@ -222,6 +223,11 @@ pub struct VersionStats {
     /// Each baseline observation over the runs that compared it; empty
     /// when the runs had no baseline check.
     pub baseline: Vec<findings::BaselineStats>,
+    /// The version's follow-up check over its runs; absent when no run's
+    /// snapshot declares a `follow_up` block.
+    #[cfg_attr(feature = "ts", ts(as = "Option<follow_up::FollowUpStats>", optional))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_up: Option<follow_up::FollowUpStats>,
     /// The models its attempts actually ran on (issue #193).
     #[serde(flatten)]
     #[cfg_attr(feature = "ts", ts(flatten))]
@@ -302,6 +308,11 @@ pub struct Comparison {
     )]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub quality: Vec<quality::QualityDelta>,
+    /// The follow-up met rates of the two versions; absent when either
+    /// side has no observed run.
+    #[cfg_attr(feature = "ts", ts(as = "Option<follow_up::MetRate>", optional))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_up_met_rate: Option<follow_up::MetRate>,
 }
 
 /// The whole report.
@@ -454,6 +465,7 @@ fn comparison(playbook: &str, base: &str, versions: &[VersionStats]) -> Comparis
         c.cost_per_run_delta_usd = delta(a.spend.cost_per_run_usd, b.spend.cost_per_run_usd)
             .map(|d| (d * 1e4).round() / 1e4);
         c.quality = quality::deltas(&a.quality, &b.quality);
+        c.follow_up_met_rate = follow_up::met_rate_pair(a.follow_up.as_ref(), b.follow_up.as_ref());
     }
     c
 }
@@ -675,11 +687,17 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
     let (mut tokens, mut cost) = (0u64, 0f64);
     let (mut cost_attempts, mut finished_attempts) = (0usize, 0usize);
     let mut notes = findings::Acc::default();
+    let mut follow_up = follow_up::Acc::default();
     let mut counted: Vec<interventions::RunInterventions> = Vec::new();
     for run in runs {
         notes.add(
             &run.run_id,
             run.started_ms().unwrap_or(0),
+            run.snapshot.as_ref(),
+            &run.events,
+        );
+        follow_up.add(
+            run.origin.is_production(),
             run.snapshot.as_ref(),
             &run.events,
         );
@@ -726,6 +744,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
     spend.tokens = PerRun::new(tokens, spend.runs_with_usage);
     spend.cost_known = Rate::new(cost_attempts, finished_attempts);
     let (findings, baseline) = notes.finish();
+    let follow_up = follow_up.finish();
     // `+ 0.0`: an empty float sum is -0.0.
     spend.cost_usd = (cost * 1e8).round() / 1e8 + 0.0;
     spend.cost_per_run_usd = (spend.runs_with_cost > 0)
@@ -818,6 +837,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
         goal,
         findings,
         baseline,
+        follow_up,
         model_use,
         quality: quality::of_runs(runs),
         interventions: interventions::version_stats(&counted),
@@ -835,6 +855,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
 pub mod digests;
 pub mod executors;
 pub mod findings;
+pub mod follow_up;
 pub mod interventions;
 pub mod models;
 pub mod quality;

@@ -19,8 +19,8 @@ const WORKSPACE_FILE: &str = "workspace.local";
 /// node outputs and per-attempt agent transcripts, which can hold whatever
 /// the agent saw), the node result cache, soft-deleted playbooks, schema
 /// migration backups, the workdir lock, the log of decisions asked outside
-/// a run (`decisions.jsonl`), remembered run input, the known problems
-/// store, scenario runs, the open billing challenges and the launch
+/// a run (`decisions.jsonl`), remembered run input, the known problems and corrections
+/// stores, scenario runs, the open billing challenges and the launch
 /// handoff files. The one list
 /// `ensure_local_ignored` writes; a new runtime path under `.apb/` belongs
 /// here.
@@ -38,6 +38,8 @@ pub const LOCAL_ENTRIES: &[&str] = &[
     "memory/",
     // Known problems of the playbooks' tools, signed by this installation.
     "problems/",
+    // The corrections people and runs left, signed by this installation.
+    "corrections/",
     // Scenario runs and their results index: never history, never shared.
     "scenario-runs/",
     // The open single-use challenges of billing confirmations.
@@ -247,6 +249,7 @@ mod tests {
             "decisions.jsonl",
             "memory/",
             "problems/",
+            "corrections/",
             "scenario-runs/",
             "launch-challenges/",
             "handoff/",

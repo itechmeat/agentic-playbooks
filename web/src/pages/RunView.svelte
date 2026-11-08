@@ -76,6 +76,7 @@
   import ListProgressPanel from '../lib/ListProgressPanel.svelte'
   import RunOutputsPanel from '../lib/RunOutputsPanel.svelte'
   import RunResultsPanel from '../lib/RunResultsPanel.svelte'
+  import ScenarioCaptureBox from '../lib/ScenarioCaptureBox.svelte'
   import { resultsFetch, resultsKey, type ResultsView } from '../lib/results'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
@@ -859,6 +860,10 @@
         onchange={load}
       />
       <RunVerdictPanel outcome={detail.outcome} />
+      <!-- A finished run can become a scenario: preview the capture, then save it. -->
+      {#if terminal}
+        <ScenarioCaptureBox {id} {workspace} />
+      {/if}
       <RunOutputsPanel outputs={detail.run_outputs} onCite={showCite} />
       {#key `${workspace}/${id}`}
         <ListProgressPanel lists={detail.lists} />

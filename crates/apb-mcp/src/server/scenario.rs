@@ -36,6 +36,19 @@ pub struct PlaybookScenariosArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct RunScenarioCaptureArgs {
+    /// The finished run's id.
+    pub run_id: String,
+    /// The scenario's name: [a-z0-9][a-z0-9-]*, at most 64 characters.
+    pub name: String,
+    /// Only assert these nodes' statuses and visits; default: every node
+    /// that ran.
+    #[serde(default)]
+    pub nodes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PlaybookScenarioRunArgs {
     pub id: String,
     /// The scenario's name (its file stem under `evals/scenarios/`).
@@ -130,6 +143,35 @@ impl WfMcp {
             };
             tools::scenario::run_scenario(&root, scope, &args.id, &req, caller, &exe)
                 .and_then(tools::grade::to_value)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Show a finished production run as a scenario: the YAML with one scripted answer per node execution and the run's expectations, scrubbed of the run's secrets, with the warnings and the digest. PREVIEW ONLY: it writes nothing. Show the YAML to the person; they save it with `apb scenario capture --save` or on the dashboard. Refused from a run step.",
+        annotations(read_only_hint = true)
+    )]
+    pub(crate) async fn run_scenario_capture(
+        &self,
+        Parameters(args): Parameters<RunScenarioCaptureArgs>,
+    ) -> CallToolResult {
+        let root = self.root.clone();
+        off_runtime(move || {
+            let step = StepCaller::from_env();
+            let a = tools::scenario_capture::CaptureArgs {
+                name: args.name,
+                nodes: args.nodes,
+                save: false,
+                digest: None,
+            };
+            tools::scenario_capture::capture(
+                &root,
+                &args.run_id,
+                &a,
+                apb_core::launch::floor::SaveChannel::Agent,
+                &step,
+            )
+            .and_then(tools::grade::to_value)
         })
         .await
     }

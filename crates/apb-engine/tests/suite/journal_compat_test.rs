@@ -1116,3 +1116,106 @@ fn run_provenance_limits_are_additive() {
             if d == "sha256:abc" && limits.is_empty()
     ));
 }
+
+// --- a `follow_up_observed` checkpoint ---
+
+/// The journal a follow-up leaves: a succeeded run that ended, then one
+/// event of a type no apb knows (what a newer apb wrote between the run's
+/// end and the follow-up read), then the `follow_up_observed` checkpoint.
+fn follow_up_journal(root: &Path) -> (std::path::PathBuf, String) {
+    seed(root);
+    let res = run(root, "lin", None, RunOptions::default()).unwrap();
+    let run_id = res.run_id.clone();
+    let dir = root.join(".apb/runs").join(&run_id);
+    let events = read_all(&dir).unwrap();
+    let last = events.last().unwrap().seq;
+    let mut out: Vec<String> = events
+        .iter()
+        .map(|e| serde_json::to_string(e).unwrap())
+        .collect();
+    out.push(format!(
+        r#"{{"seq":{},"ts":1,"type":"future_event","use":"completion_check"}}"#,
+        last + 1
+    ));
+    out.push(format!(
+        r#"{{"seq":{},"ts":1,"type":"follow_up_observed","check":"c","status":"missed","verdict":"unknown","finished_seq":{}}}"#,
+        last + 2,
+        last
+    ));
+    fs::write(dir.join("events.jsonl"), out.join("\n") + "\n").unwrap();
+    (dir, run_id)
+}
+
+/// What an older apb sees: the journal ends in `run_finished` then an
+/// unknown type. Its `read_all` refuses (a resume refuses with it), its
+/// tolerant reader shows the run with the event counted, and its stop path
+/// goes through.
+#[test]
+fn a_follow_up_run_refuses_a_resume_and_stops_for_an_older_apb() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, run_id) = follow_up_journal(tmp.path());
+
+    // An older apb knows neither the future event nor the
+    // `follow_up_observed` checkpoint: rename the checkpoint line to a type
+    // this binary does not know either, which is exactly what the older
+    // binary reads.
+    let text = fs::read_to_string(dir.join("events.jsonl")).unwrap();
+    fs::write(
+        dir.join("events.jsonl"),
+        text.replace(
+            "\"type\":\"follow_up_observed\"",
+            "\"type\":\"follow_up_observed_old\"",
+        ),
+    )
+    .unwrap();
+
+    // The older apb's strict read: refused with the upgrade message.
+    let err = read_all(&dir).unwrap_err().to_string();
+    assert!(err.contains("newer apb"), "{err}");
+    assert!(EventLog::open(&dir).is_err());
+    // A resume is refused the same way.
+    let err = resume(tmp.path(), &run_id, None).unwrap_err().to_string();
+    assert!(err.contains("newer apb"), "{err}");
+    // The tolerant reader shows the run, both unknown events counted.
+    let view = RunView::load(&dir, &run_id).unwrap();
+    assert_eq!(view.unknown.len(), 2);
+    assert_eq!(view.state.run_status, RunStatus::Succeeded);
+
+    // The stop path goes through and appends `run_aborted`.
+    // A run that already ended (its `run_finished` is on disk) is already
+    // terminal for the stop path; the older apb's stop goes through all
+    // the same.
+    let outcome = apb_engine::stop_run(tmp.path(), &run_id).unwrap();
+    assert_eq!(outcome, apb_engine::StopOutcome::AlreadyTerminal);
+    let journal = read_journal(&dir).unwrap();
+    assert_eq!(journal.unknown.len(), 2, "the unknown events stay on disk");
+    let last = journal.events.last().unwrap();
+    assert!(
+        matches!(&last.payload, EventPayload::RunFinished { .. }),
+        "{last:?}"
+    );
+}
+
+/// This apb reads the same journal whole: the unknown event before the
+/// `follow_up_observed` checkpoint is settled by it.
+#[test]
+fn this_apb_reads_a_follow_up_journal_whole() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (dir, _run_id) = follow_up_journal(tmp.path());
+    let events = read_all(&dir).unwrap();
+    // The settled unknown event is gone; the last is the checkpoint, and
+    // the one before it is the `run_finished`.
+    assert!(events.len() >= 2);
+    let last = events.last().unwrap();
+    let before = &events[events.len() - 2];
+    assert!(
+        matches!(before.payload, EventPayload::RunFinished { .. }),
+        "{before:?}"
+    );
+    let _ = last;
+    let last = events.last().unwrap();
+    assert!(
+        matches!(&last.payload, EventPayload::FollowUpObserved { status, .. } if status == "missed"),
+        "{last:?}"
+    );
+}

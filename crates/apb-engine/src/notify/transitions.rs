@@ -77,6 +77,10 @@ pub fn open_transitions(events: &[Event]) -> Vec<TransitionId> {
     let mut supervisor: Option<u64> = None;
     let mut paused: Option<u64> = None;
     let mut finished: Option<u64> = None;
+    // A read follow-up opens `follow_up` at its seq; a resume or a start
+    // closes it like they close the run's end. The run's finish does not
+    // (the observation is news about a run that already ended).
+    let mut follow_up: Option<u64> = None;
     // A stalled attempt opens `stalled` at its seq; the run's end does not
     // close it (it is news about a step, not a wait), and the send ledger
     // keeps it to one send (spec node-contracts D5).
@@ -128,9 +132,11 @@ pub fn open_transitions(events: &[Event]) -> Vec<TransitionId> {
                 // it as the supervisor's.
                 paused = (by.unwrap_or(PauseBy::Supervisor) != PauseBy::Operator).then_some(e.seq);
             }
+            EventPayload::FollowUpObserved { .. } => follow_up = Some(e.seq),
             EventPayload::RunResumed { .. } | EventPayload::RunStarted { .. } => {
                 paused = None;
                 finished = None;
+                follow_up = None;
             }
             EventPayload::AttemptFinished {
                 item: None,
@@ -175,6 +181,7 @@ pub fn open_transitions(events: &[Event]) -> Vec<TransitionId> {
     out.extend(supervisor.map(|seq| TransitionId::new(Transition::Supervisor, seq)));
     out.extend(paused.map(|seq| TransitionId::new(Transition::Paused, seq)));
     out.extend(finished.map(|seq| TransitionId::new(Transition::Finished, seq)));
+    out.extend(follow_up.map(|seq| TransitionId::new(Transition::FollowUp, seq)));
     out.extend(
         stalled
             .into_iter()
@@ -338,10 +345,95 @@ pub(crate) fn state_name(state: &IntentState) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::event::Event;
+
+    fn ev(seq: u64, payload: EventPayload) -> Event {
+        Event {
+            seq,
+            ts: 1,
+            payload,
+        }
+    }
+
+    fn follow_up_observed(seq: u64) -> Event {
+        ev(
+            seq,
+            EventPayload::FollowUpObserved {
+                check: "deal_won".into(),
+                status: "observed".into(),
+                reason: None,
+                observations: Default::default(),
+                results: Vec::new(),
+                verdict: "met".into(),
+                finished_seq: seq - 1,
+                due_at_ms: 0,
+                observed_at_ms: 0,
+                input_digest: String::new(),
+            },
+        )
+    }
+
     /// The documented default (docs say "about 30 s"): nothing in this
     /// unit-test binary sets the override.
     #[test]
     fn a_notification_is_retried_after_thirty_seconds_by_default() {
         assert_eq!(super::retry_gap_ms(), 30_000);
+    }
+
+    /// A read follow-up opens `follow_up` at its seq, a resume or a start
+    /// closes it like they close `finished`, and the run's end does not
+    /// (the observation is news about a run that already ended).
+    #[test]
+    fn a_follow_up_observation_opens_an_opt_in_transition_a_resume_closes() {
+        assert!(!Transition::DEFAULT.contains(&Transition::FollowUp));
+        let events = vec![follow_up_observed(2)];
+        let open = open_transitions(&events);
+        let follow: Vec<_> = open
+            .iter()
+            .filter(|t| t.kind == Transition::FollowUp)
+            .collect();
+        assert_eq!(follow.len(), 1);
+        assert_eq!(follow[0].seq, 2);
+        assert_eq!(follow[0].label(), "notify:follow_up.2");
+
+        // A later re-finish of the same run does not close it.
+        let mut ended = events.clone();
+        ended.push(ev(
+            3,
+            EventPayload::RunFinished {
+                outcome: "succeeded".into(),
+            },
+        ));
+        assert!(
+            open_transitions(&ended)
+                .iter()
+                .any(|t| t.kind == Transition::FollowUp)
+        );
+
+        // A resume closes it, like it closes the run's end.
+        let mut resumed = events.clone();
+        resumed.push(ev(3, EventPayload::resumed("done", None, false)));
+        assert!(
+            !open_transitions(&resumed)
+                .iter()
+                .any(|t| t.kind == Transition::FollowUp)
+        );
+
+        // A start closes it too.
+        let mut started = events.clone();
+        started.push(ev(
+            3,
+            EventPayload::RunStarted {
+                playbook: "p".into(),
+                version: "1.0.0".into(),
+                definition: None,
+            },
+        ));
+        assert!(
+            !open_transitions(&started)
+                .iter()
+                .any(|t| t.kind == Transition::FollowUp)
+        );
     }
 }

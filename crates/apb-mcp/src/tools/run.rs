@@ -433,6 +433,11 @@ fn add_outcome_blocks(
     if let Some(baseline) = &readout.baseline {
         out["baseline"] = json!(baseline);
     }
+    // The follow-up check: pending with its due time, or observed with the
+    // verdict and results. Absent for a playbook without one.
+    if let Some(follow_up) = &readout.follow_up {
+        out["follow_up"] = json!(follow_up);
+    }
     // The findings and warnings the attempts reported; absent when none.
     if !readout.notes.is_empty() {
         out["notes"] = json!(readout.notes);

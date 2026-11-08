@@ -748,6 +748,35 @@ pub fn atomic_write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_via_temp(dir, path, bytes, create_private)
 }
 
+/// Writes `bytes` to `path` only if `path` does not exist: a synced
+/// temporary file in the same directory, then `std::fs::hard_link` to
+/// `path` (fails with `AlreadyExists` when the target exists), then the
+/// temporary removed and the directory synced. The file mode is the
+/// default (not private). Never replaces a file.
+pub fn write_new_no_clobber(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    crate::process_mode::guard_write(path)?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("path has no parent"))?;
+    fs::create_dir_all(dir)?;
+    let tmp = unique_temp(dir, path);
+    let res = (|| {
+        let mut f = File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        // A hard link fails when `path` exists, where a rename would
+        // replace it: this is the one refusal a save of one name gives a
+        // second writer.
+        std::fs::hard_link(&tmp, path)
+    })();
+    let _ = fs::remove_file(&tmp);
+    if res.is_ok() {
+        sync_dir(dir)?;
+    }
+    res
+}
+
 /// Flushes the directory entry list of `dir` to disk, so a rename into it
 /// survives a power cut. A no-op off unix.
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
@@ -1212,6 +1241,7 @@ mod scenario_tests {
             refused(lock_dir(d, "x.lock").map(drop));
             refused(hold_lock(d, "x.lock").map(drop));
             refused(atomic_rewrite_in_place(&f, b"x").map(drop));
+            refused(write_new_no_clobber(&f, b"x"));
             refused(copy_tree(root, &d.join("copy")));
             refused(copy_tree_no_follow(root, d, &d.join("copy")));
             refused(symlink(root, &d.join("link")));
@@ -1228,5 +1258,52 @@ mod scenario_tests {
                 spawn_when_not_busy(&mut std::process::Command::new("true")).map(drop),
             );
         }
+    }
+}
+
+/// `write_new_no_clobber`: never replaces, and one winner under a race.
+#[cfg(test)]
+mod write_new_tests {
+    use super::*;
+
+    /// A new file is written; an existing file keeps its bytes and the
+    /// second write is `AlreadyExists`.
+    #[test]
+    fn a_new_file_is_written_and_an_existing_one_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/f");
+        write_new_no_clobber(&path, b"first").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        let e = write_new_no_clobber(&path, b"second").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+    }
+
+    /// Two threads writing one path: exactly one succeeds and the file
+    /// holds the winner's bytes whole.
+    #[test]
+    fn two_threads_on_one_path_exactly_one_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        let path_a = path.clone();
+        let path_b = path.clone();
+        let t1 = std::thread::spawn(move || write_new_no_clobber(&path_a, b"first"));
+        let t2 = std::thread::spawn(move || write_new_no_clobber(&path_b, b"second"));
+        let (r1, r2) = (t1.join().unwrap(), t2.join().unwrap());
+        let oks = [r1.is_ok(), r2.is_ok()].into_iter().filter(|b| *b).count();
+        assert_eq!(oks, 1, "{r1:?} {r2:?}");
+        let stored = fs::read(&path).unwrap();
+        assert!(
+            stored == b"first" || stored == b"second",
+            "mixed bytes: {stored:?}"
+        );
+        // No temp left behind.
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 }

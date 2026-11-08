@@ -20,6 +20,7 @@ use super::calls::{CallClass, ClassifiedCall, classified_calls};
 pub use super::claims::{
     Evidence, EvidenceBasis, EvidenceSource, Freshness, FreshnessState, Gap, GapKind,
 };
+use super::follow_up::RunFollowUp;
 use super::intents::{RunIntent, outcome_intents};
 use super::lists::{ListOutcome, list_evidence, list_gaps, list_outcomes};
 use super::notes::{RunFinding, RunNotes, RunWarning, finding_line, warning_line};
@@ -59,11 +60,15 @@ pub enum NeedsLookReason {
     /// A check passed before the agent ran, so the node failed as needing a
     /// look (a `prove_fails_first` check with `on_green_before: fail`).
     ChecksGreenBefore,
+    /// The follow-up read after the run ended did not hold (`not_met`).
+    /// An unknown or missed read does not call for a look.
+    FollowUp,
 }
 
 /// A run with a baseline regression, findings or warnings its attempts
-/// reported, sends whose outcome is not known, or list items that need a
-/// look. Nothing else sets it: a
+/// reported, sends whose outcome is not known, list items that need a
+/// look, or a follow-up read after the end that did not hold. Nothing
+/// else sets it: a
 /// failed run says so in its status.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -84,6 +89,10 @@ pub struct NeedsLook {
     #[serde(skip_serializing_if = "is_zero")]
     #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
     pub green_checks: u32,
+    /// A follow-up read after the run ended whose verdict is `not_met`.
+    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
+    pub follow_up: u32,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -94,13 +103,16 @@ impl NeedsLook {
     /// For the run listing: the current comparisons as
     /// [`BaselineState`](crate::baseline::BaselineState) reads them, the
     /// notes and the send ledger. The playbook snapshot is read only when the journal holds a
-    /// comparison, so a listing stays cheap; `None` when nothing calls for
-    /// a look.
+    /// comparison or a follow-up observation, so a listing stays cheap;
+    /// `None` when nothing calls for a look.
     pub fn for_run(run_dir: &Path, events: &[Event]) -> Option<Self> {
         let compared = events
             .iter()
             .any(|e| matches!(e.payload, EventPayload::BaselineCompared { .. }));
-        let playbook = compared
+        let observed = events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::FollowUpObserved { .. }));
+        let playbook = (compared || observed)
             .then(|| crate::legacy_snapshot::load_run_playbook(run_dir))
             .flatten();
         Self::from_events(playbook.as_ref(), events)
@@ -110,6 +122,14 @@ impl NeedsLook {
     pub fn from_events(playbook: Option<&Playbook>, events: &[Event]) -> Option<Self> {
         let notes = RunNotes::from_events(events);
         let intents = outcome_intents(events, apb_core::clock::now_ms_u64());
+        // A journaled `follow_up_observed` implies a production run: the
+        // read refuses every other origin, so its verdict counts here
+        // without reading the manifest.
+        let follow_up = events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::FollowUpObserved { .. }))
+            .then(|| super::follow_up::follow_up_from(playbook, events, true))
+            .flatten();
         Self::of(
             current_regressions(playbook, events),
             &notes,
@@ -119,6 +139,7 @@ impl NeedsLook {
                 .map(|l| l.needs_look)
                 .sum(),
             green_checks(events),
+            follow_up.as_ref(),
         )
     }
 
@@ -128,10 +149,13 @@ impl NeedsLook {
         intents: &[RunIntent],
         list_items: u32,
         green_checks: u32,
+        follow_up: Option<&RunFollowUp>,
     ) -> Option<Self> {
         let findings = notes.findings.len() as u32;
         let warnings = notes.warnings.len() as u32;
         let unknown_sends = intents.iter().filter(|i| i.is_open_unknown()).count() as u32;
+        let follow_up_not_met =
+            u32::from(follow_up.is_some_and(|f| f.verdict.as_deref() == Some("not_met")));
         let reasons: Vec<NeedsLookReason> = [
             (regressions, NeedsLookReason::Regression),
             (findings, NeedsLookReason::Findings),
@@ -139,6 +163,7 @@ impl NeedsLook {
             (unknown_sends, NeedsLookReason::UnknownSends),
             (list_items, NeedsLookReason::ListItems),
             (green_checks, NeedsLookReason::ChecksGreenBefore),
+            (follow_up_not_met, NeedsLookReason::FollowUp),
         ]
         .into_iter()
         .filter(|(n, _)| *n > 0)
@@ -152,6 +177,7 @@ impl NeedsLook {
             unknown_sends,
             list_items,
             green_checks,
+            follow_up: follow_up_not_met,
         })
     }
 
@@ -168,6 +194,7 @@ impl NeedsLook {
                 "check green before work",
                 "checks green before work",
             ),
+            (self.follow_up, "follow-up not met", "follow-ups not met"),
         ]
         .into_iter()
         .filter(|(n, ..)| *n > 0)
@@ -204,6 +231,11 @@ pub struct OutcomeSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub baseline: Option<BaselineOutcome>,
+    /// The follow-up check the playbook declared, with what the journal
+    /// recorded; absent for a run without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub follow_up: Option<RunFollowUp>,
     /// Each list node's counts; empty for a run without a list.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "ts", ts(as = "Option<Vec<ListOutcome>>", optional))]
@@ -220,6 +252,7 @@ struct Inputs<'a> {
     view: &'a RunView,
     goal: Option<&'a RunGoal>,
     baseline: Option<&'a RunBaseline>,
+    follow_up: Option<&'a RunFollowUp>,
     notes: &'a RunNotes,
     calls: Vec<ClassifiedCall>,
     intents: Vec<RunIntent>,
@@ -254,6 +287,7 @@ impl OutcomeSummary {
             view,
             goal: readout.goal.as_ref(),
             baseline: readout.baseline.as_ref(),
+            follow_up: readout.follow_up.as_ref(),
             notes: &readout.notes,
             calls: classified_calls(run_dir, &view.events),
             intents: outcome_intents(&view.events, now),
@@ -342,6 +376,9 @@ impl OutcomeSummary {
             ));
             section("Baseline", items);
         }
+        if let Some(f) = &self.follow_up {
+            section("Follow-up", f.section_items());
+        }
         if let Some(a) = &self.agent_summary {
             section(AGENT_SUMMARY_TITLE, vec![a.clone()]);
         }
@@ -361,6 +398,7 @@ impl Inputs<'_> {
             &self.intents,
             self.list_outcomes.iter().map(|l| l.needs_look).sum(),
             green_checks(&self.view.events),
+            self.follow_up,
         );
         let verified = self.verified();
         let unverified = self.unverified();
@@ -379,6 +417,7 @@ impl Inputs<'_> {
             findings: notes.findings.clone(),
             warnings: notes.warnings.clone(),
             baseline: self.baseline.map(|b| baseline_story(b, self.goal)),
+            follow_up: self.follow_up.cloned(),
             lists: self.list_outcomes,
             agent_summary: None,
         }
