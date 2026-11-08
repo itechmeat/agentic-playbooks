@@ -200,8 +200,9 @@ fn a_release_is_published_only_after_the_test_gate_succeeded() {
 fn the_release_gate_runs_on_every_shipped_os() {
     // The build legs only build, so the gate alone carries the per-platform
     // checks. Its matrix must keep a Linux leg and a leg on each macOS runner
-    // dist builds on (dist 0.32 defaults: macos-14 for arm, macos-15-intel
-    // for Intel); dropping one would let a platform-only break ship.
+    // dist builds on (macos-15 for arm, set in dist-workspace.toml, and
+    // dist 0.32's default macos-15-intel for Intel); dropping one would let
+    // a platform-only break ship.
     let doc = load(&repo_root().join(".github/workflows/test-gate.yml"));
     let gate = doc
         .get("jobs")
@@ -221,7 +222,7 @@ fn the_release_gate_runs_on_every_shipped_os() {
         runners.iter().any(|r| r.starts_with("ubuntu-")),
         "no Linux gate leg: {runners:?}"
     );
-    for want in ["macos-14", "macos-15-intel"] {
+    for want in ["macos-15", "macos-15-intel"] {
         assert!(
             runners.contains(&want),
             "no gate leg on {want}: {runners:?}"
