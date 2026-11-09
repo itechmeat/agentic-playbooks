@@ -99,6 +99,11 @@ pub struct Capabilities {
     /// apb can record the agent's sessions in the agent's own desktop history
     /// (`agents.<id>.ui_sync`).
     pub desktop_history: bool,
+    /// The built-in form prints a structured session record of the agent's
+    /// own before any work (dsh's opening `session` event), which its reader
+    /// finds (`OutputFormat::opening_session`): an attempt that fails or
+    /// times out afterwards still names the session a retry continues.
+    pub printed_session: bool,
 }
 
 impl Capabilities {
@@ -110,6 +115,7 @@ impl Capabilities {
         transcript: Transcript::Plain,
         tool_exposure: false,
         desktop_history: false,
+        printed_session: false,
     };
 }
 
@@ -121,6 +127,9 @@ pub enum Transcript {
     /// Its stdout as a stream of JSON events with tool facts (codex's
     /// `exec --json`).
     JsonEvents,
+    /// Its stdout as dsh's `--json` event stream, whose `tool_call` lines
+    /// carry the tool facts.
+    DshEvents,
     /// Its own session record, copied next to the output, plus stdout and
     /// stderr (claude's session JSONL).
     SessionRecord,

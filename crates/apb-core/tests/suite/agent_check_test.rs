@@ -153,3 +153,35 @@ fn a_custom_form_is_a_note_and_its_help_is_not_checked() {
         "custom invocation; output read as plain text when it is not codex's machine format"
     );
 }
+
+/// dsh's built-in forms against the help its headless app printed
+/// (0.2.2-rc.1): every flag is there, `--profile` in its usage line, and the
+/// pre-release suffix of its version is no newer version.
+#[test]
+fn dsh_help_names_every_flag_of_its_forms() {
+    const HELP: &str = include_str!("../fixtures/agent_output/dsh_headless_help.txt");
+    let dsh = agent("dsh");
+    let lines = check(
+        dsh,
+        &CheckInput {
+            version: Some("0.2.2-rc.1"),
+            help: Some(Ok(HELP)),
+            custom_form: false,
+        },
+    );
+    assert!(lines.iter().all(|l| l.level == Level::Ok), "{lines:?}");
+    let flags = form_flags(&dsh.forms().unwrap());
+    for f in [
+        "--profile",
+        "--json",
+        "--permission-mode",
+        "--approval-policy",
+        "--session-id",
+    ] {
+        assert!(flags.iter().any(|x| x == f), "{f}: {flags:?}");
+    }
+    assert!(
+        !flags.iter().any(|x| x == "-"),
+        "stdin is no flag: {flags:?}"
+    );
+}

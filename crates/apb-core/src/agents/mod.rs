@@ -27,6 +27,7 @@ pub mod agy;
 pub mod claude;
 pub mod codex;
 pub mod cursor;
+pub mod dsh;
 pub mod grok;
 pub mod hermes;
 pub mod opencode;
@@ -63,6 +64,7 @@ static ALL: &[&dyn Agent] = &[
     &cursor::Cursor,
     &qoder::Qoder,
     &zcode::Zcode,
+    &dsh::Dsh,
 ];
 
 /// Every built-in agent, in detection order.

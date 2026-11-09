@@ -27,6 +27,7 @@ fn the_probes_are_pinned_in_detect_order() {
             Vendor,
             &[".zcode/server/agents/glm/zcode-agent"],
         ),
+        ("dsh", &["dsh"], Aggregator, &[]),
     ];
     let probes = builtin_probes();
     assert_eq!(probes.len(), want.len());
@@ -46,10 +47,10 @@ fn the_alias_and_the_session_continuing_agents_are_pinned() {
     assert_eq!(detect::canonical_agent_id("custom"), "custom");
     assert_eq!(
         *SESSION_CONTINUING_AGENTS,
-        vec!["claude", "codex", "opencode", "zcode"]
+        vec!["claude", "codex", "opencode", "zcode", "dsh"]
     );
     for id in [
-        "claude", "codex", "agy", "opencode", "pi", "hermes", "grok", "qoder",
+        "claude", "codex", "agy", "opencode", "pi", "hermes", "grok", "qoder", "dsh",
     ] {
         assert_eq!(detect::default_program(id), id);
     }
@@ -117,6 +118,7 @@ fn every_agent_env_set_is_pinned() {
                 &[],
             ),
         ),
+        ("dsh", (&["DSH_*", "DEEPSEEK_*"], &[])),
         ("pi", (&[], &[])),
         ("custom", (&[], &[])),
     ];

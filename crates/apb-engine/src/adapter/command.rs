@@ -1,6 +1,7 @@
 //! The one spawn of a node agent's process, for the headless and the
 //! streaming transports alike: the command (wrapped in the isolation
-//! sandbox when the attempt has one), its environment
+//! sandbox when the attempt has one) behind the agent's run-scoped leading
+//! arguments ([`super::spawn_env::with_scoped_args`]), its environment
 //! ([`super::spawn_env::prepare`], the sandbox overlay last), its own
 //! process group, and the spawn-time callback.
 
@@ -30,6 +31,7 @@ pub(super) fn spawn_agent(
     // A read-only or scenario process starts no agent.
     apb_core::process_mode::guard_program_start()
         .map_err(|e| (ErrorClass::ProcessExit, e.to_string()))?;
+    let argv = spawn_env::with_scoped_args(argv, target)?;
     let sandbox = target.env.sandbox.as_deref();
     let mut cmd = match sandbox {
         Some(plan) => {
@@ -38,7 +40,7 @@ pub(super) fn spawn_agent(
         }
         None => {
             let mut c = Command::new(program);
-            c.args(argv).current_dir(workdir);
+            c.args(&argv).current_dir(workdir);
             c
         }
     };

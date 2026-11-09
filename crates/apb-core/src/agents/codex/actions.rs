@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use crate::agent_actions::action::{Action, ToolCall, WebKind, str_at};
+use crate::agent_actions::action::{Action, ToolCall, WebKind, patch_paths, str_at};
 
 /// Item fields that report what came of a call, not what it asked: left out
 /// of the input a repeated call is told by.
@@ -71,19 +71,6 @@ fn change_paths(changes: Option<&Value>) -> Vec<String> {
         Some(Value::Object(map)) => map.keys().cloned().collect(),
         _ => Vec::new(),
     }
-}
-
-/// The files an `apply_patch` names in its headers.
-fn patch_paths(patch: &str) -> Vec<String> {
-    patch
-        .lines()
-        .filter_map(|l| {
-            ["*** Update File: ", "*** Add File: ", "*** Delete File: "]
-                .iter()
-                .find_map(|h| l.strip_prefix(h))
-        })
-        .map(|p| p.trim().to_string())
-        .collect()
 }
 
 fn edit(name: &str, input: Value, paths: Vec<String>) -> ToolCall {

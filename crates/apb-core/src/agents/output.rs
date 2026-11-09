@@ -1,9 +1,9 @@
 //! What an agent CLI's output says about one attempt: the reply, the token
 //! usage it reports, its closing record and its session id.
 //!
-//! The built-in forms ask claude, codex, opencode and zcode for their machine
-//! output; each of those modules documents its shape and the CLI version it
-//! was checked against. Every reader is lenient in the same way: an output
+//! The built-in forms ask claude, codex, opencode, zcode and dsh for their
+//! machine output; each of those modules documents its shape and the CLI
+//! version it was checked against. Every reader is lenient in the same way: an output
 //! that does not have the expected shape (plain text from a custom invocation
 //! form, a stub agent, an older CLI) yields `None`, and the caller keeps the
 //! raw stdout as the reply and records no usage. Usage is only ever what the
@@ -50,6 +50,13 @@ pub trait OutputFormat: Send + Sync {
 
     /// The session id in `stdout`, unfiltered.
     fn session_id(&self, stdout: &str) -> Option<String>;
+
+    /// The session record the built-in form prints before any work, read
+    /// from the start of `stdout` alone; `None` for an agent that prints
+    /// none (see `Capabilities::printed_session`), unfiltered.
+    fn opening_session(&self, _stdout: &str) -> Option<String> {
+        None
+    }
 
     /// A session id printed in a human-readable header on stderr rather than
     /// in the output.

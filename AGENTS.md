@@ -197,8 +197,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   end-of-turn hook gives (`Agent::stop_hook`: its settings path, the
   byte-exact insert and removal of apb's hook, the event it hands the hook
   and the answer that keeps the turn going; claude's in `claude/hooks.rs`);
-  `claude/`, `codex/`, `opencode/`
-  and `zcode/` hold their readers and helpers, the other agents one file each;
+  `claude/`, `codex/`, `opencode/`, `zcode/`
+  and `dsh/` hold their readers and helpers (`dsh/model` the model string
+  and the run-scoped `--patch` file that carries it, `dsh/mcp` its home
+  patch layer as an MCP host), the other agents one file each;
   `apb_core::zcode` re-exports `agents/zcode`), free agent detection over the
   agent registry (`detect.rs`), curated models table
   (`models_table.rs` + `assets/models.yaml`), graph SCC and reachability helpers
@@ -454,9 +456,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   absence rule; `rules/` the rules grader of the built-ins, `model`
   the decision-model grader of the playbook's own criteria, `session`
   a host's grading session, `store` the write-once grade files;
-  `transcript/` the attempt transcript adapter, claude's session and
-  codex's `exec --json` stdout parsed with tool facts, the other agents'
-  streams as plain text; `candidate/`: the gate's choice and
+  `transcript/` the attempt transcript adapter, claude's session, and
+  codex's `exec --json` and dsh's `--json` stdout parsed with tool facts
+  through one JSON-lines view (`events`), the other agents' streams as
+  plain text; `candidate/`: the gate's choice and
   the trial view in `mod`, `settle` by successes, `quality` by quality with
   `resettle` after a stored grade and `decide_checked`, a person's decision
   that cannot promote without its check, `summary` the candidate summary
@@ -557,7 +560,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   estimate key), invocation resolution
   (`invocation.rs`), agent adapters (`adapter.rs`, with `adapter/command`
   the one `spawn_agent` both transports use, the sandbox wrap and `setsid`
-  included, and `adapter/spawn_env`
+  included, with the agent's run-scoped leading arguments in front
+  (`spawn_env::with_scoped_args`, dsh's model patch,
+  [decision record 0013](docs/adr/0013-run-scoped-files-an-agent-takes-only-as-arguments-lead-its-argv.md)),
+  and `adapter/spawn_env`
   the one environment every agent spawn gets: the process-env plan, the
   connector scrub, the run context, the agent's run-scoped environment in
   the directory `agent_home.rs` names, the sandbox overlay last), the

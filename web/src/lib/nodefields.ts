@@ -61,7 +61,7 @@ export const NODE_FIELDS = {
   },
   continue_session: {
     label: 'Continue session of',
-    hint: 'An earlier agent node whose agent session this node continues: its first attempt resumes that session and sends this prompt as the next message, so the agent keeps what it already learned. Works for claude, codex, opencode and zcode when both nodes run on the same agent and model in the same directory; otherwise the node starts a fresh agent as usual.',
+    hint: 'An earlier agent node whose agent session this node continues: its first attempt resumes that session and sends this prompt as the next message, so the agent keeps what it already learned. Works for claude, codex, opencode, zcode and dsh when both nodes run on the same agent and model in the same directory; otherwise the node starts a fresh agent as usual.',
   },
   output_fields: {
     label: 'Output fields',

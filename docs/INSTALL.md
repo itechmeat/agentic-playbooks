@@ -25,7 +25,8 @@ the Linux build.
 - At least one coding agent CLI that apb can drive, installed and signed in on
   its own: Claude Code (`claude`), Codex (`codex`), OpenCode (`opencode`),
   Cursor Agent (`cursor-agent`), Grok (`grok`), Hermes (`hermes`), Qoder
-  (`qoder`), Antigravity (`agy`), Pi (`pi`) or ZCode (`zcode`). `apb detect`
+  (`qoder`), Antigravity (`agy`), Pi (`pi`), ZCode (`zcode`) or DeepSeek
+  Harness (`dsh`). `apb detect`
   lists the ones it finds. Playbooks made only of `script` nodes need none.
 - `git`, and `sh` for script nodes. Other runners (`bun`, `deno`,
   `python3`) are needed only by playbooks that use them.

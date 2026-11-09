@@ -282,7 +282,7 @@ fn the_supervisor_spawn_gets_the_allowlist_and_its_own_variables() {
         spec: builtin("codex").unwrap(),
     };
     adapter
-        .spawn_supervisor("brief", "m", run_dir.path(), None, &env)
+        .spawn_supervisor("codex", "m", "brief", run_dir.path(), None, &env)
         .expect("spawned");
     // The supervisor is detached: wait for its dump to appear.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -358,4 +358,82 @@ fn a_cloud_trigger_needs_a_truthy_value() {
             "CLAUDE_CODE_USE_BEDROCK={value}"
         );
     }
+}
+
+/// A dsh route named after a provider of its catalog keeps that provider's
+/// key under an allowlist: `cerebras/` keeps `CEREBRAS_API_KEY`.
+#[test]
+fn a_dsh_route_keeps_its_providers_key_under_an_allowlist() {
+    let _l = common::env_lock();
+    let _key = EnvVar::set("CEREBRAS_API_KEY", "x");
+    let _other = EnvVar::set("GROQ_API_KEY", "x");
+    let plan = apb_engine::agent_env::plan_for("dsh", "cerebras/llama-4@low", &allowlist(), &[]);
+    assert!(plan.keeps("CEREBRAS_API_KEY"), "{:?}", plan.keep);
+    assert!(!plan.keeps("GROQ_API_KEY"), "{:?}", plan.keep);
+}
+
+/// An `amazon-bedrock/` route keeps the whole temporary (STS) credential
+/// set under an allowlist, the session token included.
+#[test]
+fn a_dsh_bedrock_route_keeps_temporary_aws_credentials_under_an_allowlist() {
+    let _l = common::env_lock();
+    let names = [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_REGION",
+    ];
+    let _set: Vec<EnvVar> = names.iter().map(|n| EnvVar::set(n, "x")).collect();
+    let plan = apb_engine::agent_env::plan_for("dsh", "amazon-bedrock/m", &allowlist(), &[]);
+    for n in names {
+        assert!(plan.keeps(n), "{n}: {:?}", plan.keep);
+    }
+}
+
+/// The supervisor spawn puts the agent's run-scoped leading arguments in
+/// front of its form like every node attempt (decision record 0013): a dsh
+/// supervisor runs the model its profile names.
+#[test]
+fn the_supervisor_spawn_gets_the_run_scoped_leading_arguments() {
+    let bin = tempfile::tempdir().unwrap();
+    let run_dir = tempfile::tempdir().unwrap();
+    let argv_file = bin.path().join("argv");
+    let program = bin.path().join("dsh-stub");
+    common::write_sync(
+        &program,
+        &format!(
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\001' \"$a\"; done > '{0}.tmp'\nmv '{0}.tmp' '{0}'\n",
+            argv_file.display()
+        ),
+    );
+    let mut perm = fs::metadata(&program).unwrap().permissions();
+    perm.set_mode(0o755);
+    fs::set_permissions(&program, perm).unwrap();
+    let env = SpawnEnv::for_node(Vec::new(), run_dir.path(), "supervisor", Vec::new());
+    let adapter = ClaudeAdapter {
+        program: program.to_string_lossy().into_owned(),
+        spec: builtin("dsh").unwrap(),
+    };
+    adapter
+        .spawn_supervisor(
+            "dsh",
+            "zai/glm-5.3@low",
+            "brief",
+            run_dir.path(),
+            None,
+            &env,
+        )
+        .expect("spawned");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !argv_file.is_file() {
+        assert!(Instant::now() < deadline, "the supervisor stub never ran");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let raw = fs::read_to_string(&argv_file).unwrap();
+    let argv: Vec<&str> = raw.split('\u{1}').filter(|s| !s.is_empty()).collect();
+    assert_eq!(argv[0], "--patch", "{argv:?}");
+    assert_eq!(&argv[2..4], ["--profile", "headless"], "{argv:?}");
+    let patch = fs::read_to_string(argv[1]).unwrap();
+    assert!(patch.contains("provider: \"zai\""), "{patch}");
+    assert!(patch.contains("model: \"glm-5.3\""), "{patch}");
 }

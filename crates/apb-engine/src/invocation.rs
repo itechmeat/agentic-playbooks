@@ -29,7 +29,7 @@ pub struct ResolvedInvocation {
 /// (`apb_core::agents`). `None` for unknown agents and for pi (details will
 /// follow once the binary exists).
 ///
-/// claude, codex, opencode and zcode are asked for their machine output
+/// claude, codex, opencode, zcode and dsh are asked for their machine output
 /// (`--output-format json`, `exec --json`, `run --format json`, `--json`):
 /// it carries the token usage and the session id of the attempt, and the
 /// adapter unwraps the reply from it (`apb_core::agent_output`), falling back

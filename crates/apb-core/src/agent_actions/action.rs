@@ -116,6 +116,25 @@ impl ToolCall {
     }
 }
 
+/// The files an `apply_patch` names in its headers (codex's and dsh's patch
+/// grammar): the added, updated, deleted and moved-to files, in order.
+pub(crate) fn patch_paths(patch: &str) -> Vec<String> {
+    patch
+        .lines()
+        .filter_map(|l| {
+            [
+                "*** Update File: ",
+                "*** Add File: ",
+                "*** Delete File: ",
+                "*** Move to: ",
+            ]
+            .iter()
+            .find_map(|h| l.strip_prefix(h))
+        })
+        .map(|p| p.trim().to_string())
+        .collect()
+}
+
 /// The tags an agent CLI wraps around what it adds to a user turn
 /// (reminders, environment notes, instruction files, slash-command and
 /// shell-mode echoes with their output): the text inside is not what the

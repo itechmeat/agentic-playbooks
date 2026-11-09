@@ -149,7 +149,7 @@ impl Scenario {
 }
 
 /// A stub agent in its own directory: records its argv (each element followed
-/// by `\x01`) in `argv.txt`, prints `stdout` and `stderr` from files and exits
+/// by `\x01`) in `argv.txt` and its stdin in `stdin.txt`, prints `stdout` and `stderr` from files and exits
 /// with `exit`.
 pub struct Stub {
     pub dir: tempfile::TempDir,
@@ -164,12 +164,14 @@ impl Stub {
         fs::write(&out, stdout).unwrap();
         fs::write(&err, stderr).unwrap();
         let argv = dir.path().join("argv.txt");
+        let stdin = dir.path().join("stdin.txt");
         let path = dir.path().join("agent");
         common::write_sync(
             &path,
             &format!(
-                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\001' \"$a\" >> '{}'; done\ncat '{}'\ncat '{}' >&2\nexit {exit}\n",
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\001' \"$a\" >> '{}'; done\ncat > '{}'\ncat '{}'\ncat '{}' >&2\nexit {exit}\n",
                 argv.display(),
+                stdin.display(),
                 out.display(),
                 err.display()
             ),
@@ -195,6 +197,11 @@ impl Stub {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect()
+    }
+
+    /// What the stub read on stdin.
+    pub fn stdin(&self) -> String {
+        fs::read_to_string(self.dir.path().join("stdin.txt")).unwrap_or_default()
     }
 
     pub fn workdir(&self) -> PathBuf {
