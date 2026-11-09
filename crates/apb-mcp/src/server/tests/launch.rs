@@ -41,6 +41,7 @@ fn start(confirm: Option<&Value>) -> PlaybookRunArgs {
         launch_version: arg("launch_version"),
         launch_choice: arg("launch_choice"),
         unattended: None,
+        external_data: None,
     }
 }
 
@@ -246,6 +247,7 @@ fn plan_args(token: &str, confirm: Option<&Value>) -> PlaybookExecutePlanArgs {
         confirm_launch: arg("launch_nonce"),
         launch_version: arg("launch_version"),
         launch_choice: arg("launch_choice"),
+        external_data: None,
     }
 }
 
@@ -354,6 +356,7 @@ fn resume_args(run_id: &str, confirm: Option<&Value>) -> RunResumeArgs {
         confirm_launch: arg("launch_nonce"),
         launch_version: arg("launch_version"),
         launch_choice: arg("launch_choice"),
+        external_data: None,
     }
 }
 
@@ -411,6 +414,7 @@ fn trial_args(confirm: Option<&Value>) -> PlaybookTrialArgs {
         confirm_launch: arg("launch_nonce"),
         launch_version: arg("launch_version"),
         launch_choice: arg("launch_choice"),
+        external_data: None,
     }
 }
 

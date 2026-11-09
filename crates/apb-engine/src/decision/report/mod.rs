@@ -319,6 +319,14 @@ pub struct DecisionsReport {
     /// [`NO_DECISIONS`] when no decision matched.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The runs left out because they processed external data
+    /// ([`crate::external_data`]): none of their decisions is read.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub skipped_external: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// One use with one `(provider, model)`.
@@ -900,6 +908,7 @@ pub fn build(
         median_attempt_ms,
         note: (decisions == 0).then(|| NO_DECISIONS.to_string()),
         groups,
+        skipped_external: 0,
     }
 }
 
@@ -909,11 +918,22 @@ pub fn report(
     filter: &ReportFilter,
     settings: &ReportSettings,
 ) -> DecisionsReport {
-    let journals: Vec<RunJournal> = run_dirs(roots)
-        .iter()
-        .filter_map(|d| RunJournal::load(d))
-        .collect();
-    build(&journals, filter, settings)
+    let (dirs, skipped_external) = report_dirs(roots);
+    let journals: Vec<RunJournal> = dirs.iter().filter_map(|d| RunJournal::load(d)).collect();
+    DecisionsReport {
+        skipped_external,
+        ..build(&journals, filter, settings)
+    }
+}
+
+/// The run directories the report and replay read ([`run_dirs`]) without
+/// the runs that processed external data, and how many those are: no
+/// label, rate, threshold or replay request ever reads one.
+pub fn report_dirs(roots: &[PathBuf]) -> (Vec<PathBuf>, usize) {
+    let (flagged, kept): (Vec<PathBuf>, Vec<PathBuf>) = run_dirs(roots)
+        .into_iter()
+        .partition(|d| crate::external_data::flag::is_flagged(d));
+    (kept, flagged.len())
 }
 
 /// Parses `--since`: a duration back from now (`7d`, `24h`, `90m`) or a

@@ -314,15 +314,27 @@ pub fn run_discover(args: &DiscoverArgs, step: &StepCaller) -> Result<ResultView
             .since_days
             .unwrap_or(discover::DEFAULT_SINCE_DAYS),
     };
+    let projects = pick_projects(&args.projects)?;
+    let registered = registered_roots();
+    // The sessions and run ids of runs that processed external data, in
+    // every project the request reads or knows: discovery leaves them out.
+    let exclude = apb_engine::external_data::flagged_markers(
+        &projects
+            .iter()
+            .map(|p| p.root.clone())
+            .chain(registered.iter().cloned())
+            .collect::<Vec<_>>(),
+    );
     let req = DiscoverRequest {
         roots: pick_roots(args)?,
-        projects: pick_projects(&args.projects)?,
-        registered: registered_roots(),
+        projects,
+        registered,
         limits: ReadLimits {
             since_days,
             ..ReadLimits::default()
         },
         mine: discover::MineParams::default(),
+        exclude,
     };
     let mut result = discover::discover(&req).map_err(discover_error)?;
     let stored = match store::save(&mut result) {

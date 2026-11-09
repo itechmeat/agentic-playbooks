@@ -69,6 +69,29 @@ pub fn playbook_memory(
     target: &MemoryTarget<'_>,
     action: MemoryAction,
 ) -> Result<Value, ToolError> {
+    playbook_memory_as(
+        root,
+        target,
+        action,
+        &apb_core::step_env::StepCaller::from_env(),
+    )
+}
+
+/// [`playbook_memory`] for the caller `step`: a step of a run that
+/// processes external data may neither read nor store remembered input
+/// (`external_data_run`); clearing stays allowed.
+pub fn playbook_memory_as(
+    root: &Path,
+    target: &MemoryTarget<'_>,
+    action: MemoryAction,
+    step: &apb_core::step_env::StepCaller,
+) -> Result<Value, ToolError> {
+    if !matches!(action, MemoryAction::Clear(_))
+        && let Some(run_id) = step.run_id.as_deref()
+        && let Some(run_dir) = apb_engine::external_data::run_dir_in(root, run_id)
+    {
+        apb_engine::external_data::refuse_if_flagged(&run_dir, "run memory from a step")?;
+    }
     let (scope, parent) = super::scope_parent(root, target.scope)?;
     let key = MemoryKey::new(scope, target.id).map_err(memory_error)?;
     let head = json!({ "id": target.id, "scope": scope.as_str() });

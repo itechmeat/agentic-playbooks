@@ -322,6 +322,8 @@ mod evidence_test;
 #[path = "suite/execution_identity_test.rs"]
 mod execution_identity_test;
 #[cfg(unix)]
+#[path = "suite/external_data_test.rs"]
+mod external_data_test;
 #[path = "suite/failure_class_test.rs"]
 mod failure_class_test;
 #[path = "suite/failure_reason_test.rs"]

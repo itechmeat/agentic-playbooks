@@ -164,6 +164,7 @@ fn prep_try_unstarted<T, E: Into<EngineError>>(
             playbook: u.playbook.into(),
             version: u.version.into(),
             definition: None,
+            external_data: false,
         });
         let _ = apb_core::run_origin::stamp(u.run_dir, u.run_id);
         finalize_prepare_failure(log, e.into())
@@ -457,6 +458,34 @@ pub(crate) fn build_run_manifest(
 /// (`unattended_unsupported`, the gate's own check, so no start path skips
 /// it), and the execution resolves without a host session, so the CLI to
 /// host fallback is off.
+/// The external data flag at a start: a child or a `continued_from`
+/// successor of a flagged run is flagged, whatever the caller passed (the
+/// surfaces refuse an explicit `false` before this, see
+/// [`crate::external_data::for_start`]; this is the backstop).
+fn external_data_start(place: &Placement, opts: &mut RunOptions) {
+    let flagged = |id: &str| {
+        apb_core::registry::is_safe_segment(id)
+            && crate::external_data::is_flagged(&place.runs.join(id))
+    };
+    if opts.parent_run.as_deref().is_some_and(flagged)
+        || opts.continued_from.as_deref().is_some_and(flagged)
+    {
+        opts.external_data = true;
+    }
+}
+
+/// The recall of a start that applies nothing remembered.
+fn empty_recall() -> apb_core::run_memory::Recall {
+    apb_core::run_memory::Recall {
+        instruction: None,
+        instruction_source: apb_core::run_memory::InstructionSource::None,
+        values: Vec::new(),
+        missing: Vec::new(),
+        schema_changed: false,
+        diagnostics: Vec::new(),
+    }
+}
+
 fn unattended_start(root: &Path, opts: &mut RunOptions) -> Result<(), EngineError> {
     if let Some(parent) = &opts.parent_run
         && crate::manifest::read(&root.join(".apb/runs").join(parent))
@@ -619,13 +648,30 @@ pub(crate) fn prepare_placed(
     let scenario = place.scenario;
     if let Some(sp) = scenario {
         opts.unattended = sp.scenario.unattended || opts.unattended;
+        opts.external_data = sp.external_data || opts.external_data;
         opts.cache = CacheRunMode::Off;
         opts.params = sp.scenario.params.clone();
         opts.instruction = sp.scenario.instruction.clone();
     }
     unattended_start(root, &mut opts)?;
+    external_data_start(place, &mut opts);
     let reg = Registry::open_dir(&t.definition_parent)?;
     let loaded = reg.load(id, version)?;
+    // A version a flagged run's patch made stays with runs that process
+    // external data.
+    if !opts.external_data
+        && let Some(run) = apb_core::versioning::read_provenance_in(
+            &t.definition_parent.join("playbooks").join(id),
+            &loaded.version,
+        )
+        .and_then(|p| p.external_data_run)
+    {
+        return Err(EngineError::Invalid(format!(
+            "{}: version {} of `{id}` was made by a patch of run {run}, which processed external data; start it with external_data or run another version",
+            crate::external_data::RUN,
+            loaded.version
+        )));
+    }
     let digest = loaded.trust_digest()?;
     // Anti-TOCTOU: if the caller checked trust against a specific digest, it
     // must match the actually loaded content - otherwise the file was swapped
@@ -877,15 +923,10 @@ pub(crate) fn prepare_placed(
     // likewise, then the definition's legacy draft. A real IO error fails the start rather than
     // starting with different input; nothing has been written yet.
     let recall = match scenario {
-        // A scenario's input is its own: nothing remembered applies.
-        Some(_) => apb_core::run_memory::Recall {
-            instruction: None,
-            instruction_source: apb_core::run_memory::InstructionSource::None,
-            values: Vec::new(),
-            missing: Vec::new(),
-            schema_changed: false,
-            diagnostics: Vec::new(),
-        },
+        // A scenario's input is its own, and a run that processes external
+        // data recalls nothing: nothing remembered applies.
+        Some(_) => empty_recall(),
+        _ if opts.external_data => empty_recall(),
         None => recall_input(root, t.origin_label, id, &reg, &playbook.params, &opts)?,
     };
     let applied = apb_core::run_memory::apply(&opts.params, opts.instruction.clone(), &recall);
@@ -1209,7 +1250,8 @@ pub(crate) fn prepare_placed(
     // here, before the origin stamp.
     let guarded = crate::manifest::manifest_guard(&playbook);
     manifest.execution =
-        crate::manifest::ManifestExecution::from_resolved_guarded(&execution, guarded);
+        crate::manifest::ManifestExecution::for_run(&execution, guarded, opts.external_data);
+    manifest.external_data = opts.external_data;
     // 0.24.0: the irreversible consent, only for a run that needed it.
     manifest.consent = consent;
     // Issue #192: a top-level run (not an eval run) that starts on the
@@ -1220,6 +1262,7 @@ pub(crate) fn prepare_placed(
         .filter(|_| opts.depth == 0 && opts.parent_run.is_none());
     manifest.unattended = opts.unattended;
     manifest.candidate_trial = scenario.is_none()
+        && !opts.external_data
         && opts.depth == 0
         && opts.parent_run.is_none()
         && opts.eval.is_none()
@@ -1247,10 +1290,12 @@ pub(crate) fn prepare_placed(
             scenario: sp.scenario.id.clone(),
             scenario_digest: sp.scenario_digest.clone(),
         }),
+        None if opts.eval.is_some() => Some(crate::manifest::RunOrigin::Eval),
+        // A run that would be production but processes external data says
+        // so in its origin too, for a reader that checks the origin alone.
         None => opts
-            .eval
-            .is_some()
-            .then_some(crate::manifest::RunOrigin::Eval),
+            .external_data
+            .then_some(crate::manifest::RunOrigin::ExternalData),
     };
     let floor_hold = if opts.parent_run.is_none() && scenario.is_none() {
         prep_try_unstarted(
@@ -1297,6 +1342,7 @@ pub(crate) fn prepare_placed(
         playbook: id.into(),
         version: loaded.version.clone(),
         definition: Some(definition),
+        external_data: opts.external_data,
     })?;
     // Run provenance (spec 3): the definition scope, content fingerprint,
     // execution root, and profiles used. A separate event right after

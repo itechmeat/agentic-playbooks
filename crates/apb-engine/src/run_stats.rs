@@ -696,11 +696,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
             run.snapshot.as_ref(),
             &run.events,
         );
-        follow_up.add(
-            run.origin.is_production(),
-            run.snapshot.as_ref(),
-            &run.events,
-        );
+        follow_up.add(run.learns, run.snapshot.as_ref(), &run.events);
         let f = run_facts(run, &mut nodes, &mut goal);
         if f.outcome.is_some() {
             counted.push(interventions::of_run(&run.events));

@@ -14,6 +14,7 @@ fn run_started(playbook: &str) -> EventPayload {
         playbook: playbook.into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     }
 }
 
@@ -26,6 +27,7 @@ fn folds_finished_run() {
                 playbook: "w".into(),
                 version: "1.0.0".into(),
                 definition: None,
+                external_data: false,
             },
         ),
         ev(
@@ -104,6 +106,7 @@ fn open_attempt_marks_interrupted() {
                 playbook: "w".into(),
                 version: "1.0.0".into(),
                 definition: None,
+                external_data: false,
             },
         ),
         ev(
@@ -250,6 +253,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 playbook: "w".into(),
                 version: "1.0.0".into(),
                 definition: None,
+                external_data: false,
             },
         ),
         ev(

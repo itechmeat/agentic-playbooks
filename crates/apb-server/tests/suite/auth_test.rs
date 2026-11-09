@@ -811,6 +811,7 @@ fn person_only_run(root: &std::path::Path) -> std::path::PathBuf {
         playbook: "po".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     let mut req = EventPayload::review_requested(

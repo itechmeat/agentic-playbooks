@@ -195,9 +195,10 @@ fn playbook_dir(
 pub(crate) fn move_error(e: MoveError) -> Response {
     let status = match &e {
         MoveError::NotFound(_) => StatusCode::NOT_FOUND,
-        MoveError::Stale { .. } | MoveError::Frozen | MoveError::IsCandidate { .. } => {
-            StatusCode::CONFLICT
-        }
+        MoveError::Stale { .. }
+        | MoveError::Frozen
+        | MoveError::IsCandidate { .. }
+        | MoveError::ExternalDataRun { .. } => StatusCode::CONFLICT,
         MoveError::ReadOnly => StatusCode::FORBIDDEN,
         MoveError::Record(_) => StatusCode::CONFLICT,
         MoveError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,

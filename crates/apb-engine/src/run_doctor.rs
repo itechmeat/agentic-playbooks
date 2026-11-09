@@ -1022,6 +1022,7 @@ mod tests {
             launch: None,
             unattended: false,
             origin: None,
+            external_data: false,
         };
         crate::manifest::write(run_dir, &manifest).unwrap();
     }

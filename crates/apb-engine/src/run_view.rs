@@ -993,6 +993,7 @@ mod decision_tests {
                 playbook: "p".into(),
                 version: "1.0.0".into(),
                 definition: None,
+                external_data: false,
             },
         }];
         assert_eq!(json(&events), None);
@@ -1221,6 +1222,7 @@ mod tests {
                         playbook: "p".into(),
                         version: "1.0.0".into(),
                         definition: None,
+                        external_data: false,
                     },
                     EventPayload::RetryDeferred {
                         node: "work".into(),
@@ -1274,6 +1276,7 @@ mod tests {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
                 EventPayload::NodeStarted {
                     node: "script".into(),
@@ -1326,6 +1329,7 @@ mod tests {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
                 EventPayload::RunFinished {
                     outcome: "succeeded".into(),

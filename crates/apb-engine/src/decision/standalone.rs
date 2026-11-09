@@ -83,6 +83,10 @@ pub struct StandaloneDecider {
     /// ([`StandaloneDecider::for_run`]), removed from every request whatever
     /// `privacy.redact` says. Empty for a request about no run.
     run_values: crate::run_redact::RunValues,
+    /// The run a request speaks about processed external data
+    /// ([`crate::external_data`]): its log lines say so, kept for the daily
+    /// cap only.
+    external_data: bool,
 }
 
 impl std::fmt::Debug for StandaloneDecider {
@@ -134,6 +138,7 @@ impl StandaloneDecider {
             chain: OnceLock::new(),
             redactor: OnceLock::new(),
             run_values: crate::run_redact::RunValues::default(),
+            external_data: false,
         }
     }
 
@@ -142,6 +147,7 @@ impl StandaloneDecider {
     /// clip, whatever `privacy.redact` says.
     pub fn for_run(mut self, run_dir: &Path) -> Self {
         self.run_values = crate::run_redact::RunValues::of(run_dir, &self.root);
+        self.external_data = crate::external_data::is_flagged(run_dir);
         self
     }
 
@@ -315,6 +321,9 @@ impl StandaloneDecider {
             "cached": false,
             "error": null,
         });
+        if self.external_data {
+            line["external_data"] = json!(true);
+        }
         // The count, the request and its log line under the log's lock: MCP
         // servers of several agents share the log, and a count read before
         // another's reply is logged would let each of them past the cap. A
@@ -792,5 +801,54 @@ mod tests {
             ask(&a),
             StandaloneOutcome::Skipped { reason: "budget" }
         ));
+    }
+
+    /// A request about a run that processed external data logs a line
+    /// that says so (for the daily cap only); one about an unflagged run
+    /// logs none. The decisions report never reads the log.
+    #[test]
+    fn a_request_about_a_flagged_run_says_so_in_its_log_line() {
+        let root = project();
+        let runs = root.path().join(".apb/runs");
+        for (id, flagged) in [("plain", false), ("flagged", true)] {
+            let dir = runs.join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            // A prepared run writes its config before its manifest.
+            std::fs::write(dir.join("run.yaml"), "params: {}\n").unwrap();
+            crate::manifest::write(
+                &dir,
+                &crate::manifest::RunExecutionManifest {
+                    external_data: flagged,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let slow = Arc::new(Slow::default());
+            let d = decider(root.path(), 10, &slow).for_run(&dir);
+            assert!(matches!(
+                d.decide(
+                    UseSite::CatalogRank,
+                    json!({"task": "x"}),
+                    vec!["task".into()],
+                    questions("s"),
+                ),
+                StandaloneOutcome::Answered(_)
+            ));
+        }
+        let lines: Vec<Value> =
+            std::fs::read_to_string(root.path().join(".apb").join(DECISIONS_LOG))
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].get("external_data").is_none(), "{lines:?}");
+        assert_eq!(lines[1]["external_data"], true, "{lines:?}");
+        let report = crate::decision::report::report(
+            &[root.path().to_path_buf()],
+            &Default::default(),
+            &Default::default(),
+        );
+        assert_eq!(report.decisions, 0);
     }
 }

@@ -17,6 +17,7 @@ fn wait_wake_returns_none_promptly_when_run_already_finished() {
         playbook: "w".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     log.append(EventPayload::RunFinished {
@@ -44,6 +45,7 @@ fn wait_wake_finds_wake_then_none_after_cursor_past_it() {
         playbook: "w".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     let wake_event = log
@@ -81,6 +83,7 @@ fn run_inspect_reports_wakes_status_and_context() {
         playbook: "w".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     log.append(EventPayload::WakeRaised {

@@ -217,6 +217,7 @@ fn gated_run(root: &Path) -> (std::path::PathBuf, EventLog) {
         playbook: "g".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     (dir, log)

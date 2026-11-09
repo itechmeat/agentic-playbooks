@@ -27,7 +27,7 @@ pub fn run_follow_up_waker(root: &Path, run_id: &str, seq: u64) {
         };
         let snapshot = crate::legacy_snapshot::load_run_playbook(&run_dir);
         let production =
-            crate::manifest::RunOrigin::of_read(&crate::manifest::read(&run_dir)).is_production();
+            crate::manifest::RunOrigin::of_read(&crate::manifest::read(&run_dir)).runs_follow_up();
         match crate::follow_up::state(snapshot.as_ref(), &events, production) {
             crate::follow_up::FollowUpState::Pending {
                 finished_seq,

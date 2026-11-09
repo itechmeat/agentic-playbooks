@@ -441,3 +441,39 @@ fn a_session_the_step_cap_stops_part_way_is_counted_as_cut() {
     assert_eq!(c.files_read, 2);
     assert_eq!(c.skipped.get("step_cap"), Some(&1));
 }
+
+/// A session of a run that processed external data is left out: a file
+/// named after its session id is never opened, and a session whose read
+/// part names its run id contributes no step, request or example; both are
+/// counted under `external_data`. Other sessions are read as before.
+#[test]
+fn sessions_of_external_data_runs_are_left_out() {
+    let _cfg = config_sandbox();
+    let h = History::new();
+    let p = h.project("app");
+    routine(&h, &p, "s");
+    // A fourth session that ran a step of the flagged run.
+    h.claude(
+        &p,
+        "named",
+        &code_routine(&p.root, "look at run ext-1700000000000 please"),
+        1,
+    );
+    let plain = discover::discover(&h.request(&[&p])).unwrap();
+    assert_eq!(plain.read.sessions, 4);
+    assert_eq!(root_report(&plain, "claude_code").files_read, 4);
+
+    let mut req = h.request(&[&p]);
+    req.exclude.sessions.insert("s0".into());
+    req.exclude.run_ids.insert("ext-1700000000000".into());
+    let r = discover::discover(&req).unwrap();
+    let report = root_report(&r, "claude_code");
+    assert_eq!(report.skipped.get("external_data"), Some(&2));
+    // `s0` was never opened; `named` was opened and dropped.
+    assert_eq!(report.files_read, 3);
+    assert_eq!(r.read.sessions, 2);
+    let text = serde_json::to_string(&r).unwrap();
+    assert!(!text.contains("ext-1700000000000"));
+    assert!(!text.contains("app/s0.jsonl"));
+    assert!(!text.contains("app/named.jsonl"));
+}

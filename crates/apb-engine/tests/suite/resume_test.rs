@@ -146,6 +146,7 @@ fn run_started() -> EventPayload {
         playbook: "lin".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     }
 }
 
@@ -401,6 +402,7 @@ fn a_legacy_journal_still_counts_and_resumes_to_the_same_outcome() {
                 playbook: "rloop".into(),
                 version: "1.0.0".into(),
                 definition: None,
+                external_data: false,
             },
             EventPayload::NodeStarted {
                 node: "start".into(),

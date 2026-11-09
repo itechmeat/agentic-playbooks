@@ -84,7 +84,8 @@ fn gate_run(
         version: permit.run_version(version),
         ..wref.clone()
     };
-    apb_engine::gate::check_params(root, &run_ref, &opts.params).map_err(refused)?;
+    apb_engine::gate::check_params_with(root, &run_ref, &opts.params, opts.external_data)
+        .map_err(refused)?;
     if let Some(w) = apb_engine::gate::short_secret_warning(root, &run_ref, &opts.params) {
         eprintln!("warning: {w}");
     }
@@ -539,6 +540,13 @@ pub(crate) struct RunArgs {
     /// with --supervise and --execution host
     #[arg(long, conflicts_with = "estimate")]
     pub unattended: bool,
+    /// The run processes data from outside the operator (a third party's
+    /// documents, messages or records): everything it produces stays in
+    /// its run directory and nothing is kept for learning (no remembered
+    /// input, node cache write, known problems, corrections, candidates or
+    /// history). Fixed for the run's lifetime; refused with --remember
+    #[arg(long, conflicts_with = "estimate")]
+    pub external_data: bool,
 }
 
 /// `--remember`: stores what the start was given once the run gate and the
@@ -632,6 +640,7 @@ struct CliStart {
     mode: RunMode,
     budget: Option<apb_core::budget::BudgetRequest>,
     notify: Option<apb_core::notify::NotifyRequest>,
+    external_data: bool,
 }
 
 impl CliStart {
@@ -649,6 +658,7 @@ impl CliStart {
             worktree: self.worktree,
             budget: self.budget,
             notify: self.notify,
+            external_data: self.external_data,
             ..RunOptions::default()
         }
     }
@@ -692,6 +702,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         estimate,
         remember,
         unattended,
+        external_data,
     } = args;
     let (name, version) = (name.as_str(), version.as_deref());
     let execution = execution.as_deref();
@@ -712,6 +723,23 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         },
     };
     let host = execution_mode == Some(apb_core::execution::ExecutionMode::Host);
+    // External data (capability run-external-data): the effective flag
+    // (inherited from a flagged predecessor) and the remember refusal,
+    // before anything is written.
+    let external_data = match apb_engine::external_data::for_start(
+        root,
+        external_data.then_some(true),
+        None,
+        continued_from.as_deref(),
+    )
+    .and_then(|flag| apb_engine::external_data::check_remember(flag, remember).map(|()| flag))
+    {
+        Ok(flag) => flag,
+        Err(refusal) => {
+            eprintln!("run failed: {refusal}");
+            return ExitCode::from(2);
+        }
+    };
     // An unattended start that also asks for what the mode cannot hold
     // (supervision, host execution, asked for or resolved) is refused
     // before anything is written, by the run gate's own check, with the
@@ -853,13 +881,15 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
     let launch = match launch_handoff.as_deref() {
         Some(path) => crate::eval::case_launch(root, path, launch_kind),
         None => launch.context(launch_kind),
-    };
+    }
+    .with_external_data(external_data);
     if supervise {
         // The detached child has no terminal, so the consent is obtained
         // here, against the same gate the child runs, and forwarded with the
         // nonce of the tree it was given for.
         let mut probe = RunOptions {
             params: parsed.clone(),
+            external_data,
             ..Default::default()
         };
         let (granted, start_version) =
@@ -948,6 +978,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
             &handoff,
             budget.as_ref(),
             notify.as_ref(),
+            external_data,
         );
     }
     let mut opts = CliStart {
@@ -959,6 +990,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         mode: RunMode::Autonomous,
         budget: None,
         notify: None,
+        external_data,
     }
     .options();
     opts.overrides = overrides;
@@ -1121,6 +1153,7 @@ pub(crate) fn spawn_detached_supervised(
     handoff: &Path,
     budget: Option<&apb_core::budget::BudgetRequest>,
     notify: Option<&apb_core::notify::NotifyRequest>,
+    external_data: bool,
 ) -> ExitCode {
     // Whatever happens below, the handoff never outlives this call: the
     // child deletes it when it takes it, this removes it otherwise.
@@ -1170,6 +1203,10 @@ pub(crate) fn spawn_detached_supervised(
     }
     if let Some(n) = notify {
         cmd.args(crate::notify::NotifyFlags::args_of(n));
+    }
+    // The child prepares the run itself, so the flag crosses on its argv.
+    if external_data {
+        cmd.arg("--external-data");
     }
     cmd.arg("--handshake").arg(&handshake);
     cmd.current_dir(root);
@@ -1234,6 +1271,7 @@ pub(crate) fn drive_supervised_child(
     handshake: &Path,
     budget: &crate::budget::BudgetFlags,
     notify: &crate::notify::NotifyFlags,
+    external_data: bool,
 ) -> ExitCode {
     let parsed = parse_params(params).and_then(|p| {
         let b = budget.request()?;
@@ -1257,6 +1295,7 @@ pub(crate) fn drive_supervised_child(
         mode: RunMode::AgentSupervised,
         budget,
         notify,
+        external_data,
     }
     .options();
     // The launch decision and the consent the parent obtained, from the
@@ -1273,7 +1312,8 @@ pub(crate) fn drive_supervised_child(
     let mut launch = apb_engine::gate::launch::LaunchContext::new(
         apb_engine::gate::launch::Initiator::cli(false),
         kind,
-    );
+    )
+    .with_external_data(external_data);
     let mut how = crate::consent::CliConsent::None;
     let parent = apb_engine::launch_handoff::parent_pid();
     match launch_handoff.map(|p| apb_engine::launch_handoff::take(root, p, parent)) {
@@ -1658,6 +1698,9 @@ fn print_run_rows(root: &Path, runs: Vec<apb_engine::RunSummary>) {
             if r.driver_dead {
                 line.push_str("\tdriver dead");
             }
+            if r.external_data {
+                line.push_str("\texternal data");
+            }
             if r.unknown_events > 0 {
                 line.push('\t');
                 line.push_str(&unknown_events_note(r.unknown_events));
@@ -1703,6 +1746,9 @@ fn print_run_rows(root: &Path, runs: Vec<apb_engine::RunSummary>) {
             }
             if let Some(t) = &r.candidate_trial {
                 line.push_str(&format!("\tcandidate {} {}", t.version, t.verdict));
+            }
+            if r.external_data {
+                line.push_str("\texternal data");
             }
             if r.unknown_events > 0 {
                 line.push('\t');
@@ -1834,6 +1880,9 @@ fn run_detail_text(
         say!(
             "  unattended: every wait without an unattended outcome fails the run (hitl_required)"
         );
+    }
+    if apb_engine::external_data::is_flagged(&run_dir) {
+        say!("  external data: the run keeps nothing for learning");
     }
     for limit in apb_engine::run_view::run_limits(&view.events) {
         say!(
@@ -2236,6 +2285,7 @@ pub(crate) fn resume_cmd(
     confirm_irreversible: Option<String>,
     budget: &crate::budget::ResumeBudgetFlags,
     launch: &crate::launch::LaunchFlags,
+    external_data: Option<bool>,
 ) -> ExitCode {
     let budget = match budget.request() {
         Ok(b) => b,
@@ -2244,6 +2294,14 @@ pub(crate) fn resume_cmd(
             return ExitCode::from(2);
         }
     };
+    // The external data flag is fixed at start: a resume may repeat it,
+    // never change it.
+    if let Err(refusal) =
+        apb_engine::external_data::check_resume(&root.join(".apb/runs").join(run_id), external_data)
+    {
+        eprintln!("resume refused: {refusal}");
+        return ExitCode::from(2);
+    }
     if let Some(n) = from_node
         && let Err(msg) = refuse_gate_skip(root, run_id, n)
     {

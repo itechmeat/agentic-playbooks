@@ -131,7 +131,7 @@ pub fn arm(root: &Path, run_dir: &Path, run_id: &str) -> Result<(), EngineError>
     let events = crate::event::read_journal(run_dir)?.events;
     let snapshot = crate::legacy_snapshot::load_run_playbook(run_dir);
     let production =
-        crate::manifest::RunOrigin::of_read(&crate::manifest::read(run_dir)).is_production();
+        crate::manifest::RunOrigin::of_read(&crate::manifest::read(run_dir)).runs_follow_up();
     let Some(wait) = arm_plan(snapshot.as_ref(), &events, production) else {
         return Ok(());
     };
@@ -176,6 +176,7 @@ mod tests {
             playbook: "p".into(),
             version: "1.0.0".into(),
             definition: None,
+            external_data: false,
         }
     }
 
@@ -202,6 +203,30 @@ mod tests {
             arm_plan(Some(&pb), &events, true),
             Some(crate::waker::WakerFor::FollowUp(2))
         );
+    }
+
+    /// A run that processes external data still schedules and shows its
+    /// own follow-up (it is part of the run), from the manifest the
+    /// readers read; a scenario or eval run does not.
+    #[test]
+    fn a_flagged_run_schedules_its_follow_up() {
+        use crate::manifest::{RunExecutionManifest, RunOrigin};
+        let pb = playbook();
+        let events = vec![ev(1, started()), finished(2, "succeeded")];
+        let dir = tempfile::tempdir().unwrap();
+        let m = RunExecutionManifest {
+            external_data: true,
+            origin: Some(RunOrigin::ExternalData),
+            ..Default::default()
+        };
+        crate::manifest::write(dir.path(), &m).unwrap();
+        let follows = RunOrigin::of_read(&crate::manifest::read(dir.path())).runs_follow_up();
+        assert!(follows);
+        assert_eq!(
+            arm_plan(Some(&pb), &events, follows),
+            Some(crate::waker::WakerFor::FollowUp(2))
+        );
+        assert!(!RunOrigin::Eval.runs_follow_up());
     }
 
     /// A failed end is None, and no waker is armed.

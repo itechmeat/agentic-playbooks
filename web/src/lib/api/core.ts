@@ -667,13 +667,15 @@ export const fetchVersions = (id: string, workspace = '') =>
 export type { RunBudget } from '../types'
 
 // What a start passes besides its budget: the param values, the
-// instruction, whether to remember both for this project, and the "Notify
-// me" choice when it differs from what the workspace does anyway.
+// instruction, whether to remember both for this project, the "Notify
+// me" choice when it differs from what the workspace does anyway, and
+// whether the run processes external data (it keeps nothing for learning).
 export interface RunInput {
   params?: Record<string, string>
   instruction?: string
   remember?: boolean
   notify?: boolean
+  external_data?: boolean
 }
 
 export interface RunStarted {
@@ -708,6 +710,7 @@ export const runPlaybook = (
       ...(opts.input?.instruction !== undefined ? { instruction: opts.input.instruction } : {}),
       ...(opts.input?.remember ? { remember: true } : {}),
       ...(opts.input?.notify !== undefined ? { notify: opts.input.notify } : {}),
+      ...(opts.input?.external_data ? { external_data: true } : {}),
     }),
   })
 

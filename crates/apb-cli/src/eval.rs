@@ -111,6 +111,9 @@ pub(crate) struct EvalArgs {
     pub max_decision_requests: Option<u32>,
     /// Play a scenario that does not fit the version.
     pub allow_stale: bool,
+    /// The runs process external data (`--external-data`): every
+    /// repetition is flagged and no result is stored.
+    pub external_data: bool,
 }
 
 /// The flag of `args` that does not belong to its level, if any.
@@ -601,6 +604,7 @@ fn start_run(
             "--no-cache",
         ])
         .args(["--execution", "cli"])
+        .args(args.external_data.then_some("--external-data"))
         .arg("--eval-settings")
         .arg(&settings_file)
         .env("APB_NO_REGISTRY", "1")
@@ -2074,7 +2078,9 @@ fn run_eval(
         total_tokens: tokens,
         journal_agent_writable: true,
     };
-    let stored_at = if started {
+    // A run that processes external data leaves no stored result: the
+    // result is printed and kept nowhere else.
+    let stored_at = if started && !args.external_data {
         Some(store::store(evals_home, &result))
     } else {
         None

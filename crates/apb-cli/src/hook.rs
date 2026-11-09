@@ -59,5 +59,13 @@ fn stop() -> Option<String> {
         &state,
         apb_core::save_nudge::Thresholds::from_env(),
         &mut ask,
+        &|cwd| {
+            cwd.map(|cwd| {
+                apb_engine::external_data::flagged_markers(&apb_core::workspace::enclosing_roots(
+                    cwd,
+                ))
+            })
+            .unwrap_or_default()
+        },
     )
 }

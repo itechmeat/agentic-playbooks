@@ -662,6 +662,7 @@ async fn supervise_self_returns_token() {
             launch_choice: None,
             unattended: None,
             confirm_launch: None,
+            external_data: None,
         }))
         .await;
 
@@ -723,6 +724,7 @@ async fn playbook_run_remember_keeps_the_input_for_this_project() {
             launch_choice: None,
             unattended: None,
             confirm_launch: None,
+            external_data: None,
         }))
         .await;
     let text = result_text(&result);
@@ -772,6 +774,7 @@ async fn playbook_run_remember_keeps_the_input_for_this_project() {
         launch_choice: None,
         unattended: None,
         confirm_launch: None,
+        external_data: None,
     };
     // A refused start remembers nothing.
     let refused = server
@@ -855,6 +858,7 @@ async fn background_run_returns_run_id_without_blocking() {
             launch_choice: None,
             unattended: None,
             confirm_launch: None,
+            external_data: None,
         }))
         .await;
     returned.store(true, Ordering::SeqCst);
@@ -1663,6 +1667,7 @@ async fn prepare_then_execute_runs_in_target_workspace() {
             launch_version: None,
             launch_choice: None,
             confirm_launch: None,
+            external_data: None,
         }))
         .await;
     let out: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();
@@ -1710,6 +1715,7 @@ async fn token_is_single_use() {
             launch_version: None,
             launch_choice: None,
             confirm_launch: None,
+            external_data: None,
         }))
         .await;
     assert!(result_text(&first).contains("run_ref"));
@@ -1722,6 +1728,7 @@ async fn token_is_single_use() {
             launch_version: None,
             launch_choice: None,
             confirm_launch: None,
+            external_data: None,
         }))
         .await;
     assert!(
@@ -1761,6 +1768,7 @@ async fn digest_drift_invalidates_plan() {
             launch_version: None,
             launch_choice: None,
             confirm_launch: None,
+            external_data: None,
         }))
         .await;
     assert!(
@@ -1797,6 +1805,7 @@ async fn tampered_token_is_rejected() {
             launch_version: None,
             launch_choice: None,
             confirm_launch: None,
+            external_data: None,
         }))
         .await;
     assert!(
@@ -1872,6 +1881,7 @@ async fn untrusted_foreign_plan_requires_acknowledge() {
             launch_version: None,
             launch_choice: None,
             confirm_launch: None,
+            external_data: None,
         }))
         .await;
     assert!(
@@ -1889,6 +1899,7 @@ async fn untrusted_foreign_plan_requires_acknowledge() {
             launch_version: None,
             launch_choice: None,
             confirm_launch: None,
+            external_data: None,
         }))
         .await;
     assert!(
@@ -1953,6 +1964,7 @@ async fn execute_plan_refuses_an_unapproved_child_without_acknowledge() {
             launch_version: None,
             launch_choice: None,
             confirm_launch: None,
+            external_data: None,
         }))
         .await;
     let out: serde_json::Value = serde_json::from_str(&result_text(&refused)).unwrap();
@@ -2020,6 +2032,7 @@ async fn global_scope_playbook_runs_in_current_project() {
             launch_choice: None,
             unattended: None,
             confirm_launch: None,
+            external_data: None,
         }))
         .await;
     let out: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();
@@ -2172,6 +2185,7 @@ async fn a_host_request_under_the_kill_switch_returns_the_execution_note() {
             launch_choice: None,
             unattended: None,
             confirm_launch: None,
+            external_data: None,
         }))
         .await;
     unsafe {
@@ -2288,6 +2302,7 @@ fn rel_args(
         launch_choice: None,
         unattended: None,
         confirm_launch: None,
+        external_data: None,
     }
 }
 
@@ -2514,6 +2529,7 @@ async fn execute_plan_needs_the_consent_nonce_and_records_the_client() {
                 launch_version: None,
                 launch_choice: None,
                 confirm_launch: None,
+                external_data: None,
             }),
             Some("claude-code".to_string()),
         )
@@ -2595,6 +2611,7 @@ async fn run_resume_asks_once_for_a_run_without_consent() {
                 launch_version: None,
                 launch_choice: None,
                 confirm_launch: None,
+                external_data: None,
             },
             Some("claude-code".into()),
         )
@@ -2697,6 +2714,8 @@ mod budget;
 mod corrections;
 #[path = "../../../apb-engine/tests/support/driver_reaper.rs"]
 mod driver_reaper;
+// External data runs on the start and run tools.
+mod external_data;
 // The launch policy of agents on the start and authoring tools.
 mod launch;
 mod notify;
@@ -2785,6 +2804,7 @@ async fn playbook_run_refuses_a_param_without_a_value() {
             launch_choice: None,
             unattended: None,
             confirm_launch: None,
+            external_data: None,
         }))
         .await;
     assert_needs_who(&result_text(&result), dir.path());
@@ -2822,6 +2842,7 @@ async fn playbook_execute_plan_refuses_a_param_without_a_value() {
             launch_version: None,
             launch_choice: None,
             confirm_launch: None,
+            external_data: None,
         }))
         .await;
     assert_needs_who(&result_text(&res), b.path());
@@ -2875,6 +2896,7 @@ fn run_resume_retry_now_expedites_a_live_run() {
         confirm_launch: None,
         launch_version: None,
         launch_choice: None,
+        external_data: None,
     };
     let server = WfMcp::new(proj.path().to_path_buf());
     let refused = |args: RunResumeArgs| -> String {
@@ -2980,6 +3002,7 @@ fn unattended_args(
         launch_choice: None,
         unattended,
         confirm_launch: None,
+        external_data: None,
     }
 }
 
@@ -3110,6 +3133,7 @@ async fn playbook_run_refuses_a_param_that_does_not_match_its_pattern() {
             launch_choice: None,
             unattended: None,
             confirm_launch: None,
+            external_data: None,
         }))
         .await;
     let answer = result_text(&result);

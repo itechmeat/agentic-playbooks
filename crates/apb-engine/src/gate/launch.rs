@@ -282,6 +282,9 @@ pub struct LaunchContext {
     pub launch_version: Option<String>,
     /// A retry's fixed choice, from the refusal's start action.
     pub launch_choice: Option<Choice>,
+    /// The start processes external data ([`crate::external_data`]): the
+    /// gate never chooses a waiting candidate for it.
+    pub external_data: bool,
 }
 
 impl LaunchContext {
@@ -292,7 +295,14 @@ impl LaunchContext {
             kind,
             launch_version: None,
             launch_choice: None,
+            external_data: false,
         }
+    }
+
+    /// The same caller for a start that processes external data or not.
+    pub fn with_external_data(mut self, external_data: bool) -> Self {
+        self.external_data = external_data;
+        self
     }
 
     /// A person clicking in the dashboard signed in with a key.

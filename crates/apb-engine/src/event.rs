@@ -136,6 +136,12 @@ pub enum EventPayload {
             deserialize_with = "lenient_option"
         )]
         definition: Option<String>,
+        /// The run processes external data and keeps nothing for learning
+        /// (see [`crate::external_data`]); the manifest is the authority,
+        /// this is the journal's own record of the start. Absent (false)
+        /// for every other run, so their journals read and write as before.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        external_data: bool,
     },
     /// Origin and execution location of the run (spec 3). Written right
     /// after `RunStarted`. A separate event (rather than fields on
@@ -3915,6 +3921,42 @@ mod tests {
     }
 
     use super::*;
+
+    /// `run_started.external_data` is absent from an unflagged start (its
+    /// line reads and writes as before) and an older line decodes as
+    /// unflagged; a flagged start round trips.
+    #[test]
+    fn run_started_external_data_is_left_out_unless_set() {
+        let old: EventPayload = serde_json::from_value(
+            serde_json::json!({"type": "run_started", "playbook": "p", "version": "1.0.0"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            old,
+            EventPayload::RunStarted {
+                external_data: false,
+                ..
+            }
+        ));
+        let line = serde_json::to_string(&old).unwrap();
+        assert!(!line.contains("external_data"), "{line}");
+        let flagged = EventPayload::RunStarted {
+            playbook: "p".into(),
+            version: "1.0.0".into(),
+            definition: None,
+            external_data: true,
+        };
+        let line = serde_json::to_string(&flagged).unwrap();
+        assert!(line.contains("\"external_data\":true"), "{line}");
+        let back: EventPayload = serde_json::from_str(&line).unwrap();
+        assert!(matches!(
+            back,
+            EventPayload::RunStarted {
+                external_data: true,
+                ..
+            }
+        ));
+    }
 
     /// Writers on separate handles (as separate processes would be) never
     /// share a seq and never tear a line, however their appends interleave.

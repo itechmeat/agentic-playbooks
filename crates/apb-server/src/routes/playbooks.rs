@@ -230,6 +230,14 @@ pub(crate) struct RunBody {
     /// with the mode; the check is the one every surface makes.
     #[serde(default)]
     unattended: bool,
+    /// The run processes data from outside the operator and keeps nothing
+    /// for learning (the Run dialog's "External data" box). Absent: the
+    /// start inherits a flagged `continued_from` predecessor's flag; an
+    /// explicit `false` there is refused (409 `external_data_immutable`),
+    /// and the flag together with `remember` is refused (409
+    /// `external_data_remember_refused`), before anything is written.
+    #[serde(default)]
+    external_data: Option<bool>,
 }
 
 /// The launch context of a click in the dashboard: a person's with keys;
@@ -302,6 +310,20 @@ pub(crate) async fn run_playbook_handler(
         Ok(r) => r,
         Err(e) => return e,
     };
+    // External data (capability run-external-data): the effective flag
+    // (inherited from a flagged predecessor) and the remember refusal,
+    // before every other check and before anything is written.
+    let external_data = match apb_engine::external_data::for_start(
+        &root,
+        body.external_data,
+        None,
+        body.continued_from.as_deref(),
+    )
+    .and_then(|flag| apb_engine::external_data::check_remember(flag, body.remember).map(|()| flag))
+    {
+        Ok(flag) => flag,
+        Err(refusal) => return (StatusCode::CONFLICT, Json(refusal.body())).into_response(),
+    };
     let launch_kind = match &body.continued_from {
         Some(pred) => apb_engine::gate::launch::LaunchKind::ContinueFrom {
             run_id: pred.clone(),
@@ -315,7 +337,8 @@ pub(crate) async fn run_playbook_handler(
         body.confirm_launch.clone(),
         body.launch_version.clone(),
         body.launch_choice.as_deref(),
-    );
+    )
+    .with_external_data(external_data);
     // The unattended start check every surface makes (the run gate's own):
     // a dashboard start is never supervised and asks for no execution, so
     // only a host execution the project resolves to refuses it.
@@ -339,6 +362,7 @@ pub(crate) async fn run_playbook_handler(
     }
     let mut opts = apb_engine::RunOptions {
         unattended: body.unattended,
+        external_data,
         instruction: body.instruction,
         params: body.params,
         continued_from: body.continued_from,
@@ -398,7 +422,7 @@ pub(crate) async fn run_playbook_handler(
         let (root, run_ref, params) = (root.clone(), run_ref.clone(), opts.params.clone());
         match tokio::task::spawn_blocking(move || {
             (
-                apb_engine::gate::check_params(&root, &run_ref, &params),
+                apb_engine::gate::check_params_with(&root, &run_ref, &params, external_data),
                 apb_engine::gate::short_secret_warning(&root, &run_ref, &params),
             )
         })

@@ -260,6 +260,45 @@ describe('RunStartDialog', () => {
     })
   })
 
+  it('external data turns remember off, clears unedited remembered input and is sent', async () => {
+    fetchMemory.mockResolvedValue({
+      ...emptyRecall,
+      instruction: 'since the last tag',
+      instruction_source: 'memory',
+      values: [
+        { name: 'channel', value: 'beta', status: { status: 'compatible' } },
+        { name: 'region', value: 'us', status: { status: 'compatible' } },
+      ],
+    })
+    const onrun = await open(null, [], {
+      params: [
+        { name: 'channel', type: 'text', default: 'stable' },
+        { name: 'region', type: 'text', default: 'eu' },
+      ],
+    })
+    // The person edits one remembered value and ticks remember first.
+    type('run-start-param-channel', 'edited')
+    const remember = byTestId('run-start-remember') as HTMLInputElement
+    remember.click()
+    flushSync()
+    expect(remember.checked).toBe(true)
+    ;(byTestId('run-start-external-data') as HTMLInputElement).click()
+    flushSync()
+    expect(remember.checked).toBe(false)
+    expect(remember.disabled).toBe(true)
+    // The edited value stays; the unedited remembered one and the
+    // remembered instruction are cleared.
+    expect((byTestId('run-start-param-channel') as HTMLInputElement).value).toBe('edited')
+    expect((byTestId('run-start-param-region') as HTMLInputElement).value).toBe('eu')
+    expect((byTestId('run-start-instruction') as HTMLTextAreaElement).value).toBe('')
+    submit()
+    expect(onrun).toHaveBeenCalledWith(undefined, {
+      params: { channel: 'edited', region: 'eu' },
+      instruction: '',
+      external_data: true,
+    })
+  })
+
   it('keeps what the person typed before the memory answer and waits for it to start', async () => {
     let answer: (r: unknown) => void = () => {}
     fetchMemory.mockReturnValue(new Promise((r) => (answer = r)))

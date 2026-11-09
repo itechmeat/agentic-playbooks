@@ -223,6 +223,40 @@ fn a_quick_run_leaves_the_project_as_it_was_and_no_surface_finds_it() {
     }
 }
 
+/// `apb eval --level quick --external-data`: the scenario run and its
+/// nested child run carry the flag and keep their scenario origin, and the
+/// results index line is the flagged one that `latest` skips.
+#[test]
+fn a_flagged_quick_run_and_its_child_are_flagged() {
+    let p = Project::new(&["fixloop", "kid"]);
+    let (code, r) = p.play("fixloop", "quick", "green", &["--external-data"]);
+    assert_eq!(code, 0, "{r:#}");
+    let dir = run_dir(&p, &r);
+    let m = apb_engine::manifest::read(&dir).unwrap().unwrap();
+    assert!(m.external_data);
+    assert!(matches!(
+        m.origin,
+        Some(apb_engine::manifest::RunOrigin::Scenario { .. })
+    ));
+    let child = journal(&dir)
+        .into_iter()
+        .find(|e| e["type"] == "child_run_started")
+        .and_then(|e| e["run_id"].as_str().map(str::to_string))
+        .expect("the child ran");
+    let child = dir.parent().unwrap().join(child);
+    assert!(
+        apb_engine::manifest::read(&child)
+            .unwrap()
+            .unwrap()
+            .external_data
+    );
+    let index = fs::read_to_string(p.root().join(".apb/scenario-runs/index/fixloop.jsonl"))
+        .unwrap_or_default();
+    let line: Value = serde_json::from_str(index.lines().last().expect("an index line")).unwrap();
+    assert_eq!(line["external_data"], true, "{line}");
+    assert!(line.get("verdict").is_none(), "{line}");
+}
+
 fn walkdir_has(dir: &std::path::Path, name: &str) -> bool {
     let Ok(entries) = fs::read_dir(dir) else {
         return false;

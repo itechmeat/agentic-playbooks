@@ -126,6 +126,7 @@ fn seed_gate_run_yaml(
         playbook: "gated".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     for p in payloads {
@@ -1302,6 +1303,7 @@ fn seed_open_attempt_run(root: &std::path::Path, run_id: &str, pid: u32) {
         playbook: "noagent".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     log.append(apb_engine::event::EventPayload::NodeStarted {
@@ -1496,6 +1498,7 @@ async fn run_detail_reports_a_working_child_run_as_running() {
         playbook: "noagent".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     log.append(apb_engine::event::EventPayload::ChildRunStarted {
@@ -2142,6 +2145,87 @@ async fn an_unattended_start_records_the_mode_and_the_run_detail_shows_it() {
     );
 }
 
+/// `POST /api/playbooks/{id}/run` with `external_data: true` writes the
+/// flag into the run, the run detail and the runs list show it, and the
+/// field is left out for an unflagged run. `remember` with the flag, and
+/// with an inheriting `continued_from` and no flag, is refused (409)
+/// before a run directory exists, with the memory file unchanged; a resume
+/// that asks for another value is refused too.
+#[tokio::test]
+async fn an_external_data_start_is_flagged_shown_and_never_remembers() {
+    let _guard = crate::common::env_lock().await;
+    let dir = seed_with_run();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let runs = || fs::read_dir(dir.path().join(".apb/runs")).unwrap().count();
+    let memory = || {
+        fs::read_dir(dir.path().join(".apb/memory"))
+            .map(|d| d.count())
+            .unwrap_or(0)
+    };
+    let (runs0, memory0) = (runs(), memory());
+    let (status, json) = post_json(
+        app.clone(),
+        "/api/playbooks/noagent/run",
+        serde_json::json!({ "params": { "who": "world" }, "external_data": true, "remember": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["error"], "external_data_remember_refused");
+    assert_eq!((runs(), memory()), (runs0, memory0));
+
+    let (status, json) = post_json(
+        app.clone(),
+        "/api/playbooks/noagent/run",
+        serde_json::json!({ "params": { "who": "world" }, "external_data": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let flagged = json["run_id"].as_str().unwrap().to_string();
+    let run_dir = dir.path().join(".apb/runs").join(&flagged);
+    let manifest = apb_engine::manifest::read(&run_dir).unwrap().unwrap();
+    assert!(manifest.external_data);
+    let (_, detail) = get_json(app.clone(), &format!("/api/runs/{flagged}")).await;
+    assert_eq!(detail["external_data"], true, "{detail}");
+    let (_, list) = get_json(app.clone(), "/api/runs").await;
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == flagged.as_str())
+        .unwrap();
+    assert_eq!(row["external_data"], true, "{row}");
+
+    let (status, json) = post_json(
+        app.clone(),
+        "/api/playbooks/noagent/run",
+        serde_json::json!({ "params": { "who": "world" }, "continued_from": flagged, "remember": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["error"], "external_data_remember_refused");
+    assert_eq!(memory(), memory0);
+
+    let (status, json) = post_json(
+        app.clone(),
+        &format!("/api/runs/{flagged}/resume"),
+        serde_json::json!({ "external_data": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["error"], "external_data_immutable");
+
+    let (status, json) = post_json(
+        app.clone(),
+        "/api/playbooks/noagent/run",
+        serde_json::json!({ "params": { "who": "world" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let plain = json["run_id"].as_str().unwrap().to_string();
+    let (_, detail) = get_json(app.clone(), &format!("/api/runs/{plain}")).await;
+    assert!(detail.get("external_data").is_none(), "{detail}");
+}
+
 /// The run detail carries each read-only check: an attempt's tier from its
 /// `read_only_checked` with the violation folded in, and a violation
 /// without a check as a row of its own; a run without one has no
@@ -2244,6 +2328,7 @@ mod results_routes {
             playbook: "p".into(),
             version: "1.0.0".into(),
             definition: None,
+            external_data: false,
         })
         .unwrap();
         let mut txn = ResultTxn::begin(&run).unwrap();
@@ -2814,6 +2899,7 @@ async fn get_run_detail_shows_previous_success_without_values() {
         playbook: "noagent".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     log.append(apb_engine::event::EventPayload::RunProvenance {

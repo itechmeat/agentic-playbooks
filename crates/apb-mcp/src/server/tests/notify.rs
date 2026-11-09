@@ -40,6 +40,7 @@ fn start_args(notify: serde_json::Value) -> PlaybookRunArgs {
         launch_choice: None,
         unattended: None,
         confirm_launch: None,
+        external_data: None,
     }
 }
 

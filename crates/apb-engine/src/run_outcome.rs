@@ -137,7 +137,7 @@ impl RunView {
         // journal alone does not carry: a scenario or eval run never
         // scheduled its follow-up.
         let production =
-            crate::manifest::RunOrigin::of_read(&crate::manifest::read(run_dir)).is_production();
+            crate::manifest::RunOrigin::of_read(&crate::manifest::read(run_dir)).runs_follow_up();
         self.readout_of_with(playbook, production)
     }
 

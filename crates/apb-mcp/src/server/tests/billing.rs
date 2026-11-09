@@ -103,6 +103,7 @@ fn start(confirm: Option<&Value>) -> PlaybookRunArgs {
         launch_version: arg("launch_version"),
         launch_choice: arg("launch_choice"),
         unattended: None,
+        external_data: None,
     }
 }
 

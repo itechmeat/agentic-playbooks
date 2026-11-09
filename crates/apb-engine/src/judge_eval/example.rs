@@ -255,6 +255,9 @@ fn from_run(
     if !run_dir.is_dir() {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
+    // Nothing of a run that processed external data becomes an example,
+    // nor are its values filled into one.
+    crate::external_data::refuse_if_flagged(&run_dir, "judge examples and run values")?;
     let (playbook_id, _) = crate::scheduler::run_playbook_ref(root, run_id)?;
     let playbook = crate::legacy_snapshot::load_run_playbook(&run_dir)
         .ok_or_else(|| EngineError::NotFound(format!("the playbook snapshot of run `{run_id}`")))?;

@@ -384,6 +384,13 @@ pub struct RunExecutionManifest {
     /// mode from here. Absent (false) for every other run.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unattended: bool,
+    /// The run processes data from outside the operator and keeps nothing
+    /// for learning (`external_data: true` at start, see
+    /// [`crate::external_data`]). Written once at start and never changed:
+    /// a resume, a patch or an amendment keeps it. Absent (false) for every
+    /// other run, so their manifests read and write as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub external_data: bool,
     /// What kind of run this is: absent for a production run, `scenario`
     /// for a scenario run, `eval` for an `apb eval` repetition. Only
     /// production runs count as history (stats, estimates, quality
@@ -415,6 +422,11 @@ pub enum RunOrigin {
     },
     /// A repetition of `apb eval`.
     Eval,
+    /// A run that would be production but processes external data
+    /// ([`crate::external_data`]): never history. An apb that does not
+    /// know the kind reads it as [`RunOrigin::Unknown`], not production
+    /// either.
+    ExternalData,
     /// An origin this apb does not know (a newer apb wrote it).
     #[serde(other)]
     Unknown,
@@ -424,6 +436,13 @@ impl RunOrigin {
     /// Whether a run of this origin counts as history.
     pub fn is_production(&self) -> bool {
         matches!(self, RunOrigin::Production)
+    }
+
+    /// Whether a run of this origin schedules and shows its own follow-up
+    /// check: a production run and an external data run (the check is part
+    /// of the run; only its statistics are history).
+    pub fn runs_follow_up(&self) -> bool {
+        matches!(self, RunOrigin::Production | RunOrigin::ExternalData)
     }
 
     /// The origin of a run from the [`read`] of its manifest: no manifest
@@ -487,6 +506,40 @@ impl ManifestExecution {
     /// the part before the suffix.
     pub const GUARD_SUFFIX: &str = "+guard";
 
+    /// The suffix an external data run's mode carries (`cli+external`,
+    /// `host+guard+external`), after the guard suffix: an apb that does
+    /// not know it refuses to drive, resume or amend the run instead of
+    /// running it without the external data guards.
+    pub const EXTERNAL_SUFFIX: &str = "+external";
+
+    /// The block for a resolved execution of a run, the suffixes applied:
+    /// `None` only for a plain `cli` run without the fallback, the guard
+    /// and the external data flag, which keeps the manifest unchanged.
+    pub fn for_run(
+        r: &apb_core::execution::ResolvedExecution,
+        guarded: bool,
+        external: bool,
+    ) -> Option<Self> {
+        if !external {
+            return Self::from_resolved_guarded(r, guarded);
+        }
+        let mut block = Self::from_resolved_guarded(r, guarded).unwrap_or_else(|| Self {
+            mode: r.mode.as_str().to_string(),
+            source: Some(r.source.as_str().to_string()),
+            client: r.client.clone(),
+            fallback_to_host: r.fallback_to_host,
+        });
+        block.mode.push_str(Self::EXTERNAL_SUFFIX);
+        Some(block)
+    }
+
+    /// The mode without the external data and guard suffixes: the part a
+    /// mode reader parses.
+    fn base(mode: &str) -> &str {
+        let mode = mode.strip_suffix(Self::EXTERNAL_SUFFIX).unwrap_or(mode);
+        mode.strip_suffix(Self::GUARD_SUFFIX).unwrap_or(mode)
+    }
+
     /// The block for a resolved execution; `None` for a plain `cli` run
     /// without the fallback, which keeps the manifest unchanged.
     pub fn from_resolved(r: &apb_core::execution::ResolvedExecution) -> Option<Self> {
@@ -544,10 +597,7 @@ impl RunExecutionManifest {
         match &self.execution {
             None => Ok(apb_core::execution::ExecutionMode::Cli),
             Some(e) => {
-                let base = e
-                    .mode
-                    .strip_suffix(ManifestExecution::GUARD_SUFFIX)
-                    .unwrap_or(&e.mode);
+                let base = ManifestExecution::base(&e.mode);
                 apb_core::execution::ExecutionMode::parse(base).ok_or_else(|| {
                     EngineError::Conflict(format!(
                         "the run manifest names execution mode `{}`, which this apb {} does not know; it was written by a newer apb: upgrade apb and retry",
@@ -562,13 +612,23 @@ impl RunExecutionManifest {
     /// Whether the run's manifest carries the guard suffix: a run whose
     /// definition uses a person-only gate or an approval.
     pub fn is_guarded(&self) -> bool {
-        self.execution
-            .as_ref()
-            .is_some_and(|e| e.mode.ends_with(ManifestExecution::GUARD_SUFFIX))
+        self.execution.as_ref().is_some_and(|e| {
+            e.mode
+                .strip_suffix(ManifestExecution::EXTERNAL_SUFFIX)
+                .unwrap_or(&e.mode)
+                .ends_with(ManifestExecution::GUARD_SUFFIX)
+        })
     }
 
-    /// The execution mode a surface shows: the part before the guard
-    /// suffix, so the internal suffix never reaches a person or a host
+    /// Whether the run's mode carries the external data suffix.
+    pub fn is_external(&self) -> bool {
+        self.execution
+            .as_ref()
+            .is_some_and(|e| e.mode.ends_with(ManifestExecution::EXTERNAL_SUFFIX))
+    }
+
+    /// The execution mode a surface shows: the part before the guard and
+    /// external data suffixes, so an internal suffix never reaches a person or a host
     /// that matches on the mode ([`Self::is_guarded`] carries it as its
     /// own attribute instead). `cli` for a run without an execution block.
     pub fn base_mode(&self) -> &str {
@@ -577,8 +637,7 @@ impl RunExecutionManifest {
             .as_ref()
             .map(|e| e.mode.as_str())
             .unwrap_or(apb_core::execution::ExecutionMode::Cli.as_str());
-        mode.strip_suffix(ManifestExecution::GUARD_SUFFIX)
-            .unwrap_or(mode)
+        ManifestExecution::base(mode)
     }
 
     /// Whether the run executes its agent steps as host tasks.
@@ -635,6 +694,7 @@ impl RunExecutionManifest {
             && self.secret_params.is_empty()
             && self.launch.is_none()
             && !self.unattended
+            && !self.external_data
             && self.origin.is_none()
     }
 
@@ -895,6 +955,142 @@ mod tests {
             assert_eq!(m.origin(), RunOrigin::Unknown, "{newer}");
             assert!(!m.origin().is_production());
         }
+    }
+
+    fn resolved(
+        mode: apb_core::execution::ExecutionMode,
+    ) -> apb_core::execution::ResolvedExecution {
+        apb_core::execution::ResolvedExecution {
+            mode,
+            source: apb_core::execution::ExecutionSource::Default,
+            client: None,
+            fallback_to_host: false,
+            notes: Vec::new(),
+        }
+    }
+
+    /// An unflagged manifest serializes byte-identical to one written
+    /// before the external data flag existed: no field, no origin, no
+    /// execution block for a plain cli run.
+    #[test]
+    fn an_unflagged_manifest_is_byte_identical_to_todays() {
+        let m = RunExecutionManifest {
+            unattended: true,
+            execution: ManifestExecution::for_run(
+                &resolved(apb_core::execution::ExecutionMode::Cli),
+                false,
+                false,
+            ),
+            ..Default::default()
+        };
+        assert_eq!(
+            yaml_serde::to_string(&m).unwrap(),
+            "profiles: []\nnode_bindings: {}\nconnectors: []\nconnector_grants: {}\nunattended: true\n"
+        );
+        let guarded = ManifestExecution::for_run(
+            &resolved(apb_core::execution::ExecutionMode::Cli),
+            true,
+            false,
+        );
+        assert_eq!(
+            guarded,
+            ManifestExecution::from_resolved_guarded(
+                &resolved(apb_core::execution::ExecutionMode::Cli),
+                true
+            )
+        );
+    }
+
+    /// A flagged production run writes the boolean, the external data
+    /// origin and the mode suffix; the manifest is worth writing with no
+    /// profiles; `base_mode` and `execution_mode` strip the suffix with the
+    /// guard suffix; an amendment keeps all three.
+    #[test]
+    fn a_flagged_manifest_carries_the_flag_the_origin_and_the_suffix() {
+        for (guarded, mode) in [(false, "cli+external"), (true, "cli+guard+external")] {
+            let m = RunExecutionManifest {
+                external_data: true,
+                origin: Some(RunOrigin::ExternalData),
+                execution: ManifestExecution::for_run(
+                    &resolved(apb_core::execution::ExecutionMode::Cli),
+                    guarded,
+                    true,
+                ),
+                ..Default::default()
+            };
+            assert!(!m.is_empty());
+            let yaml = yaml_serde::to_string(&m).unwrap();
+            assert!(yaml.contains("external_data: true"), "{yaml}");
+            assert!(yaml.contains("kind: external_data"), "{yaml}");
+            assert!(yaml.contains(&format!("mode: {mode}")), "{yaml}");
+            assert_eq!(m.base_mode(), "cli");
+            assert_eq!(
+                m.execution_mode().unwrap(),
+                apb_core::execution::ExecutionMode::Cli
+            );
+            assert!(m.is_external());
+            assert_eq!(m.is_guarded(), guarded);
+
+            let dir = tempfile::tempdir().unwrap();
+            write(dir.path(), &m).unwrap();
+            add_secret_params(dir.path(), "r", ["token".to_string()]).unwrap();
+            let back = read(dir.path()).unwrap().unwrap();
+            assert!(back.external_data);
+            assert_eq!(back.origin, Some(RunOrigin::ExternalData));
+            assert!(back.is_external());
+            assert_eq!(back.secret_params, vec!["token".to_string()]);
+        }
+        // Host mode carries the suffix after its own name.
+        let host = ManifestExecution::for_run(
+            &resolved(apb_core::execution::ExecutionMode::Host),
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(host.mode, "host+external");
+    }
+
+    /// A flagged scenario run keeps its scenario origin and only the
+    /// boolean.
+    #[test]
+    fn a_flagged_scenario_manifest_keeps_its_origin() {
+        let m = RunExecutionManifest {
+            external_data: true,
+            origin: Some(RunOrigin::Scenario {
+                level: apb_core::scenario::ScenarioLevel::Quick,
+                scenario: "green".into(),
+                scenario_digest: "sha256:s".into(),
+            }),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), &m).unwrap();
+        let back = read(dir.path()).unwrap().unwrap();
+        assert!(matches!(back.origin(), RunOrigin::Scenario { .. }));
+        assert!(back.external_data);
+    }
+
+    /// The external data origin is not production but runs its own
+    /// follow-up; an unknown kind reads as unknown; a mode with a suffix
+    /// this apb does not know refuses, the path an older apb takes on a
+    /// flagged run.
+    #[test]
+    fn the_external_data_origin_and_the_downgrade_guard() {
+        assert!(!RunOrigin::ExternalData.is_production());
+        assert!(RunOrigin::ExternalData.runs_follow_up());
+        assert!(RunOrigin::Production.runs_follow_up());
+        assert!(!RunOrigin::Eval.runs_follow_up());
+        assert!(!RunOrigin::Unknown.runs_follow_up());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            manifest_path(dir.path()),
+            "profiles: []\nnode_bindings: {}\norigin:\n  kind: kept_private\nexecution:\n  mode: cli+private\n",
+        )
+        .unwrap();
+        let m = read(dir.path()).unwrap().unwrap();
+        assert_eq!(m.origin(), RunOrigin::Unknown);
+        let err = m.execution_mode().unwrap_err().to_string();
+        assert!(err.contains("newer apb"), "{err}");
     }
 
     #[test]

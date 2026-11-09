@@ -2084,12 +2084,17 @@ fn execute_node_kind(
                             }
                             None => adapter_for(&step.agent)?,
                         };
-                        // Desktop-history sync (`agents.zcode.ui_sync`).
-                        crate::zcode_ui_sync::wrap_step(
-                            adapter,
-                            &step.agent,
-                            base_spec.as_ref().map(|(spec, _)| spec),
-                        )
+                        // Desktop-history sync (`agents.zcode.ui_sync`); a run
+                        // that processes external data leaves no row there.
+                        if crate::external_data::is_flagged(run_dir) {
+                            adapter
+                        } else {
+                            crate::zcode_ui_sync::wrap_step(
+                                adapter,
+                                &step.agent,
+                                base_spec.as_ref().map(|(spec, _)| spec),
+                            )
+                        }
                     };
                     // Where to stream the attempt's NDJSON events (acp transport); one
                     // file per attempt. The headless field ignores it.
@@ -4969,6 +4974,10 @@ pub(crate) fn run_playbook_node(
     // A child of an unattended run is unattended (from the parent's
     // manifest, here, so it never hangs on where the child's prepare looks).
     opts.unattended = super::unattended::mode(run_dir, cfg);
+    // A child of a run that processes external data does too, whatever its
+    // start asked (a scenario run's child included: read from the parent's
+    // own directory).
+    opts.external_data = crate::external_data::is_flagged(run_dir);
     // The launch authorization: a child spawned under its verified pin
     // records its parent's, so a later resume of the child alone needs no
     // check of its own. A child resolved live inherits nothing.

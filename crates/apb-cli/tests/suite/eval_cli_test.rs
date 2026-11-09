@@ -1226,6 +1226,24 @@ fn an_eval_run_records_origin_eval_and_stats_skip_it() {
     assert_eq!(s["runs"], 1, "the control run was not read: {s:#}");
 }
 
+/// `apb eval --external-data`: every repetition's manifest carries the
+/// flag (and keeps its eval origin), and no result is stored: nothing
+/// under `evals/results`, no `stored` path in the answer.
+#[test]
+fn a_flagged_eval_is_flagged_and_stores_no_result() {
+    let env = setup(PLAYBOOK);
+    let (code, v) = env.eval_json(&["--external-data"]);
+    assert_eq!(code, 0, "{v:#}");
+    assert!(v["stored"].is_null(), "{v:#}");
+    assert!(!env.cfg.path().join("evals/results").exists());
+    let rep = &v["result"]["cases"][0]["repetitions"][0];
+    let run_dir = PathBuf::from(rep["run_dir"].as_str().expect("run_dir"));
+    let m = apb_engine::manifest::read(&run_dir).unwrap().unwrap();
+    assert!(m.external_data);
+    assert_eq!(m.origin, Some(apb_engine::manifest::RunOrigin::Eval));
+    assert!(m.is_external());
+}
+
 /// A playbook whose `evals/` holds only scenario files has no eval case:
 /// the refusal says so and points at the scenario levels, while a playbook
 /// with no `evals/` at all is told that instead.

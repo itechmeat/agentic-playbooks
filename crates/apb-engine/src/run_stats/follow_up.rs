@@ -203,6 +203,7 @@ mod tests {
             definitions: Default::default(),
             diagnostics: Vec::new(),
             origin: crate::manifest::RunOrigin::Production,
+            learns: true,
             identities: Vec::new(),
             declared: Default::default(),
             ephemeral_nodes: Default::default(),
@@ -237,9 +238,35 @@ mod tests {
     fn add_all(runs: &[StatsRun]) -> FollowUpStats {
         let mut acc = Acc::default();
         for r in runs {
-            acc.add(r.origin.is_production(), r.snapshot.as_ref(), &r.events);
+            acc.add(r.learns, r.snapshot.as_ref(), &r.events);
         }
         acc.finish().expect("a run declares the block")
+    }
+
+    /// A run that processed external data scheduled its own follow-up,
+    /// but its verdict never enters the statistics.
+    #[test]
+    fn a_flagged_run_is_absent_from_the_statistics() {
+        let mut flagged = run(
+            "x",
+            "1.0.0",
+            PLAYBOOK,
+            vec![succeeded(), observed_event("observed", "not_met")],
+        );
+        flagged.learns = false;
+        flagged.origin = crate::manifest::RunOrigin::ExternalData;
+        let runs = [
+            run(
+                "a",
+                "1.0.0",
+                PLAYBOOK,
+                vec![succeeded(), observed_event("observed", "met")],
+            ),
+            flagged,
+        ];
+        let stats = add_all(&runs);
+        assert_eq!(stats.observed, 1);
+        assert_eq!((stats.met, stats.not_met), (1, 0));
     }
 
     /// The met rate counts met runs over the observed ones only: an

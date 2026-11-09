@@ -39,6 +39,11 @@ pub struct StatsRun {
     /// production run counts as history
     /// ([`crate::run_history::counts_as_history`]).
     pub origin: crate::manifest::RunOrigin,
+    /// Whether readers of earlier runs may learn from it
+    /// ([`crate::external_data::learns_from`]): a production run that did
+    /// not process external data. What
+    /// [`crate::run_history::counts_as_history`] reads.
+    pub learns: bool,
     /// Every attempt's identity ([`crate::execution_identity::fold`]): its
     /// chain position and the digests of the binding it ran on.
     pub identities: Vec<crate::execution_identity::fold::ExecutionIdentity>,
@@ -93,6 +98,7 @@ impl StatsRun {
             definitions,
             diagnostics: crate::diagnostics::read(run_dir),
             origin,
+            learns: crate::external_data::learns_from(run_dir),
             ephemeral_nodes: m
                 .map(|m| {
                     m.node_bindings

@@ -69,6 +69,10 @@ pub struct PlaybookScenarioRunArgs {
     pub scope: Option<String>,
     #[serde(default)]
     pub workspace: Option<String>,
+    /// external_data - the scenario run keeps nothing for learning (see
+    /// playbook_run): its index line holds only what retention needs.
+    #[serde(default)]
+    pub external_data: Option<bool>,
 }
 
 /// The `scope` argument: project when absent.
@@ -132,6 +136,7 @@ impl WfMcp {
             level,
             version: args.version,
             max_decision_requests: args.max_decision_requests,
+            external_data: args.external_data == Some(true),
         };
         off_runtime(move || {
             let exe = apb_core::fsutil::reexec_exe()

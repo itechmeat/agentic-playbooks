@@ -115,6 +115,7 @@ fn run(id: &str, f: &Fixture) -> RunJournal {
                 playbook: "pb".into(),
                 version: "1.0.0".into(),
                 definition: None,
+                external_data: false,
             },
         ),
         node(1, "a", None),

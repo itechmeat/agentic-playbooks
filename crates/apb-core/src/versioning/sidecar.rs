@@ -61,6 +61,14 @@ pub struct VersionProvenance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub shipped_version: Option<String>,
+    /// The run that processed external data whose current-run patch
+    /// created this version: the version stays with that run. It is never
+    /// promoted to `current` nor made a candidate, and moving `current` to
+    /// it, `apb version use` and a start that is not itself flagged refuse
+    /// it with `external_data_run`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub external_data_run: Option<String>,
 }
 
 /// The trial record of a candidate version (issue #192): how many trial runs

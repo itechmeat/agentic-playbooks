@@ -846,3 +846,66 @@ fn only_a_step_of_an_unattended_run_may_start_one_unattended() {
     assert_eq!(code, 0, "{out}");
     assert_eq!(p.runs().len(), 3);
 }
+
+// ---------------------------------------------------------- external data
+
+/// The run directories of `p`, sorted.
+fn run_ids(p: &Project) -> Vec<String> {
+    let mut ids: Vec<String> = fs::read_dir(p.root().join(".apb/runs"))
+        .map(|d| {
+            d.filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids
+}
+
+/// `apb run --external-data`: the run's manifest carries the flag, `apb
+/// runs` and `apb runs <id> --json` show it, `--remember` with it is
+/// refused before a run directory exists with the memory unchanged, and
+/// `apb resume --external-data false` is refused with the journal
+/// unchanged.
+#[test]
+fn apb_run_external_data_is_flagged_shown_and_never_remembers() {
+    let p = Project::new();
+    p.install(
+        "ext",
+        "schema: 2\nid: ext\nname: ext\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: script, script: \"scripts/w.sh\", runner: sh }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n",
+        &[("w.sh", "echo w\n")],
+    );
+    let (code, out) = p.apb(&["run", "ext", "--external-data", "--remember"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("external_data_remember_refused"), "{out}");
+    assert!(run_ids(&p).is_empty());
+    assert!(!p.root().join(".apb/memory").exists());
+
+    let (code, out) = p.apb(&["run", "ext", "--external-data"]);
+    assert_eq!(code, 0, "{out}");
+    let ids = run_ids(&p);
+    assert_eq!(ids.len(), 1);
+    let run = &ids[0];
+    let dir = p.root().join(".apb/runs").join(run);
+    assert!(
+        apb_engine::manifest::read(&dir)
+            .unwrap()
+            .unwrap()
+            .external_data
+    );
+    let (code, json) = p.apb(&["runs", run, "--json"]);
+    assert_eq!(code, 0, "{json}");
+    let status: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(status["external_data"], true, "{status:#}");
+    let (_, text) = p.apb(&["runs", run]);
+    assert!(text.contains("external data"), "{text}");
+    assert!(!text.contains("+external"), "{text}");
+    let (_, table) = p.apb(&["runs"]);
+    assert!(table.contains("external data"), "{table}");
+
+    let journal = fs::read(dir.join("events.jsonl")).unwrap();
+    let (code, out) = p.apb(&["resume", run, "--external-data", "false"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("external_data_immutable"), "{out}");
+    assert_eq!(fs::read(dir.join("events.jsonl")).unwrap(), journal);
+}

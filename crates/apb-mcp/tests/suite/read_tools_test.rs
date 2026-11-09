@@ -189,6 +189,7 @@ mod results {
             playbook: "p".into(),
             version: "1.0.0".into(),
             definition: None,
+            external_data: false,
         })
         .unwrap();
         // The run's working tree: capture reads `scope: workspace` there.

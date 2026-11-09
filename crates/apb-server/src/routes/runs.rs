@@ -221,6 +221,12 @@ pub struct RunDetail {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(test, ts(optional, as = "Option<bool>"))]
     pub unattended: bool,
+    /// The run processes external data and keeps nothing for learning
+    /// (`external_data: true` at start), from its manifest and journal.
+    /// Read-only; left out for every other run.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(test, ts(optional, as = "Option<bool>"))]
+    pub external_data: bool,
     /// What `run.previous_success.*` renders in this run, as the start
     /// recorded it: times and output keys only, never the values. Left out
     /// for a run whose definition does not read the namespace.
@@ -497,6 +503,7 @@ pub(crate) async fn get_run_handler(
     let isolation = view.isolation();
     let read_only = view.read_only();
     let unattended = apb_engine::run_view::run_unattended(&run_dir);
+    let external_data = apb_engine::external_data::is_flagged(&run_dir);
     // The goal, the baseline and the outcome are read against the one
     // playbook snapshot parsed above.
     let readout = view.readout_of(loaded_pb);
@@ -582,6 +589,7 @@ pub(crate) async fn get_run_handler(
         isolation,
         read_only,
         unattended,
+        external_data,
         previous_success: apb_engine::run_view::previous_success(&events),
         untrusted: apb_engine::run_view::untrusted_nodes(&events),
         goal,
@@ -999,6 +1007,10 @@ pub(crate) struct ResumeBody {
     /// `node_without_retry_now` without it).
     #[serde(default)]
     node: Option<String>,
+    /// Checked only: the external data flag the run was started with. A
+    /// different value is refused (409 `external_data_immutable`).
+    #[serde(default)]
+    external_data: Option<bool>,
 }
 
 /// Who the dashboard's retry-now is journaled as (`retry_expedited.by`): a
@@ -1087,6 +1099,14 @@ pub(crate) async fn post_resume_handler(
         body.node.is_some(),
     ) {
         return (StatusCode::BAD_REQUEST, Json(refusal)).into_response();
+    }
+    // The external data flag is fixed at start: a resume may repeat it,
+    // never change it.
+    if let Err(refusal) = apb_engine::external_data::check_resume(
+        &root.join(".apb/runs").join(&id),
+        body.external_data,
+    ) {
+        return (StatusCode::CONFLICT, Json(refusal.body())).into_response();
     }
     // The run gate first, for a live retry-now too: it writes to the run's
     // journal like any resume.

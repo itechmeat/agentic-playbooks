@@ -613,6 +613,7 @@ fn seed_journal(root: &Path, run_id: &str, extra: &[EventPayload]) -> PathBuf {
         playbook: "nowscript".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     for p in extra {

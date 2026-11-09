@@ -49,6 +49,69 @@ pub struct IndexLine {
     pub decision_requests: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// The run processed external data ([`crate::external_data`]): the
+    /// stored line holds only what retention needs (the run id, the
+    /// scenario, the level, the time and this flag), and [`latest`] and
+    /// every reader skip it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub external_data: bool,
+}
+
+/// What the index keeps of a run that processed external data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ExternalLine {
+    scenario: String,
+    level: ScenarioLevel,
+    run_id: String,
+    at_ms: u64,
+    external_data: bool,
+}
+
+impl ExternalLine {
+    /// The line read back as an [`IndexLine`]: no digest, no version,
+    /// verdict `invalid`, flagged.
+    fn into_line(self) -> IndexLine {
+        IndexLine {
+            scenario: self.scenario,
+            scenario_digest: String::new(),
+            level: self.level,
+            version: String::new(),
+            playbook_digest: String::new(),
+            verdict: Verdict::Invalid,
+            run_id: self.run_id,
+            at_ms: self.at_ms,
+            decision_requests: 0,
+            cost_usd: None,
+            external_data: true,
+        }
+    }
+}
+
+/// One index line as stored: a flagged run's line keeps only what
+/// retention needs.
+fn line_text(l: &IndexLine) -> Option<String> {
+    if l.external_data {
+        serde_json::to_string(&ExternalLine {
+            scenario: l.scenario.clone(),
+            level: l.level,
+            run_id: l.run_id.clone(),
+            at_ms: l.at_ms,
+            external_data: true,
+        })
+        .ok()
+    } else {
+        serde_json::to_string(l).ok()
+    }
+}
+
+/// One stored index line read back: a full line, or a flagged run's.
+fn parse_line(text: &str) -> Option<IndexLine> {
+    serde_json::from_str::<IndexLine>(text).ok().or_else(|| {
+        serde_json::from_str::<ExternalLine>(text)
+            .ok()
+            .filter(|l| l.external_data)
+            .map(ExternalLine::into_line)
+    })
 }
 
 impl IndexLine {
@@ -66,6 +129,7 @@ impl IndexLine {
             at_ms,
             decision_requests: report.decision_requests,
             cost_usd: report.cost_usd,
+            external_data: false,
         })
     }
 }
@@ -164,7 +228,10 @@ pub fn execute_with(req: &DriveRequest, drive: Drive) -> Executed {
     let stored = write_report(&run_dir, &report)
         .and_then(
             |()| match IndexLine::of(&report, apb_core::clock::now_ms() as u64) {
-                Some(line) => append(&req.root, &req.playbook_id, &line),
+                Some(mut line) => {
+                    line.external_data = crate::external_data::is_flagged(&run_dir);
+                    append(&req.root, &req.playbook_id, &line)
+                }
                 None => Ok(()),
             },
         )
@@ -194,14 +261,17 @@ pub fn read_index(root: &Path, playbook: &str) -> Vec<IndexLine> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
+        .filter_map(parse_line)
         .collect()
 }
 
 /// The newest line per scenario and level.
 pub fn latest(root: &Path, playbook: &str) -> BTreeMap<(String, ScenarioLevel), IndexLine> {
     let mut out = BTreeMap::new();
-    for line in read_index(root, playbook) {
+    for line in read_index(root, playbook)
+        .into_iter()
+        .filter(|l| !l.external_data)
+    {
         let key = (line.scenario.clone(), line.level);
         match out.get(&key) {
             Some(prev) if is_newer(prev, &line) => {}
@@ -235,7 +305,7 @@ pub fn append(root: &Path, playbook: &str, line: &IndexLine) -> io::Result<()> {
     }
     let text: String = keep
         .iter()
-        .filter_map(|l| serde_json::to_string(l).ok())
+        .filter_map(line_text)
         .map(|l| l + "\n")
         .collect();
     apb_core::fsutil::atomic_write_private(&path, text.as_bytes())
@@ -328,6 +398,7 @@ mod tests {
             scenario: scenario(body),
             level: ScenarioLevel::Quick,
             max_decision_requests: None,
+            external_data: false,
         }
     }
 
@@ -390,6 +461,7 @@ mod tests {
             at_ms,
             decision_requests: 0,
             cost_usd: None,
+            external_data: false,
         }
     }
 
@@ -453,6 +525,57 @@ mod tests {
             "smoke1"
         );
         assert!(index_path(root.path(), "../loop").is_err());
+    }
+
+    /// A flagged scenario run's line holds only the run id, the scenario,
+    /// the level, the time and the flag; `latest` skips it, and retention
+    /// still removes its directory past [`KEEP_RUNS`].
+    #[test]
+    fn a_flagged_line_keeps_only_what_retention_needs() {
+        let root = tempfile::tempdir().unwrap();
+        let base = runs_root(root.path());
+        write_run(&base.join("plain"), &[]);
+        append(
+            root.path(),
+            "loop",
+            &line("s", ScenarioLevel::Quick, "plain", 1),
+        )
+        .unwrap();
+        write_run(&base.join("flagged0"), &[]);
+        let mut flagged = line("s", ScenarioLevel::Quick, "flagged0", 2);
+        flagged.external_data = true;
+        append(root.path(), "loop", &flagged).unwrap();
+        let text = std::fs::read_to_string(index_path(root.path(), "loop").unwrap()).unwrap();
+        let stored: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        let mut keys: Vec<&str> = stored
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["at_ms", "external_data", "level", "run_id", "scenario"]
+        );
+        let latest = latest(root.path(), "loop");
+        assert_eq!(
+            latest[&("s".to_string(), ScenarioLevel::Quick)].run_id,
+            "plain"
+        );
+        // Past KEEP_RUNS newer runs, the flagged run's directory goes.
+        for i in 0..KEEP_RUNS as u64 {
+            let id = format!("n{i:02}");
+            write_run(&base.join(&id), &[]);
+            append(
+                root.path(),
+                "loop",
+                &line("s", ScenarioLevel::Quick, &id, 10 + i),
+            )
+            .unwrap();
+        }
+        assert!(!base.join("flagged0").exists());
+        assert!(!base.join("plain").exists());
     }
 
     /// The index keeps at most a thousand lines per playbook, the newest,

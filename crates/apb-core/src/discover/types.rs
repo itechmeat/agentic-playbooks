@@ -198,6 +198,52 @@ pub struct DiscoverRequest {
     pub registered: Vec<PathBuf>,
     pub limits: ReadLimits,
     pub mine: MineParams,
+    /// What discovery leaves out: the sessions and run ids of runs that
+    /// processed external data (`apb_engine::external_data::flagged_markers`).
+    pub exclude: Exclude,
+}
+
+/// The markers of runs that processed external data, which history
+/// discovery and the end-of-turn save hook leave out: a session file named
+/// after one of `sessions` is never opened, and a session whose read part
+/// names one of `run_ids` contributes nothing. Each is counted under the
+/// skip reason [`Exclude::SKIP_REASON`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Exclude {
+    pub run_ids: std::collections::BTreeSet<String>,
+    pub sessions: std::collections::BTreeSet<String>,
+}
+
+impl Exclude {
+    /// The skip reason a left-out session file is counted under.
+    pub const SKIP_REASON: &str = "external_data";
+
+    /// Whether a session file named `file_name` is a flagged run's
+    /// session: `<session>.jsonl` (claude) or a name that ends with
+    /// `-<session>.jsonl` (codex's `rollout-<time>-<session>.jsonl`).
+    pub fn names_session(&self, file_name: &str) -> bool {
+        let Some(stem) = file_name.strip_suffix(".jsonl") else {
+            return false;
+        };
+        self.sessions.iter().any(|s| {
+            stem == s
+                || stem
+                    .strip_suffix(s.as_str())
+                    .is_some_and(|head| head.ends_with('-'))
+        })
+    }
+
+    /// Whether `bytes` (the part of a session read) name a flagged run id.
+    pub fn names_run(&self, bytes: &[u8]) -> bool {
+        self.run_ids
+            .iter()
+            .filter(|id| !id.is_empty())
+            .any(|id| bytes.windows(id.len()).any(|w| w == id.as_bytes()))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.run_ids.is_empty() && self.sessions.is_empty()
+    }
 }
 
 /// Where a suggestion was seen: a root by its name, a file as
@@ -281,6 +327,7 @@ pub struct RootReport {
     pub bytes_read: u64,
     /// Files left unread, by why: `symlink`, `not_regular`, `too_old`,
     /// `other_project`, `file_cap`, `byte_cap`, `step_cap`, `unreadable`,
+    /// `external_data` (a session of a run that processed external data),
     /// and lines skipped as `line_too_long`.
     pub skipped: BTreeMap<String, u32>,
     /// Files read by their prefix only.
