@@ -823,3 +823,57 @@ fn the_report_labels_a_real_run_and_replay_leaves_its_journal_untouched() {
     assert!(results.starts_with(p.cfg.path().join("decisions-replay")));
     assert_eq!(tree(&run_dir), before, "replay never touches the run");
 }
+
+/// Replay over one flagged and one unflagged run asks the provider for the
+/// unflagged run's records only, and the report and the replay each count
+/// the flagged run as skipped.
+#[test]
+fn replay_and_the_report_leave_a_flagged_run_out() {
+    use apb_engine::decision::report::{self, ReportFilter, ReportSettings, replay};
+
+    let p = Project::new(&one_node(""), DONE);
+    let server = StubServer::start(vec![
+        StubResponse::json(200, reply(0.93, "complete")),
+        StubResponse::json(200, reply(0.92, "complete")),
+    ]);
+    let other = StubServer::start(vec![
+        StubResponse::json(200, reply(0.95, "complete")),
+        StubResponse::json(200, reply(0.95, "complete")),
+    ]);
+    p.decisions(&format!(
+        "version: 1\nmode: shadow\nproviders:\n  - {{ id: stub, kind: systemone, base_url: \"{}\", model: jev-1.13.0 }}\n  - {{ id: other, kind: systemone, base_url: \"{}\", model: jev-1.14.0 }}\nuses:\n  completion_check: {{ mode: shadow }}\nprivacy: {{ debug_state: true }}\n",
+        server.base_url, other.base_url
+    ));
+    let _lock = common::env_lock();
+    let _env = p.env();
+    apb_core::run_origin::ensure_key().unwrap();
+    let (status, _, _) = p.run();
+    assert_eq!(status, RunStatus::Succeeded);
+    let flagged = run(
+        p.root.path(),
+        "d",
+        None,
+        RunOptions {
+            external_data: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(flagged.outcome, RunStatus::Succeeded);
+    // Both runs asked the run's provider once.
+    assert_eq!((server.count(), other.count()), (2, 0));
+
+    let roots = [p.root.path().to_path_buf()];
+    let r = report::report(&roots, &ReportFilter::default(), &ReportSettings::default());
+    assert_eq!((r.runs, r.decisions, r.skipped_external), (1, 1, 1));
+    let s = replay::replay(
+        &roots,
+        p.cfg.path(),
+        Some("other"),
+        &ReportFilter::default(),
+        10,
+    )
+    .unwrap();
+    assert_eq!((s.matched, s.asked, s.skipped_external), (1, 1, 1));
+    assert_eq!(other.count(), 1, "replay asked about the flagged run");
+}

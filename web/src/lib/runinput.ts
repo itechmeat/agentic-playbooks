@@ -120,6 +120,14 @@ export function memoryNoteFrom(recall: Recall): string | null {
   return notes.length ? notes.join(' ') : null
 }
 
+// The fields of a start that processes external data: a field still showing
+// its remembered value (the person did not edit it) goes back to its
+// default, so nothing remembered reaches such a run; a value the person
+// typed stays.
+export function withoutRemembered(fields: ParamField[]): ParamField[] {
+  return fields.map((f) => (f.remembered !== null && f.value === f.remembered ? { ...f, value: f.fallback } : f))
+}
+
 // The value field `f` sends, or null to leave it to the engine (see the
 // rules at the top).
 function sent(f: ParamField): string | null {

@@ -403,6 +403,16 @@ fn fake_tasks_index(home: &Path) -> std::path::PathBuf {
 /// Runs the one-node `zplan` playbook on a stub zcode that prints a real
 /// `--json` result, with `config_extra` appended under `agents.zcode`.
 fn run_zplan_with(dir: &Path, home: &Path, config_extra: &str) -> apb_engine::scheduler::RunResult {
+    run_zplan_opts(dir, home, config_extra, RunOptions::default())
+}
+
+/// [`run_zplan_with`] with the run options `opts`.
+fn run_zplan_opts(
+    dir: &Path,
+    home: &Path,
+    config_extra: &str,
+    opts: RunOptions,
+) -> apb_engine::scheduler::RunResult {
     let root = dir.join("proj");
     let cfg = dir.join("cfg");
     fs::create_dir_all(&root).unwrap();
@@ -425,7 +435,7 @@ fn run_zplan_with(dir: &Path, home: &Path, config_extra: &str) -> apb_engine::sc
     )
     .unwrap();
     let _env = ZcodeRunEnv::set(&[("HOME", home), ("APB_CONFIG_DIR", &cfg)]);
-    run(&root, "zplan", None, RunOptions::default()).unwrap()
+    run(&root, "zplan", None, opts).unwrap()
 }
 
 /// With `agents.zcode.ui_sync: true` a finished zcode session gets one row in
@@ -473,6 +483,31 @@ fn a_zcode_session_with_ui_sync_lands_in_the_desktop_task_index() {
     assert_eq!(meta["thoughtLevel"], "low");
     assert_eq!(meta["traceId"], "00000000-0000-4000-8000-0000000000a1");
     assert_eq!(meta["status"], "completed");
+}
+
+/// A run that processes external data leaves no row in the desktop task
+/// index even with `ui_sync` on. `HOME` is a directory under `$TMPDIR`.
+#[test]
+fn a_flagged_run_leaves_the_desktop_task_index_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    assert!(home.starts_with(std::env::temp_dir()));
+    let db = fake_tasks_index(&home);
+    let res = run_zplan_opts(
+        dir.path(),
+        &home,
+        "    ui_sync: true\n",
+        RunOptions {
+            external_data: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let n: i64 = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0);
 }
 
 /// The sync is opt-in: without `ui_sync` the index is never touched.

@@ -103,6 +103,7 @@ fn a_scenario_run_starts_with_a_secret_placeholder() {
         scenario_digest: "sha256:green".into(),
         max_requests: 20,
         sent: Default::default(),
+        external_data: false,
     };
     let res = apb_engine::scheduler::run_scenario(proj.path(), "secp", None, &prep).unwrap();
     assert_eq!(res.outcome, apb_engine::state::RunStatus::Succeeded);

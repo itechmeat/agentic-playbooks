@@ -50,6 +50,7 @@ Every decision serves code work and routines outside code alike:
 | D3 cost | a code run's budget of 2 USD stops before the next node would pass it | a daily digest's `apb stats` shows its spend per day |
 | D4 privacy | a security-review profile whose fallback is `anthropic/claude-sonnet-5-5` on NEAR gets a warning: the fallback leaves the confidential class | a profile reading customer contracts is shown as `confidential_tee` end to end |
 | D5 decisions | a completion check asks a NEAR model, priced and classed in `decision_made` | an intake routing decision on mail runs on a confidential NEAR model |
+| D8 external data | a review run over a third party's repository with `external_data: true` adds nothing to the known problems store, the corrections ledger or the node cache | a run that triages a client's inbound documents recalls no remembered input and never counts toward `apb stats` |
 
 ## What changes
 
@@ -101,6 +102,26 @@ Every decision serves code work and routines outside code alike:
    picks the structured-output mode from its features, prices each
    decision from the catalog and records the class in
    `decision_made.privacy_class`.
+6. External data runs (capability `run-external-data`): every start
+   surface (REST run and scenario run, the dashboard, `apb run`,
+   `apb eval` (with `--level quick|smoke` for scenario runs), MCP
+   `playbook_run`, `playbook_trial`,
+   `playbook_scenario_run`, `playbook_execute_plan`) takes
+   `external_data: true` for a run whose input comes from outside the
+   operator and must not be retained for learning. The flag is written
+   once into the manifest (with the origin `external_data`) and onto
+   `run_started`, inherited by children and `continued_from`
+   successors, kept by a resume and shown on every run surface. Such a
+   run neither recalls nor remembers run input (`remember` with it is
+   refused), adds nothing to the known problems store, the corrections
+   ledger, the node cache, judge examples, scenario captures, forward
+   patches, candidate trials or the eval store, and every reader of
+   earlier runs (stats, estimates, quality comparison, previous success,
+   the decisions report, discovery, the save hook) skips it. A patch
+   version such a run creates is never promoted and is refused to
+   unflagged starts, a step of it cannot read or write run memory, and
+   its mode suffix `+external` makes an older apb refuse to drive it.
+   Everything else runs as without the flag. Design D8.
 
 ## Later phase (not in this change)
 
@@ -178,3 +199,21 @@ Every decision serves code work and routines outside code alike:
       reply, so stored replies differ from what the agent printed in
       that one respect.
 7. Built on main a012e4ae (dsh as a built-in agent).
+8. External data runs (D8): `apb-engine` (new `external_data.rs`;
+   `manifest.rs` `RunExecutionManifest.external_data` and
+   `RunOrigin::ExternalData`; `event.rs` `RunStarted.external_data`;
+   `scheduler/entry.rs`, `scheduler/prepare.rs`, `scheduler/cache.rs`;
+   `known_problems`, `corrections`, `forward_patch`, `judge_eval`,
+   `scenario/capture.rs`, `eval/store.rs`, `decision/report`,
+   `decision/standalone.rs`, `follow_up`, `run_history.rs`,
+   `zcode_ui_sync.rs`, `scheduler/patch.rs`, `scheduler/node.rs`,
+   `gate/params.rs`, `candidate/`, `scenario/store.rs`; the gate's
+   candidate choice), `apb-core` (`discover` request exclusions,
+   `save_nudge`, `versioning` provenance and the `current` move),
+   `apb-mcp`, `apb-server`, `apb` CLI
+   and the Run dialog. Additive fields only: an older apb reads a
+   flagged manifest's origin as unknown (not history) and ignores the
+   journal field. Refusal codes `external_data_immutable`,
+   `external_data_remember_refused`, `external_data_run`; no validator
+   code. Release note: a run started with `external_data: true` is kept
+   out of every learning store and every history reader.

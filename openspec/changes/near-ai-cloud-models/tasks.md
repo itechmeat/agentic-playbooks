@@ -361,3 +361,142 @@ is missing, then `bun run test` and `bun run check`.
    owners the listing shows with provider-prefixed ids on 2026-11-09; any
    new owner reads `unverified` until the list in `near_ai.rs` is
    extended by a pull request.
+
+## 8. External data runs (design D8; spec run-external-data)
+
+Independent of sections 1 to 5: it may be built before or after them.
+The same environment, test-first and gate rules apply. Every refusal test
+asserts the code and that nothing was written (no run directory, the store
+file byte-identical). Every test that could touch a store under the home
+directory (zcode's desktop index, Claude Code sessions) sets `HOME` to a
+directory under `$TMPDIR` for the process it runs.
+
+- [x] 8.1 Preconditions: `git grep -n 'external_data' crates web/src`
+  prints nothing; `git grep -n 'RunOrigin::\|is_production()' crates`
+  lists the readers D8 names. Any reader not named there is routed
+  through `learns_from` (history) or `runs_follow_up` (its own follow-up)
+  in 8.3 and listed in the final report.
+- [x] 8.2 Manifest and journal. Tests in `manifest.rs`: an unflagged
+  manifest serializes byte-identical to today's; a flagged production run
+  writes `external_data: true`, `origin: { kind: external_data }` and the
+  mode suffix `+external`; a flagged scenario run keeps `kind: scenario`;
+  `base_mode` strips the suffix (and `+guard` with it); `is_empty` is
+  false for a flagged manifest with no profiles; `amend` through
+  `add_secret_params` keeps all three; `ExternalData.is_production()` is
+  false and `runs_follow_up()` true; a fixture manifest with an unknown
+  origin kind reads as `Unknown`; `execution_mode()` of a fixture whose
+  mode carries an unknown suffix is refused (the downgrade guard: the
+  same code path an older build runs). Test in `event.rs`: `run_started`
+  without the field decodes as false and an unflagged one serializes
+  without it.
+- [x] 8.3 `crates/apb-engine/src/external_data.rs` with `is_flagged`,
+  `learns_from`, `refuse_if_flagged`, `for_start`, `learnable_run_dirs`,
+  `flagged_markers`; `StatsRun.learns`; every reader of D8 "Field home"
+  item 6.2 switched to `learns_from`. Unit tests: each source alone
+  (boolean only, origin only, mode suffix only, journal field only)
+  flags, and for each such fixture `counts_as_history`,
+  `production_dir` and the `previous_success` lookup skip the run (not
+  only `is_flagged`); a manifest that does not read gives `learns_from`
+  false and `refuse_if_flagged` an error; `learnable_run_dirs` over two
+  unflagged runs followed by `cap + 10` flagged runs returns the two; a
+  flagged run's follow-up is scheduled (extend the follow-up test in
+  `follow_up/mod.rs`) and absent from `run_stats/follow_up`.
+- [x] 8.4 Start: `RunOptions.external_data`; `for_start` on every surface
+  before its remember handling; the empty recall arm in `prepare.rs` and
+  in `gate/params.rs`; the child line in `scheduler/node.rs`; the
+  `__drive-supervised` argv; `candidate_trial` and settlement guards.
+  Integration tests in `crates/apb-engine/tests/suite/external_data_test.rs`
+  (declared in `main.rs`): a flagged start ignores a remembered value
+  (`run_provenance.remembered` empty) and a required param with only a
+  remembered value is refused `param_needs_value` by the gate, as
+  preparation would leave it empty; a child of a flagged run and a child
+  of a flagged scenario run are flagged; a `continued_from` successor is
+  flagged and an explicit `false` is refused `external_data_immutable`;
+  a flagged start with a waiting candidate runs `current` with
+  `candidate_skipped: external_data`; a flagged start naming the
+  candidate version leaves `candidate_trial` false and the trial record
+  byte-identical; a resume of a flagged run with `false` and of an
+  unflagged run with `true` are both refused with the journal length
+  unchanged, and a resume repeating the run's value is accepted; the
+  two-run journal equality of the spec's last scenario on the fake agent.
+- [x] 8.5 Learning stores, one failing test each before the guard, in the
+  same suite file: known problems `observe` and `scan` leave the store
+  absent or byte-identical; corrections leave the ledger unchanged for a
+  flagged production run and a flagged scenario run; a cache-eligible
+  node of a flagged run adds no file under `.apb/cache` and a later
+  unflagged run misses; `forward_patch::create`,
+  `judge_eval::example::save_from_run`, `run_values` and scenario capture
+  refuse `external_data_run`; an in-run patch of a flagged run under
+  `promote_supervisor_patches` leaves `current` unchanged, its version
+  provenance names the run, and `move_current`, `apb version use` and an
+  unflagged start naming it refuse `external_data_run`; the decisions
+  report loader and `replay` over one flagged and one unflagged run read
+  only the unflagged one (assert replay sends no request for the flagged
+  run's records with the decide stub) and the report counts one skipped;
+  a standalone decision about a flagged run writes a log line with
+  `external_data: true` that the report skips; `zcode_ui_sync` with
+  `HOME` under `$TMPDIR` inserts no row for a flagged run into that
+  home's index; a flagged eval with a temp config dir writes nothing
+  under `evals/results`; a flagged scenario run's index line holds only
+  run id, scenario, level and the flag, `latest` skips it, and
+  retention still removes its directory past `KEEP_RUNS`.
+  Tests that need another suite's fixtures (the in-run patch in
+  `migrate_test`, replay in `decision_test`, `zcode_ui_sync` in
+  `zcode_adapter_test`) or crate-private code (candidate settlement and
+  `previous_success` in `external_data/tests.rs`, the standalone log line
+  in `decision/standalone.rs`, a flagged scenario run's child in
+  `scenario/drive_tests.rs`) live there instead.
+- [x] 8.6 History readers: `apb stats` (`run_stats`), the estimate
+  (`run_estimate::history`), `grade::backfill`, the `run_retro`
+  baseline, `previous_success` and candidate settlement each skip a
+  flagged run: one test per reader over a fixture project with two
+  unflagged and one flagged finished run. `previous_success` with an
+  unreadable newest manifest still refuses `HistoryUnreadable`.
+- [x] 8.7 Discovery and the save hook: `DiscoverRequest.exclude` in
+  `apb_core::discover`, filled from `flagged_markers` by
+  `apb_mcp::tools::discover` and the CLI; the same markers in the save
+  hook (`apb_core::save_nudge`, `decision/save_nudge.rs`). Tests: a
+  session file named after a flagged run's `attempt_finished.session` is
+  never opened (assert through the walker's read report); a session
+  whose tool input names a flagged run id inside the read part
+  contributes no step, request or example and is counted under the
+  skip reason `external_data`; an unflagged run's session is read as before; the
+  save hook gives no nudge, caches no answer and asks no decision for a
+  session naming a flagged run id.
+- [x] 8.8 Surfaces: the field on `RunBody`, the scenario run body,
+  `PlaybookRunArgs`, `PlaybookTrialArgs`, `PlaybookExecutePlanArgs`,
+  `PlaybookScenarioRunArgs`, `RunResumeArgs`, `ResumeBody`, `apb run`
+  (also with `--supervise`), `apb eval` (also `--level quick|smoke`,
+  the CLI's scenario run), `apb resume`. One test per surface that the started run's manifest
+  carries the flag (MCP in `crates/apb-mcp/src/server/tests`, HTTP in
+  `crates/apb-server/tests/suite`, CLI in `crates/apb-cli/tests/suite`).
+  A scenario run is prepared by an `apb __scenario-run` child, which a
+  test binary of apb-mcp or apb-server cannot start, so MCP
+  `playbook_scenario_run` and the HTTP scenario route are tested in
+  `crates/apb-cli/tests/suite/external_data_surfaces_test.rs` through the
+  shipped binary (`apb mcp`, `apb dashboard`).
+  `remember` with the flag, and with an inheriting `continued_from` and
+  no flag, is refused `external_data_remember_refused` on MCP, HTTP
+  (409) and CLI before a run directory exists, with the memory file
+  unchanged. `playbook_memory` `get` and `set` with `APB_RUN_ID` of a
+  flagged run are refused `external_data_run`. Read-only MCP
+  (`apb mcp --read-only`) still refuses every start tool: assert it.
+- [x] 8.9 Visibility: `RunDetail.external_data`, `RunSummary.external_data`,
+  `run_status` and `runs_list` (`tools/run.rs`, next to `unattended`),
+  `apb runs <id>` and `apb runs` (`run.rs` `runs_cmd`), the report page;
+  no surface shows the `+external` suffix in a mode. Tests: present and
+  true on a flagged run, absent on an unflagged one. Regenerate
+  `api.gen.ts` with `APB_WRITE_TS=1 cargo test -p apb-server --lib
+  ts_contract`.
+- [x] 8.10 Dashboard: the Run dialog checkbox; when checked, "Remember
+  for this project" is disabled and remembered values the person did not
+  edit are cleared; the run page shows the flag. Tests in the dialog's
+  vitest file; `bun run test`, `bun run check`, `bun run build`. Plain
+  CSS over the existing variables only.
+- [x] 8.11 Docs as D8 "Docs": `docs/EXTERNAL-DATA.md`, `docs/GUARDRAILS.md`,
+  `CLAUDE.md` and `AGENTS.md` with the same text. No em dashes, no
+  exclamation marks, no CJK.
+- [x] 8.12 Gate the section: `cargo test -p apb-engine --test main
+  external_data_test`, `cargo test -p apb-engine --lib external_data`,
+  `cargo test -p apb-engine --lib manifest`, the surface tests of 8.8 one
+  filter each, clippy; then the whole gate of 6.6 once at the end.

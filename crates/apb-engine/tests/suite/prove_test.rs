@@ -414,6 +414,7 @@ answers:
         scenario_digest: "sha256:pv".into(),
         max_requests: 20,
         sent: Default::default(),
+        external_data: false,
     };
     let quick = run_scenario(dir.path(), "pv", None, &prep).unwrap();
     let all: Vec<EventPayload> = read_all(&quick.run_dir)

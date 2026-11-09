@@ -109,6 +109,7 @@ impl Fixture {
             &self.state,
             Thresholds::default(),
             &mut ask,
+            &|_| Default::default(),
         );
         (out, asked)
     }
@@ -210,7 +211,8 @@ fn a_broken_transcript_or_event_is_silent() {
             b"garbage",
             &f.state,
             Thresholds::default(),
-            &mut ask
+            &mut ask,
+            &|_| Default::default(),
         ),
         None
     );
@@ -275,6 +277,7 @@ fn a_session_reminded_while_the_model_was_asked_is_not_reminded_again() {
         &f.state,
         Thresholds::default(),
         &mut ask,
+        &|_| Default::default(),
     );
     assert_eq!(out, None);
 }
@@ -307,4 +310,51 @@ fn a_transcript_that_is_a_fifo_fails_without_waiting_for_a_writer() {
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("opening a FIFO blocked");
     assert!(failed);
+}
+
+/// A session that ran a step of a run that processed external data (its
+/// read part names the run id), or that is such a run's agent session,
+/// gets no nudge, caches no answer and asks nothing.
+#[test]
+fn a_session_of_an_external_data_run_is_left_alone() {
+    let mut lines = vec![user(GREEK_RECURRING)];
+    lines.push(bash("apb runs ext-1700000000000"));
+    lines.extend(long_task());
+    lines.push(say("done"));
+    let f = Fixture::new(&session(&lines));
+    let mut asked = 0;
+    let mut ask = |_: &str, _: Option<&Path>| {
+        asked += 1;
+        Some(true)
+    };
+    let by_run = |_: Option<&Path>| crate::discover::Exclude {
+        run_ids: ["ext-1700000000000".to_string()].into_iter().collect(),
+        sessions: Default::default(),
+    };
+    let out = run_stop_hook(
+        &ClaudeStopHook,
+        &f.stdin("s", false),
+        &f.state,
+        Thresholds::default(),
+        &mut ask,
+        &by_run,
+    );
+    assert_eq!(out, None);
+    let by_session = |_: Option<&Path>| crate::discover::Exclude {
+        run_ids: Default::default(),
+        sessions: ["s".to_string()].into_iter().collect(),
+    };
+    let out = run_stop_hook(
+        &ClaudeStopHook,
+        &f.stdin("s", false),
+        &f.state,
+        Thresholds::default(),
+        &mut ask,
+        &by_session,
+    );
+    assert_eq!(out, None);
+    assert_eq!(asked, 0);
+    assert!(!f.state.exists(), "nothing cached");
+    // The same session with no marker is reminded as before.
+    assert!(blocked(&f.run("s", false, None).0));
 }

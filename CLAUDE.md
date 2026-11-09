@@ -502,6 +502,15 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   sightings of a journal, `source` a problem's current and old source text,
   `recheck` the model, host and person rechecks, `prompt` the attempt
   section and the supervisor line),
+  external data runs (`external_data.rs`: `is_flagged` over the four
+  sources (the manifest's `external_data`, its origin `external_data`, the
+  `+external` mode suffix, `run_started.external_data`), `learns_from` the
+  one predicate every reader of earlier runs asks, `refuse_if_flagged`
+  (`external_data_run`), `for_start` with the inheritance from a parent or
+  `continued_from` run (`external_data_immutable`), `check_remember`
+  (`external_data_remember_refused`), `check_resume`, `learnable_run_dirs`
+  filtering before the cap, `flagged_markers` for discovery and the save
+  hook),
   the tree-scoped busy lock (`workdir.rs`), attempt failure
   classification and the bounded infrastructure backoff (`failure_class.rs`),
   what an ending run records (`run_end.rs`: the one call every end path
@@ -866,6 +875,24 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   MCP lists and dismisses or reopens, marking a fix is the CLI's and the
   dashboard's. Collecting goes through `crate::run_end::record`, the one
   call every end path makes, which also records the known problems.
+- **External data runs** (`docs/EXTERNAL-DATA.md`): a start with
+  `external_data: true` (every start surface, the Run dialog's box) is
+  fixed for the run's lifetime in `manifest.yaml` (the boolean, the origin
+  `RunOrigin::ExternalData` for a would-be production run, the mode suffix
+  `+external` an older apb refuses to drive) and in
+  `run_started.external_data`; a child and a `continued_from` successor
+  inherit it, a resume only checks it. The gate never takes a waiting
+  candidate for it (`candidate_skipped: external_data`) and counts memory
+  as empty (`check_params_with`); preparation recalls nothing. Nothing it
+  produces reaches a learning store: no node cache write (`keep: false`),
+  no known problem, correction, candidate trial, eval result, zcode row or
+  full scenario index line; a current-run patch version records
+  `VersionProvenance.external_data_run` and never moves `current`. Every
+  reader of earlier runs goes through `external_data::learns_from`
+  (`StatsRun.learns`, `run_history`, `previous_success`), the decisions
+  report and replay skip flagged runs (`report_dirs`), and discovery and
+  the save hook skip their sessions (`apb_core::discover::Exclude`). The
+  run otherwise behaves as without the flag.
 - **The follow-up check** (`docs/HOWTO-authoring.md` "follow_up"): a
   playbook's `follow_up:` is one baseline-shaped check read once `after`
   a successful run ended, for production runs only, by a detached waker

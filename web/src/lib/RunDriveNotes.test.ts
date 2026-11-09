@@ -50,3 +50,17 @@ describe('RunDriveNotes untrusted', () => {
     expect(body).not.toContain('run-untrusted')
   })
 })
+
+describe('RunDriveNotes external data', () => {
+  it('says a run that processes external data keeps nothing for learning', () => {
+    const { body } = render(RunDriveNotes, { props: { externalData: true } })
+    expect(body).toContain('data-testid="run-external-data"')
+    expect(body).toContain('keeps nothing for learning')
+    expect(body).not.toContain('+external')
+  })
+
+  it('shows nothing for an unflagged run', () => {
+    const { body } = render(RunDriveNotes, { props: {} })
+    expect(body).not.toContain('run-external-data')
+  })
+})

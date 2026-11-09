@@ -140,6 +140,13 @@ pub struct RunOptions {
     /// run. Recorded write-once in the manifest; a resume cannot change it,
     /// and a child inherits its parent's.
     pub unattended: bool,
+    /// The run processes external data and keeps nothing for learning
+    /// (`external_data: true` on every start surface, see
+    /// [`crate::external_data`]): the effective value from
+    /// [`crate::external_data::for_start`]. Recorded write-once in the
+    /// manifest and on `run_started`; a child and a `continued_from`
+    /// successor of a flagged run are flagged whatever this says.
+    pub external_data: bool,
 }
 
 /// A permit hands the engine exactly what the gate verified (decision record

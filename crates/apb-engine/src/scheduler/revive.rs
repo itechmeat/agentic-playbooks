@@ -542,6 +542,7 @@ edges:
             playbook: "r".into(),
             version: "1.0.0".into(),
             definition: None,
+            external_data: false,
         }]);
         let r = rebuild(&p, &mut run, &["start"]);
         assert!(r.revivals.is_empty() && r.records.is_empty());

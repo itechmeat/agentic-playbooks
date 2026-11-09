@@ -127,6 +127,7 @@ fn supervisor_lost_roundtrip_is_journal_only() {
         playbook: "w".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     log.append(EventPayload::SupervisorLost {

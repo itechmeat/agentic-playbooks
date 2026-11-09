@@ -335,6 +335,7 @@ mod tests {
                 playbook: "p".into(),
                 version: "1.0.0".into(),
                 definition: None,
+                external_data: false,
             },
         );
         let events = vec![started.clone(), ev(1, paused(Some(500)))];

@@ -2072,7 +2072,12 @@ search?: SearchFields,
  * run still lists with its journal facts, and only this run carries
  * the error.
  */
-config_error?: string, };
+config_error?: string, 
+/**
+ * The run processes external data and keeps nothing for learning
+ * ([`crate::external_data`]). Absent for every other run.
+ */
+external_data?: boolean, };
 
 export type RunListing = { runs: Array<RunSummary>, 
 /**
@@ -2158,7 +2163,12 @@ search?: SearchFields,
  * run still lists with its journal facts, and only this run carries
  * the error.
  */
-config_error?: string, };
+config_error?: string, 
+/**
+ * The run processes external data and keeps nothing for learning
+ * ([`crate::external_data`]). Absent for every other run.
+ */
+external_data?: boolean, };
 
 export type LaunchPolicy = "allow" | "ask" | "deny";
 
@@ -2644,6 +2654,12 @@ read_only?: Array<ReadOnlyRow>,
  * a declared outcome fails it. Read-only; left out for an attended run.
  */
 unattended?: boolean, 
+/**
+ * The run processes external data and keeps nothing for learning
+ * (`external_data: true` at start), from its manifest and journal.
+ * Read-only; left out for every other run.
+ */
+external_data?: boolean, 
 /**
  * What `run.previous_success.*` renders in this run, as the start
  * recorded it: times and output keys only, never the values. Left out
@@ -3421,6 +3437,7 @@ export type RootReport = { name: string, agent: string, files_seen: number, file
 /**
  * Files left unread, by why: `symlink`, `not_regular`, `too_old`,
  * `other_project`, `file_cap`, `byte_cap`, `step_cap`, `unreadable`,
+ * `external_data` (a session of a run that processed external data),
  * and lines skipped as `line_too_long`.
  */
 skipped: { [key in string]: number }, 
@@ -3542,7 +3559,15 @@ imported?: ImportProvenance,
  * the content it ships (`created_by: bundled`); the stored version can
  * differ when that number was taken.
  */
-shipped_version?: string, };
+shipped_version?: string, 
+/**
+ * The run that processed external data whose current-run patch
+ * created this version: the version stays with that run. It is never
+ * promoted to `current` nor made a candidate, and moving `current` to
+ * it, `apb version use` and a start that is not itself flagged refuse
+ * it with `external_data_run`.
+ */
+external_data_run?: string, };
 
 export type VersionInfo = { version: string, 
 /**
@@ -4115,7 +4140,12 @@ version?: string,
  * The decision request cap of a smoke run (required there, refused at
  * quick).
  */
-max_decision_requests?: number, };
+max_decision_requests?: number, 
+/**
+ * The scenario run processes external data and keeps nothing for
+ * learning (`apb_engine::external_data`).
+ */
+external_data?: boolean, };
 
 export type ScenarioEntry = { name: string, title?: string, 
 /**

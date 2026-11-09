@@ -158,7 +158,16 @@ pub(super) fn header(w: &Writer, title: &str, report: &Report) -> Markup {
             )
         })
         .unwrap_or_default();
-    Markup::concat([head, previous])
+    let external = if report.external_data {
+        Markup::el(
+            "p",
+            Some("meta"),
+            Markup::text("external data: the run keeps nothing for learning"),
+        )
+    } else {
+        Markup::default()
+    };
+    Markup::concat([head, previous, external])
 }
 
 /// The nodes that render untrusted text, as the start recorded them;

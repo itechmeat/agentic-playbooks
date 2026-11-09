@@ -252,6 +252,7 @@ fn doctor_run_warns_autonomy_for_a_node_with_no_non_interactive_flag() {
         launch: None,
         unattended: false,
         origin: None,
+        external_data: false,
     };
     apb_engine::manifest::write(&rd, &manifest).unwrap();
 
@@ -452,6 +453,7 @@ mod results_cli {
             playbook: "p".into(),
             version: "1.0.0".into(),
             definition: None,
+            external_data: false,
         })
         .unwrap();
         Fixture {

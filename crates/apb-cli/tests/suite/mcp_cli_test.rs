@@ -209,7 +209,7 @@ fn a_supervisor_mcp_serves_only_supervisor_and_read_only_tools() {
 }
 
 /// The JSON a `tools/call` answered, from its first content block.
-fn tool_json(line: &str) -> serde_json::Value {
+pub(crate) fn tool_json(line: &str) -> serde_json::Value {
     let v: serde_json::Value = serde_json::from_str(line).unwrap();
     let text = v["result"]["content"][0]["text"]
         .as_str()

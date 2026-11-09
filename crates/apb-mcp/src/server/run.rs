@@ -43,6 +43,7 @@ impl WfMcp {
             confirm_launch,
             launch_version,
             launch_choice,
+            external_data,
         }): Parameters<PlaybookTrialArgs>,
         client: Option<String>,
     ) -> CallToolResult {
@@ -53,7 +54,8 @@ impl WfMcp {
             confirm_launch,
             launch_version,
             launch_choice,
-        );
+        )
+        .with_external_data(external_data == Some(true));
         to_call_tool_result(tools::playbook_trial(
             &self.root,
             &id,
@@ -141,6 +143,7 @@ impl WfMcp {
             confirm_launch,
             launch_version,
             launch_choice,
+            external_data,
         }): Parameters<PlaybookExecutePlanArgs>,
         client: Option<String>,
     ) -> CallToolResult {
@@ -183,13 +186,15 @@ impl WfMcp {
             id: payload.id.clone(),
             version: Some(payload.version.clone()),
         };
+        let external_data = external_data == Some(true);
         let launch = super::mcp_launch(
             client.clone(),
             apb_engine::gate::launch::LaunchKind::ExecutePlan,
             confirm_launch,
             launch_version,
             launch_choice,
-        );
+        )
+        .with_external_data(external_data);
         let permit = match crate::policy::check_run(
             &root_b,
             &wref,
@@ -222,7 +227,9 @@ impl WfMcp {
                 )));
             }
         };
-        if let Err(refusal) = apb_engine::gate::check_params(&root_b, &wref, &payload.params) {
+        if let Err(refusal) =
+            apb_engine::gate::check_params_with(&root_b, &wref, &payload.params, external_data)
+        {
             return to_call_tool_result(Ok(tools::actions::policy_refusal(
                 apb_engine::next_action::start::StartOf::of(&wref),
                 refusal,
@@ -305,6 +312,7 @@ impl WfMcp {
             consent,
             budget,
             estimate: checked.estimate,
+            external_data,
             ..Default::default()
         };
         // Driven by a detached process, like every other background start:
@@ -371,10 +379,26 @@ impl WfMcp {
             launch_version,
             launch_choice,
             unattended,
+            external_data,
         }): Parameters<PlaybookRunArgs>,
         client: Option<String>,
     ) -> CallToolResult {
         let unattended = unattended == Some(true);
+        // External data (capability run-external-data): the effective flag
+        // (inherited from a flagged predecessor) and the remember refusal,
+        // before every other check and before anything is written.
+        let external_data = match apb_engine::external_data::for_start(
+            &self.root,
+            external_data,
+            None,
+            continued_from.as_deref(),
+        )
+        .and_then(|flag| {
+            apb_engine::external_data::check_remember(flag, remember == Some(true)).map(|()| flag)
+        }) {
+            Ok(flag) => flag,
+            Err(refusal) => return to_call_tool_result(Ok(refusal.body())),
+        };
         // --- host execution mode (0.23.0) ---
         // The mode is the caller's choice per run; the client name is only
         // recorded for attribution. A blocking call cannot serve host tasks,
@@ -488,7 +512,8 @@ impl WfMcp {
             confirm_launch,
             launch_version,
             launch_choice,
-        );
+        )
+        .with_external_data(external_data);
         let permit = match crate::policy::check_run(
             &self.root,
             &wref,
@@ -535,7 +560,9 @@ impl WfMcp {
         };
         // --- end 0.24.0 irreversible consent ---
         // A param the start leaves without a value, refused like the gate.
-        if let Err(refusal) = apb_engine::gate::check_params(&self.root, &pinned, &params) {
+        if let Err(refusal) =
+            apb_engine::gate::check_params_with(&self.root, &pinned, &params, external_data)
+        {
             return to_call_tool_result(Ok(tools::actions::policy_refusal(
                 apb_engine::next_action::start::StartOf::of(&pinned),
                 refusal,
@@ -623,6 +650,7 @@ impl WfMcp {
             estimate: checked.estimate,
             notify,
             unattended,
+            external_data,
         };
 
         // supervise:"self" - a project-scoped supervised run (a global scope
@@ -1042,6 +1070,7 @@ impl WfMcp {
             confirm_launch,
             launch_version,
             launch_choice,
+            external_data,
         }): Parameters<RunResumeArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> CallToolResult {
@@ -1061,6 +1090,7 @@ impl WfMcp {
                 confirm_launch,
                 launch_version,
                 launch_choice,
+                external_data,
             },
             client,
         )
@@ -1082,6 +1112,7 @@ impl WfMcp {
             confirm_launch,
             launch_version,
             launch_choice,
+            external_data,
         }: RunResumeArgs,
         client: Option<String>,
     ) -> CallToolResult {
@@ -1098,6 +1129,14 @@ impl WfMcp {
             tools::run::retry_now_arg_refusal(retry_now, from_node.is_some(), node.is_some())
         {
             return to_call_tool_result(Ok(refusal));
+        }
+        // The external data flag is fixed at start: a resume may repeat it,
+        // never change it (an argument check, before the run gate).
+        if let Err(refusal) = apb_engine::external_data::check_resume(
+            &root.join(".apb/runs").join(&run_id),
+            external_data,
+        ) {
+            return to_call_tool_result(Ok(refusal.body()));
         }
         // The origin and trust checks come first, for a live retry-now too:
         // it writes to the run's journal like any resume.

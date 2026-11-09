@@ -272,6 +272,7 @@ fn a_pause_shifts_the_due_time_by_exactly_its_length() {
                 playbook: "p".into(),
                 version: "1.0.0".into(),
                 definition: None,
+                external_data: false,
             },
         ),
         ev(

@@ -28,7 +28,8 @@ use std::path::{Path, PathBuf};
 
 use super::session::{self, Session};
 use super::types::{
-    DiscoverError, DiscoverRequest, HistoryAgent, HistoryRoot, ProjectRef, ReadLimits, RootReport,
+    DiscoverError, DiscoverRequest, Exclude, HistoryAgent, HistoryRoot, ProjectRef, ReadLimits,
+    RootReport,
 };
 use crate::fsutil::{open_regular_no_follow, read_prefix_capped};
 
@@ -294,6 +295,11 @@ pub fn read_roots(req: &DiscoverRequest, now_ms: u64) -> (Vec<RootReport>, Vec<S
     let mut sessions = Vec::new();
     for c in candidates {
         let report = &mut reports[c.root];
+        // A flagged run's session is never opened.
+        if req.exclude.names_session(&c.file_name) {
+            report.skip(Exclude::SKIP_REASON);
+            continue;
+        }
         let cap = if budget.files >= limits.max_files {
             Some("file_cap")
         } else if budget.bytes >= limits.max_total_bytes {
@@ -308,7 +314,15 @@ pub fn read_roots(req: &DiscoverRequest, now_ms: u64) -> (Vec<RootReport>, Vec<S
             continue;
         }
         let agent = req.roots[c.root].agent;
-        if let Some(s) = read_one(agent, &c, &owners, limits, &mut budget, report) {
+        if let Some(s) = read_one(
+            agent,
+            &c,
+            &owners,
+            limits,
+            &req.exclude,
+            &mut budget,
+            report,
+        ) {
             sessions.push(s);
         }
     }
@@ -321,6 +335,7 @@ fn read_one(
     c: &Candidate,
     owners: &Owners<'_>,
     limits: &ReadLimits,
+    exclude: &Exclude,
     budget: &mut Budget,
     report: &mut RootReport,
 ) -> Option<Session> {
@@ -362,6 +377,12 @@ fn read_one(
         count(budget, report, rest.len());
         bytes.extend(rest);
         cut = more;
+    }
+    // A session whose read part names a flagged run id contributes no
+    // step, request or example. A marker past the byte cap is not seen.
+    if exclude.names_run(&bytes) {
+        report.skip(Exclude::SKIP_REASON);
+        return None;
     }
     let left = limits.max_total_steps - budget.steps;
     let max_steps = limits.max_steps_per_session.min(left) as usize;

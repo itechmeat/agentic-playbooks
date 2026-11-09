@@ -32,7 +32,19 @@ pub fn check_params(
     wref: &PlaybookRef,
     given: &BTreeMap<String, String>,
 ) -> Result<(), Value> {
-    let missing = unfilled(root, wref, given);
+    check_params_with(root, wref, given, false)
+}
+
+/// [`check_params`] for a start that processes external data or not: a
+/// flagged start recalls nothing ([`crate::external_data`]), so its memory
+/// counts as empty here, as preparation will leave it.
+pub fn check_params_with(
+    root: &Path,
+    wref: &PlaybookRef,
+    given: &BTreeMap<String, String>,
+    external_data: bool,
+) -> Result<(), Value> {
+    let missing = unfilled(root, wref, given, external_data);
     if !missing.is_empty() {
         // A missing value is answered first.
         return Err(json!({
@@ -112,7 +124,12 @@ pub fn short_secret_warning(
     ))
 }
 
-fn unfilled(root: &Path, wref: &PlaybookRef, given: &BTreeMap<String, String>) -> Vec<String> {
+fn unfilled(
+    root: &Path,
+    wref: &PlaybookRef,
+    given: &BTreeMap<String, String>,
+    external_data: bool,
+) -> Vec<String> {
     let Ok(resolved) = apb_core::store::resolve(root, wref) else {
         return Vec::new();
     };
@@ -126,6 +143,7 @@ fn unfilled(root: &Path, wref: &PlaybookRef, given: &BTreeMap<String, String>) -
     // default then needs a value, which is what the start would get.
     let missing = MemoryKey::for_label(resolved.origin_label, &wref.id)
         .ok()
+        .filter(|_| !external_data)
         .and_then(|key| recall(root, &key, params, None).ok())
         .map(|r| r.missing)
         .unwrap_or_else(|| without_default(params));

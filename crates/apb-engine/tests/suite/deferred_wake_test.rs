@@ -163,6 +163,7 @@ fn seed_released(root: &Path, run_id: &str, wake_at_ms: u64) -> std::path::PathB
             playbook: "p".into(),
             version: "1.0.0".into(),
             definition: None,
+            external_data: false,
         },
         EventPayload::RetryDeferred {
             node: "work".into(),

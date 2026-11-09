@@ -128,6 +128,7 @@ impl History {
             registered: Vec::new(),
             limits: ReadLimits::default(),
             mine: MineParams::default(),
+            exclude: Default::default(),
         }
     }
 }

@@ -233,6 +233,7 @@ mod tests {
             scenario_digest: apb_core::scenario::scenario_digest(&scenario),
             max_requests: 0,
             sent: Default::default(),
+            external_data: false,
         };
         let session = std::sync::Arc::new(ScenarioSession::new(&prep, &playbook, dir.path()));
         super::super::session::register(dir.path(), session);

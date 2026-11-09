@@ -77,6 +77,7 @@ fn notify_off_changes_a_live_run_and_an_ended_run_refuses_it() {
         playbook: "quick".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
 
@@ -148,6 +149,7 @@ fn a_step_inside_a_run_cannot_change_or_test_notifications() {
         playbook: "quick".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     for (var, value) in [("APB_RUN_ID", "r-live"), ("APB_HOST_TASK", "t-1")] {
@@ -245,6 +247,7 @@ fn a_broken_machine_config_does_not_stop_turning_a_run_off() {
         playbook: "quick".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -281,6 +284,7 @@ fn an_outcome_filter_is_checked_by_name_and_the_doctor_reads_the_policy_file() {
         playbook: "quick".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     let out = apb_in(dir.path(), &["notify", "r-live", "--finished=sometimes"]);

@@ -8,6 +8,7 @@ fn appends_and_reads_events_with_increasing_seq() {
         playbook: "ping".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     log.append(EventPayload::node_finished(
@@ -38,6 +39,7 @@ fn open_continues_seq_for_resume() {
             playbook: "w".into(),
             version: "1.0.0".into(),
             definition: None,
+            external_data: false,
         })
         .unwrap();
     }

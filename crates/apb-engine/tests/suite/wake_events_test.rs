@@ -9,6 +9,7 @@ fn wake_and_abort_round_trip_and_fold() {
         playbook: "w".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     log.append(EventPayload::WakeRaised {

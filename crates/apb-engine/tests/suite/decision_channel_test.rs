@@ -321,6 +321,7 @@ fn a_scenario_run_decides_a_person_only_bound_gate_by_its_script() {
         scenario_digest: loaded.digest,
         max_requests: 20,
         sent: Default::default(),
+        external_data: false,
     };
     let r = apb_engine::scheduler::run_scenario(root, "sc", None, &prep).unwrap();
     let events = read_all(&r.run_dir).unwrap();

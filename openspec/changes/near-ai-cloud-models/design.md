@@ -787,3 +787,199 @@ found against the code while building it.
 11. The embedded asset is the listing fetched on 2026-11-09 by the first
     attempt at this change (64 rows, no key or personal data); it was not
     fetched again.
+
+## D8. External data runs
+
+Capability `run-external-data`. Built after D6 and independent of D1 to
+D5: it touches no catalog code and can land on its own. A run may
+process data that comes from outside the operator (a third party's
+documents, messages or records) and must not be kept for learning. The
+flag `external_data: true` at start marks such a run; apb then keeps
+everything the run produces in its run directory and nothing in a store
+that later runs or learning tools read. Line numbers are from a012e4ae.
+
+### Field home
+
+1. The authority is the manifest:
+   `RunExecutionManifest.external_data: bool`
+   (`crates/apb-engine/src/manifest.rs`, next to `unattended`), with
+   `#[serde(default, skip_serializing_if = "std::ops::Not::not")]`, so an
+   unflagged run's manifest is byte-identical to today's.
+   `RunExecutionManifest::is_empty` gains `&& !self.external_data`, so a
+   flagged run with no profiles still writes its manifest. It is written
+   in `scheduler/prepare.rs` `build_run_manifest` (next to
+   `manifest.unattended` at line 1220) and covered by the origin stamp
+   (`apb_core::run_origin::stamp`).
+2. The origin carries it too. A new variant `RunOrigin::ExternalData`
+   (serialized `origin: { kind: external_data }`) is written instead of
+   an absent origin when the run would otherwise be production; a
+   scenario or eval run keeps its own origin and only the boolean.
+   `RunOrigin::is_production` stays `matches!(self, RunOrigin::Production)`,
+   so a reader gated on the origin alone skips a flagged production run,
+   and an apb that knows `origin` but not the variant reads it as
+   `RunOrigin::Unknown` through `lenient_origin`.
+3. A downgrade guard: a flagged run's `execution.mode` carries the
+   suffix `+external` (`ManifestExecution::EXTERNAL_SUFFIX`, beside
+   `GUARD_SUFFIX` at line 488), stripped by `base_mode` and read by
+   `RunExecutionManifest::is_external`. An apb without this change does
+   not know the mode and refuses to drive the run with its version
+   message (`RunExecutionManifest::execution_mode`), so an older binary
+   can neither resume a flagged run (and then write the cache or the
+   run-end stores) nor amend its manifest during a drive. Readers of an
+   older apb that do not drive (stats, history) are covered by item 2.
+4. A new `RunOrigin::runs_follow_up()` is true for `Production` and
+   `ExternalData`. The readers that decide whether a run's own follow-up
+   is scheduled and shown (`follow_up/mod.rs` line 134,
+   `follow_up/read.rs` lines 42 and 64, `follow_up/waker.rs` line 30,
+   `run_outcome.rs` line 140) switch to it. `run_stats/follow_up.rs`
+   (line 240) switches to `learns_from`, so a flagged run's follow-up
+   never enters statistics.
+5. The journal: `EventPayload::RunStarted` (`event.rs` line 124) gains
+   `#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+   external_data: bool`. No new event type (decision record 0001).
+6. One module owns the rule: `crates/apb-engine/src/external_data.rs`
+   with
+   1. `pub fn is_flagged(run_dir) -> bool`: the manifest's boolean, its
+      origin variant, its mode suffix or `run_started.external_data`
+      (any source true means flagged; nothing reads a flag as cleared);
+   2. `pub fn learns_from(run_dir) -> bool`: the manifest reads, its
+      origin is production and `is_flagged` is false. Every learning
+      reader calls this, never the origin alone: `run_history`
+      (`counts_as_history` over `StatsRun`, which gains
+      `learns: bool` filled by it in `StatsRun::load`, and
+      `production_dir`), `previous_success.rs` line 107,
+      `corrections::observe`, `scenario/capture.rs` line 427,
+      `run_stats.rs` line 700;
+   3. `pub fn refuse_if_flagged(run_dir, what) -> Result<(), EngineError>`:
+      `EngineError::Invalid("external_data_run: ...")`, failing closed
+      when the manifest does not read;
+   4. `pub fn for_start(root, requested: Option<bool>, parent_run,
+      continued_from) -> Result<bool, Refusal>`: the effective flag of a
+      start (below), called by every surface before its own checks;
+   5. `pub fn learnable_run_dirs(roots, cap) -> Vec<PathBuf>`: the newest
+      run directories that `learns_from`, the filter applied before the
+      cap within a scan bound of four times the cap, so flagged runs
+      never crowd earlier history out of a capped window;
+   6. `pub fn flagged_markers(roots) -> FlaggedMarkers`: the agent
+      session ids (`attempt_finished.session`) and run ids of flagged
+      runs under the given project roots, for discovery and the save
+      hook.
+
+Naming: `external_data` everywhere (manifest, journal, REST, MCP,
+`RunDetail`, `run_status`), `--external-data` on the CLI, mode suffix
+`+external`. It names where the data comes from, not a policy, so a
+later privacy policy (out of scope 3 of the proposal) can build on it.
+
+### Start surfaces
+
+`RunOptions` (`scheduler/entry.rs` line 11) gains `external_data: bool`,
+set from `external_data::for_start`:
+
+| Surface | Where |
+|---|---|
+| REST run | `routes/playbooks.rs` `RunBody.external_data`; `for_start` runs before the remember capture at line 461 |
+| REST scenario run | `routes/scenario.rs` `post_scenario_run_handler` body |
+| Dashboard Run dialog | `web/src/lib/RunStartDialog.svelte`, a checkbox "External data: keep nothing for learning" |
+| CLI | `crates/apb-cli/src/run.rs` `RunArgs.external_data`; `eval.rs` `start_run` (each repetition's `apb run` gets `--external-data`); `scenario.rs` (`apb eval --level quick|smoke --external-data`: there is no `apb scenario run`) |
+| Supervised CLI start | `run.rs` line 1148: the `__drive-supervised` argv gains `--external-data`, since that process prepares the run itself |
+| MCP | `server/args.rs` `PlaybookRunArgs`, `PlaybookTrialArgs`, `PlaybookExecutePlanArgs`; `server/scenario.rs` `PlaybookScenarioRunArgs` |
+| Resume | `RunResumeArgs`, `routes/runs.rs` `ResumeBody`, `apb resume --external-data <bool>`: optional, checked only |
+| Sub-playbook child | `scheduler/node.rs` line 4971, next to `opts.unattended`: `opts.external_data = external_data::is_flagged(run_dir)`, which also covers scenario children under `.apb/scenario-runs` |
+| Detached drives | `__drive-run`, `apb __pause-waker`: they read the flag from the manifest; nothing on argv. `__scenario-run` prepares its run itself, so the flag crosses on its argv (`--external-data`, `ScenarioChild.external_data`), as for `__drive-supervised` |
+
+`external_data::for_start`:
+
+1. A parent (`parent_run`) or `continued_from` predecessor that is
+   flagged makes the start flagged. An omitted request inherits; an
+   explicit `false` is refused with `external_data_immutable`.
+2. The surface then refuses `external_data && remember` with
+   `external_data_remember_refused` (MCP: a `{ error, detail }` answer, as
+   `notify_unavailable` is answered; CLI: exit 2; REST: 409), before the
+   gate and before anything is written, right where the surface computes
+   the effective flag (`external_data::check_remember`). Refusing, not ignoring: a caller that
+   asked to remember expects the next start to recall, and a silent drop
+   would surprise it later, while a refusal costs one flag and leaves no
+   doubt that nothing was stored. Because the effective flag is known
+   here, a `continued_from` successor that inherits is refused too.
+
+In the engine:
+
+3. Recall: `prepare.rs` line 879 `let recall = match scenario` gains the
+   arm "flagged: the empty recall", the value a scenario gets, and
+   `gate/params.rs` line 127 treats a flagged start's memory as empty
+   (`without_default(params)`), so the `param_needs_value` check and the
+   start agree. Values the caller passed are used as passed.
+4. The candidate: the gate's candidate choice
+   (`RunPermit::candidate_skipped`) skips a waiting candidate with the
+   reason `external_data`; `manifest.candidate_trial` (`prepare.rs` line
+   1222) gains `&& !opts.external_data`, so a flagged start that names
+   the candidate version explicitly, or a fixed-choice retry, is no
+   trial; `candidate/settle.rs` (line 43) and `candidate/quality.rs`
+   also return early on `!learns_from`.
+5. A resume compares a passed value with `is_flagged` and refuses any
+   mismatch, in both directions, with `external_data_immutable`
+   (`external_data::check_resume`, an argument check before the run gate);
+   it never writes the field. `manifest::amend` keeps `external_data`, `origin`
+   and the mode suffix (a test pins it).
+
+No validator code is needed: the flag is a run argument, not part of a
+definition. The refusal codes are `external_data_immutable`,
+`external_data_remember_refused` and `external_data_run`, named in
+`docs/GUARDRAILS.md` with the other start refusals.
+
+### Every learning and reuse path
+
+| # | Path | Where | Decision |
+|---|---|---|---|
+| 1 | Known problems, run-end observation | `known_problems::observe` (`known_problems/mod.rs` line 88), called by `run_end::record` | Excluded: returns 0 for a flagged run or one whose manifest does not read (`refuse_if_flagged`). It has no origin check today, so the guard goes in `observe` itself, which `scan` also calls; scenario and eval runs keep contributing as before (`learns_from` would have changed that too) |
+| 2 | Known problems scan | `known_problems::scan` over `run_history::runs_of` | Excluded through `learnable_run_dirs` and `observe` |
+| 3 | Known problems shown at start and the recheck | `known_problems::at_start`, `recheck` | Kept: they read the store into the run and a recheck reads playbook source only |
+| 4 | Corrections ledger | `corrections::observe` (line 35) | Excluded through `learns_from`, which also covers a flagged scenario run |
+| 5 | Node cache | `scheduler/cache.rs` `settle` (line 750), `capture_artifacts` | Excluded for writes: the cache context carries `keep: false` and `settle` journals `node_cache_rejected` ("the run processes external data") instead of storing. Lookups stay: a hit returns the operator's earlier output |
+| 6 | Judge examples from a run | `tools/judge.rs` `judge_example_save`, `judge_run_values`; `judge_eval::example::save_from_run`, `run_values` | Excluded: `refuse_if_flagged` in the engine functions, so MCP, HTTP and `apb judge` refuse alike |
+| 7 | Scenario capture | `scenario/capture.rs` line 427, `tools/scenario_capture.rs` | Excluded: `refuse_if_flagged` first, code `external_data_run` |
+| 8 | Forward patches | `forward_patch::create`, `tools/supervisor.rs` `playbook_forward_patch` | Excluded: refused with `external_data_run` |
+| 9 | In-run patches | `tools/supervisor.rs` line 297 `create_patch_version` writes a registry version; `scheduler/patch.rs` line 309 may promote it to `current` | Kept for the run, fenced for everyone else: the version is created (the run executes it) with `VersionProvenance.external_data_run: <run id>`; `patch.rs` never promotes it; `move_current`, `apb version use` and a start that names that version refuse it with `external_data_run` unless the start is itself flagged |
+| 10 | Candidate trial and settlement | gate choice, `prepare.rs` line 1222, `candidate/settle.rs`, `candidate/quality.rs` | Excluded (start step 4) |
+| 11 | Quality comparison | `run_stats/quality.rs`, `candidate/quality.rs` | Excluded through `counts_as_history` and `all_runs_of` |
+| 12 | Grades | `grade/store.rs` (`runs/<id>/grades/`), the rules grader, `run_grade` | Kept in the run's own directory; never compared (11). `grade::backfill` (`grade/mod.rs` line 215) excluded through `learnable_run_dirs` |
+| 13 | Run statistics | `run_stats.rs` line 361 and 700 | Excluded through `StatsRun.learns` |
+| 14 | Pre-start estimates | `run_estimate/history.rs` over `runs_of` | Excluded through `learnable_run_dirs` (filter before the cap). A flagged run's own estimate reads unflagged history: kept |
+| 15 | Retrospective baseline | `run_retro.rs` line 255 | Excluded as baseline for other runs through `StatsRun.learns`. The run's own `run_retro_context` and `{{run.retro}}`: kept, model-free numbers about itself |
+| 16 | `run.previous_success` | `previous_success.rs` lines 95 to 112 | Excluded as a source through `learns_from`. A manifest that does not read still refuses the start (`HistoryUnreadable`, today's fail-closed rule), not a skip |
+| 17 | Decisions report, labels, replay, thresholds | `decision/report/mod.rs` `RunJournal` loading, `report/replay.rs` line 170 `run_dirs` | Excluded at enumeration: the report's loader and `replay` iterate `report_dirs` (every run directory but the flagged ones, `external_data::flag::is_flagged`; not `learnable_run_dirs`, which would cap the report and drop the eval runs it reads today), so neither a label, a rate, a threshold a person sets from the report nor a replay request ever reads a flagged run; the report and the replay summary state how many they skipped (`skipped_external`) |
+| 18 | Standalone decision log | `decision/standalone.rs` `<root>/.apb/decisions.jsonl` | Kept for the daily cap only: a request about a flagged run (`StandaloneDecider::for_run`) writes its line with `external_data: true`. The report reads run journals, never this log, so no reader learns from such a line |
+| 19 | In-run decision cache and replay, retry advice, supervisor triage, attempt memory | `decision/mod.rs`, `scheduler/attempt_memory.rs` | Kept: run-scoped, in the run directory |
+| 20 | Run memory at start | `apb_core::run_memory`, `prepare.rs` line 879, `gate/params.rs` line 127, `tools/memory.rs` `remember_at_start` | Excluded both ways (start steps 2 and 3) |
+| 21 | Run memory from a step | `tools/memory.rs` line 84, `playbook_memory` `get` and `set` | Excluded: refused with `external_data_run` when the caller is a step (`StepCaller`, `APB_RUN_ID`) of a flagged run |
+| 22 | History discovery | `apb_core::discover::walk::read_roots` | Excluded: `DiscoverRequest.exclude` (`apb_core::discover::Exclude`) from `flagged_markers`. A session file named after a flagged run's session id is never opened. A file whose read part names a flagged run id contributes nothing (its steps, requests and examples are dropped). Both are counted in the root report's `skipped` under the reason `external_data`. A marker past the walker's byte cap (`walk.rs` line 357) is not seen: documented limit |
+| 23 | The end-of-turn save hook | `apb_core::save_nudge` (line 175 answer cache), `decision/save_nudge.rs` line 48 | Excluded the same way as 22: a session that names a flagged run id gets no nudge, no cached answer and no decision request |
+| 24 | zcode desktop history | `zcode_ui_sync::wrap_step` (`scheduler/node.rs` line 2088) | Excluded: no row for a flagged run |
+| 25 | Eval result store | `eval/store.rs` (`<config-dir>/evals/results/`) | Excluded: a flagged eval prints its result and writes no stored result |
+| 26 | Scenario run index | `scenario/store.rs` line 225 `append`, `latest` | Excluded content: a flagged scenario run appends a line with its run id, scenario, level, time (`at_ms`, which retention orders by) and `external_data: true` only, which retention needs to prune its directory; `latest` and every reader skip such a line |
+| 27 | Run search fields and the run overlay | `apb_core::run_search`, `run_outcome/overlay.rs` | Kept: computed at listing time, nothing persisted, a surface of the run itself |
+| 28 | `continued_from` and the inherited baseline | `run_lineage.rs`, `baseline.rs` `inherited_from` | Kept with the successor flagged (step 1) |
+| 29 | Notifications, review gates, follow-up check, report page | `notify/`, `review.rs`, `follow_up/`, `report_html/` | Kept: part of the run |
+| 30 | Webhook inbox | `apb_core::connector::inbox` | Kept: an input store written before any run; a flagged run consuming a delivery stores nothing new |
+
+### What apb cannot control
+
+An agent CLI's own memory and session files sit outside apb: Claude
+Code persists sessions under the person's home, and an agent may keep its
+own notes. Codex already runs in a run-scoped `CODEX_HOME` under the run
+directory (`agents/codex/home.rs`). apb's own readers skip those
+sessions (paths 22 and 23); `docs/EXTERNAL-DATA.md` says plainly what
+the flag does not reach and points to `process_env: allowlist` and node
+`isolation` for a stricter setup. In host execution mode the host
+session does the work; its tool calls name the run id, so paths 22 and
+23 skip it, and the doc says the host's own memory is the host's.
+
+### Docs
+
+1. `docs/EXTERNAL-DATA.md` (new): the flag, the surfaces, the table
+   above in plain words, the refusals, what it does not reach.
+2. `docs/GUARDRAILS.md`: the three refusal codes.
+3. `CLAUDE.md` and `AGENTS.md` (mirror rule): `external_data.rs` in the
+   apb-engine list and a concept paragraph "External data runs".
+4. Generated TypeScript: `RunDetail.external_data` and
+   `RunSummary.external_data` regenerate through `ts_contract`.

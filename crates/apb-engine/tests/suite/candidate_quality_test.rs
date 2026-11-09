@@ -597,6 +597,7 @@ fn result(
             at_ms: at,
             decision_requests: 0,
             cost_usd: None,
+            external_data: false,
         },
     )
     .unwrap();

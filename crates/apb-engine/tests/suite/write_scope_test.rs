@@ -682,6 +682,7 @@ answers:
         scenario_digest: "sha256:ws".into(),
         max_requests: 20,
         sent: Default::default(),
+        external_data: false,
     };
     let quick = run_scenario(dir.path(), "ws", None, &prep).unwrap();
     assert!(

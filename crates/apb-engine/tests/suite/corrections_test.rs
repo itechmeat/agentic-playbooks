@@ -210,6 +210,7 @@ fn a_scenario_an_unreadable_journal_and_a_token_add_nothing() {
         scenario_digest: "sha256:corr".into(),
         max_requests: 0,
         sent: Default::default(),
+        external_data: false,
     };
     let r = run_scenario(dir.path(), "corr", None, &prep).unwrap();
     assert_eq!(r.outcome, RunStatus::Failed);

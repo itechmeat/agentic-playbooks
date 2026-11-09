@@ -39,6 +39,7 @@ fn run(
         definitions: snapshot.map(known).unwrap_or_default(),
         diagnostics: Vec::new(),
         origin: crate::manifest::RunOrigin::Production,
+        learns: true,
         identities: Vec::new(),
         declared: BTreeMap::new(),
         ephemeral_nodes: Default::default(),
@@ -1147,6 +1148,7 @@ fn only_production_runs_count_in_the_statistics() {
     use crate::manifest::RunOrigin;
     let with = |id: &str, tokens: u64, origin: RunOrigin| {
         let mut r = bind(one_visit(id, "1.0.0", tokens), "aaa");
+        r.learns = origin.is_production();
         r.origin = origin;
         r
     };

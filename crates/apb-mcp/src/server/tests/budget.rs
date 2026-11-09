@@ -59,6 +59,7 @@ fn start_args(budget: Option<BudgetArg>) -> PlaybookRunArgs {
         launch_choice: None,
         unattended: None,
         confirm_launch: None,
+        external_data: None,
     }
 }
 
@@ -213,6 +214,7 @@ fn resume_args(run_id: &str, confirm_budget: Option<String>) -> RunResumeArgs {
         launch_version: None,
         launch_choice: None,
         confirm_launch: None,
+        external_data: None,
     }
 }
 

@@ -311,6 +311,7 @@ fn seed_abandoned_run(root: &Path, run_id: &str) -> PathBuf {
         playbook: "stopflow".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     log.append(EventPayload::NodeStarted {
@@ -1600,6 +1601,7 @@ fn stop_of_a_parent_driven_child_leaves_the_journal_to_the_live_parent_drive() {
             playbook: playbook.into(),
             version: "1.0.0".into(),
             definition: None,
+            external_data: false,
         })
         .unwrap();
     }

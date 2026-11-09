@@ -498,6 +498,11 @@ enum Command {
         budget: budget::ResumeBudgetFlags,
         #[command(flatten)]
         launch: launch::LaunchFlags,
+        /// Checked only: the external data flag the run was started with
+        /// (true or false). Another value is refused
+        /// (external_data_immutable); the flag never changes after the start
+        #[arg(long, value_name = "BOOL", conflicts_with = "all")]
+        external_data: Option<bool>,
     },
     /// Block until a run finishes, needs input (a question, a review, a
     /// supervisor decision) or stops, then print why. A single call that
@@ -725,6 +730,11 @@ enum Command {
         /// Play a scenario whose versions or digest pin exclude this version
         #[arg(long)]
         allow_stale: bool,
+        /// The runs process external data and keep nothing for learning:
+        /// no stored eval result, a scenario index line with only what
+        /// retention needs
+        #[arg(long, conflicts_with = "list_scenarios")]
+        external_data: bool,
     },
     // --- end 0.24.0 eval suites ---
     /// Inspect and manage the project-local node result cache
@@ -833,6 +843,10 @@ enum Command {
         /// The run's notify flags, forwarded from `apb run --supervise`.
         #[command(flatten)]
         notify: notify::NotifyFlags,
+        /// The run processes external data, forwarded from `apb run
+        /// --supervise --external-data`.
+        #[arg(long)]
+        external_data: bool,
     },
     /// Drives an already-prepared run at `<root>/.apb/runs/<run-id>` to
     /// completion in THIS process. Spawned detached by
@@ -951,6 +965,9 @@ enum Command {
         playbook_digest: String,
         #[arg(long)]
         max_decision_requests: Option<u32>,
+        /// The scenario run processes external data.
+        #[arg(long)]
+        external_data: bool,
     },
     /// The live-question sidecar (spec 2026-07-20-interactive-nodes, Task 10):
     /// a stdio MCP server exposing one `ask_user` tool, injected into the
@@ -1224,6 +1241,7 @@ fn main() -> ExitCode {
             confirm_irreversible,
             budget,
             launch,
+            external_data,
             ..
         }) => resume_cmd(
             &root,
@@ -1236,6 +1254,7 @@ fn main() -> ExitCode {
             confirm_irreversible,
             &budget,
             &launch,
+            external_data,
         ),
         Some(Command::Launch {
             cmd:
@@ -1345,6 +1364,7 @@ fn main() -> ExitCode {
             list_scenarios,
             max_decision_requests,
             allow_stale,
+            external_data,
         }) => scenario::eval_entry(
             &root,
             eval::EvalArgs {
@@ -1373,6 +1393,7 @@ fn main() -> ExitCode {
                 list_scenarios,
                 max_decision_requests,
                 allow_stale,
+                external_data,
             },
         ),
         // --- end 0.24.0 eval suites ---
@@ -1413,6 +1434,7 @@ fn main() -> ExitCode {
             handshake,
             budget,
             notify,
+            external_data,
         }) => drive_supervised_child(
             &root,
             &name,
@@ -1426,6 +1448,7 @@ fn main() -> ExitCode {
             &handshake,
             &budget,
             &notify,
+            external_data,
         ),
         // Deliberately uses the `--root` it was given, not the process cwd:
         // the spawning parent knows which project the run belongs to.
@@ -1507,6 +1530,7 @@ fn main() -> ExitCode {
             scenario_digest,
             playbook_digest,
             max_decision_requests,
+            external_data,
         }) => match level.scenario() {
             Some(level) => scenario::child_cmd(scenario::ChildArgs {
                 root: run_root,
@@ -1519,6 +1543,7 @@ fn main() -> ExitCode {
                 max_decision_requests,
                 scenario_digest,
                 playbook_digest,
+                external_data,
             }),
             None => {
                 eprintln!("__scenario-run: deep is not a scenario level");

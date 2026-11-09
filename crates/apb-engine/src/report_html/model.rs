@@ -51,6 +51,8 @@ pub(super) struct Report {
     /// The definition the run actually executed: the shown segment's
     /// stored definition.
     pub(super) definition: Option<apb_core::schema::Playbook>,
+    /// The run processes external data ([`crate::external_data`]).
+    pub(super) external_data: bool,
 }
 
 /// One node of the playbook, in playbook order.
@@ -120,6 +122,7 @@ impl Report {
             known_problems,
             graph,
             definition,
+            external_data: crate::external_data::is_flagged(run_dir),
             run_id,
         })
     }

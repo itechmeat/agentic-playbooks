@@ -96,6 +96,7 @@ fn wait_times_out_with_its_own_exit_code() {
         playbook: "rev".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     let started = Instant::now();

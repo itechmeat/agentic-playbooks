@@ -18,6 +18,7 @@ fn fold_records_review_decision() {
                 playbook: "apb".into(),
                 version: "1.0.0".into(),
                 definition: None,
+                external_data: false,
             },
         ),
         ev(

@@ -150,6 +150,7 @@ pub fn playbook_trial(
         expected_children: Some(checked.children),
         expected_profile_bundles: Some(checked.profile_bundles),
         launch: Some(checked.grant),
+        external_data: launch.external_data,
         ..Default::default()
     };
     let resolved_version = loaded.version.clone();

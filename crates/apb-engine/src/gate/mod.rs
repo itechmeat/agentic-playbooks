@@ -24,7 +24,10 @@ pub(crate) mod params;
 pub(crate) mod trust_scan;
 pub mod unattended;
 
-pub use params::{PARAM_NEEDS_VALUE, PARAM_PATTERN_MISMATCH, check_params, short_secret_warning};
+pub use params::{
+    PARAM_NEEDS_VALUE, PARAM_PATTERN_MISMATCH, check_params, check_params_with,
+    short_secret_warning,
+};
 pub use unattended::{UnattendedStart, check_start as check_unattended};
 
 use std::path::Path;
@@ -756,10 +759,21 @@ pub fn check_run(
     // stands in for a candidate nobody approved. Asking for the candidate by
     // version stays the way to run it anyway.
     let mut candidate_skipped: Option<String> = None;
-    if wref.version.is_none()
-        && let Some((version, cand)) =
-            crate::candidate::choose_at_gate(&reg, &playbook_dir, &wref.id, &loaded)
-    {
+    let waiting = wref
+        .version
+        .is_none()
+        .then(|| crate::candidate::choose_at_gate(&reg, &playbook_dir, &wref.id, &loaded))
+        .flatten();
+    // A start that processes external data never takes a waiting
+    // candidate: its outcome would settle the candidate.
+    let waiting = match waiting {
+        Some(_) if launch.external_data => {
+            candidate_skipped = Some(crate::external_data::CANDIDATE_SKIPPED.to_string());
+            None
+        }
+        w => w,
+    };
+    if let Some((version, cand)) = waiting {
         let current_trusted = loaded
             .trust_digest()
             .is_ok_and(|d| TrustStore::load().is_approved(&d));

@@ -39,6 +39,10 @@ pub(crate) struct NodeCacheCtx {
     /// its workspace by design (#80). Changes the admission rejection reason
     /// on a fingerprint mismatch, never the admission decision itself.
     batch_member: bool,
+    /// Whether a success may be stored: false for a run that processes
+    /// external data ([`crate::external_data`]), whose lookups still hit an
+    /// earlier run's entry but which adds nothing to the store.
+    keep: bool,
 }
 
 /// What the caller knows about the execution surrounding this node's cache
@@ -317,6 +321,7 @@ pub(crate) fn prepare(
         bundle_digest: bundle_digest.map(str::to_string),
         exclude,
         batch_member: probe_ctx.batch_member,
+        keep: !crate::external_data::is_flagged(run_dir),
     })
 }
 
@@ -810,6 +815,14 @@ pub(crate) fn settle(
                 events.push(EventPayload::NodeCacheRejected {
                     node: node_id.to_string(),
                     reason: "output came from the host fallback, not the CLI agent".into(),
+                });
+            } else if ctx.is_some_and(|c| !c.keep) {
+                // A run that processes external data adds nothing to the
+                // store; its lookups still hit an earlier run's entry.
+                events.push(EventPayload::NodeCacheRejected {
+                    node: node_id.to_string(),
+                    reason: "the run processes external data and keeps nothing for later runs"
+                        .into(),
                 });
             } else if let Some(ctx) = ctx {
                 // Scan the run log for this node's connector calls (written out
