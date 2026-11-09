@@ -68,6 +68,9 @@ pub(crate) fn run_quota_probe(run_dir: &Path, node: &str, agent: &str, model: &s
             .as_ref()
             .map(|c| c.spawn_env())
             .unwrap_or_default(),
+        // The catalog row the run started with: a cloud model runs on
+        // apb's provider route, as the node's attempts do.
+        cloud: ri.cloud.clone(),
         ..Default::default()
     };
     let task = AgentTask {

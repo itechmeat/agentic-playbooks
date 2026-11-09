@@ -345,7 +345,10 @@ A new gate check `crates/apb-engine/src/gate/cloud.rs`, called from
 `gate::check_run` after the profile resolution and before the billing
 half, walks every `ResolvedInvocation` of the run's profiles (primary,
 fallbacks, tiers, over the whole tree as the billing half does,
-`crates/apb-engine/src/gate/billing.rs`):
+`crates/apb-engine/src/gate/billing.rs`), the background supervisor's
+profile when the run is supervised by an agent, and, for a node with a
+run override `ephemeral_executor`, that executor in place of its
+profile's chain (a profile the override replaces is not judged):
 
 1. a cloud model the snapshot lacks: refused `cloud_model_unknown`
    ("not in the NEAR AI Cloud catalog fetched <date>; run `apb models
@@ -353,7 +356,11 @@ fallbacks, tiers, over the whole tree as the billing half does,
 2. `NoTools`, `NotChat`, `EffortUnsupported`: refused with that code;
 3. the primary executor's key variable does not reach the spawn
    (`adapter::SpawnEnv::reaches`, the same fact the cost basis reads):
-   refused `cloud_key_missing` naming the variable. A fallback or tier
+   refused `cloud_key_missing` naming the variable. Reaching means set
+   in apb's environment, kept by the profile's `process_env` and not a
+   variable an installed connector references: the connector scrub
+   drops those from every agent spawn, so the check uses the
+   workspace's scrub set. A fallback or tier
    whose key is missing is a start warning, not a refusal, since the
    chain may never reach it. dsh's headless profile disables its
    credential store (`--dump-config` of dsh 0.2.2-rc.1 shows `id:
@@ -449,17 +456,29 @@ documented in `docs/AGENT-SETUP.md`.
    reply, the failure text, the stream log and the per-attempt
    transcript the adapter writes (`crates/apb-engine/src/adapter.rs`, at
    the point `AgentReport` and `AgentFailure` are built, and the stream
-   log writer), before the scheduler journals any of it. The match is
+   log writer), and the attempt's status file, whose outputs, findings
+   and warnings the scheduler reads after the adapter returns, before
+   the scheduler journals any of it. The stream log and the transcript
+   copies are also redacted as the bytes arrive
+   (`capture::Redact`, holding back only a tail that could start the
+   value, so a key split across two reads is caught), so a driver
+   killed mid-attempt leaves no plain value in them. The key variable
+   comes from the invocation's `cloud`, else from the provider the
+   agent's model route names (`apb_core::agents::cloud_key_env`), so an
+   executor an older apb resolved without a snapshot is scrubbed too. The match is
    exact on the value (at least 8 characters, else nothing is replaced
    and the start warns, like a short secret param). The value is never
    stored, cached or compared outside `Secret`.
 3. Read-time redaction stays as a second layer:
    `crates/apb-engine/src/run_redact.rs` `RunRedactor::of` adds the
    current value of each key variable the manifest names, when set, to
-   the values `redact_text` and `redact_json` scrub. Text an older apb
+   the values `redact_text` and `redact_json` scrub (an executor without
+   `cloud` names the variable through its model route, as above). Text an older apb
    stored is covered only while the same value is set.
 4. The supervisor spawn passes the same `cloud` (decision record 0013:
-   it gets the leading arguments).
+   it gets the leading arguments), and so does the wake-up probe of a
+   quota pause (`scheduler/quota_probe.rs`), so the probe asks the
+   provider on the same route the node's attempts use.
 
 ### The node rule (V220, V222)
 
@@ -858,8 +877,8 @@ that later runs or learning tools read. Line numbers are from a012e4ae.
       start (below), called by every surface before its own checks;
    5. `pub fn learnable_run_dirs(roots, cap) -> Vec<PathBuf>`: the newest
       run directories that `learns_from`, the filter applied before the
-      cap within a scan bound of four times the cap, so flagged runs
-      never crowd earlier history out of a capped window;
+      cap with no scan bound on flagged runs, so flagged runs, however
+      many, never crowd earlier history out of a capped window;
    6. `pub fn flagged_markers(roots) -> FlaggedMarkers`: the agent
       session ids (`attempt_finished.session`) and run ids of flagged
       runs under the given project roots, for discovery and the save
@@ -908,7 +927,10 @@ In the engine:
    arm "flagged: the empty recall", the value a scenario gets, and
    `gate/params.rs` line 127 treats a flagged start's memory as empty
    (`without_default(params)`), so the `param_needs_value` check and the
-   start agree. Values the caller passed are used as passed.
+   start agree. Values the caller passed are used as passed. A
+   preparation that fails before the manifest records the start's
+   effective flag on the `run_started` it writes (`Unstarted`), so the
+   failed run stays flagged.
 4. The candidate: the gate's candidate choice
    (`RunPermit::candidate_skipped`) skips a waiting candidate with the
    reason `external_data`; `manifest.candidate_trial` (`prepare.rs` line
@@ -951,7 +973,7 @@ definition. The refusal codes are `external_data_immutable`,
 | 18 | Standalone decision log | `decision/standalone.rs` `<root>/.apb/decisions.jsonl` | Kept for the daily cap only: a request about a flagged run (`StandaloneDecider::for_run`) writes its line with `external_data: true`. The report reads run journals, never this log, so no reader learns from such a line |
 | 19 | In-run decision cache and replay, retry advice, supervisor triage, attempt memory | `decision/mod.rs`, `scheduler/attempt_memory.rs` | Kept: run-scoped, in the run directory |
 | 20 | Run memory at start | `apb_core::run_memory`, `prepare.rs` line 879, `gate/params.rs` line 127, `tools/memory.rs` `remember_at_start` | Excluded both ways (start steps 2 and 3) |
-| 21 | Run memory from a step | `tools/memory.rs` line 84, `playbook_memory` `get` and `set` | Excluded: refused with `external_data_run` when the caller is a step (`StepCaller`, `APB_RUN_ID`) of a flagged run |
+| 21 | Run memory from a step | `tools/memory.rs` line 84, `playbook_memory` `get` and `set` | Excluded: refused with `external_data_run` when the caller is a step (`StepCaller`, `APB_RUN_ID`) of a flagged run, whatever workspace it targets: the step's run is found through `APB_RUN_DIR` (its directory name equal to the run id), else under the target workspace, and a step whose run is found nowhere is refused (`external_data::refuse_step_if_flagged`) |
 | 22 | History discovery | `apb_core::discover::walk::read_roots` | Excluded: `DiscoverRequest.exclude` (`apb_core::discover::Exclude`) from `flagged_markers`. A session file named after a flagged run's session id is never opened. A file whose read part names a flagged run id contributes nothing (its steps, requests and examples are dropped). Both are counted in the root report's `skipped` under the reason `external_data`. A marker past the walker's byte cap (`walk.rs` line 357) is not seen: documented limit |
 | 23 | The end-of-turn save hook | `apb_core::save_nudge` (line 175 answer cache), `decision/save_nudge.rs` line 48 | Excluded the same way as 22: a session that names a flagged run id gets no nudge, no cached answer and no decision request |
 | 24 | zcode desktop history | `zcode_ui_sync::wrap_step` (`scheduler/node.rs` line 2088) | Excluded: no row for a flagged run |

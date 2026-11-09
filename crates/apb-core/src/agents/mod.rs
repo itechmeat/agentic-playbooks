@@ -79,6 +79,14 @@ pub fn cloud_model(agent: &str, model: &str) -> Option<crate::cloud_models::Clou
     lookup(agent)?.models().cloud_model(model)
 }
 
+/// The key variable of the cloud provider `model` routes to when `agent`
+/// runs it, read from the agent's routes alone: it holds without a catalog
+/// snapshot, as for an executor an older apb resolved before it recorded
+/// one, so the key is still scrubbed from what such an attempt prints.
+pub fn cloud_key_env(agent: &str, model: &str) -> Option<&'static str> {
+    crate::cloud_models::lookup(cloud_model(agent, model)?.provider).map(|p| p.key_env)
+}
+
 /// The snapshot of the catalog row `model` names when `agent` runs it, when
 /// the catalog lists it.
 pub fn cloud_snapshot(

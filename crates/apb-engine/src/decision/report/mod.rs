@@ -248,6 +248,17 @@ pub fn run_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
 /// scan bounded on a long history reads. Unverified directories never take
 /// a place under the cap; the scan stops at the `cap`-th verified one.
 pub fn newest_run_dirs(roots: &[PathBuf], cap: usize) -> Vec<PathBuf> {
+    newest_run_dirs_where(roots, cap, |_| true)
+}
+
+/// [`newest_run_dirs`] counting only the directories `keep` accepts: the
+/// filter runs before the cap, so the directories it drops never take a
+/// place in the window.
+pub(crate) fn newest_run_dirs_where(
+    roots: &[PathBuf],
+    cap: usize,
+    keep: impl Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
     let written = |d: &PathBuf| {
         std::fs::metadata(d.join("events.jsonl"))
             .and_then(|m| m.modified())
@@ -260,7 +271,7 @@ pub fn newest_run_dirs(roots: &[PathBuf], cap: usize) -> Vec<PathBuf> {
     dirs.sort_by_key(|a| std::cmp::Reverse(a.0));
     dirs.into_iter()
         .map(|(_, d)| d)
-        .filter(|d| created_here(d))
+        .filter(|d| created_here(d) && keep(d))
         .take(cap)
         .collect()
 }

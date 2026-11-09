@@ -18,7 +18,7 @@ mod head_tail;
 mod pipes;
 mod view;
 
-pub(crate) use capped_file::CappedFile;
+pub(crate) use capped_file::{CappedFile, Redact};
 pub use head_tail::Kept;
 pub(crate) use pipes::{LineCapture, Pipes, PipesError, StreamCapture, drain_stream};
 pub use view::{AttemptOutputLoss, attempt_losses};

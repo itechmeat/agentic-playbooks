@@ -132,14 +132,18 @@ fn remembered(root: &Path, id: &str) -> Vec<String> {
 }
 
 fn rendered_customer(root: &Path, id: &str) -> Option<String> {
+    rendered(root, id, "customer")
+}
+
+fn rendered(root: &Path, id: &str, name: &str) -> Option<String> {
     apb_engine::run_config::read_run_config(&run_dir(root, id))
         .unwrap()
         .params
-        .get("customer")
+        .get(name)
         .cloned()
 }
 
-fn remember_customer(root: &Path, customer: &str) {
+fn remember_params(root: &Path, values: BTreeMap<String, String>) {
     let loaded = apb_core::registry::Registry::open(root)
         .unwrap()
         .load(ID, None)
@@ -151,7 +155,7 @@ fn remember_customer(root: &Path, customer: &str) {
         &loaded.playbook.params,
         &loaded.version,
         apb_core::run_memory::RememberInput {
-            params: Some(params(customer)),
+            params: Some(values),
             instruction: None,
         },
     )
@@ -167,7 +171,15 @@ fn a_flagged_start_records_the_flag_and_recalls_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     seed(root);
-    remember_customer(root, "acme");
+    // `region` has a default, so a start that gives only `customer` would
+    // take the remembered `us` from memory unless recall is off.
+    remember_params(
+        root,
+        BTreeMap::from([
+            ("customer".to_string(), "acme".to_string()),
+            ("region".to_string(), "us".to_string()),
+        ]),
+    );
 
     // The gate's param check: memory counts as empty for a flagged start.
     assert!(apb_engine::gate::check_params(root, &wref(None), &BTreeMap::new()).is_ok());
@@ -178,7 +190,11 @@ fn a_flagged_start_records_the_flag_and_recalls_nothing() {
     // An unflagged start recalls the remembered value.
     let (plain, outcome, _) = start(root, None, false, RunOptions::default());
     assert_eq!(outcome, RunStatus::Succeeded);
-    assert_eq!(remembered(root, &plain), vec!["customer".to_string()]);
+    assert_eq!(
+        remembered(root, &plain),
+        vec!["customer".to_string(), "region".to_string()]
+    );
+    assert_eq!(rendered(root, &plain, "region").as_deref(), Some("us"));
     assert!(!external_data::is_flagged(&run_dir(root, &plain)));
 
     // A flagged start passes its own value and recalls nothing.
@@ -194,6 +210,7 @@ fn a_flagged_start_records_the_flag_and_recalls_nothing() {
     assert_eq!(outcome, RunStatus::Succeeded);
     assert!(remembered(root, &flagged).is_empty());
     assert_eq!(rendered_customer(root, &flagged).as_deref(), Some("beta"));
+    assert_eq!(rendered(root, &flagged, "region").as_deref(), Some("eu"));
     let m = apb_engine::manifest::read(&run_dir(root, &flagged))
         .unwrap()
         .unwrap();
@@ -209,6 +226,73 @@ fn a_flagged_start_records_the_flag_and_recalls_nothing() {
         }
     ));
     assert!(!external_data::learns_from(&run_dir(root, &flagged)));
+}
+
+/// A flagged start whose preparation fails before its manifest (a profile
+/// changed after the check) still records the flag on the `run_started`
+/// the failure writes, so no reader of earlier runs learns from it.
+#[test]
+fn a_flagged_start_that_fails_in_preparation_stays_flagged() {
+    let _env = crate::common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root);
+    let pdir = root.join(".apb/profiles/main");
+    fs::create_dir_all(&pdir).unwrap();
+    fs::write(
+        pdir.join("profile.yaml"),
+        "name: main\ndescription: t\nexecutor:\n  agent: claude-code\n  model: sonnet\n",
+    )
+    .unwrap();
+    fs::write(pdir.join("SOUL.md"), "").unwrap();
+    let vdir = root.join(".apb/playbooks").join(ID).join("1.1.0");
+    fs::create_dir_all(vdir.join("scripts")).unwrap();
+    fs::write(vdir.join("scripts/ok.sh"), "echo ok\n").unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        PLAYBOOK
+            .replace("version: 1.0.0", "version: 1.1.0")
+            .replace(
+                "type: script, script: \"scripts/ok.sh\", runner: sh",
+                "type: agent_task, prompt: \"do\", profile: main",
+            ),
+    )
+    .unwrap();
+    approve(root, "1.1.0");
+    let permit = apb_engine::gate::check_run(
+        root,
+        &wref(Some("1.1.0")),
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start).with_external_data(true),
+    )
+    .unwrap();
+    let mut opts = RunOptions {
+        params: params("acme"),
+        external_data: true,
+        ..Default::default()
+    };
+    permit.apply(&mut opts);
+    // The profile changes after the check: preparation refuses the run.
+    fs::write(pdir.join("SOUL.md"), "changed").unwrap();
+    let err = run(root, ID, Some("1.1.0"), opts).unwrap_err().to_string();
+    assert!(err.contains("bundle mismatch"), "{err}");
+    let dirs: Vec<PathBuf> = fs::read_dir(root.join(".apb/runs"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(dirs.len(), 1);
+    let failed = &dirs[0];
+    assert!(matches!(
+        &read_all(failed).unwrap()[0].payload,
+        EventPayload::RunStarted {
+            external_data: true,
+            ..
+        }
+    ));
+    assert!(external_data::is_flagged(failed));
+    assert!(!external_data::learns_from(failed));
 }
 
 /// A run started with `continued_from` naming a flagged run is flagged

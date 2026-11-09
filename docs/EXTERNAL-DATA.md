@@ -40,7 +40,7 @@ surface shows the `+external` suffix inside a mode.
 | Store or reader | For a flagged run |
 |---|---|
 | Remembered run input | nothing is applied at start (the gate's param check counts memory as empty too, so a param only memory would fill must be passed), and asking to remember is refused with `external_data_remember_refused` |
-| Run memory from a step | `playbook_memory` `get` and `set` from a step of the run are refused with `external_data_run` |
+| Run memory from a step | `playbook_memory` `get` and `set` from a step of the run are refused with `external_data_run`, for any workspace; a step whose run cannot be found is refused too |
 | Node cache | nothing is stored; a lookup may still hit an earlier run's entry |
 | Known problems | nothing is added at run end or by a scan |
 | Corrections ledger | nothing is added |

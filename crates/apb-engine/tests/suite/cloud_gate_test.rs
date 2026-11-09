@@ -94,7 +94,8 @@ fn a_fallback_without_its_key_is_a_warning_and_the_start_proceeds() {
     let _l = common::env_lock();
     let _env = EnvVar::remove("NEARAI_API_KEY");
     let snaps = apb_core::cloud_models::catalog::load_all();
-    let warnings = apb_engine::gate::cloud::check_profile(&doc, "project/main", &snaps).unwrap();
+    let warnings =
+        apb_engine::gate::cloud::check_profile(&doc, "project/main", &snaps, &[]).unwrap();
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].contains("NEARAI_API_KEY"), "{warnings:?}");
     drop(_env);
@@ -114,6 +115,140 @@ fn a_fallback_without_its_key_is_a_warning_and_the_start_proceeds() {
     ];
     let res = run(dir.path(), "near", None, RunOptions::default()).expect("the start proceeds");
     assert_eq!(runs(dir.path()), 1, "{}", res.run_id);
+}
+
+/// A supervised start whose supervisor profile runs on NEAR AI Cloud
+/// without its key is refused like a node's, before a run directory exists.
+#[test]
+fn a_supervisor_without_its_key_is_refused() {
+    let _l = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let agent = seed(root, "claude-code", "haiku", &[]);
+    let vdir = root.join(".apb/playbooks/near/1.0.0");
+    fs::write(
+        vdir.join("playbook.yaml"),
+        PLAYBOOK.replace(
+            "defaults:\n  profile: main\n",
+            "defaults:\n  profile: main\nsupervisor:\n  profile: sup\n",
+        ),
+    )
+    .unwrap();
+    common::seed_profile(root, "sup", "dsh", "nearai/Qwen/Qwen3.8-27B", &[]);
+    let _env = [
+        EnvVar::set("APB_AGENT_CMD", agent),
+        EnvVar::remove("NEARAI_API_KEY"),
+    ];
+    let err = run_background(
+        root,
+        "near",
+        None,
+        RunOptions {
+            mode: apb_engine::run_config::RunMode::AgentSupervised,
+            ..RunOptions::default()
+        },
+    )
+    .expect_err("the start is refused")
+    .to_string();
+    assert!(err.contains("cloud_key_missing"), "{err}");
+    assert!(err.contains("project/sup"), "{err}");
+    assert_eq!(runs(root), 0, "no run directory: {err}");
+}
+
+fn ephemeral(agent: &str, model: &str) -> apb_core::overrides::RunOverrides {
+    apb_core::overrides::RunOverrides::from_yaml(&format!(
+        "nodes:\n  w:\n    ephemeral_executor: {{ agent: {agent}, model: {model} }}\n"
+    ))
+    .unwrap()
+}
+
+/// A node's ephemeral executor is judged in place of its profile's chain:
+/// an unknown NEAR model there refuses a start whose profile is local, and
+/// a local override starts a node whose profile alone would be refused.
+#[test]
+fn an_ephemeral_override_is_judged_in_place_of_the_profile() {
+    let _l = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let agent = seed(dir.path(), "claude-code", "haiku", &[]);
+    let _env = [
+        EnvVar::set("APB_AGENT_CMD", agent),
+        EnvVar::set("NEARAI_API_KEY", "fake-key-1234567"),
+    ];
+    let err = run(
+        dir.path(),
+        "near",
+        None,
+        RunOptions {
+            overrides: Some(ephemeral("dsh", "nearai/does-not-exist")),
+            ..RunOptions::default()
+        },
+    )
+    .expect_err("the start is refused")
+    .to_string();
+    assert!(err.contains("cloud_model_unknown"), "{err}");
+    assert!(err.contains("ephemeral/w"), "{err}");
+    assert_eq!(runs(dir.path()), 0, "no run directory: {err}");
+    drop(_env);
+    drop(_l);
+
+    let _l = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let agent = seed(dir.path(), "dsh", "nearai/Qwen/Qwen3.8-27B", &[]);
+    let _env = [
+        EnvVar::set("APB_AGENT_CMD", agent),
+        EnvVar::remove("NEARAI_API_KEY"),
+    ];
+    run(
+        dir.path(),
+        "near",
+        None,
+        RunOptions {
+            overrides: Some(ephemeral("claude-code", "haiku")),
+            ..RunOptions::default()
+        },
+    )
+    .expect("the start proceeds");
+    assert_eq!(runs(dir.path()), 1);
+}
+
+/// A key variable an installed connector references is dropped from every
+/// agent spawn, so it does not count as reaching the primary executor.
+#[test]
+fn a_key_the_connector_scrub_drops_is_refused() {
+    let _l = common::env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let agent = seed(root, "dsh", "nearai/Qwen/Qwen3.8-27B", &[]);
+    let cdir = cfg.path().join("connectors/near-tool");
+    fs::create_dir_all(&cdir).unwrap();
+    fs::write(
+        cdir.join("connector.yaml"),
+        "name: near-tool\nversion: 0.1.0\naccount_fields:\n  - { name: token, required: true, secret: true }\nfunctions:\n  - { name: ping, description: Ping, read_only: true, method: GET, url: \"https://example.com\" }\n",
+    )
+    .unwrap();
+    let account = apb_core::connector::config::project_config_path(root, "near-tool");
+    fs::create_dir_all(account.parent().unwrap()).unwrap();
+    fs::write(
+        &account,
+        "accounts:\n  - name: a\n    token: \"{{env.NEARAI_API_KEY}}\"\n",
+    )
+    .unwrap();
+    let _env = [
+        EnvVar::set("APB_CONFIG_DIR", cfg.path()),
+        EnvVar::set("APB_AGENT_CMD", agent),
+        EnvVar::set("NEARAI_API_KEY", "fake-key-1234567"),
+    ];
+    assert_eq!(
+        apb_core::connector::resolve::all_referenced_env_names(root),
+        ["NEARAI_API_KEY"]
+    );
+    let Err(err) = run(root, "near", None, RunOptions::default()) else {
+        panic!("the start is refused");
+    };
+    let err = err.to_string();
+    assert!(err.contains("cloud_key_missing"), "{err}");
+    assert_eq!(runs(root), 0, "no run directory: {err}");
 }
 
 #[test]

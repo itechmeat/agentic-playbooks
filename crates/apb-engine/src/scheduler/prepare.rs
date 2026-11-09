@@ -149,6 +149,9 @@ struct Unstarted<'a> {
     run_id: &'a str,
     playbook: &'a str,
     version: &'a str,
+    /// The start's effective external data flag: a failed preparation
+    /// records it on the `run_started` it writes, so the run stays flagged.
+    external_data: bool,
 }
 
 /// [`prep_try`] for the steps before `run_started`: on a failure it first
@@ -164,7 +167,7 @@ fn prep_try_unstarted<T, E: Into<EngineError>>(
             playbook: u.playbook.into(),
             version: u.version.into(),
             definition: None,
-            external_data: false,
+            external_data: u.external_data,
         });
         let _ = apb_core::run_origin::stamp(u.run_dir, u.run_id);
         finalize_prepare_failure(log, e.into())
@@ -824,8 +827,17 @@ pub(crate) fn prepare_placed(
     // Host mode spawns no agent CLI; a scenario run spawns nothing.
     let cloud_warnings =
         if scenario.is_none() && execution.mode == apb_core::execution::ExecutionMode::Cli {
-            crate::gate::cloud::check_tree(root, &playbook, origin, opts.expected_children.as_ref())
-                .map_err(|r| EngineError::Invalid(crate::gate::cloud::text(&r)))?
+            crate::gate::cloud::check_tree(
+                root,
+                &playbook,
+                origin,
+                opts.expected_children.as_ref(),
+                crate::gate::cloud::StartBinding {
+                    supervised: opts.mode.expects_supervisor_agent(),
+                    overrides: opts.overrides.as_ref(),
+                },
+            )
+            .map_err(|r| EngineError::Invalid(crate::gate::cloud::text(&r)))?
         } else {
             Vec::new()
         };
@@ -1076,6 +1088,7 @@ pub(crate) fn prepare_placed(
         run_id: &run_id_owned,
         playbook: id,
         version: &loaded.version,
+        external_data: opts.external_data,
     };
     // Every run path (CLI, MCP, dashboard, detached driver, child runs) comes
     // through here, and nothing but the event log is in the run yet: make sure

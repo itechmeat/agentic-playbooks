@@ -1249,7 +1249,14 @@ impl ClaudeAdapter {
             on_spawn,
         )?;
         // Drain both streams from the start (see `crate::capture::Pipes`).
-        let pipes = Pipes::start(&mut child, task.transcript_dir, &task.output_limits);
+        let redact = key_scrub::KeyScrub::for_spawn(task.spawn_env, task.agent, task.model)
+            .map(|s| s.redact());
+        let pipes = Pipes::start(
+            &mut child,
+            task.transcript_dir,
+            &task.output_limits,
+            redact.as_ref(),
+        );
         if let Some(payload) = &stdin_payload
             && let Some(mut si) = child.stdin.take()
         {
@@ -1513,7 +1520,11 @@ impl ClaudeAdapter {
                 {
                     let _ = apb_core::fsutil::create_dir_under(run_dir, parent);
                 }
-                CappedFile::append(p, task.output_limits.stream_log_bytes)
+                // The key of a cloud model is replaced as the agent prints.
+                CappedFile::append(p, task.output_limits.stream_log_bytes).redacting(
+                    key_scrub::KeyScrub::for_spawn(task.spawn_env, task.agent, task.model)
+                        .map(|s| s.redact()),
+                )
             }
             None => CappedFile::none(),
         };
@@ -1878,10 +1889,15 @@ impl AgentAdapter for ClaudeAdapter {
         // Every usage an attempt reports, succeeded or failed, says what
         // its cost is.
         // The key of a cloud model never reaches what apb stores: the reply,
-        // the failure text, the stream log and the transcript files.
-        let scrub = key_scrub::KeyScrub::for_spawn(task.spawn_env);
+        // the failure text, the stream log, the transcript files and the
+        // status file, whose outputs, findings and warnings the scheduler
+        // reads after this returns.
+        let scrub = key_scrub::KeyScrub::for_spawn(task.spawn_env, task.agent, task.model);
         if let Some(s) = &scrub {
             if let Some(p) = task.stream_log {
+                s.file(p);
+            }
+            if let Some(p) = &task.status_file {
                 s.file(p);
             }
             if let Some(d) = task.transcript_dir {

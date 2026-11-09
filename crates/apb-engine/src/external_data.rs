@@ -101,6 +101,31 @@ pub fn refuse_if_flagged(run_dir: &Path, what: &str) -> Result<(), EngineError> 
     Ok(())
 }
 
+/// Refuses `what` for a step of a flagged run: the step's run is the one
+/// `APB_RUN_DIR` names when its directory name is the step's `run_id`,
+/// else the run of that id under the project `root`, whatever workspace
+/// the step's request targets. A step whose run is found nowhere is
+/// refused too (fail-closed), since whether it processes external data
+/// cannot be told. A process that is no run step passes.
+pub fn refuse_step_if_flagged(
+    root: &Path,
+    step: &apb_core::step_env::StepCaller,
+    what: &str,
+) -> Result<(), EngineError> {
+    let Some(run_id) = step.run_id.as_deref() else {
+        return Ok(());
+    };
+    let named = std::env::var_os("APB_RUN_DIR")
+        .map(PathBuf::from)
+        .filter(|d| d.file_name().is_some_and(|n| n == run_id) && d.is_dir());
+    match named.or_else(|| run_dir_in(root, run_id)) {
+        Some(dir) => refuse_if_flagged(&dir, what),
+        None => Err(EngineError::Invalid(format!(
+            "{RUN}: {what}: the step's run `{run_id}` is not found, so whether it processes external data cannot be told"
+        ))),
+    }
+}
+
 /// The run directory of `run_id` under the project `root`: a production
 /// run, else a scenario run. `None` for an id that is no safe path segment
 /// or names no directory.
@@ -175,15 +200,10 @@ pub fn check_resume(run_dir: &Path, requested: Option<bool>) -> Result<(), Refus
 }
 
 /// The newest `cap` run directories under `roots` that [`learns_from`],
-/// newest first: the filter runs before the cap, within a scan bound of
-/// four times the cap, so flagged runs never crowd earlier history out of
-/// a capped window.
+/// newest first: the filter runs before the cap, so flagged runs, however
+/// many, never crowd earlier history out of a capped window.
 pub fn learnable_run_dirs(roots: &[PathBuf], cap: usize) -> Vec<PathBuf> {
-    crate::decision::report::newest_run_dirs(roots, cap.saturating_mul(4))
-        .into_iter()
-        .filter(|d| learns_from(d))
-        .take(cap)
-        .collect()
+    crate::decision::report::newest_run_dirs_where(roots, cap, learns_from)
 }
 
 /// Every run directory under the project `roots`, production and scenario

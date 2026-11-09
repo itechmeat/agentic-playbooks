@@ -123,8 +123,8 @@ fn an_unreadable_manifest_never_counts_and_refuses() {
 }
 
 /// Flagged runs never crowd earlier history out of a capped window: two
-/// unflagged runs followed by more flagged runs than the cap still give
-/// the two.
+/// unflagged runs followed by more flagged runs than any multiple of the
+/// cap a scan bound would allow still give the two.
 #[test]
 fn flagged_runs_do_not_crowd_out_history() {
     child(
@@ -144,7 +144,7 @@ fn flagged_runs_do_not_crowd_out_history() {
                 let d = seed(root, id, i as u64, Source::None);
                 touch(&d, i as u64);
             }
-            for i in 0..cap + 10 {
+            for i in 0..cap * 8 + 10 {
                 let d = seed(root, &format!("x{i:02}"), 100 + i as u64, Source::Boolean);
                 touch(&d, 100 + i as u64);
             }

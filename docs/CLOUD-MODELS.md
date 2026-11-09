@@ -120,9 +120,13 @@ warnings because a run in host mode spawns no dsh.
    manifest, journal, cache). The value reaches dsh through the spawn
    environment and is kept under `process_env: allowlist`. Whatever the
    agent prints of it is replaced with `[redacted:NEARAI_API_KEY]` in the
-   reply, the failure text, the stream log and the attempt's transcript
-   before apb stores any of it, and the run surfaces redact the current
-   value on read too. A value shorter than 8 characters is not replaced
+   reply, the failure text, the stream log, the attempt's transcript and
+   its status file before apb stores or reads any of it (the logs as the
+   agent prints, so a killed driver leaves no plain value), and the run
+   surfaces redact the current value on read too. A key variable an
+   installed connector references never reaches an agent, so such a
+   start is refused `cloud_key_missing`; the check covers the
+   supervisor's profile and an ephemeral executor override too. A value shorter than 8 characters is not replaced
    (the start warns). The failure classifier ignores the marker, so an
    echoed key never reads as an auth failure.
 5. **Cost.** dsh prints no cost. An attempt on a catalog model that

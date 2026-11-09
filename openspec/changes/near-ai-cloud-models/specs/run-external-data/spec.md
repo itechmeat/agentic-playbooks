@@ -104,8 +104,16 @@ For a flagged run apb SHALL write nothing into the known problems store, the cor
 - **THEN** the manifest has no `candidate_trial` and the candidate's trial record is unchanged
 
 #### Scenario: Run memory from a step
-- **WHEN** an agent step of a flagged run calls `playbook_memory` with `get` or `set`
+- **WHEN** an agent step of a flagged run calls `playbook_memory` with `get` or `set`, for its own workspace or another one
 - **THEN** it is refused with `external_data_run` and the memory file is unchanged
+
+#### Scenario: A step whose run is not found
+- **WHEN** a step calls `playbook_memory` with `get` or `set` and its run is found neither through `APB_RUN_DIR` nor under the target workspace
+- **THEN** it is refused with `external_data_run`
+
+#### Scenario: A failed preparation
+- **WHEN** a flagged start fails in preparation before its manifest is written
+- **THEN** the `run_started` the failure writes carries `external_data: true` and no reader of earlier runs counts the run
 
 #### Scenario: A forward patch
 - **WHEN** the supervisor of a flagged run calls `supervisor_patch_playbook` with `scope: next_runs`

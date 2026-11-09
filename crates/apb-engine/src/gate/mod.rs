@@ -1559,6 +1559,7 @@ pub fn check_rebind(
                 &loaded.doc,
                 &key,
                 &apb_core::cloud_models::catalog::load_all(),
+                &cloud::connector_scrub(root),
             )?;
             Ok(bundle)
         }

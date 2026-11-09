@@ -26,10 +26,17 @@ pub(crate) struct KeyScrub {
 }
 
 impl KeyScrub {
-    /// The scrub of a spawn with `env`: `None` when it runs no cloud model,
-    /// its key does not reach it, or the value is too short to replace.
-    pub(crate) fn for_spawn(env: &SpawnEnv) -> Option<Self> {
-        let name = env.cloud.as_ref()?.key_env()?;
+    /// The scrub of a spawn of `agent` on `model` with `env`: `None` when it
+    /// runs no cloud model, its key does not reach it, or the value is too
+    /// short to replace. The key variable comes from the run's catalog
+    /// snapshot, else from the agent's routes, so an executor an older apb
+    /// resolved without a snapshot is scrubbed too.
+    pub(crate) fn for_spawn(env: &SpawnEnv, agent: &str, model: &str) -> Option<Self> {
+        let name = env
+            .cloud
+            .as_ref()
+            .and_then(|c| c.key_env())
+            .or_else(|| apb_core::agents::cloud_key_env(agent, model))?;
         let value = env
             .overlay
             .iter()
@@ -44,6 +51,12 @@ impl KeyScrub {
             key: Secret::new(value),
             marker: format!("[redacted:{name}]"),
         })
+    }
+
+    /// The same replacement for a stream's file copy, applied as the agent
+    /// prints (`crate::capture::Redact`).
+    pub(crate) fn redact(&self) -> crate::capture::Redact {
+        crate::capture::Redact::new(self.key.clone(), self.marker.clone())
     }
 
     /// `text` with every occurrence of the key replaced.
@@ -109,7 +122,7 @@ mod tests {
 
     #[test]
     fn the_key_is_replaced_in_text_and_files() {
-        let s = KeyScrub::for_spawn(&env_with("fake-key-1234567")).unwrap();
+        let s = KeyScrub::for_spawn(&env_with("fake-key-1234567"), "dsh", "x").unwrap();
         assert_eq!(
             s.text("got fake-key-1234567 here"),
             "got [redacted:NEARAI_API_KEY] here"
@@ -126,11 +139,23 @@ mod tests {
 
     #[test]
     fn a_short_key_or_no_cloud_model_is_not_scrubbed() {
-        assert!(KeyScrub::for_spawn(&env_with("short")).is_none());
+        assert!(KeyScrub::for_spawn(&env_with("short"), "dsh", "x").is_none());
         let plain = SpawnEnv {
             overlay: vec![("NEARAI_API_KEY".into(), "fake-key-1234567".into())],
             ..Default::default()
         };
-        assert!(KeyScrub::for_spawn(&plain).is_none());
+        assert!(KeyScrub::for_spawn(&plain, "dsh", "deepseek-v4").is_none());
+    }
+
+    #[test]
+    fn a_cloud_route_without_a_snapshot_is_still_scrubbed() {
+        // An executor an older apb resolved records no catalog snapshot;
+        // its model still routes to the provider whose key it carries.
+        let old = SpawnEnv {
+            overlay: vec![("NEARAI_API_KEY".into(), "fake-key-1234567".into())],
+            ..Default::default()
+        };
+        let s = KeyScrub::for_spawn(&old, "dsh", "nearai/Qwen/Qwen3.8-27B").unwrap();
+        assert_eq!(s.text("k=fake-key-1234567"), "k=[redacted:NEARAI_API_KEY]");
     }
 }

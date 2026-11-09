@@ -243,7 +243,9 @@ fn tree_secrets(run_dir: &Path) -> TreeSecrets {
 }
 
 /// The current values of the cloud key variables the run's manifest names
-/// (`ResolvedInvocation::cloud`), when set and long enough to match: the
+/// (`ResolvedInvocation::cloud`, else the provider the executor's model
+/// routes to, for a manifest an older apb wrote without a snapshot), when
+/// set and long enough to match: the
 /// second layer behind the scrub at store time (`adapter::key_scrub`), for
 /// text an older apb stored. A rotated key is no longer known here; what
 /// this apb stored already holds the marker.
@@ -255,7 +257,12 @@ fn cloud_key_values(run_dir: &Path) -> Vec<Secret> {
         .profiles
         .iter()
         .flat_map(|p| p.chain.iter())
-        .filter_map(|ri| ri.cloud.as_ref()?.key_env())
+        .filter_map(|ri| {
+            ri.cloud
+                .as_ref()
+                .and_then(|c| c.key_env())
+                .or_else(|| apb_core::agents::cloud_key_env(&ri.agent_id, &ri.model))
+        })
         .collect();
     names
         .into_iter()

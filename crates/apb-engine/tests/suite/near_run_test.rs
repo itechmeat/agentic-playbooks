@@ -70,13 +70,18 @@ while [ $# -gt 0 ]; do [ "$1" = "--patch" ] && patch="$2"; shift; done
 cat > /dev/null
 env | cut -d= -f1 > '{names}'
 if [ -n "$FAIL_MODEL" ] && grep -q "$FAIL_MODEL" "$patch"; then cat '{quota}'; exit 1; fi
+if [ -f '{need_route}' ] && ! grep -q "NEAR AI Cloud" "$patch"; then echo "no provider route nearai" >&2; exit 1; fi
 echo "stderr $NEARAI_API_KEY" >&2
-[ -n "$APB_STATUS_FILE" ] && printf '{{"status":"success"}}' > "$APB_STATUS_FILE"
+if [ -n "$APB_STATUS_FILE" ] && [ -f '{flag}' ]; then
+  printf '{{"status":"success","outputs":{{"said":"%s"}},"findings":[{{"kind":"bug","location":"a","evidence":"saw %s","why_not_fixed":"w"}}],"warnings":[{{"subject":"key %s","reason":"r"}}]}}' "$NEARAI_API_KEY" "$NEARAI_API_KEY" "$NEARAI_API_KEY" > "$APB_STATUS_FILE"
+elif [ -n "$APB_STATUS_FILE" ]; then printf '{{"status":"success"}}' > "$APB_STATUS_FILE"; fi
 sed "s/__KEY__/$NEARAI_API_KEY/" '{ok}'
 "#,
             names = names.display(),
             quota = quota.display(),
             ok = ok.display(),
+            flag = dir.join("status-echo").display(),
+            need_route = dir.join("need-route").display(),
         ),
     );
     let mut perm = fs::metadata(&path).unwrap().permissions();
@@ -226,6 +231,98 @@ fn a_near_step_is_priced_billed_scrubbed_and_classed() {
     let _rotated = EnvVar::set("NEARAI_API_KEY", "another-key-7654321");
     let again = apb_engine::run_view::RunView::load(&run_dir, &res.run_id).unwrap();
     assert!(again.state.outputs["w"].contains("[redacted:NEARAI_API_KEY]"));
+}
+
+#[test]
+fn a_status_file_that_holds_the_key_is_scrubbed_before_it_is_read() {
+    let p = project(&playbook(ONE.0, ONE.1, ""), ALLOWLISTED, &[]);
+    // The stub writes the key into the status file's outputs, findings and
+    // warnings.
+    fs::write(p.root().join("status-echo"), "").unwrap();
+    let res = run(p.root(), "near", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let run_dir = p.run_dir(&res.run_id);
+    assert_eq!(holding(&run_dir, KEY), Vec::<PathBuf>::new());
+    assert_eq!(holding(p.root(), KEY), Vec::<PathBuf>::new());
+    let view = apb_engine::run_view::RunView::load(&run_dir, &res.run_id).unwrap();
+    assert!(
+        view.state.outputs["w"].contains("[redacted:NEARAI_API_KEY]"),
+        "{}",
+        view.state.outputs["w"]
+    );
+}
+
+#[test]
+fn a_manifest_without_a_catalog_snapshot_still_redacts_the_key_on_read() {
+    let p = project(&playbook(ONE.0, ONE.1, ""), ALLOWLISTED, &[]);
+    let res = run(p.root(), "near", None, RunOptions::default()).unwrap();
+    let run_dir = p.run_dir(&res.run_id);
+    // The manifest as an older apb wrote it: no `cloud` snapshot on the
+    // executor, whose model still routes to NEAR AI Cloud.
+    let path = run_dir.join("manifest.yaml");
+    let text = fs::read_to_string(&path).unwrap();
+    let mut doc: serde_json::Value = yaml_serde::from_str(&text).unwrap();
+    let mut removed = 0;
+    for prof in doc["profiles"].as_array_mut().unwrap() {
+        for ri in prof["chain"].as_array_mut().unwrap() {
+            removed += usize::from(ri.as_object_mut().unwrap().remove("cloud").is_some());
+        }
+    }
+    assert!(removed > 0, "{text}");
+    fs::write(&path, yaml_serde::to_string(&doc).unwrap()).unwrap();
+    let redactor = apb_engine::run_redact::RunRedactor::for_run(p.root(), &run_dir);
+    let out = redactor.redact_text(&format!("old {KEY} text"));
+    assert!(!out.contains(KEY), "{out}");
+}
+
+/// The wake-up probe of a quota pause runs the executor as its attempts
+/// do: on apb's NEAR AI Cloud route, from the run's catalog snapshot.
+#[test]
+fn the_quota_probe_runs_on_the_cloud_route() {
+    let profile =
+        "name: main\ndescription: t\nexecutor:\n  agent: dsh\n  model: nearai/Qwen/Qwen3.8-27B\n";
+    let cfg = tempfile::tempdir().unwrap();
+    let p = project(
+        &playbook(ONE.0, ONE.1, ""),
+        profile,
+        &[
+            ("FAIL_MODEL", "Qwen/Qwen3.8-27B"),
+            ("APB_INFRA_BACKOFF_MS", "20,20"),
+            ("APB_QUOTA_BACKOFF_MS", "600000,1200000"),
+        ],
+    );
+    let _cfg = EnvVar::set("APB_CONFIG_DIR", cfg.path());
+    apb_core::run_origin::ensure_key().unwrap();
+    let res = run(p.root(), "near", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Paused);
+    let run_dir = p.run_dir(&res.run_id);
+    let seq = read_all(&run_dir)
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|e| match &e.payload {
+            EventPayload::RunPaused { reason, .. } if reason.starts_with("quota") => Some(e.seq),
+            _ => None,
+        })
+        .expect("a quota pause");
+    // The quota is back; the stub now answers only on apb's route.
+    let _ok = EnvVar::remove("FAIL_MODEL");
+    fs::write(p.root().join("need-route"), "").unwrap();
+    apb_engine::pause::probe_before_wake(p.root(), &res.run_id, seq).unwrap();
+    let detail = read_all(&run_dir)
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|e| match &e.payload {
+            EventPayload::SupervisorAction { action, detail, .. }
+                if action == apb_engine::pause::quota::QUOTA_PROBE_ACTION =>
+            {
+                Some(detail.clone())
+            }
+            _ => None,
+        })
+        .expect("the probe's outcome");
+    assert!(detail.contains("answered"), "{detail}");
 }
 
 #[test]

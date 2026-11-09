@@ -190,6 +190,50 @@ async fn a_flagged_start_is_flagged_and_shown_and_remember_is_refused() {
         assert!(err.contains("external_data_run"), "{err}");
         assert_eq!(memory_files(root), memory);
     }
+
+    // Nor in another workspace, where its run is not found: through the
+    // run directory the engine hands the step, and fail-closed without it.
+    let other = tempfile::tempdir().unwrap();
+    seed(other.path());
+    let none = apb_core::step_env::StepCaller::default();
+    crate::tools::memory::playbook_memory_as(
+        other.path(),
+        &target,
+        crate::tools::memory::MemoryAction::Set(apb_core::run_memory::RememberInput {
+            params: Some(BTreeMap::from([(
+                "customer".to_string(),
+                "other".to_string(),
+            )])),
+            instruction: None,
+        }),
+        &none,
+    )
+    .unwrap();
+    let saved = std::env::var_os("APB_RUN_DIR");
+    for named in [Some(dir.as_os_str()), None] {
+        // SAFETY: CROSS_ENV_LOCK serializes the tests that touch the env.
+        unsafe {
+            match named {
+                Some(d) => std::env::set_var("APB_RUN_DIR", d),
+                None => std::env::remove_var("APB_RUN_DIR"),
+            }
+        }
+        let res = crate::tools::memory::playbook_memory_as(
+            other.path(),
+            &target,
+            crate::tools::memory::MemoryAction::Get,
+            &step,
+        );
+        let err = res.expect_err("refused").to_string();
+        assert!(err.contains("external_data_run"), "{err}");
+    }
+    // SAFETY: as above.
+    unsafe {
+        match saved {
+            Some(v) => std::env::set_var("APB_RUN_DIR", v),
+            None => std::env::remove_var("APB_RUN_DIR"),
+        }
+    }
 }
 
 #[tokio::test]
