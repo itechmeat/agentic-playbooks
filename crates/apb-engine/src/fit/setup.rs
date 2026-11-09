@@ -106,12 +106,8 @@ fn check_profile(
                 out.push(finding(UNTRUSTED, &key, false));
             }
             let ex = &loaded.doc.executor;
-            let chain = std::iter::once((ex.agent.as_str(), ex.model.as_str())).chain(
-                ex.fallbacks
-                    .iter()
-                    .map(|f| (f.agent.as_str(), f.model.as_str())),
-            );
-            for (agent, model) in chain {
+            // The executor, its fallbacks and every tier.
+            for (agent, model) in loaded.doc.executor_pairs() {
                 out.extend(model_finding(agent, model, &key, cx));
             }
             ProfileCheck {
@@ -161,7 +157,10 @@ fn model_finding(
     cx: &ModelContext,
 ) -> Option<ProfileFinding> {
     let issue = model_check::check(agent, model, cx)?;
-    let blocking = !matches!(issue, ModelIssue::Unverifiable | ModelIssue::NewInFamily);
+    let blocking = match &issue {
+        ModelIssue::Cloud(c) => c.is_blocking(),
+        _ => !matches!(issue, ModelIssue::Unverifiable | ModelIssue::NewInFamily),
+    };
     let mut f = ProfileFinding {
         agent: Some(agent.to_string()),
         ..finding(issue.code(), profile_key, blocking)
@@ -171,6 +170,10 @@ fn model_finding(
         ModelIssue::NotAllowed(detail) | ModelIssue::PolicyViolation(detail) => {
             f.model = Some(model.to_string());
             f.detail = Some(detail.clone());
+        }
+        ModelIssue::Cloud(_) => {
+            f.model = Some(model.to_string());
+            f.detail = Some(issue.describe(agent, model));
         }
         _ => f.model = Some(model.to_string()),
     }

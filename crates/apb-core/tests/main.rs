@@ -76,6 +76,8 @@ mod launch_floor_test;
 mod list_schema_test;
 #[path = "suite/migration_test.rs"]
 mod migration_test;
+#[path = "suite/model_check_cloud_test.rs"]
+mod model_check_cloud_test;
 #[path = "suite/models_table_test.rs"]
 mod models_table_test;
 #[path = "suite/notify_config_test.rs"]

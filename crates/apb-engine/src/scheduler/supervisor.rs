@@ -108,12 +108,14 @@ pub fn spawn_supervisor_agent(
         brief.push_str(&brief_lines(&manifest, playbook));
         // The supervisor profile's `process_env`, for this chain element's
         // agent. Not journaled: a supervisor spawn is no attempt.
-        let step_env = spawn_env.with_process(crate::agent_env::plan_for_entry(
-            entry.process_env.as_ref(),
-            &inv.agent_id,
-            &inv.model,
-            &scrub,
-        ));
+        let step_env = spawn_env
+            .with_process(crate::agent_env::plan_for_entry(
+                entry.process_env.as_ref(),
+                &inv.agent_id,
+                &inv.model,
+                &scrub,
+            ))
+            .with_cloud(inv.cloud.clone());
         // Agent work like any attempt: the supervisor starts only on a basis
         // the run's billing covers. It loads the agent's own settings (no
         // minimal settings), so its basis is read on those. A held element is

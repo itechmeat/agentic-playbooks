@@ -772,6 +772,20 @@ pub(crate) fn prepare_placed(
             crate::gate::isolation::text(&refused)
         )));
     }
+    // Cloud catalog models (`gate::cloud`): in cli mode, a model an agent
+    // step cannot run on, one the catalog lacks, or a primary executor whose
+    // key does not reach it refuses the start before anything is written.
+    // Host mode spawns no agent CLI; a scenario run spawns nothing.
+    let cloud_warnings =
+        if scenario.is_none() && execution.mode == apb_core::execution::ExecutionMode::Cli {
+            crate::gate::cloud::check_tree(root, &playbook, origin, opts.expected_children.as_ref())
+                .map_err(|r| EngineError::Invalid(crate::gate::cloud::text(&r)))?
+        } else {
+            Vec::new()
+        };
+    for w in &cloud_warnings {
+        eprintln!("apb: warning: {w}");
+    }
 
     // --- 0.24.0 irreversible consent ---
     // Checked on the effective playbook before anything is written, so a
@@ -1535,6 +1549,7 @@ pub(super) fn scripted_manifest(playbook: &Playbook) -> crate::manifest::RunExec
             soul_delivery: Default::default(),
             canonical_executable: std::path::PathBuf::new(),
             executable_fingerprint: String::new(),
+            cloud: None,
         }],
         ephemeral: false,
         hermetic: false,

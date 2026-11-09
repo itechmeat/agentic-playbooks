@@ -203,7 +203,15 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   patch layer as an MCP host), the other agents one file each;
   `apb_core::zcode` re-exports `agents/zcode`), free agent detection over the
   agent registry (`detect.rs`), curated models table
-  (`models_table.rs` + `assets/models.yaml`), graph SCC and reachability helpers
+  (`models_table.rs` + `assets/models.yaml`), the cloud model catalogs
+  (`cloud_models/`: `mod` the provider registry, the row, `PrivacyClass`
+  with its lenient read, `CloudRoute`, `CloudModelRef` and the run's
+  `CloudSnapshotRef`; `near_ai` NEAR AI Cloud's URLs, key variable, listing
+  parser and owner to class rule; `catalog` the embedded snapshot, the cache
+  under the config dir, the one network `refresh` and the doctor line;
+  `check` the one judgement (`cloud_model_unknown`, `_no_tools`,
+  `_not_chat`, `cloud_effort_unsupported`); `privacy` the class along a
+  chain; `validate/cloud_models` V220 to V222), graph SCC and reachability helpers
   shared by the validator and the engine (`graphutil.rs`, with
   `reachable_with_policies` the one reachability from the start and every
   failure policy handler that V07 and the run graph's "why it did not run"
@@ -988,6 +996,28 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   (`apb-cli` `bundled_scenarios_test`) and by a person or an installing
   agent with `apb eval <id> --scope global --level quick`.
 
+- **Cloud models** (`docs/CLOUD-MODELS.md`,
+  [decision record 0014](docs/adr/0014-cloud-provider-knowledge-lives-in-its-catalog-module.md)):
+  NEAR AI Cloud's public catalog is embedded in the binary and refreshed
+  only by `apb models --refresh`, `POST /api/models/refresh` and the
+  dashboard's daily task (no credential sent, refused read-only). An agent
+  declares the routes it serves on its model rules
+  (`ModelPolicy::cloud_routes`; dsh: `nearai/<id>[@<effort>]`); the lists
+  offer every row with tool calling, and every authoring surface judges a
+  cloud model through `cloud_models::check` after the person's
+  `model_policy`. A run snapshots the row (`ResolvedInvocation::cloud`, the
+  manifest), refuses a start in cli mode (and a rebind) on an unknown model,
+  one an agent step cannot run on or a primary executor without its key
+  (`gate::cloud`, in `scheduler/prepare` before the run directory), writes
+  dsh's patch with an `llm-pi-ai` row for the route (`SpawnEnv::cloud`),
+  scrubs the key value from everything it stores
+  (`adapter/key_scrub`, marker `[redacted:<VAR>]`, which the failure
+  classifier ignores), prices an unpriced attempt from the row
+  (`AgentUsage.priced_from`, basis `billed` with the key) and journals the
+  class (`attempt_started.cloud`; `privacy_class_left` on the run
+  surfaces). A `decisions.yaml` `llm_emulation` provider may name
+  `catalog: near-ai-cloud` (`ProviderSpec.cloud`, priced and classed in
+  `decision_made.privacy_class`).
 - **Edge addresses and route facts** (spec
   `docs/superpowers/specs/2026-11-01-edge-identity-design.md`): every edge
   has an address in its definition (`id:<id>` or `e:<from>><to>#<n>`,

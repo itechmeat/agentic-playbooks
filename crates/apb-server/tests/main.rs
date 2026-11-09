@@ -48,6 +48,8 @@ mod bind_interlock_test;
 #[cfg(unix)]
 #[path = "suite/budget_api_test.rs"]
 mod budget_api_test;
+#[path = "suite/cloud_models_api_test.rs"]
+mod cloud_models_api_test;
 #[path = "suite/connectors_api_test.rs"]
 mod connectors_api_test;
 #[path = "suite/corrections_api_test.rs"]

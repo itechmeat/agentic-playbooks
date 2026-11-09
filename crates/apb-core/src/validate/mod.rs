@@ -10,6 +10,7 @@
 mod approval;
 mod baseline;
 mod budget;
+pub mod cloud_models;
 mod connectors;
 mod decisions;
 mod edges;
@@ -288,6 +289,12 @@ pub struct ValidationContext {
     /// resolved ([`ValidationContext::with_child_outputs`]). A node absent
     /// here is not checked (V46, V133).
     pub child_outputs: std::collections::BTreeMap<String, Vec<String>>,
+    /// The executor pairs (agent, model) of each resolvable profile, keyed
+    /// by `<scope>:<name>` (`project:` and `global:`), for the cloud rules
+    /// (V220-V222). Empty means no check.
+    pub profile_chains: std::collections::BTreeMap<String, Vec<(String, String)>>,
+    /// The cloud catalogs as this machine has them (`crate::cloud_models`).
+    pub cloud: Vec<crate::cloud_models::catalog::CatalogSnapshot>,
 }
 
 impl ValidationContext {
@@ -303,6 +310,8 @@ impl ValidationContext {
             playbook_origin: origin,
             connectors: crate::connector::resolve::validation_facts(),
             child_outputs: Default::default(),
+            profile_chains: profile_chains(reg, origin),
+            cloud: crate::cloud_models::catalog::load_all(),
         }
     }
 
@@ -356,6 +365,44 @@ impl ValidationContext {
     }
 }
 
+/// The executor pairs of every profile a definition in `reg` can bind: the
+/// registry's own profiles (`project:`, for a project registry) and the
+/// global ones (`global:`). An unreadable profile is left out (V14 and run
+/// start report it).
+fn profile_chains(
+    reg: &crate::registry::Registry,
+    origin: PlaybookOrigin,
+) -> std::collections::BTreeMap<String, Vec<(String, String)>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut add = |scope: &str, dir: &std::path::Path| {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.filter_map(Result::ok) {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Some(doc) = std::fs::read_to_string(e.path().join("profile.yaml"))
+                .ok()
+                .and_then(|y| crate::profile::ProfileDoc::from_yaml(&y).ok())
+            else {
+                continue;
+            };
+            let pairs = doc
+                .executor_pairs()
+                .into_iter()
+                .map(|(a, m)| (a.to_string(), m.to_string()))
+                .collect();
+            out.insert(cloud_models::chain_key(scope, &name), pairs);
+        }
+    };
+    if origin == PlaybookOrigin::Project {
+        add("project", &reg.base().join("profiles"));
+    }
+    if let Some(g) = crate::profile_store::global_dir() {
+        add("global", &g);
+    }
+    out
+}
+
 pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationReport {
     let mut r = ValidationReport::default();
     check_unique_ids(playbook, &mut r); // V01, V02
@@ -404,6 +451,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     unattended::check_unattended(playbook, ctx, &mut r); // V141-V143
     output_types::check_output_types(playbook, &mut r); // V167, V168
     write_scope::check_write_scope(playbook, &mut r); // V170-V172
+    cloud_models::check_cloud_models(playbook, ctx, &mut r); // V220-V222
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10

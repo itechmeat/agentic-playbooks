@@ -238,7 +238,31 @@ fn tree_secrets(run_dir: &Path) -> TreeSecrets {
         }
     }
     descendants(&top, &mut found);
+    found.values.extend(cloud_key_values(run_dir));
     found
+}
+
+/// The current values of the cloud key variables the run's manifest names
+/// (`ResolvedInvocation::cloud`), when set and long enough to match: the
+/// second layer behind the scrub at store time (`adapter::key_scrub`), for
+/// text an older apb stored. A rotated key is no longer known here; what
+/// this apb stored already holds the marker.
+fn cloud_key_values(run_dir: &Path) -> Vec<Secret> {
+    let Some(m) = crate::manifest::read(run_dir).ok().flatten() else {
+        return Vec::new();
+    };
+    let names: BTreeSet<&'static str> = m
+        .profiles
+        .iter()
+        .flat_map(|p| p.chain.iter())
+        .filter_map(|ri| ri.cloud.as_ref()?.key_env())
+        .collect();
+    names
+        .into_iter()
+        .filter_map(|n| std::env::var(n).ok())
+        .filter(|v| v.chars().count() >= apb_core::cloud_models::MIN_KEY_CHARS)
+        .map(Secret::new)
+        .collect()
 }
 
 /// A run config that could not be read, and whether the file is missing

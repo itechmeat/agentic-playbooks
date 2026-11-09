@@ -41,6 +41,7 @@ mod launch;
 mod make_global;
 mod manage;
 mod memory;
+mod models;
 mod notify;
 mod onboarding;
 mod passkey;
@@ -168,6 +169,15 @@ enum Command {
         #[arg(long)]
         refresh: bool,
         /// Machine-readable output only (no survey hint)
+        #[arg(long)]
+        json: bool,
+    },
+    /// The cloud model catalogs apb knows (NEAR AI Cloud): source, age, and
+    /// per model its privacy class, tool calling and prices. `--refresh`
+    /// fetches each public listing first (no credential is sent)
+    Models {
+        #[arg(long)]
+        refresh: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1368,6 +1378,7 @@ fn main() -> ExitCode {
         // --- end 0.24.0 eval suites ---
         Some(Command::Migrate { apply }) => migrate_cmd(&root, apply),
         Some(Command::Detect { refresh, json }) => detect_cmd(refresh, json),
+        Some(Command::Models { refresh, json }) => models::models_cmd(refresh, json),
         Some(Command::Adopt { name, scope }) => adopt_cmd(&root, name.as_deref(), scope.as_deref()),
         Some(Command::Memory { cmd }) => memory::memory_cmd(&root, cmd),
         Some(Command::MakeGlobal {

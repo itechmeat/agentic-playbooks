@@ -437,3 +437,79 @@ fn the_supervisor_spawn_gets_the_run_scoped_leading_arguments() {
     assert!(patch.contains("provider: \"zai\""), "{patch}");
     assert!(patch.contains("model: \"glm-5.3\""), "{patch}");
 }
+
+/// A NEAR model keeps `NEARAI_API_KEY` under an allowlist, and the spawned
+/// process sees it.
+#[test]
+fn a_near_model_keeps_its_key_under_an_allowlist() {
+    let _l = common::env_lock();
+    let home = tempfile::tempdir().unwrap();
+    let _env = canaries(home.path());
+    let _key = EnvVar::set("NEARAI_API_KEY", "fake-key-1234567");
+    let model = "nearai/Qwen/Qwen3.8-27B";
+    let plan = apb_engine::agent_env::plan_for("dsh", model, &allowlist(), &[]);
+    assert!(plan.keeps("NEARAI_API_KEY"), "{:?}", plan.keep);
+    let bin = tempfile::tempdir().unwrap();
+    let run_dir = tempfile::tempdir().unwrap();
+    let dump = bin.path().join("env.dump");
+    let program = stub(bin.path(), &dump);
+    let env = run_env(run_dir.path(), Some(Arc::new(plan)));
+    let got = spawn(
+        &program,
+        builtin("dsh").unwrap(),
+        "dsh",
+        model,
+        &env,
+        bin.path(),
+        &dump,
+    );
+    assert!(got.has("NEARAI_API_KEY"));
+    assert!(!got.has(OPERATOR_CANARY));
+}
+
+/// A dsh supervisor on a NEAR model gets the provider row in its patch
+/// (decision record 0013 and 0014).
+#[test]
+fn the_supervisor_on_a_near_model_names_the_route_in_its_patch() {
+    let bin = tempfile::tempdir().unwrap();
+    let run_dir = tempfile::tempdir().unwrap();
+    let argv_file = bin.path().join("argv");
+    let program = bin.path().join("dsh-stub");
+    common::write_sync(
+        &program,
+        &format!(
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\001' \"$a\"; done > '{0}.tmp'\nmv '{0}.tmp' '{0}'\n",
+            argv_file.display()
+        ),
+    );
+    let mut perm = fs::metadata(&program).unwrap().permissions();
+    perm.set_mode(0o755);
+    fs::set_permissions(&program, perm).unwrap();
+    let model = "nearai/Qwen/Qwen3.8-27B@low";
+    let cloud = apb_core::agents::cloud_snapshot(
+        "dsh",
+        model,
+        &apb_core::cloud_models::catalog::load_all(),
+    );
+    let env =
+        SpawnEnv::for_node(Vec::new(), run_dir.path(), "supervisor", Vec::new()).with_cloud(cloud);
+    let adapter = ClaudeAdapter {
+        program: program.to_string_lossy().into_owned(),
+        spec: builtin("dsh").unwrap(),
+    };
+    adapter
+        .spawn_supervisor("dsh", model, "brief", run_dir.path(), None, &env)
+        .expect("spawned");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !argv_file.is_file() {
+        assert!(Instant::now() < deadline, "the supervisor stub never ran");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let raw = fs::read_to_string(&argv_file).unwrap();
+    let argv: Vec<&str> = raw.split('\u{1}').filter(|s| !s.is_empty()).collect();
+    assert_eq!(argv[0], "--patch", "{argv:?}");
+    let patch = fs::read_to_string(argv[1]).unwrap();
+    assert!(patch.contains("provider: \"nearai\""), "{patch}");
+    assert!(patch.contains("- id: llm-pi-ai"), "{patch}");
+    assert!(patch.contains("apiKeyEnv: \"NEARAI_API_KEY\""), "{patch}");
+}

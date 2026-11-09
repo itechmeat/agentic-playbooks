@@ -62,6 +62,8 @@ mod bundled_scenarios_test;
 mod cache_cli;
 #[path = "suite/cli_test.rs"]
 mod cli_test;
+#[path = "suite/cloud_models_cli_test.rs"]
+mod cloud_models_cli_test;
 #[path = "suite/connector_cli.rs"]
 mod connector_cli;
 #[path = "suite/demo_playbooks_test.rs"]

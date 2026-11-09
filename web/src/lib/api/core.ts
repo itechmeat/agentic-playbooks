@@ -121,6 +121,9 @@ export type ProfileWriteResult = {
   name: string
   trusted?: boolean
   skills_unapproved?: { skill: string; digest: string }[]
+  /** Warnings the save kept the profile despite (a cloud model the catalog
+   * does not list, a chain that spans privacy classes). */
+  warnings?: string[]
 }
 
 export const writeProfile = (body: ProfileWriteBody, workspace = '') =>
@@ -161,6 +164,48 @@ export interface ModelOption {
   id: string
   vendor: string
   detected: boolean
+  /** The catalog row behind an option on a cloud route (NEAR AI Cloud). */
+  cloud?: CloudOption
+}
+
+/** How private a cloud model's traffic is, from most to least private. */
+export type PrivacyClass = 'confidential_tee' | 'third_party_tee' | 'incognito' | 'unverified'
+
+/** What the model list shows of a cloud catalog row. */
+export interface CloudOption {
+  provider: string
+  privacy_class: PrivacyClass
+  tools: boolean
+  reasoning: boolean
+  price_in_usd_mtok?: number
+  price_out_usd_mtok?: number
+  context_tokens?: number
+}
+
+/** One model row of a cloud catalog (`GET /api/models` `cloud[].models`). */
+export interface CloudModelRow {
+  id: string
+  owned_by: string
+  privacy_class: PrivacyClass
+  features: { tools: boolean; structured_outputs: boolean; json_mode: boolean; reasoning: boolean }
+  input_modalities: string[]
+  output_modalities: string[]
+  price_in_usd_mtok?: number
+  price_out_usd_mtok?: number
+}
+
+/** One cloud catalog as the server has it: the key by name only. */
+export interface CloudCatalog {
+  provider: string
+  display: string
+  base_url: string
+  key_env: string
+  key_present: boolean
+  source: 'embedded' | 'refreshed'
+  fetched_at: string
+  digest: string
+  dropped: number
+  models: CloudModelRow[]
 }
 
 /** The agent/model catalog, as the server computes it (`GET /api/models`,
@@ -173,8 +218,17 @@ export interface ModelCatalog {
   codex_static: string[]
   agents: AgentInfo[]
   options_by_agent: Record<string, ModelOption[]>
+  cloud?: CloudCatalog[]
 }
 export const fetchModelCatalog = () => getJson<ModelCatalog>('/api/models')
+
+/** Fetches every cloud catalog's public listing again (no key is sent). */
+export const refreshModelCatalog = () =>
+  requestJson<{ cloud: CloudCatalog[] }>('/api/models/refresh', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({}),
+  })
 
 export interface AvailableSkill {
   name: string

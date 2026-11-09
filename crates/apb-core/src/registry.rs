@@ -359,6 +359,12 @@ impl Registry {
         Ok(())
     }
 
+    /// The directory the registry lives in (`.apb`, or the config dir for
+    /// the global store).
+    pub fn base(&self) -> &Path {
+        &self.base
+    }
+
     pub fn profiles(&self) -> Vec<String> {
         let dir = self.base.join("profiles");
         let mut out: Vec<String> = fs::read_dir(dir)

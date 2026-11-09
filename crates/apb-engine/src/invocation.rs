@@ -23,6 +23,12 @@ pub struct ResolvedInvocation {
     pub canonical_executable: PathBuf,
     /// Binary fingerprint "size:mtime_ms" for verification on resume.
     pub executable_fingerprint: String,
+    /// The catalog row of a cloud model this executor runs, as the run
+    /// started (`apb_core::cloud_models`); every later read (the patch, the
+    /// price, the class) uses it. Absent for any other model and in a
+    /// manifest an older apb wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<apb_core::cloud_models::CloudSnapshotRef>,
 }
 
 /// Built-in invocation form of a built-in agent, from its module
@@ -194,6 +200,12 @@ pub fn resolve_invocation(
     let spec = spec_for(agent_id, global)?;
     let soul_delivery = spec.soul;
     let (canonical_executable, executable_fingerprint) = fingerprint_program(program);
+    let cloud = apb_core::agents::cloud_model(agent_id, model).and_then(|r| {
+        apb_core::cloud_models::CloudSnapshotRef::of(
+            &r,
+            &apb_core::cloud_models::catalog::load_all(),
+        )
+    });
     Ok(ResolvedInvocation {
         agent_id: agent_id.to_string(),
         model: model.to_string(),
@@ -201,6 +213,7 @@ pub fn resolve_invocation(
         soul_delivery,
         canonical_executable,
         executable_fingerprint,
+        cloud,
     })
 }
 
@@ -318,6 +331,7 @@ mod tests {
             soul_delivery: soul,
             canonical_executable: PathBuf::from("/bin/true"),
             executable_fingerprint: "0:0".into(),
+            cloud: None,
         }
     }
 
@@ -688,5 +702,35 @@ mod tests {
     fn native_required_empty_chain_errors() {
         let chain = vec![ri("agy", SoulDelivery::Prefix)];
         assert!(filter_chain(chain, SoulRequirement::NativeRequired, false).is_err());
+    }
+
+    /// A dsh executor on a NEAR model snapshots its catalog row; a claude
+    /// one does not; the field round-trips and a manifest entry an older
+    /// apb wrote (no field) still reads.
+    #[test]
+    fn a_near_executor_snapshots_its_catalog_row() {
+        let global = GlobalConfig::default();
+        let near = resolve_invocation("dsh", "nearai/Qwen/Qwen3.8-27B@high", "/bin/true", &global)
+            .unwrap();
+        let cloud = near.cloud.as_ref().expect("the catalog row");
+        assert_eq!(cloud.provider, "near-ai-cloud");
+        assert_eq!(cloud.route, "nearai");
+        assert_eq!(cloud.model.id, "Qwen/Qwen3.8-27B");
+        assert_eq!(cloud.effort.as_deref(), Some("high"));
+        assert!(cloud.catalog_digest.starts_with("sha256:"));
+        let claude =
+            resolve_invocation("claude", "claude-sonnet-5-5", "/bin/true", &global).unwrap();
+        assert!(claude.cloud.is_none());
+        let unknown =
+            resolve_invocation("dsh", "nearai/Qwen/Qwen3.8-72B", "/bin/true", &global).unwrap();
+        assert!(unknown.cloud.is_none());
+
+        let yaml = yaml_serde::to_string(&near).unwrap();
+        let back: ResolvedInvocation = yaml_serde::from_str(&yaml).unwrap();
+        assert_eq!(back, near);
+        let old = yaml_serde::to_string(&claude).unwrap();
+        assert!(!old.contains("cloud"));
+        let read: ResolvedInvocation = yaml_serde::from_str(&old).unwrap();
+        assert_eq!(read.cloud, None);
     }
 }

@@ -355,7 +355,11 @@ fn print_issue(id: &str, issue: &apb_core::validate::Issue) {
 /// `model_policy` refuses is an error (`zcode_model_not_allowed`,
 /// `model_policy_violation`); one outside apb's list for its agent, or one the
 /// installed agent does not list, is a warning; an unlisted id of a known
-/// Claude family is an info note (`model_new_in_family`); an agent with no invocation
+/// Claude family is an info note (`model_new_in_family`); a model on a cloud
+/// route is judged by the catalog (`cloud_model_*`: an error when an agent
+/// step cannot run on it, a warning when the catalog does not list it), and
+/// a chain that spans privacy classes is a warning
+/// (`profile_privacy_class_changes`); an agent with no invocation
 /// form is an error (`agent_no_invocation`). Returns whether no profile had
 /// an error. An unreadable profile is left to the run-time resolver, which
 /// reports it with its own error.
@@ -425,11 +429,24 @@ fn validate_profile_models(root: &Path, names: &[String]) -> bool {
                     issue.code(),
                     issue.describe(agent, model)
                 ),
+                ModelIssue::Cloud(c) => println!(
+                    "profile {name}: {} {} {}",
+                    if c.is_blocking() { "error" } else { "warning" },
+                    issue.code(),
+                    issue.describe(agent, model)
+                ),
                 ModelIssue::AgentNotInstalled | ModelIssue::Unverifiable => {}
             }
             if issue.is_blocking() {
                 ok = false;
             }
+        }
+        let privacy = apb_core::agents::chain_privacy(doc.executor_pairs(), &cx.cloud);
+        for w in &privacy.warnings {
+            println!(
+                "profile {name}: warning {w} the executor chain spans privacy classes ({})",
+                apb_core::cloud_models::privacy::describe(&privacy.classes)
+            );
         }
     }
     ok
@@ -2121,6 +2138,9 @@ fn usage_line(u: &apb_engine::run_view::RunUsage) -> String {
             line.push_str(&format!(" (reported by {} of them)", u.cost_attempts));
         }
     }
+    for p in &u.priced_from {
+        line.push_str(&format!(", {p}"));
+    }
     line
 }
 
@@ -3004,6 +3024,12 @@ fn identity_line(v: &apb_engine::execution_identity::fold::ExecutionIdentityView
             }
         }
         None => line.push_str(", position not recorded"),
+    }
+    if let Some(c) = &v.cloud {
+        line.push_str(&format!(", {} on {}", c.privacy_class.as_str(), c.provider));
+    }
+    if v.privacy_class_left {
+        line.push_str(", privacy_class_left: another class than the profile's executor");
     }
     line
 }

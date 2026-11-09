@@ -14,7 +14,12 @@
 //!   than this binary, which passes with an info note;
 //! - detection: an installed agent whose list has Full authority
 //!   (`opencode models`) names exactly what it can run.
+//!
+//! A model on a cloud route (`crate::cloud_models`) is judged by the
+//! catalog instead, after the policy ([`ModelIssue::Cloud`]).
 
+use crate::cloud_models::catalog::CatalogSnapshot;
+use crate::cloud_models::check::CloudIssue;
 use crate::config::{GlobalConfig, ModelRule};
 use crate::detect::{self, AgentInfo, Authority};
 use crate::models_table::{self, ModelsTable};
@@ -43,6 +48,8 @@ pub enum ModelIssue {
     /// Nothing can confirm or refute the model (a custom agent, a partial or
     /// missing list).
     Unverifiable,
+    /// A model on a cloud route the catalog judges (`crate::cloud_models`).
+    Cloud(CloudIssue),
 }
 
 impl ModelIssue {
@@ -56,16 +63,20 @@ impl ModelIssue {
             ModelIssue::NotAvailable => "model_not_available",
             ModelIssue::AgentNotInstalled => "agent_not_installed",
             ModelIssue::Unverifiable => "model_unverifiable",
+            ModelIssue::Cloud(c) => c.code(),
         }
     }
 
     /// Whether the run would be refused or the user's rule broken, as opposed
     /// to a likely-but-unproven problem.
     pub fn is_blocking(&self) -> bool {
-        matches!(
-            self,
-            ModelIssue::NotAllowed(_) | ModelIssue::PolicyViolation(_)
-        )
+        match self {
+            ModelIssue::Cloud(c) => c.is_blocking(),
+            other => matches!(
+                other,
+                ModelIssue::NotAllowed(_) | ModelIssue::PolicyViolation(_)
+            ),
+        }
     }
 
     /// Whether this is only a note: the model is accepted and nothing needs
@@ -93,6 +104,10 @@ impl ModelIssue {
             ModelIssue::Unverifiable => {
                 format!("{agent} model `{model}` cannot be verified on this machine")
             }
+            ModelIssue::Cloud(c) => match crate::agents::cloud_model(agent, model) {
+                Some(r) => format!("{agent} model `{model}`: {}", c.describe(&r)),
+                None => format!("{agent} model `{model}`: {}", c.code()),
+            },
         }
     }
 }
@@ -103,6 +118,8 @@ pub struct ModelContext {
     pub table: ModelsTable,
     pub zcode_family: String,
     pub policy: Vec<ModelRule>,
+    /// The cloud catalogs as this machine has them.
+    pub cloud: Vec<CatalogSnapshot>,
 }
 
 impl ModelContext {
@@ -118,6 +135,7 @@ impl ModelContext {
             policy: GlobalConfig::load()
                 .map(|g| g.model_policy)
                 .unwrap_or_default(),
+            cloud: crate::cloud_models::catalog::load_all(),
         }
     }
 }
@@ -137,6 +155,11 @@ pub fn check(agent: &str, model: &str, cx: &ModelContext) -> Option<ModelIssue> 
     };
     if let Some(issue) = policy_issue(probe, model, &bare, &cx.policy) {
         return Some(issue);
+    }
+    // A model on a cloud route is the catalog's to judge: the agent's closed
+    // list says nothing about it, and detection cannot list a catalog.
+    if let Some(r) = rules.and_then(|r| r.cloud_model(model)) {
+        return crate::cloud_models::check::check(&r, &cx.cloud).map(ModelIssue::Cloud);
     }
     let closed = models_table::static_models_for_agent(probe, &cx.table);
     // An unlisted id of a known model family (claude's) is a newer model:
@@ -227,6 +250,7 @@ mod tests {
             table: models_table::builtin(),
             zcode_family: crate::zcode::DEFAULT_FAMILY.to_string(),
             policy,
+            cloud: Vec::new(),
         }
     }
 

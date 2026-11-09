@@ -69,6 +69,8 @@ pub struct ExecutionIdentity {
     pub model_requested_by_apb: Option<String>,
     /// One per host task of the attempt; empty for a CLI attempt.
     pub host_tasks: Vec<HostTaskExec>,
+    /// The cloud catalog model the attempt ran on (`attempt_started.cloud`).
+    pub cloud: Option<crate::event::AttemptCloud>,
 }
 
 impl ExecutionIdentity {
@@ -245,6 +247,7 @@ impl IdentityWalk {
                 agent: String::new(),
                 model_requested_by_apb: None,
                 host_tasks: Vec::new(),
+                cloud: None,
             },
             started: false,
             finished: false,
@@ -291,6 +294,7 @@ impl IdentityWalk {
                 model,
                 item,
                 exec,
+                cloud,
                 ..
             } => {
                 let i = self.open(node, item.as_deref(), *attempt, true);
@@ -299,6 +303,7 @@ impl IdentityWalk {
                 s.id.attempt = e.seq;
                 s.id.agent.clone_from(agent);
                 s.id.step.clone_from(exec);
+                s.id.cloud.clone_from(cloud);
                 s.id.model_requested_by_apb = model.clone().filter(|m| !m.trim().is_empty());
                 Some(i)
             }
@@ -355,10 +360,47 @@ impl IdentityWalk {
 
 /// Every attempt of the run at `run_dir` as the run surfaces show it.
 pub fn views(run_dir: &Path, events: &[Event]) -> Vec<ExecutionIdentityView> {
-    let expected = primary_models(run_dir);
+    let manifest = crate::manifest::read(run_dir).ok().flatten();
+    let expected = manifest.as_ref().map(primary_models_of).unwrap_or_default();
+    let classes = manifest
+        .as_ref()
+        .map(primary_classes_of)
+        .unwrap_or_default();
     fold(events)
         .into_iter()
         .map(|id| view_of(id, &expected))
+        .map(|mut v| {
+            if let Some(primary) = classes.get(&v.node) {
+                let ran = v.cloud.as_ref().map(|c| c.privacy_class);
+                v.privacy_class_left = !v.is_host_view() && ran != *primary;
+            }
+            v
+        })
+        .collect()
+}
+
+impl ExecutionIdentityView {
+    fn is_host_view(&self) -> bool {
+        self.executed_by == super::EXECUTED_BY_HOST
+    }
+}
+
+/// The privacy class of each node's profile executor (the first entry of
+/// its chain, as [`primary_models_of`] reads it): `None` for a model
+/// outside any catalog.
+pub fn primary_classes_of(
+    m: &crate::manifest::RunExecutionManifest,
+) -> BTreeMap<String, Option<apb_core::cloud_models::PrivacyClass>> {
+    m.node_bindings
+        .iter()
+        .filter_map(|(node, key)| {
+            let p = m.profiles.iter().find(|p| &p.key() == key)?;
+            let first = p.chain.first()?;
+            Some((
+                node.clone(),
+                first.cloud.as_ref().map(|c| c.model.privacy_class),
+            ))
+        })
         .collect()
 }
 
@@ -403,6 +445,8 @@ pub(crate) fn view_of(
             source: s.source,
             entered: s.entered,
         }),
+        cloud: id.cloud,
+        privacy_class_left: false,
     }
 }
 
@@ -453,6 +497,17 @@ pub struct ExecutionIdentityView {
     #[cfg_attr(feature = "ts", ts(optional))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub step: Option<ExecStepView>,
+    /// The cloud catalog model the attempt ran on, with its privacy class;
+    /// absent for any other model.
+    #[cfg_attr(feature = "ts", ts(optional))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<crate::event::AttemptCloud>,
+    /// The attempt ran on another privacy class than the node's profile
+    /// executor (a fallback or a tier on another class, or on a model
+    /// outside any catalog).
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub privacy_class_left: bool,
 }
 
 /// Words a model id may carry beside the model itself: the vendor or the

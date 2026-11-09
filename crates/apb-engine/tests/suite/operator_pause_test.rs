@@ -775,6 +775,7 @@ fn a_timed_pause_of_a_run_whose_driver_died_mid_attempt_is_resumed_by_its_waker(
         token: None,
         isolation: None,
         exec: None,
+        cloud: None,
     })
     .unwrap();
     drop(log);

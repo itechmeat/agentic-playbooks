@@ -823,7 +823,13 @@ estimated?: boolean,
  * can say "5 attempts, 3 with usage" instead of passing the reporting
  * ones off as all of them.
  */
-finished_attempts: number, };
+finished_attempts: number, 
+/**
+ * Where apb priced costs the agents did not print, one line per catalog
+ * and fetch date (`priced from NEAR AI Cloud catalog 2026-11-09`);
+ * empty when every cost was printed.
+ */
+priced_from?: Array<string>, };
 
 export type CostByBasis = { 
 /**
@@ -930,7 +936,30 @@ mismatch: boolean,
 /**
  * `None`: position not recorded.
  */
-step?: ExecStepView, };
+step?: ExecStepView, 
+/**
+ * The cloud catalog model the attempt ran on, with its privacy class;
+ * absent for any other model.
+ */
+cloud?: AttemptCloud, 
+/**
+ * The attempt ran on another privacy class than the node's profile
+ * executor (a fallback or a tier on another class, or on a model
+ * outside any catalog).
+ */
+privacy_class_left?: boolean, };
+
+export type AttemptCloud = { 
+/**
+ * The provider id (`near-ai-cloud`).
+ */
+provider: string, 
+/**
+ * The catalog id.
+ */
+model: string, privacy_class: PrivacyClass, };
+
+export type PrivacyClass = "confidential_tee" | "third_party_tee" | "incognito" | "unverified";
 
 export type IsolationViewEntry = { path: string, 
 /**
@@ -1623,8 +1652,9 @@ input_tokens: number,
  */
 output_tokens: number, cache_read_tokens: number, cache_write_tokens: number, 
 /**
- * The attempt's cost in US dollars as the CLI printed it, whatever its
- * basis ([`Self::cost_basis`] says whether anybody is billed for it).
+ * The attempt's cost in US dollars as the CLI printed it, or as apb
+ * priced it from a catalog (`priced_from`), whatever its basis
+ * ([`Self::cost_basis`] says whether anybody is billed for it).
  * A printed `0` is no figure and is left out: some CLIs print it on a
  * login they do not price, and a non-zero figure is no proof of money
  * spent either, since a CLI may price work a subscription covers.
@@ -1635,9 +1665,25 @@ cost_usd?: number, source: UsageSource,
  * subscription covers, or not known. Absent in a journal an older apb
  * wrote, and a value a newer apb wrote reads as unknown.
  */
-cost_basis: CostBasis, };
+cost_basis: CostBasis, 
+/**
+ * Where `cost_usd` came from when apb priced it from a cloud catalog
+ * (`crate::cloud_models`), not the CLI. Absent for a printed cost and
+ * in older journals; a shape a newer apb wrote reads as absent.
+ */
+priced_from?: PricedFrom, };
 
 export type CostBasis = "billed" | "subscription_equivalent" | "unknown";
+
+export type PricedFrom = { 
+/**
+ * The provider id (`near-ai-cloud`).
+ */
+catalog: string, model: string, 
+/**
+ * The digest of the catalog the run snapshotted.
+ */
+digest: string, fetched_at: string, };
 
 export type CandidateTrial = { 
 /**

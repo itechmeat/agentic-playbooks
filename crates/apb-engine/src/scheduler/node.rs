@@ -2217,7 +2217,8 @@ fn execute_node_kind(
                         .with_attempt(attempt)
                         .with_process(step_env.process.clone())
                         .with_sandbox(place.sandbox.clone())
-                        .with_evidence(evidence_session.clone());
+                        .with_evidence(evidence_session.clone())
+                        .with_cloud(step.invocation.as_ref().and_then(|i| i.cloud.clone()));
                     let task = AgentTask {
                         prompt: attempt_prompt.as_ref(),
                         untrusted_section,
@@ -2323,6 +2324,10 @@ fn execute_node_kind(
                             token: attempt_policy.attempt_token.clone(),
                             isolation: place.record.clone(),
                             exec: attempt_exec.clone(),
+                            cloud: attempt_policy
+                                .cloud
+                                .as_ref()
+                                .map(crate::event::AttemptCloud::of),
                         }) {
                             Ok(seq) => {
                                 started_seq.set(seq);
@@ -2845,22 +2850,28 @@ fn execute_node_kind(
                     // a started (pid unknown) so every attempt_finished is preceded
                     // by an attempt_started.
                     if spawn_instant.is_none() {
-                        started_seq.set(journal.append_seq(EventPayload::AttemptStarted {
-                            item: None,
-                            node: node_id.into(),
-                            attempt,
-                            agent: step.agent.clone(),
-                            soul_delivery: step.soul_delivery.clone(),
-                            skills_mode: Some(skills_mode.to_string()),
-                            pid: None,
-                            spawn_ms: None,
-                            model: attempt_model.clone(),
-                            workdir: attempt_dir.clone(),
-                            transcript: attempt_transcript.clone(),
-                            token: attempt_policy.attempt_token.clone(),
-                            isolation: place.record.clone(),
-                            exec: attempt_exec.clone(),
-                        })?);
+                        started_seq.set(
+                            journal.append_seq(EventPayload::AttemptStarted {
+                                item: None,
+                                node: node_id.into(),
+                                attempt,
+                                agent: step.agent.clone(),
+                                soul_delivery: step.soul_delivery.clone(),
+                                skills_mode: Some(skills_mode.to_string()),
+                                pid: None,
+                                spawn_ms: None,
+                                model: attempt_model.clone(),
+                                workdir: attempt_dir.clone(),
+                                transcript: attempt_transcript.clone(),
+                                token: attempt_policy.attempt_token.clone(),
+                                isolation: place.record.clone(),
+                                exec: attempt_exec.clone(),
+                                cloud: attempt_policy
+                                    .cloud
+                                    .as_ref()
+                                    .map(crate::event::AttemptCloud::of),
+                            })?,
+                        );
                         super::provenance::attempt_started(run_dir, node_id, started_seq.get());
                         read_only::journal_check(
                             journal,
@@ -4421,7 +4432,8 @@ pub(crate) fn execute_finish_answer(
                 .join(format!("{node_id}-{attempt}.jsonl"));
             let attempt_policy = spawn_env
                 .with_attempt(attempt)
-                .with_process(step_env.process.clone());
+                .with_process(step_env.process.clone())
+                .with_cloud(ri.cloud.clone());
             let task = AgentTask {
                 prompt: &text,
                 untrusted_section: None,
@@ -4477,6 +4489,10 @@ pub(crate) fn execute_finish_answer(
                     token: attempt_policy.attempt_token.clone(),
                     isolation: None,
                     exec: attempt_exec.clone(),
+                    cloud: attempt_policy
+                        .cloud
+                        .as_ref()
+                        .map(crate::event::AttemptCloud::of),
                 }) {
                     Ok(seq) => started_seq.set(Some(seq)),
                     Err(e) => *spawn_err.borrow_mut() = Some(e),
@@ -4530,22 +4546,28 @@ pub(crate) fn execute_finish_answer(
             // Spawn failed before the callback ran: still journal a started
             // (pid unknown) so every attempt_finished is preceded by a started.
             if spawn_instant.is_none() {
-                started_seq.set(Some(journal.append_seq(EventPayload::AttemptStarted {
-                    item: None,
-                    node: node_id.into(),
-                    attempt,
-                    agent: agent_label.clone(),
-                    soul_delivery: Some(soul_delivery_str(ri.soul_delivery)),
-                    skills_mode: None,
-                    pid: None,
-                    spawn_ms: None,
-                    model: attempt_model.clone(),
-                    workdir: None,
-                    transcript: None,
-                    token: attempt_policy.attempt_token.clone(),
-                    isolation: None,
-                    exec: attempt_exec.clone(),
-                })?));
+                started_seq.set(Some(
+                    journal.append_seq(EventPayload::AttemptStarted {
+                        item: None,
+                        node: node_id.into(),
+                        attempt,
+                        agent: agent_label.clone(),
+                        soul_delivery: Some(soul_delivery_str(ri.soul_delivery)),
+                        skills_mode: None,
+                        pid: None,
+                        spawn_ms: None,
+                        model: attempt_model.clone(),
+                        workdir: None,
+                        transcript: None,
+                        token: attempt_policy.attempt_token.clone(),
+                        isolation: None,
+                        exec: attempt_exec.clone(),
+                        cloud: attempt_policy
+                            .cloud
+                            .as_ref()
+                            .map(crate::event::AttemptCloud::of),
+                    })?,
+                ));
             }
             last_close_seq = started_seq.get().unwrap_or(0);
             let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);

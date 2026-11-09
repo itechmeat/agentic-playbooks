@@ -119,6 +119,7 @@ impl SubmittedUsage {
             cost_usd: self.cost_usd.filter(|c| *c > 0.0),
             source: apb_core::agent_output::UsageSource::Reported,
             cost_basis: Default::default(),
+            priced_from: None,
         }
     }
 }

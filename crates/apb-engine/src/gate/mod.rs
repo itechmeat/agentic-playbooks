@@ -15,6 +15,7 @@
 
 pub mod billing;
 pub mod challenge;
+pub mod cloud;
 pub mod isolation;
 mod profile_refs;
 pub use profile_refs::collect_profile_refs;
@@ -1538,6 +1539,13 @@ pub fn check_rebind(
                     "detail": "run again with acknowledge_untrusted: true after user confirmation",
                 }));
             }
+            // A cloud model an agent step cannot run on, or one the catalog
+            // lacks, refuses the rebind as it refuses a start.
+            cloud::check_profile(
+                &loaded.doc,
+                &key,
+                &apb_core::cloud_models::catalog::load_all(),
+            )?;
             Ok(bundle)
         }
         Err(e) => Err(json!({ "policy": "profile_unresolved", "detail": e.to_string() })),

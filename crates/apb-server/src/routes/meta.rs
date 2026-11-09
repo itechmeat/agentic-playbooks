@@ -54,9 +54,97 @@ pub(crate) async fn list_models_handler() -> impl IntoResponse {
             "codex_static": c.table.codex_static_models,
             "agents": c.agents,
             "options_by_agent": c.options_by_agent,
+            "cloud": cloud_block(&c.cloud),
         }))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
+}
+
+/// The `cloud` block of `/api/models`: per provider its catalog, the key
+/// variable by name and whether it is set for the server, never its value.
+pub(crate) fn cloud_block(
+    snaps: &[apb_core::cloud_models::catalog::CatalogSnapshot],
+) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = snaps
+        .iter()
+        .filter_map(|s| {
+            let p = apb_core::cloud_models::lookup(&s.provider)?;
+            Some(serde_json::json!({
+                "provider": p.id,
+                "display": p.display,
+                "base_url": p.base_url,
+                "key_env": p.key_env,
+                "key_present": std::env::var_os(p.key_env).is_some_and(|v| !v.is_empty()),
+                "source": s.source,
+                "fetched_at": s.fetched_at,
+                "digest": s.digest,
+                "dropped": s.dropped,
+                "models": s.models,
+            }))
+        })
+        .collect();
+    serde_json::Value::Array(rows)
+}
+
+/// POST /api/models/refresh: fetches every cloud catalog's public listing
+/// (no credential is sent) off the async runtime and answers the new
+/// `cloud` block, or 502 `cloud_catalog_refresh_failed` with the reason;
+/// a failure keeps the earlier catalog. Behind [`local_gate`].
+pub(crate) async fn refresh_models_handler() -> impl IntoResponse {
+    let done = tokio::task::spawn_blocking(|| {
+        let results = apb_core::cloud_models::catalog::refresh_all();
+        let failures: Vec<String> = results
+            .iter()
+            .filter_map(|r| r.as_ref().err().map(|e| e.to_string()))
+            .collect();
+        (failures, apb_core::cloud_models::catalog::load_all())
+    })
+    .await;
+    match done {
+        Ok((failures, _)) if !failures.is_empty() => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": apb_core::cloud_models::catalog::REFRESH_FAILED,
+                "detail": failures.join("; "),
+            })),
+        )
+            .into_response(),
+        Ok((_, snaps)) => no_store(Json(serde_json::json!({ "cloud": cloud_block(&snaps) }))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// The catalog refresh route, behind [`local_gate`].
+pub(crate) fn router() -> axum::Router<crate::state::AppState> {
+    axum::Router::new()
+        .route(
+            "/api/models/refresh",
+            axum::routing::post(refresh_models_handler),
+        )
+        .route_layer(axum::middleware::from_fn(local_gate))
+}
+
+/// Refuses a client that is not straight from this machine (the rule of
+/// [`crate::state::local_client`]), before the refresh makes a request.
+async fn local_gate(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let local = req
+        .extensions()
+        .get::<crate::auth::ClientCtx>()
+        .is_some_and(|ctx| crate::state::local_client(ctx, req.headers()));
+    if !local {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "cloud_refresh_local_only",
+                "detail": "the model catalog is refreshed only for a client on this machine",
+            })),
+        )
+            .into_response();
+    }
+    next.run(req).await
 }
 
 /// Loads the catalog off the async runtime: a cold detection spawns the

@@ -749,6 +749,16 @@ configured for dsh's `llm-pi-ai` adapter. An id on another route passes the
 model check, since apb cannot list your routes; a bare `deepseek-*` id off
 the list is noted as a newer model.
 
+The route `nearai` is apb's own: `nearai/<catalog id>[@<effort>]` runs on
+NEAR AI Cloud with only `NEARAI_API_KEY` set. The editor offers every NEAR
+catalog model with tool calling after the DeepSeek models, with its privacy
+class, and the model check judges such an id against the catalog
+(`cloud_model_unknown`, `cloud_model_no_tools`, `cloud_model_not_chat`,
+`cloud_effort_unsupported`). A chain that spans privacy classes gets the
+warning `profile_privacy_class_changes`; the editor's Privacy panel and the
+resolved block of `GET /api/profiles/{name}` show the class of every
+executor, fallback and tier. See [CLOUD-MODELS.md](CLOUD-MODELS.md).
+
 ```yaml
 name: dsh-main
 description: DeepSeek Harness, official DeepSeek route first

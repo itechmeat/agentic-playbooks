@@ -885,6 +885,29 @@ Two backends:
   `prompt_only` embeds the schema and parses the first JSON object of the
   reply. Keys by reference, retries and error mapping as for `systemone`. Fast,
   but a second credential.
+
+  With `catalog: near-ai-cloud` the provider takes a NEAR AI Cloud model
+  and apb fills the rest: `base_url` defaults to
+  `https://cloud-api.near.ai/v1`, the key to `{{env.NEARAI_API_KEY}}`, and
+  `structured_output` to `json_schema` when the catalog row has structured
+  outputs, else `prompt_only`:
+
+  ```yaml
+  providers:
+    - { id: near, kind: llm_emulation, via: openai_compatible, catalog: near-ai-cloud, model: Qwen/Qwen3.8-27B }
+  ```
+
+  Loading fails, naming the provider, when `catalog` is set on another kind
+  ("`catalog` is only for kind llm_emulation"), names an unknown catalog, or
+  names a model the catalog lacks or that is not a chat model
+  (`typesafe/jev-1.13` there is a decision model, not a chat model), and
+  when `json_schema` is asked of a row without structured outputs. The row
+  is kept with the run's decisions: each decision is priced from it (input
+  and output tokens at list price, `cost_estimated: true`) and carries
+  `decision_made.privacy_class`, shown by `apb decisions report` and the
+  doctor's line next to the provider, and a catalog refresh during a run
+  changes neither. The doctor's free check of such a provider sends no key.
+  See [CLOUD-MODELS.md](CLOUD-MODELS.md).
 - **An APB agent profile**, declared on the judge node: `on_unavailable:
   emulate` with `profile` (or `defaults.profile`). One attempt on the
   profile's primary executor (no fallback chain, at most one retry), a fresh

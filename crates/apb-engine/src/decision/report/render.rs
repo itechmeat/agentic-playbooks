@@ -50,7 +50,11 @@ fn group(out: &mut String, g: &GroupReport) {
         .provider_kind
         .as_deref()
         .map(|k| format!(", {k}"))
-        .unwrap_or_default();
+        .unwrap_or_default()
+        + &g.privacy_class
+            .as_deref()
+            .map(|c| format!(", {c}"))
+            .unwrap_or_default();
     let cal = if g.calibrated {
         "calibrated"
     } else {

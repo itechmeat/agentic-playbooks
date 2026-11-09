@@ -333,6 +333,10 @@ pub struct GroupReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule: Option<String>,
     pub provider_kind: Option<String>,
+    /// The privacy class of a cloud catalog model (`decisions.yaml`
+    /// `catalog:`), shown next to the provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub privacy_class: Option<String>,
     pub calibrated: bool,
     /// An LLM emulation: its own group, never pooled with a decision model.
     pub emulation: bool,
@@ -657,6 +661,7 @@ fn group_report(
         model: key.model.clone(),
         rule: key.rule.clone(),
         provider_kind: key.provider_kind.clone(),
+        privacy_class: key.privacy_class.clone(),
         calibrated: key.calibrated,
         emulation: key.emulation,
         label_source: l.label_source().to_string(),
@@ -799,6 +804,7 @@ struct GroupKey {
     rule: Option<String>,
     calibrated: bool,
     provider_kind: Option<String>,
+    privacy_class: Option<String>,
 }
 
 impl GroupKey {
@@ -815,6 +821,7 @@ impl GroupKey {
             rule: rule.map(str::to_string),
             calibrated: r.calibrated,
             provider_kind: r.provider_kind.clone(),
+            privacy_class: r.privacy_class.clone(),
         }
     }
 }

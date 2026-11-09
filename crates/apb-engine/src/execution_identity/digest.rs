@@ -98,6 +98,7 @@ mod tests {
             soul_delivery: Default::default(),
             canonical_executable: program.into(),
             executable_fingerprint: format!("1:{program}"),
+            cloud: None,
         }
     }
 

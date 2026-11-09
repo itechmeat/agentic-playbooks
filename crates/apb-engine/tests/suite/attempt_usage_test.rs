@@ -143,6 +143,7 @@ fn a_claude_json_result_journals_its_usage_and_the_unwrapped_reply() {
         cost_usd: Some(0.0125),
         source: UsageSource::Reported,
         cost_basis: CostBasis::Unknown,
+        priced_from: None,
     };
     assert_eq!(
         attempt_usages(dir.path(), &res.run_id),
@@ -169,6 +170,7 @@ fn a_claude_json_result_journals_its_usage_and_the_unwrapped_reply() {
             },
             estimated: false,
             finished_attempts: 1,
+            priced_from: Vec::new(),
         })
     );
 }
@@ -300,6 +302,7 @@ fn a_failed_claude_exit_still_journals_the_usage_it_reported() {
         cost_usd: Some(0.0125),
         source: UsageSource::Reported,
         cost_basis: CostBasis::Unknown,
+        priced_from: None,
     };
     let usages = attempt_usages(dir.path(), &res.run_id);
     assert!(!usages.is_empty());

@@ -82,6 +82,8 @@ mod problems_tool_test;
 #[cfg(unix)]
 #[path = "suite/profile_e2e_test.rs"]
 mod profile_e2e_test;
+#[path = "suite/profile_privacy_test.rs"]
+mod profile_privacy_test;
 #[path = "suite/profile_tools_test.rs"]
 mod profile_tools_test;
 #[path = "suite/promote_tools_test.rs"]

@@ -454,6 +454,8 @@ mod tests {
                 account_id: None,
                 zero_data_retention: false,
                 structured_output: None,
+                catalog: None,
+                cloud: None,
             }],
             budget: Budget::default(),
             privacy: Privacy::default(),

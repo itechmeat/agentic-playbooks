@@ -216,6 +216,7 @@ fn doctor_run_warns_autonomy_for_a_node_with_no_non_interactive_flag() {
         soul_delivery: apb_core::config::SoulDelivery::Prefix,
         canonical_executable: std::path::PathBuf::from("/bin/true"),
         executable_fingerprint: "0:0".into(),
+        cloud: None,
     };
     let manifest = apb_engine::manifest::RunExecutionManifest {
         profiles: vec![apb_engine::manifest::ManifestProfile {

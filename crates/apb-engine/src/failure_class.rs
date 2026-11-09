@@ -200,6 +200,34 @@ const QUOTA_PATTERNS: &[&str] = &["rate limit", "rate_limit", "ratelimit", "too 
 /// HTTP 429, matched as a standalone number like [`TRANSIENT_CODES`].
 const QUOTA_CODES: &[&str] = &["429"];
 
+/// `hay` without the `[redacted:<name>]` markers apb puts in place of a
+/// secret value (a cloud key an agent printed): a marker names a variable
+/// such as `NEARAI_API_KEY`, which must not read as an auth failure.
+fn without_redaction_markers(hay: &str) -> std::borrow::Cow<'_, str> {
+    const OPEN: &str = "[redacted:";
+    if !hay.contains(OPEN) {
+        return std::borrow::Cow::Borrowed(hay);
+    }
+    let mut out = String::with_capacity(hay.len());
+    let mut rest = hay;
+    while let Some(i) = rest.find(OPEN) {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + OPEN.len()..];
+        match after.find(']') {
+            Some(j) => {
+                out.push_str("[redacted]");
+                rest = &after[j + 1..];
+            }
+            None => {
+                out.push_str(&rest[i..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
+}
+
 /// Classifies a failure detail string. Case-insensitive; matching is plain
 /// substring containment over the lowercased detail.
 ///
@@ -210,7 +238,8 @@ const QUOTA_CODES: &[&str] = &["429"];
 /// out is pure waste; a rate limit in turn wins over transport noise, since a
 /// 5 s backoff never outlasts a provider's quota window.
 pub fn classify(detail: &str) -> FailureKind {
-    let hay = detail.to_lowercase();
+    let lower = detail.to_lowercase();
+    let hay = without_redaction_markers(&lower);
     if contains_any(&hay, QUOTA_STRONG_PATTERNS) {
         return FailureKind::Quota;
     }
@@ -607,6 +636,17 @@ mod tests {
             retry_after("Retry-After: Sat, 29 Feb 2025 07:28:00 GMT", now),
             None
         );
+    }
+
+    #[test]
+    fn a_redaction_marker_is_no_auth_failure() {
+        assert_eq!(
+            classify(
+                "stderr [redacted:NEARAI_API_KEY]\ndsh error RATE_LIMIT (rate limit, status 429)"
+            ),
+            FailureKind::Quota
+        );
+        assert_eq!(classify("invalid api key [redacted:X]"), FailureKind::Auth);
     }
 
     #[test]

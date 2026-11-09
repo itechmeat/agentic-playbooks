@@ -134,6 +134,9 @@ fn render_types() -> String {
         apb_engine::execution_identity::fold::HostTaskExec::decl(&cfg),
         apb_engine::execution_identity::fold::ReportedModel::decl(&cfg),
         apb_engine::execution_identity::fold::ExecutionIdentityView::decl(&cfg),
+        // Cloud catalog models: the model and class an attempt ran on.
+        apb_engine::event::AttemptCloud::decl(&cfg),
+        apb_core::cloud_models::PrivacyClass::decl(&cfg),
         // Isolation: what each isolated attempt held and did not.
         apb_engine::event::IsolationViewEntry::decl(&cfg),
         apb_engine::event::AttemptIsolation::decl(&cfg),
@@ -183,6 +186,7 @@ fn render_types() -> String {
         apb_core::agent_output::UsageSource::decl(&cfg),
         apb_core::agent_output::AgentUsage::decl(&cfg),
         apb_core::agent_output::CostBasis::decl(&cfg),
+        apb_core::agent_output::PricedFrom::decl(&cfg),
         // Issue #192: candidate trials.
         apb_engine::candidate::CandidateTrial::decl(&cfg),
         // Issue #200: operator pause.

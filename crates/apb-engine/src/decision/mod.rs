@@ -276,6 +276,21 @@ fn list_price_per_million(model: &str) -> Option<f64> {
     }
 }
 
+/// The cost of a decision from the catalog row of the provider that
+/// answered (`decisions.yaml` `catalog:`): input and output tokens at the
+/// row's list prices per million. `None` without both prices or counts.
+fn catalog_cost(
+    row: &apb_core::cloud_models::CloudSnapshotRef,
+    usage: &apb_decide::Usage,
+) -> Option<f64> {
+    let input = row.model.price_in_usd_mtok?;
+    let output = row.model.price_out_usd_mtok?;
+    let i = usage.input_tokens?;
+    let o = usage.output_tokens.unwrap_or(0);
+    let cost = (i as f64 * input + o as f64 * output) / 1e6;
+    Some((cost * 1e10).round() / 1e10)
+}
+
 /// The run's decision runner. `Sync`: parallel branches share it.
 #[derive(Debug)]
 pub(crate) struct DecisionRunner {
@@ -348,6 +363,18 @@ impl RequestCap {
     /// written now must count.
     pub(crate) fn take_charge(&self) -> u32 {
         self.charged.swap(0, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl DecisionRunner {
+    /// The catalog row of the provider `id`, as the run's decisions
+    /// snapshotted it (`decisions.yaml` `catalog:`).
+    fn catalog_row(&self, id: &str) -> Option<&apb_core::cloud_models::CloudSnapshotRef> {
+        self.settings
+            .providers
+            .iter()
+            .find(|p| p.id == id)
+            .and_then(|p| p.cloud.as_ref())
     }
 }
 
@@ -928,6 +955,7 @@ impl DecisionRunner {
             enforce_refused: None,
             join: call.join.clone(),
             edge_addresses: call.edge_addresses.clone(),
+            privacy_class: None,
         };
         let worst = self.worst_requests(&route);
         let Some(slot) = self.reserve_request(worst) else {
@@ -1014,6 +1042,7 @@ impl DecisionRunner {
             error,
             enforce_refused,
             join,
+            privacy_class,
             ..
         } = &mut event
         {
@@ -1064,10 +1093,16 @@ impl DecisionRunner {
                     };
                     *input_tokens = resp.usage.input_tokens;
                     *cached = resp.cached;
+                    let row = self.catalog_row(&resp.provider);
+                    *privacy_class = row.map(|r| r.model.privacy_class.as_str().to_string());
                     if resp.cached {
                         *cost_usd = None;
                     } else if let Some(c) = resp.usage.cost_usd {
                         *cost_usd = Some(c);
+                    } else if let Some(c) = row.and_then(|r| catalog_cost(r, &resp.usage)) {
+                        // A list price from the catalog, not a billed figure.
+                        *cost_usd = Some(c);
+                        *cost_estimated = true;
                     } else if let (Some(price), Some(tokens)) =
                         (list_price_per_million(&resp.model), resp.usage.input_tokens)
                     {
@@ -1227,6 +1262,7 @@ impl DecisionRunner {
             enforce_refused: None,
             join: BTreeMap::from([("excluded".to_string(), Value::from(reason))]),
             edge_addresses: BTreeMap::new(),
+            privacy_class: None,
         });
     }
 

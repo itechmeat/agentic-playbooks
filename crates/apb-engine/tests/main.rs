@@ -250,6 +250,8 @@ mod candidate_trial_test;
 mod child_connector_prepare;
 #[path = "suite/child_run_event_test.rs"]
 mod child_run_event_test;
+#[path = "suite/cloud_gate_test.rs"]
+mod cloud_gate_test;
 #[path = "suite/connector_asana.rs"]
 mod connector_asana;
 #[path = "suite/connector_call.rs"]
@@ -411,10 +413,12 @@ mod migrate_test;
 mod missing_input_test;
 #[path = "suite/model_grade_test.rs"]
 mod model_grade_test;
-#[cfg(unix)]
-#[cfg(unix)]
 #[path = "suite/named_outputs_test.rs"]
 mod named_outputs_test;
+#[cfg(unix)]
+#[cfg(unix)]
+#[path = "suite/near_run_test.rs"]
+mod near_run_test;
 #[path = "suite/next_action_test.rs"]
 mod next_action_test;
 #[path = "suite/notify_send_test.rs"]

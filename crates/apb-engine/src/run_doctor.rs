@@ -989,6 +989,7 @@ mod tests {
                 soul_delivery: apb_core::config::SoulDelivery::Prefix,
                 canonical_executable: std::path::PathBuf::from("/bin/true"),
                 executable_fingerprint: "0:0".into(),
+                cloud: None,
             })
             .collect();
         let manifest = crate::manifest::RunExecutionManifest {

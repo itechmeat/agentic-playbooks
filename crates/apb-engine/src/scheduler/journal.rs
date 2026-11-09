@@ -740,6 +740,7 @@ mod tests {
                     token: None,
                     isolation: None,
                     exec: None,
+                    cloud: None,
                 },
             )
         };
@@ -829,6 +830,7 @@ mod tests {
                         token: None,
                         isolation: None,
                         exec: None,
+                        cloud: None,
                     },
                 ),
                 at(
@@ -894,6 +896,7 @@ mod tests {
                     token: None,
                     isolation: None,
                     exec: None,
+                    cloud: None,
                 },
             ),
             at(
@@ -954,6 +957,7 @@ mod tests {
                 token: None,
                 isolation: None,
                 exec: None,
+                cloud: None,
             },
         )
     }
@@ -1030,6 +1034,7 @@ mod tests {
                         token: None,
                         isolation: None,
                         exec: None,
+                        cloud: None,
                     },
                 ),
                 at(

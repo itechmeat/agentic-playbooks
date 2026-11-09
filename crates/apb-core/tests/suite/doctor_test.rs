@@ -472,3 +472,49 @@ fn doctor_flags_an_invalid_suggestions_config_in_either_scope() {
         std::env::remove_var("APB_CONFIG_DIR");
     }
 }
+
+/// A model on a cloud route: an id the catalog lacks is a warning line, one
+/// an agent step cannot run on a failing line.
+#[test]
+fn doctor_judges_a_cloud_model_by_the_catalog() {
+    let _l = env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+    }
+    let proj = tempfile::tempdir().unwrap();
+    init_project(proj.path()).unwrap();
+    for (name, model) in [
+        ("typo", "nearai/Qwen/Qwen3.8-72B"),
+        ("vision", "nearai/Qwen/Qwen3-VL-30B-A3B-Instruct"),
+    ] {
+        let dir = proj.path().join(".apb/profiles").join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("profile.yaml"),
+            format!("name: {name}\ndescription: t\nexecutor:\n  agent: dsh\n  model: {model}\n"),
+        )
+        .unwrap();
+        fs::write(dir.join("SOUL.md"), "").unwrap();
+        let body = VALID_AGENT
+            .replace("id: va", &format!("id: {name}"))
+            .replace("profile: main", &format!("profile: {name}"));
+        seed_playbook(proj.path(), name, &body);
+    }
+    let report = diagnose(proj.path());
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+    let line = |profile: &str| {
+        report
+            .checks
+            .iter()
+            .find(|c| c.name == format!("profile {profile}") && c.detail.contains("cloud_model"))
+            .unwrap_or_else(|| panic!("{:?}", report.checks))
+            .clone()
+    };
+    assert_eq!(line("typo").status, CheckStatus::Warn);
+    assert!(line("typo").detail.contains("cloud_model_unknown"));
+    assert_eq!(line("vision").status, CheckStatus::Fail);
+    assert!(line("vision").detail.contains("cloud_model_no_tools"));
+}

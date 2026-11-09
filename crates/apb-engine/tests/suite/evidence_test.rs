@@ -933,6 +933,7 @@ fn an_open_session_of_a_written_off_attempt_refuses_reads() {
                 token: None,
                 isolation: None,
                 exec: None,
+                cloud: None,
             })
             .unwrap()
             .seq;

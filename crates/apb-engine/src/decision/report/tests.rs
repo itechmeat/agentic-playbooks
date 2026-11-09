@@ -58,6 +58,7 @@ fn decision_event(seq: u64, p: Option<f64>, regex_flag: bool, output_chars: u64)
             cached: false,
             error: (!answered).then(|| "timeout".to_string()),
             edge_addresses: Default::default(),
+            privacy_class: None,
         },
     }
 }
@@ -625,6 +626,7 @@ fn review_triage_labels_count_advise_shown_decisions_apart() {
                 cached: false,
                 error: None,
                 edge_addresses: Default::default(),
+                privacy_class: None,
             },
         );
         RunJournal {
@@ -838,4 +840,27 @@ fn an_exec1_row_with_only_a_legacy_threshold_names_the_rule_not_the_model() {
         "{:?}",
         row.notes
     );
+}
+
+/// A decision answered by a catalog provider shows its privacy class next
+/// to the provider, in the group and in the text.
+#[test]
+fn the_class_of_a_catalog_provider_shows_next_to_it() {
+    let mut journals = fixture();
+    for j in &mut journals {
+        for e in &mut j.events {
+            if let EventPayload::DecisionMade { privacy_class, .. } = &mut e.payload {
+                *privacy_class = Some("confidential_tee".into());
+            }
+        }
+    }
+    let r = build(
+        &journals,
+        &ReportFilter::default(),
+        &ReportSettings::default(),
+    );
+    let g = one_group(&r);
+    assert_eq!(g.privacy_class.as_deref(), Some("confidential_tee"));
+    let text = super::render::render_text(&r);
+    assert!(text.contains("confidential_tee"), "{text}");
 }

@@ -134,6 +134,7 @@ fn attempt_started(node: &str) -> EventPayload {
         token: None,
         isolation: None,
         exec: None,
+        cloud: None,
     }
 }
 

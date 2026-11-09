@@ -13,6 +13,7 @@
 
 pub mod assets;
 pub mod auth;
+mod cloud_refresh;
 mod httpserve;
 pub mod ingest;
 pub mod lock;
@@ -229,6 +230,8 @@ pub fn build_router(state: AppState) -> Router {
         )
         // History discovery, behind its own local-only route layer.
         .merge(routes::discover::router())
+        // The cloud catalog refresh, behind the same rule.
+        .merge(routes::meta::router())
         // The judge sandbox and labelled examples.
         .merge(routes::judge::router())
         .merge(routes::scenario::router())
@@ -397,6 +400,8 @@ pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::erro
             None
         }
     };
+    // The public cloud model catalogs, at start and then once a day.
+    cloud_refresh::spawn(&global_cfg.cloud_models);
     let app = build_router(state);
     println!(
         "apb dashboard (global): http://{}:{port}",
