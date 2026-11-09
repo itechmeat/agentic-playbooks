@@ -18,13 +18,16 @@ fn form(agent: &str) -> InvocationDef {
     builtin(agent).unwrap_or_else(|| panic!("{agent} has no built-in form"))
 }
 
-/// The prompt reaches the CLI as text: after an end-of-options `--` and last,
-/// or as an option's value that does not start with `-`.
-fn assert_prompt_is_not_an_option(agent: &str, argv: &[String]) {
-    let at = argv
-        .iter()
-        .position(|a| a.contains(PROMPT))
-        .unwrap_or_else(|| panic!("{agent}: no prompt in {argv:?}"));
+/// The prompt reaches the CLI as text: on stdin, after an end-of-options
+/// `--` and last, or as an option's value that does not start with `-`.
+fn assert_prompt_is_not_an_option(agent: &str, argv: &[String], stdin: &str) {
+    let Some(at) = argv.iter().position(|a| a.contains(PROMPT)) else {
+        assert!(
+            stdin.contains(PROMPT),
+            "{agent}: no prompt in {argv:?} or on stdin"
+        );
+        return;
+    };
     if at > 0 && argv[at - 1] == "--" {
         assert_eq!(
             at,
@@ -69,7 +72,7 @@ pub fn success(agent: &str) {
         Conformance::PlainByDesign
     };
     assert_eq!(conformance, want, "{agent}");
-    assert_prompt_is_not_an_option(agent, &stub.argv());
+    assert_prompt_is_not_an_option(agent, &stub.argv(), &stub.stdin());
 }
 
 /// A non-zero exit is a process failure carrying the CLI's own message, and

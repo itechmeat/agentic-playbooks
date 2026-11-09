@@ -1,0 +1,2 @@
+[llm-deepseek-api-key] model listing from https://api.deepseek.com/models loaded 2 model(s), skipped 0 row(s)
+dsh: INVALID_REQUEST: The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed deepseek-nonexistent. (request_id: 00000000-0000-4000-8000-00000000000a)

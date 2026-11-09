@@ -171,7 +171,8 @@ pub fn form_flags(forms: &Forms) -> Vec<String> {
     }
     let mut out: Vec<String> = Vec::new();
     for a in all {
-        if a.starts_with('-') && a != "--" && !out.contains(&a) {
+        // `--` ends the options and a lone `-` names stdin: neither is a flag.
+        if a.starts_with('-') && a != "--" && a != "-" && !out.contains(&a) {
             out.push(a);
         }
     }

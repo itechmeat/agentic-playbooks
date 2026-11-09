@@ -343,6 +343,122 @@ fn a_codex_retry_resumes_the_session_id_from_its_header() {
     );
 }
 
+/// dsh names its session in the first line of its event stream, before
+/// any model call: an attempt that then fails (a dropped connection, exit
+/// 1) leaves that id, and the retry resumes it with `--session-id`.
+#[test]
+fn a_dsh_retry_after_a_failed_attempt_resumes_its_printed_session() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_retry(dir.path(), "dsh", &[]);
+    let session = r#"{"type":"session","sessionId":"session-00000000-0000-4000-8000-0000000000aa","cwd":"/w"}"#;
+    let fin = r#"{"type":"final","sessionId":"session-00000000-0000-4000-8000-0000000000aa","reason":{"kind":"completed"},"text":"ok\n\n```yaml\nstatus: success\nsummary: ok\n```"}"#;
+    let stub = recording_stub(
+        dir.path(),
+        &format!(
+            "cat > /dev/null; printf '%s\n' '{session}'; \
+             if [ \"$N\" = 1 ]; then echo 'dsh: TRANSPORT: connection reset' 1>&2; exit 1; fi; \
+             printf '%s\n' '{fin}'"
+        ),
+    );
+    assert_eq!(
+        run_with_stub(dir.path(), "one", &stub, None),
+        RunStatus::Succeeded
+    );
+    let inv = invocations(dir.path());
+    assert_eq!(inv.len(), 2, "{inv:?}");
+    assert_eq!(inv[0].flag("--session-id"), None, "{:?}", inv[0].args);
+    assert_eq!(
+        inv[1].flag("--session-id"),
+        Some("session-00000000-0000-4000-8000-0000000000aa"),
+        "{:?}",
+        inv[1].args
+    );
+}
+
+/// A retry that continued a session keeps continuing it, even when the
+/// failed attempt printed another id: an id apb handed the attempt wins.
+#[test]
+fn a_dsh_retry_keeps_the_session_it_continued_over_a_conflicting_printed_id() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_retry(dir.path(), "dsh", &[]);
+    let a = "session-00000000-0000-4000-8000-0000000000aa";
+    let b = "session-00000000-0000-4000-8000-0000000000bb";
+    let fin = format!(
+        r#"{{"type":"final","sessionId":"{a}","reason":{{"kind":"completed"}},"text":"ok\n\n```yaml\nstatus: success\nsummary: ok\n```"}}"#
+    );
+    let stub = recording_stub(
+        dir.path(),
+        &format!(
+            "cat > /dev/null; \
+             if [ \"$N\" = 1 ]; then printf '%s\\n' '{{\"type\":\"session\",\"sessionId\":\"{a}\"}}'; echo 'connection reset' 1>&2; exit 1; fi; \
+             if [ \"$N\" = 2 ]; then printf '%s\\n' '{{\"type\":\"session\",\"sessionId\":\"{b}\"}}'; echo 'connection reset' 1>&2; exit 1; fi; \
+             printf '%s\\n' '{fin}'"
+        ),
+    );
+    assert_eq!(
+        run_with_stub(dir.path(), "one", &stub, None),
+        RunStatus::Succeeded
+    );
+    let inv = invocations(dir.path());
+    assert_eq!(inv.len(), 3, "{inv:?}");
+    assert_eq!(inv[1].flag("--session-id"), Some(a), "{:?}", inv[1].args);
+    assert_eq!(inv[2].flag("--session-id"), Some(a), "{:?}", inv[2].args);
+}
+
+/// A dash-led id a failed attempt printed is never handed back as a
+/// session: the retry starts fresh.
+#[test]
+fn a_dsh_retry_never_resumes_a_dash_led_printed_id() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_retry(dir.path(), "dsh", &[]);
+    let fin = r#"{"type":"final","sessionId":"session-x","reason":{"kind":"completed"},"text":"ok\n\n```yaml\nstatus: success\nsummary: ok\n```"}"#;
+    let stub = recording_stub(
+        dir.path(),
+        &format!(
+            "cat > /dev/null; \
+             if [ \"$N\" = 1 ]; then printf '%s\\n' '{{\"type\":\"session\",\"sessionId\":\"--last\"}}'; echo 'connection reset' 1>&2; exit 1; fi; \
+             printf '%s\\n' '{fin}'"
+        ),
+    );
+    assert_eq!(
+        run_with_stub(dir.path(), "one", &stub, None),
+        RunStatus::Succeeded
+    );
+    let inv = invocations(dir.path());
+    assert_eq!(inv.len(), 2, "{inv:?}");
+    assert_eq!(inv[1].flag("--session-id"), None, "{:?}", inv[1].args);
+    assert!(
+        !inv[1].args.iter().any(|a| a == "--last"),
+        "{:?}",
+        inv[1].args
+    );
+}
+
+/// A plain-text agent's answer that holds a session field is no session
+/// record: after a failed attempt the retry starts fresh with the task.
+#[test]
+fn a_plain_text_answer_with_a_session_field_is_never_resumed() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_retry(dir.path(), "grok", &[]);
+    let stub = recording_stub(
+        dir.path(),
+        &format!(
+            "if [ \"$N\" = 1 ]; then echo '{{\"session_id\":\"existing-other-session\"}}'; echo 'connection reset' 1>&2; exit 1; fi; {OK}"
+        ),
+    );
+    assert_eq!(
+        run_with_stub(dir.path(), "one", &stub, None),
+        RunStatus::Succeeded
+    );
+    let inv = invocations(dir.path());
+    assert_eq!(inv.len(), 2, "{inv:?}");
+    assert!(
+        !inv[1].args.iter().any(|a| a == "existing-other-session"),
+        "{:?}",
+        inv[1].args
+    );
+}
+
 /// opencode prints no id at all: apb titles the session at launch and looks
 /// it up by that title (`session list --format json`) when it needs it.
 #[test]

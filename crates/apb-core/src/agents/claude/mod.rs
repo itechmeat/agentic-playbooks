@@ -50,6 +50,7 @@ static DESCRIPTOR: Descriptor = Descriptor {
         transcript: Transcript::SessionRecord,
         tool_exposure: true,
         desktop_history: false,
+        printed_session: false,
     },
     verified: Some(Verified {
         version: "2.1.283",

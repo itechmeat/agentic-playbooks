@@ -151,8 +151,8 @@ fn spawn_target<'a>(task: &'a AgentTask) -> spawn_env::SpawnTarget<'a> {
 }
 
 /// The reply of an attempt's stdout and whether the CLI itself marked the
-/// attempt failed. The built-in forms ask claude, codex, opencode and zcode
-/// for their machine output, which wraps the reply (see
+/// attempt failed. The built-in forms ask claude, codex, opencode, zcode and
+/// dsh for their machine output, which wraps the reply (see
 /// `apb_core::agent_output`); every other agent, and any output without the
 /// expected shape (a custom invocation form, an older CLI), is the reply
 /// itself.
@@ -619,6 +619,24 @@ pub fn capture_session_header(agent_id: &str, stderr: &str) -> Option<String> {
     apb_core::agents::lookup(agent_id)?
         .output()
         .stderr_session(stderr)
+        .filter(|id| is_plausible_session_id(id))
+}
+
+/// The session a failed or timed-out attempt printed before any work, from
+/// the head of its stdout: only for an agent whose built-in form prints a
+/// verified session record of its own (`Capabilities::printed_session`),
+/// read by that agent's record parser, and only an id
+/// [`capture_session`] would take too. `None` for every other agent: a
+/// plain-text answer that holds a session field is no session record.
+pub fn capture_failed_session(agent_id: &str, stdout: &str) -> Option<String> {
+    let agent = apb_core::agents::lookup(agent_id)?;
+    if !agent.descriptor().capabilities.printed_session {
+        return None;
+    }
+    agent
+        .output()
+        .opening_session(stdout)
+        .filter(|id| is_plausible_session_id(id))
 }
 
 /// The tools and MCP servers an agent reported at start in its streaming
@@ -751,8 +769,9 @@ pub trait AgentAdapter {
     /// it.
     fn spawn_supervisor(
         &self,
-        _brief: &str,
+        _agent: &str,
         _model: &str,
+        _brief: &str,
         _workdir: &Path,
         _soul: Option<&str>,
         _policy: &SpawnEnv,
@@ -1838,8 +1857,9 @@ impl AgentAdapter for ClaudeAdapter {
     /// only cover the fact of spawning.
     fn spawn_supervisor(
         &self,
-        brief: &str,
+        agent: &str,
         model: &str,
+        brief: &str,
         workdir: &Path,
         soul: Option<&str>,
         policy: &SpawnEnv,
@@ -1853,6 +1873,17 @@ impl AgentAdapter for ClaudeAdapter {
         // file/network actions in the run workdir.
         let (argv, stdin_payload) =
             build_command(&self.spec, brief, model, soul, false).into_parts();
+        // The agent's run-scoped leading arguments, as for a node attempt
+        // (decision record 0013): a dsh supervisor runs the model its
+        // profile names.
+        let target = spawn_env::SpawnTarget {
+            env: policy,
+            agent,
+            model,
+            node: policy.node_id.as_deref().unwrap_or("supervisor"),
+            status_file: None,
+        };
+        let argv = spawn_env::with_scoped_args(&argv, &target)?;
         let mut cmd = Command::new(&self.program);
         cmd.args(&argv)
             .current_dir(workdir)

@@ -19,7 +19,7 @@ with two files:
   name: architect            # must equal the directory name
   description: senior implementation agent
   executor:
-    agent: claude            # one of the known agents (claude, codex, agy, opencode, pi, hermes, grok, cursor, qoder, zcode) or a configured one
+    agent: claude            # one of the known agents (claude, codex, agy, opencode, pi, hermes, grok, cursor, qoder, zcode, dsh) or a configured one
     model: claude-opus-5-5   # exactly the string that agent's --model expects
     fallbacks:               # optional ordered chain; same role, different executor
       - { agent: codex, model: gpt-6-sol }
@@ -142,7 +142,8 @@ process_env:
   - the variables the agent CLI reads (the table below);
   - the names in `allow`.
 - apb's own variables (`APB_RUN_DIR`, `APB_NODE_ID`, `APB_ATTEMPT_TOKEN`,
-  `APB_STATUS_FILE`, `CODEX_HOME`, the zcode provider config, an eval overlay)
+  `APB_STATUS_FILE`, `CODEX_HOME`, the zcode provider config, an eval overlay;
+  dsh's model travels in a `--patch` file argument instead)
   are set after the plan, so they always arrive.
 - A variable a connector references is withheld under either policy, even when
   `allow` names it.
@@ -157,6 +158,7 @@ process_env:
 | grok | `GROK_* XAI_API_KEY` | | |
 | cursor | `CURSOR_*` (not verified against an installed CLI) | | |
 | qoder | `QODER_* QODERCLI_*` | | |
+| dsh | `DSH_* DEEPSEEK_*` | | the variables of the model's route when it is named after a provider of dsh's `llm-pi-ai` catalog (`cerebras/` keeps `CEREBRAS_API_KEY`, `amazon-bedrock/` the AWS login names, `AWS_SESSION_TOKEN` of temporary credentials included, `azure/` its key and base-URL names, and so on for every provider dsh 0.2.2-rc.1 lists), and every `apiKeyEnv` named in `~/.dsh/cordis.patch.yml` and `~/.dsh/profiles/headless/cordis.patch.yml` (names only) |
 | agy | `AGY_* ANTIGRAVITY_* GEMINI_API_KEY GOOGLE_API_KEY GOOGLE_CLOUD_PROJECT GOOGLE_APPLICATION_CREDENTIALS CLOUDSDK_CONFIG` | | |
 | any other agent (config `agents:`) | the base set and `allow` only | | |
 
@@ -417,8 +419,9 @@ Not every agent can run unattended. apb passes a non-interactive permission flag
 where the agent has one: `--permission-mode bypassPermissions` for claude and
 grok, `--force` for cursor, `--permission-mode bypass_permissions` for qoder,
 `--mode yolo` for zcode, `--dangerously-skip-permissions` for agy,
-`--dangerously-bypass-approvals-and-sandbox` for codex, and `--auto` for
-opencode. hermes has no flag apb passes today: its `--yolo` is documented but
+`--dangerously-bypass-approvals-and-sandbox` for codex, `--permission-mode
+danger-full-access` for dsh (whose base form runs `read-only` with
+`--approval-policy never`), and `--auto` for opencode. hermes has no flag apb passes today: its `--yolo` is documented but
 unverified in the one-shot form apb uses, so it is deliberately not shipped. A
 node bound to an agent without such a flag can hang indefinitely on a write
 permission prompt in an autonomous run, and `apb doctor --run <id>` warns about
@@ -499,10 +502,10 @@ implements `agents::Agent`:
 
 | Part | Holds |
 |---|---|
-| `descriptor()` | id, legacy aliases, binaries, version and help arguments, home install locations, category, capabilities (hermetic settings, live ask-server, long tool waits, the transcript the grader reads, the streaming transport, desktop history) and `Verified`, the CLI version and date its forms and reader were last checked against |
+| `descriptor()` | id, legacy aliases, binaries, version and help arguments, home install locations, category, capabilities (hermetic settings, live ask-server, long tool waits, the transcript the grader reads, the streaming transport, desktop history, a verified session record printed before any work, from which a failed attempt's session is recovered for its retry) and `Verified`, the CLI version and date its forms and reader were last checked against |
 | `forms()` | the built-in launch form, the resume argv and how a fresh attempt makes its session findable (an id apb assigns, a title looked up in the agent's session listing, or an id the agent prints); `None` when apb cannot launch the agent without `agents.<id>.invocation` |
 | `output()` | the reader of the agent's output (reply, usage, closing record, session id, a session header on stderr) and `promises()`, what the built-in form must carry; an agent that prints plain text uses the shared `PlainText` reader |
-| `setup()` | what detection reads (models listing, login hint, provider notes, memo inputs), the environment set kept under `process_env: allowlist`, the variables a model or the agent's own config names, and the run-scoped environment of a spawn (codex's config home, zcode's provider config) |
+| `setup()` | what detection reads (models listing, login hint, provider notes, memo inputs), the environment set kept under `process_env: allowlist`, the variables a model or the agent's own config names, the run-scoped environment of a spawn (codex's config home, zcode's provider config), and the run-scoped leading arguments of a spawn for a file the agent takes only as an argument (dsh's model patch, decision record 0013) |
 | `models()` | the vendor, the closed model list, how a model id is spelled and checked, and the billing account a model spends |
 
 To add one:
@@ -733,3 +736,31 @@ agent is still tried.
 list lives in `assets/models.yaml` (`codex_static_models`), next to a pricing
 row for each model; the `model` line of `~/.codex/config.toml` does not extend
 it.
+
+## DeepSeek Harness (dsh)
+
+`apb detect` and the profile editor offer dsh the two models the official
+DeepSeek API serves, DeepSeek's own names: `deepseek-flash` (the editor's
+default) and `deepseek-v4-pro`. A model string is
+`[<route>/]<model>[@<effort>]`: a bare model runs on the route
+`deepseek-official` (key `DEEPSEEK_API_KEY`), an effort is one of `off`,
+`low`, `high`, `max` there, and any other route is a provider profile you
+configured for dsh's `llm-pi-ai` adapter. An id on another route passes the
+model check, since apb cannot list your routes; a bare `deepseek-*` id off
+the list is noted as a newer model.
+
+```yaml
+name: dsh-main
+description: DeepSeek Harness, official DeepSeek route first
+executor:
+  agent: dsh
+  model: deepseek-v4-pro@high
+  fallbacks:
+    - { agent: dsh, model: deepseek-flash@low }
+    - { agent: dsh, model: zai/glm-5.3-flash@low }
+soul: any
+```
+
+Each route is its own billing account, so the `zai/` fallback still runs when
+the DeepSeek key is out of balance. The model reaches dsh as a run-scoped
+patch file (`--patch`), see `docs/AGENT-SETUP.md`, "DeepSeek Harness (`dsh`)".

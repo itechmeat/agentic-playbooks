@@ -17,6 +17,7 @@ fn default_model(agent: &str) -> &'static str {
         "claude" => "claude-haiku-4-5",
         "codex" => "gpt-6-sol",
         "zcode" => "GLM-5.3-Flash",
+        "dsh" => "deepseek-flash@low",
         _ => "",
     }
 }

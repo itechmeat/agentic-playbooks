@@ -1,0 +1,57 @@
+# Contract fixture for the dsh agent, read by `suite/agent_contract`.
+# The run, error and session scenarios replay dsh 0.2.2-rc.1 captures in
+# apb-core's `agent_output` fixtures (ids, paths and request ids replaced by
+# placeholders); the quota and verdict streams are synthetic and say so.
+agent: dsh
+provenance: captured
+checked_against: 0.2.2-rc.1
+scenarios:
+  success:
+    stdout_file: ../../../../apb-core/tests/fixtures/agent_output/dsh_run.jsonl
+    expect:
+      output: MANGO
+      final_record: true
+  error:
+    stdout_file: ../../../../apb-core/tests/fixtures/agent_output/dsh_bad_model.jsonl
+    stderr_file: ../../../../apb-core/tests/fixtures/agent_output/dsh_bad_model.stderr
+    exit: 1
+    expect:
+      message: "INVALID_REQUEST"
+      model_turn: false
+  quota:
+    provenance: synthetic
+    stdout: |
+      {"type":"session","sessionId":"session-00000000-0000-4000-8000-000000000004","cwd":"/work/project"}
+      {"type":"status","phase":"turn_start","turn":1}
+      {"type":"status","phase":"step_start","turn":1,"step":1}
+      {"type":"status","phase":"step_end","turn":1,"step":1}
+      {"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"error","error":{"message":"Too many requests","code":"RATE_LIMIT","status":429}}}
+      {"type":"final","sessionId":"session-00000000-0000-4000-8000-000000000004","reason":{"kind":"error","error":{"message":"Too many requests","code":"RATE_LIMIT","status":429}},"text":""}
+    stderr: "dsh: RATE_LIMIT: Too many requests"
+    exit: 1
+    expect:
+      kind: quota
+  session:
+    stdout_file: ../../../../apb-core/tests/fixtures/agent_output/dsh_run.jsonl
+    expect:
+      session: session-00000000-0000-4000-8000-000000000001
+      fresh: printed
+      continues: true
+      missing: "agent exited with Some(1): dsh: session \"session-x\" does not exist; omit --session-id to start a new Session\ndsh error: session \"session-x\" does not exist; omit --session-id to start a new Session (session not found)"
+  usage:
+    stdout_file: ../../../../apb-core/tests/fixtures/agent_output/dsh_run.jsonl
+    expect:
+      usage:
+        input_tokens: 8491
+        output_tokens: 3
+        cache_read_tokens: 0
+        cache_write_tokens: 0
+        source: reported
+  verdict:
+    provenance: synthetic
+    stdout: |
+      {"type":"session","sessionId":"session-00000000-0000-4000-8000-000000000005","cwd":"/work/project"}
+      {"type":"status","phase":"step_end","turn":1,"step":1,"usage":{"inputTokens":5,"outputTokens":1}}
+      {"type":"final","sessionId":"session-00000000-0000-4000-8000-000000000005","reason":{"kind":"completed"},"text":"stuck\n\n```yaml\nstatus: failure\nsummary: the tests fail\n```"}
+    expect:
+      status: failed

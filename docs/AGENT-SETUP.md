@@ -27,8 +27,10 @@ are local, listed in the plan and reversible with `apb setup remove`:
    line of `apb runs <id>`. Only the primary agents are compared, not the
    fallbacks; a later profile rebind does not update a run's limit.
 4. Register the MCP server `agentic-playbooks` in every detected host:
-   Claude Code through its own CLI at user scope, Codex and OpenCode by
-   adding one entry to their config file (the original is backed up first,
+   Claude Code through its own CLI at user scope, Codex, OpenCode and
+   DeepSeek Harness by adding one entry to their config file (for dsh one
+   `insert` patch appended to the home layer `~/.dsh/cordis.patch.yml`; the
+   original is backed up first,
    nothing else in the file changes). A config that is a symbolic link (a
    dotfiles folder) stays a link: its target is edited and keeps its
    permissions. When the entry cannot be added without changing anything
@@ -51,8 +53,9 @@ are local, listed in the plan and reversible with `apb setup remove`:
    `save_nudge_model`). A settings file that does not parse or has a
    `hooks` shape apb does not edit gets a warning
    (`hook_settings_unreadable`), and a hook that already runs apb in another
-   form is left alone (`hook_entry_differs`). Codex and OpenCode have no
-   such hook; the standing block below is their channel.
+   form is left alone (`hook_entry_differs`). Codex, OpenCode and DeepSeek
+   Harness have no such hook apb registers; the standing block below is
+   their channel.
 6. With `--project <dir>`: write the standing playbook instruction into that
    project's `CLAUDE.md` and `AGENTS.md`. When one of them is a link to the
    other (`CLAUDE.md -> AGENTS.md`), the block is written once, into the
@@ -136,6 +139,56 @@ When the
 project uses a tracker (GitHub issues, Beads, Linear or similar, named only
 as examples), the delivery skill puts subtasks and status there; otherwise
 into the task record. apb depends on none of them.
+
+## DeepSeek Harness (`dsh`)
+
+apb runs DeepSeek Harness (npm `@deepseek-ai/dsh`, verified against
+0.2.2-rc.1) as the built-in agent `dsh`. What it needs and what apb does:
+
+- **Install and login.** `dsh` on PATH and a DeepSeek key: `DEEPSEEK_API_KEY`
+  in the environment, or a key stored through dsh's own Models page (the
+  credentials file `~/.dsh/.credentials.yaml`, read by presence only). `apb
+  doctor` warns when neither is found. Other providers need the key their
+  provider profile names (`apiKeyEnv`).
+- **The form.** `dsh --profile headless --json --permission-mode read-only
+  --approval-policy never -`, the prompt on stdin, the SOUL as a prompt
+  prefix. A run that grants autonomy adds `--permission-mode
+  danger-full-access` (no confinement, no approval). A resume adds
+  `--session-id <id> -- <prompt>`; dsh refuses a session recorded in another
+  working directory, and apb then starts a fresh one.
+- **Models.** `[<route>/]<model>[@<effort>]`. A bare model runs on the
+  official DeepSeek route (`deepseek-official`), which serves
+  `deepseek-flash` and `deepseek-v4-pro` (efforts `off`, `low`, `high`,
+  `max`). Any other route is a provider profile you configured for dsh's
+  `llm-pi-ai` adapter, for example `zai/glm-5.3-flash@low` or
+  `openrouter/deepseek/deepseek-v4-pro`. dsh has no model flag, so apb
+  writes the model as the `agent-default-model` row of a patch file in the
+  node's agent home (`agent-home/dsh/<node>/model-<digest>.patch.yml`, named
+  after its content and never rewritten, so list items running at once on
+  different models each read their own) and passes it as `--patch <file>` in
+  front of the form, node attempts and the supervisor alike. An empty model runs the headless
+  profile's own default. Each route is its own billing account: a quota on
+  one does not block a fallback to another.
+- **Output.** The `--json` event stream gives the reply (`final`), the
+  session id, the token usage of every step (no cost: dsh prints none), the
+  tool calls the grader reads, and an error code apb classifies (a rate limit
+  is a quota pause, a spent balance a budget stop, a credential problem an
+  auth failure).
+- **Skills.** dsh reads the project's `.agents/skills` and
+  `~/.agents/skills`, the same directories apb installs skills into, so
+  skills reach it by name.
+- **MCP.** `apb setup` registers `agentic-playbooks` as one
+  `@deepseek-ai/dsh-mcp-client` row in the home patch layer, so every dsh
+  profile, the headless one included, sees apb's tools as
+  `mcp__agentic-playbooks__<tool>`; `apb setup remove` takes exactly those
+  bytes back.
+- **Not supported.** The live ask transport (it injects claude's
+  `--mcp-config`; dsh takes MCP servers only as profile rows), so an
+  interactive node resumes instead; the tool exposure check (the stream
+  names no tools at start); an end-of-turn hook (dsh's hook rows are
+  experimental); `environment: minimal`; a sandboxed run (never verified, so
+  `isolation: full` refuses dsh and `best_effort` runs it without a
+  sandbox); a run budget's money limit (no cost is reported).
 
 ## Procedure
 

@@ -279,20 +279,47 @@ fn apply_scoped_env(cmd: &mut Command, task: &SpawnTarget) -> Result<(), (ErrorC
     let Some(agent) = apb_core::agents::lookup(task.agent) else {
         return Ok(());
     };
-    let scoped = task
-        .env
-        .run_dir
-        .as_deref()
-        .or(task.env.scoped_base.as_deref())
-        .map(|d| crate::agent_home::scoped_dir(d, agent.descriptor().id, task.node));
     let env = agent
         .setup()
-        .scoped_env(task.model, scoped.as_deref())
+        .scoped_env(task.model, scoped_dir(agent, task).as_deref())
         .map_err(|e| (ErrorClass::ProcessExit, e.to_string()))?;
     for (name, value) in env {
         cmd.env(name, value);
     }
     Ok(())
+}
+
+/// The run-scoped directory of `agent` for the spawn `task`: the run's
+/// agent home for the node, or under [`SpawnEnv::scoped_base`] outside a
+/// run; `None` for a spawn path that carries neither.
+fn scoped_dir(
+    agent: &dyn apb_core::agents::Agent,
+    task: &SpawnTarget,
+) -> Option<std::path::PathBuf> {
+    task.env
+        .run_dir
+        .as_deref()
+        .or(task.env.scoped_base.as_deref())
+        .map(|d| crate::agent_home::scoped_dir(d, agent.descriptor().id, task.node))
+}
+
+/// `argv` behind the agent's run-scoped leading arguments (dsh's model
+/// patch, see `apb_core::agents::HostSetup::scoped_args`), for every form
+/// of every transport; `argv` unchanged for an agent that needs none
+/// (decision record 0013).
+pub(crate) fn with_scoped_args(
+    argv: &[String],
+    task: &SpawnTarget,
+) -> Result<Vec<String>, (ErrorClass, String)> {
+    let Some(agent) = apb_core::agents::lookup(task.agent) else {
+        return Ok(argv.to_vec());
+    };
+    let mut lead = agent
+        .setup()
+        .scoped_args(task.model, scoped_dir(agent, task).as_deref())
+        .map_err(|e| (ErrorClass::ProcessExit, e.to_string()))?;
+    lead.extend(argv.iter().cloned());
+    Ok(lead)
 }
 
 #[cfg(test)]

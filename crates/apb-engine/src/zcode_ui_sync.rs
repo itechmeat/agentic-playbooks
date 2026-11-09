@@ -205,14 +205,15 @@ impl AgentAdapter for ZcodeUiSync {
 
     fn spawn_supervisor(
         &self,
-        brief: &str,
+        agent: &str,
         model: &str,
+        brief: &str,
         workdir: &Path,
         soul: Option<&str>,
         policy: &SpawnEnv,
     ) -> Result<(), (ErrorClass, String)> {
         self.inner
-            .spawn_supervisor(brief, model, workdir, soul, policy)
+            .spawn_supervisor(agent, model, brief, workdir, soul, policy)
     }
 }
 

@@ -51,3 +51,4 @@ followed by the rule as the title and three sections:
 | [0010](0010-a-push-leaves-only-through-the-publish-step.md) | A push leaves a run only through apb's publish step, after a person's consent to the exact plan, and a push whose result is unknown is never repeated on its own |
 | [0011](0011-an-agent-launches-only-what-the-launch-policy-allows.md) | An agent launches a playbook only as its launch policy allows, decided once in the run gate, and no agent channel loosens that policy |
 | [0012](0012-billed-agent-work-starts-only-on-a-persons-command.md) | Billed agent work starts only as the billing settings allow, decided once in the run gate and checked again at every spawn |
+| [0013](0013-run-scoped-files-an-agent-takes-only-as-arguments-lead-its-argv.md) | A run-scoped file an agent takes only as an argument leads its argv, put there by the one spawn path for every form |

@@ -96,6 +96,18 @@ pub trait HostSetup: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The leading arguments of one spawn of the agent on `model`, put in
+    /// front of every form's own (start and resume alike): a file prepared
+    /// in `scoped_dir` (as for [`Self::scoped_env`]) that the agent only
+    /// takes as an argument. dsh's model patch (`--patch <file>`) is one.
+    fn scoped_args(
+        &self,
+        _model: &str,
+        _scoped_dir: Option<&Path>,
+    ) -> Result<Vec<String>, ScopedEnvError> {
+        Ok(Vec::new())
+    }
+
     /// What the agent needs inside an isolation sandbox (its login), `None`
     /// when nobody has verified a sandboxed run of it: `isolation: full`
     /// then refuses it and `best_effort` runs it without a sandbox.

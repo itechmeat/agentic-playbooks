@@ -7,6 +7,11 @@ const CLAUDE: &str = include_str!("../fixtures/agent_output/claude_result.json")
 const CODEX: &str = include_str!("../fixtures/agent_output/codex_exec.jsonl");
 const CODEX_FAILED: &str = include_str!("../fixtures/agent_output/codex_exec_failed.jsonl");
 const OPENCODE: &str = include_str!("../fixtures/agent_output/opencode_run.jsonl");
+const DSH: &str = include_str!("../fixtures/agent_output/dsh_run.jsonl");
+const DSH_RESUME: &str = include_str!("../fixtures/agent_output/dsh_resume.jsonl");
+const DSH_BAD_MODEL: &str = include_str!("../fixtures/agent_output/dsh_bad_model.jsonl");
+const DSH_NO_SESSION: &str = include_str!("../fixtures/agent_output/dsh_no_session.jsonl");
+const DSH_TOOLS: &str = include_str!("../fixtures/agent_output/dsh_tools.jsonl");
 const ZCODE: &str = include_str!("../../../apb-engine/tests/fixtures/zcode/json_edit.json");
 
 const REPORT: &str = "hello\n\n```yaml\nstatus: success\nsummary: read the file\n```";
@@ -139,6 +144,8 @@ fn the_final_record_is_found_in_each_machine_format_and_missing_when_cut() {
         ("codex", CODEX),
         ("opencode", OPENCODE),
         ("zcode", ZCODE),
+        ("dsh", DSH),
+        ("dsh", DSH_NO_SESSION),
     ] {
         assert_eq!(has_final_record(agent, out), Some(true), "{agent}");
         // The closing record torn in half is not a record.
@@ -166,4 +173,46 @@ fn a_failed_run_ends_with_a_final_record_too() {
         let out = format!("{{\"type\":\"item.started\"}}\n{last}\n");
         assert_eq!(has_final_record(agent, &out), Some(true), "{agent}: {last}");
     }
+}
+
+/// dsh 0.2.2-rc.1 captures: a run, its resume, a refused model and a
+/// refused session; and an older build's run with tool calls, whose final
+/// record carries the text alone.
+#[test]
+fn dsh_json_events_read_reply_session_and_usage() {
+    assert_eq!(reply("dsh", DSH).unwrap().text, "MANGO");
+    assert_eq!(
+        usage("dsh", DSH).unwrap(),
+        AgentUsage {
+            input_tokens: 8491,
+            output_tokens: 3,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: None,
+            source: UsageSource::Reported,
+            cost_basis: Default::default(),
+        }
+    );
+    let resumed = usage("dsh", DSH_RESUME).unwrap();
+    assert_eq!(
+        (resumed.input_tokens, resumed.cache_read_tokens),
+        (188, 8320)
+    );
+    let failed = reply("dsh", DSH_BAD_MODEL).unwrap();
+    assert!(failed.is_error);
+    assert!(
+        failed
+            .text
+            .starts_with("dsh error INVALID_REQUEST (status 400): The supported API model names"),
+        "{}",
+        failed.text
+    );
+    // A failed step reports no usage sample.
+    assert_eq!(usage("dsh", DSH_BAD_MODEL), None);
+    let refused = reply("dsh", DSH_NO_SESSION).unwrap();
+    assert!(refused.is_error && refused.text.ends_with("(session not found)"));
+    let tools = usage("dsh", DSH_TOOLS).unwrap();
+    assert_eq!(tools.input_tokens, 8609 + 673 + 988);
+    assert_eq!(tools.cache_read_tokens, 8576 + 16896);
+    assert_eq!(reply("dsh", DSH_TOOLS).unwrap().text, "Report written.");
 }

@@ -2769,6 +2769,18 @@ fn execute_node_kind(
                     // until a retry actually needs it.
                     let session_now: Option<String> = match &outcome {
                         Ok(report) => report.session.clone(),
+                        // An id apb handed the attempt (a continued or an
+                        // assigned session) wins over one it printed.
+                        Err(_)
+                            if spawn_instant.is_some()
+                                && continued.is_none()
+                                && !matches!(
+                                    fresh,
+                                    Some(crate::invocation::FreshSession::Assigned { .. })
+                                ) =>
+                        {
+                            printed_session(&step.agent, &transcript_dir)
+                        }
                         Err(_) => None,
                     }
                     .or_else(|| continued.as_ref().map(|(sid, _)| sid.clone()))
@@ -5624,6 +5636,22 @@ pub(crate) fn advance_frontier(
     }
     crate::diagnostics::route::record_decision(log, playbook, node, state, &evaluation);
     Ok(())
+}
+
+/// The session id a failed attempt printed before any work, read from the
+/// head of the attempt's own stdout log through the agent's verified session
+/// record ([`crate::adapter::capture_failed_session`]): a retry after a
+/// dropped connection or a deadline continues that session instead of
+/// starting over.
+fn printed_session(agent: &str, transcript_dir: &Path) -> Option<String> {
+    use std::io::Read as _;
+    let mut buf = Vec::new();
+    std::fs::File::open(transcript_dir.join("stdout.log"))
+        .ok()?
+        .take(64 * 1024)
+        .read_to_end(&mut buf)
+        .ok()?;
+    crate::adapter::capture_failed_session(agent, &String::from_utf8_lossy(&buf))
 }
 
 #[cfg(test)]

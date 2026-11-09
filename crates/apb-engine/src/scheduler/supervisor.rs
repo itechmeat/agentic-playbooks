@@ -141,7 +141,7 @@ pub fn spawn_supervisor_agent(
             )?;
             session_written = true;
         }
-        match adapter.spawn_supervisor(&brief, &inv.model, root, soul, &step_env) {
+        match adapter.spawn_supervisor(&inv.agent_id, &inv.model, &brief, root, soul, &step_env) {
             Ok(()) => {
                 apb_core::fsutil::atomic_write_under(
                     &run_dir,

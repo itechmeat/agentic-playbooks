@@ -251,6 +251,33 @@ fn find_binary(p: &Probe, home: Option<&Path>) -> Option<PathBuf> {
     })
 }
 
+/// The interpreter a script's first line names through `env` (`#!/usr/bin/env
+/// node`, `#!/usr/bin/env -S node --flag`); `None` for any other first line
+/// or an interpreter given as a path.
+fn env_interpreter(first_line: &str) -> Option<&str> {
+    let mut words = first_line.strip_prefix("#!")?.split_whitespace();
+    if !words.next()?.ends_with("/env") {
+        return None;
+    }
+    words
+        .find(|w| !w.starts_with('-') && !w.contains('='))
+        .filter(|w| !w.contains('/'))
+}
+
+/// The directory of the interpreter `program`'s first line names through
+/// `env`, found on the operator's PATH the way an agent binary is
+/// ([`find_in_path`]: never inside the working directory).
+fn interpreter_dir(program: &Path) -> Option<PathBuf> {
+    use std::io::Read as _;
+    let mut head = [0u8; 256];
+    let n = std::fs::File::open(program).ok()?.read(&mut head).ok()?;
+    let text = std::str::from_utf8(&head[..n]).ok()?;
+    let name = env_interpreter(text.lines().next()?)?;
+    find_in_path(&[name.to_string()])?
+        .parent()
+        .map(Path::to_path_buf)
+}
+
 /// Result of a successful probe: stdout (truncated to the limit) + a
 /// truncation flag.
 struct ProbeOut {
@@ -360,6 +387,13 @@ fn run_probe(
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     if let Some(dir) = extra_path {
         dirs.push(dir.to_path_buf());
+    }
+    // A script that names its interpreter through `env` (an npm-installed
+    // CLI: `#!/usr/bin/env node`) finds it where the operator's PATH has it,
+    // when a version manager keeps it outside the system directories and the
+    // binary's own canonical directory.
+    if let Some(dir) = interpreter_dir(program) {
+        dirs.push(dir);
     }
     dirs.extend(
         ["/usr/bin", "/bin", "/usr/local/bin"]
@@ -879,6 +913,18 @@ mod scenario_tests {
 
     /// A stub program `name` in `dir` that leaves `<dir>/<name>.ran` when
     /// it runs.
+    #[test]
+    fn an_env_shebang_names_its_interpreter() {
+        assert_eq!(super::env_interpreter("#!/usr/bin/env node"), Some("node"));
+        assert_eq!(
+            super::env_interpreter("#!/usr/bin/env -S node --no-warnings"),
+            Some("node")
+        );
+        assert_eq!(super::env_interpreter("#!/bin/sh"), None);
+        assert_eq!(super::env_interpreter("#!/usr/bin/env /opt/x/node"), None);
+        assert_eq!(super::env_interpreter("echo hi"), None);
+    }
+
     fn stub(dir: &Path, name: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
         let path = dir.join(name);

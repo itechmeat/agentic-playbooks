@@ -3249,7 +3249,8 @@ again, the session carries it. The handoff is warm only when all of these hold:
 - the source attempt recorded a session id (see "Retries continue the session"
   for how each agent's id is found);
 - the source ran on the same agent and model as this node's primary executor;
-- the agent can resume a session: `claude`, `codex`, `opencode` and `zcode`;
+- the agent can resume a session: `claude`, `codex`, `opencode`, `zcode` and
+  `dsh`;
 - both nodes run in the same directory: neither is isolated and their
   `workdir`s resolve to the same place (agents key sessions by directory).
 

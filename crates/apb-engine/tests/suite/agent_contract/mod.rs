@@ -51,7 +51,7 @@ macro_rules! contract {
 }
 
 contract!(
-    claude, codex, agy, opencode, hermes, grok, cursor, qoder, zcode
+    claude, codex, agy, opencode, hermes, grok, cursor, qoder, zcode, dsh
 );
 
 /// Every built-in agent with a launch form has a fixture and a test module,
@@ -99,5 +99,70 @@ fn captured_fixtures_match_the_verified_version() {
                 );
             }
         }
+    }
+}
+
+/// An agent whose run-scoped file is an argument gets it in front of the
+/// built-in form, on the one spawn path (decision record 0013): dsh's model
+/// patch leads the launcher's own flags.
+#[test]
+fn the_run_scoped_arguments_lead_the_form() {
+    let fx = stub::load("dsh");
+    let s = fx.scenario("success");
+    let stub = stub::Stub::for_scenario(s);
+    stub.run("dsh", apb_engine::invocation::builtin("dsh").unwrap())
+        .unwrap();
+    let argv = stub.argv();
+    assert_eq!(argv[0], "--patch", "{argv:?}");
+    assert_eq!(&argv[2..4], ["--profile", "headless"], "{argv:?}");
+    let patch = std::fs::read_to_string(&argv[1]).unwrap();
+    assert!(patch.contains("model: \"m-1\""), "{patch}");
+    assert!(patch.contains("provider: \"deepseek-official\""), "{patch}");
+}
+
+/// A failed attempt's session is recovered only from a verified record the
+/// agent prints before any work (`Capabilities::printed_session`), through
+/// its own reader, and only an id that cannot read as an option.
+#[test]
+fn a_failed_attempts_session_comes_only_from_a_verified_opening_record() {
+    use apb_engine::adapter::capture_failed_session;
+    let dsh = "{\"type\":\"session\",\"sessionId\":\"session-ok\",\"cwd\":\"/w\"}\n";
+    assert_eq!(
+        capture_failed_session("dsh", dsh).as_deref(),
+        Some("session-ok")
+    );
+    let dashed = "{\"type\":\"session\",\"sessionId\":\"--last\",\"cwd\":\"/w\"}\n";
+    assert_eq!(capture_failed_session("dsh", dashed), None);
+    // An answer of a plain-text agent that happens to hold a session field.
+    let answer = "{\"session_id\":\"existing-other-session\"}\n";
+    assert_eq!(capture_failed_session("grok", answer), None);
+    assert_eq!(capture_failed_session("hermes", answer), None);
+    // codex declares no verified opening record, and a dash-led id is
+    // never a session on any path, its stderr header included.
+    assert_eq!(
+        capture_failed_session("codex", "session id: --last\n"),
+        None
+    );
+    assert_eq!(
+        apb_engine::adapter::capture_session_header("codex", "session id: --last\n"),
+        None
+    );
+}
+
+/// The agents that declare a verified opening session record are exactly
+/// the ones whose reader finds it in their success fixture.
+#[test]
+fn the_printed_session_capability_matches_the_reader() {
+    for a in apb_core::agents::all() {
+        let id = a.descriptor().id;
+        if a.forms().is_none() {
+            continue;
+        }
+        let fx = stub::load(id);
+        let found = a
+            .output()
+            .opening_session(&fx.scenario("success").stdout())
+            .is_some();
+        assert_eq!(a.descriptor().capabilities.printed_session, found, "{id}");
     }
 }
