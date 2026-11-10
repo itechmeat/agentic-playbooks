@@ -115,6 +115,16 @@ pub fn publish_driver_pid(run_dir: &Path, pid: u32) {
     }
 }
 
+/// Removes `driver.pid` when it names this process, which never drove the
+/// run: a detached driver that gives up before its drive (the workdir
+/// queue) leaves no claim behind, so a stop finalizes the run instead of
+/// signalling a driver that is gone.
+pub(crate) fn let_go_unclaimed(run_dir: &Path) {
+    if read_driver_pid(run_dir) == Some(std::process::id()) {
+        let _ = std::fs::remove_file(driver_pid_path(run_dir));
+    }
+}
+
 /// Owns `runs/<id>/driver.pid` for the lifetime of one drive call: written
 /// (atomically, 0600) when the drive starts, removed when it returns, whatever
 /// the outcome. Every drive invocation takes one - the CLI's synchronous run,
@@ -267,6 +277,9 @@ pub struct DriverArgs<'a> {
     /// The path of the handoff file holding the resume's launch grant
     /// ([`crate::launch_handoff`]); the grant itself never goes on argv.
     pub launch_handoff: Option<&'a Path>,
+    /// More time a resume grants the run's deadline, milliseconds,
+    /// forwarded as `--deadline-ms`.
+    pub deadline_ms: Option<u64>,
 }
 
 /// Re-execs this binary as `apb __drive-run ...` in a separate, detached OS
@@ -297,6 +310,7 @@ pub fn spawn_detached_driver(root: &Path, run_id: &str, args: &DriverArgs<'_>) -
         retry_now,
         budget_json,
         launch_handoff,
+        deadline_ms,
     } = *args;
     let exe = apb_core::fsutil::reexec_exe()?;
     // The child gets an absolute root: it starts from a different working
@@ -343,6 +357,9 @@ pub fn spawn_detached_driver(root: &Path, run_id: &str, args: &DriverArgs<'_>) -
         }
         if let Some(h) = launch_handoff {
             cmd.arg("--launch-handoff").arg(h);
+        }
+        if let Some(ms) = deadline_ms {
+            cmd.arg("--deadline-ms").arg(ms.to_string());
         }
     }
     cmd.current_dir(&root);

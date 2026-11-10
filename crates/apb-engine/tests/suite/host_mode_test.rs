@@ -1944,3 +1944,48 @@ fn a_host_task_decision_never_sends_a_declared_secret_of_its_run() {
         assert_eq!(h.finish(&run_id).0, RunStatus::Succeeded);
     }
 }
+
+/// A graceful engine abort (routine operations, D0) closes the open host
+/// task `cancelled`, the run ends aborted, and a later submission for the
+/// task is refused as not pending. A pause would have left it open.
+#[test]
+fn a_graceful_abort_cancels_the_host_task() {
+    let h = Host::new(&one_node(""), &[]);
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let task = h.task(&run_id, "w");
+    let outcome = apb_engine::stop::stop_run_with(
+        h.root.path(),
+        &run_id,
+        &apb_engine::stop::StopRequest {
+            by: apb_engine::pause::kind::PauseBy::Engine,
+            reason: "deadline_exceeded: test",
+            graceful: true,
+            due: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome, apb_engine::stop::StopOutcome::SignaledLiveDriver);
+    let (status, events) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Aborted);
+    let closed = events.iter().any(|e| {
+        matches!(&e.payload, EventPayload::HostTaskSubmitted { task_id, status, submitted_by, .. }
+            if task_id == &task.task_id && status == "cancelled" && submitted_by == "engine")
+    });
+    assert!(closed, "the host task stays open after a graceful abort");
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunPaused { .. }))
+    );
+    let refused = host_task::submit_to_run(
+        h.root.path(),
+        &run_id,
+        request(&task.task_id, SubmitStatus::Succeeded, "late"),
+    );
+    assert!(
+        matches!(refused, Err(apb_engine::error::EngineError::NotFound(ref m)) if m.contains("not pending")),
+        "{refused:?}"
+    );
+}

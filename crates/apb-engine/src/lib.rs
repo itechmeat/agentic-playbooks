@@ -66,6 +66,9 @@ pub mod notify;
 pub mod parallel;
 pub mod previous_success;
 // operator pause (issue #200)
+/// Barriers the deadline race tests hold the engine at (test builds only).
+#[cfg(any(test, feature = "testing"))]
+pub mod deadline_hooks;
 pub mod pause;
 pub mod people;
 pub mod proc;
@@ -84,6 +87,7 @@ pub mod retry_wait;
 pub mod review;
 pub mod run_binaries;
 pub mod run_config;
+pub mod run_deadline;
 pub mod run_definitions;
 pub mod run_doctor;
 pub mod run_end;
@@ -111,7 +115,9 @@ pub mod scheduler;
 pub mod script;
 pub mod signals;
 mod stall;
+pub mod start_key;
 pub mod state;
+pub mod step_start;
 pub mod stop;
 pub mod transcript;
 pub mod waker;

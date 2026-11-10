@@ -132,9 +132,13 @@ pub(crate) fn probe_before_wake_within(
         )));
     }
     verify_before_probe(root, run_id, &run_dir, launch_checked)?;
-    let run = crate::scheduler::run_quota_probe(&run_dir, &node, &agent, &model);
+    let hold = crate::resume_kind::WakeHold::Pause(seq);
+    let run = crate::scheduler::run_quota_probe(&run_dir, &node, &agent, &model, hold);
     let (detail, repause) = match &run {
         ProbeRun::Unavailable(why) => return Ok(WakeProbe::Skipped(why.clone())),
+        // A probe stopped because its pause no longer holds the run has
+        // nothing to say about the run.
+        ProbeRun::Cancelled(_) => return Ok(WakeProbe::Superseded),
         ProbeRun::Answered => (format!("{PROBE_PASSED}: `{agent}/{model}` answered"), None),
         ProbeRun::Failed(msg) if crate::failure_class::classify(msg) == FailureKind::Quota => {
             let now = apb_core::clock::now_ms();

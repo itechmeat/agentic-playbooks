@@ -811,3 +811,176 @@ fn resume_all_never_probes_a_run_whose_launch_check_was_set_aside() {
     assert!(probes(&events(root, &res.run_id)).is_empty());
     drop(env);
 }
+
+/// A stub whose first call hits the quota and whose later calls (the
+/// probe) hang for 30 s.
+fn hanging_probe_stub(dir: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let c = dir.join("calls");
+    let body = format!(
+        "#!/bin/sh\nprintf x >> '{c}'\nn=$(wc -c < '{c}' | tr -d ' ')\nif [ \"$n\" -eq 1 ]; then echo '{QUOTA_429}' 1>&2; exit 1; fi\nsleep 30\necho done\n",
+        c = c.display()
+    );
+    let path = dir.join("agent.sh");
+    common::write_sync(&path, &body);
+    let mut p = fs::metadata(&path).unwrap().permissions();
+    p.set_mode(0o755);
+    fs::set_permissions(&path, p).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+/// A probe of a run with a deadline is bounded by the time it has left,
+/// not by the probe's own two minutes: a hanging executor is killed at
+/// the deadline and no outcome is journaled for the run the deadline
+/// ends.
+#[test]
+fn a_probe_is_bounded_by_the_runs_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, "probedl");
+    common::seed_main(root);
+    let prog = hanging_probe_stub(root);
+    let _env = Env::set(&prog);
+    let res = run(
+        root,
+        "probedl",
+        None,
+        RunOptions {
+            deadline_ms: Some(3000),
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(res.outcome, RunStatus::Paused);
+    let (seq, ..) = last_pause(&events(root, &res.run_id));
+    let started = std::time::Instant::now();
+    let _ = probe_before_wake(root, &res.run_id, seq);
+    let took = started.elapsed();
+    assert_eq!(calls(root), 2, "the probe was sent");
+    assert!(took < std::time::Duration::from_secs(10), "{took:?}");
+}
+
+/// A probe whose run passed its deadline after the waker's check is not
+/// sent: the deadline is checked again right before the spawn.
+#[test]
+fn a_probe_past_the_deadline_is_not_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, "probepast");
+    common::seed_main(root);
+    let prog = hanging_probe_stub(root);
+    let _env = Env::set(&prog);
+    let res = run(
+        root,
+        "probepast",
+        None,
+        RunOptions {
+            deadline_ms: Some(1500),
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(res.outcome, RunStatus::Paused);
+    let (seq, ..) = last_pause(&events(root, &res.run_id));
+    std::thread::sleep(std::time::Duration::from_millis(1600));
+    let probe = probe_before_wake(root, &res.run_id, seq).unwrap();
+    assert!(matches!(probe, WakeProbe::Skipped(_)), "{probe:?}");
+    assert_eq!(calls(root), 1, "the attempt only, no probe");
+}
+
+/// A probe is cancelled when the run it probes for changes under it: a
+/// hanging probe starts with minutes left, a person resumes the run with
+/// `--deadline 1s` meanwhile, and the resumed run ends at that deadline.
+/// The probe does not keep its executor for the old bound: it stops within
+/// a moment of the run's end and journals nothing.
+#[test]
+fn a_probe_is_cancelled_when_a_resume_shortens_the_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, "probecut");
+    common::seed_main(root);
+    let prog = hanging_probe_stub(root);
+    let _env = Env::set(&prog);
+    unsafe { std::env::set_var("APB_PAUSE_GRACE_MS", "200") };
+    let res = run(
+        root,
+        "probecut",
+        None,
+        RunOptions {
+            deadline_ms: Some(600_000),
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(res.outcome, RunStatus::Paused);
+    let (seq, ..) = last_pause(&events(root, &res.run_id));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (r, id) = (root.to_path_buf(), res.run_id.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send(probe_before_wake(&r, &id, seq));
+    });
+    let sent = std::time::Instant::now();
+    while calls(root) < 2 {
+        assert!(
+            sent.elapsed() < std::time::Duration::from_secs(20),
+            "no probe"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let resumed = apb_engine::scheduler::resume_req(
+        root,
+        &res.run_id,
+        &apb_engine::scheduler::ResumeRequest {
+            deadline_ms: Some(1000),
+            ..apb_engine::scheduler::ResumeRequest::operator()
+        },
+    )
+    .unwrap();
+    assert_eq!(resumed.outcome, RunStatus::Aborted);
+    let ended = std::time::Instant::now();
+    let probe = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the probe kept running past the run's end");
+    assert!(
+        ended.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        ended.elapsed()
+    );
+    assert_eq!(probe.unwrap(), WakeProbe::Superseded);
+    assert!(probes(&events(root, &res.run_id)).is_empty());
+    unsafe { std::env::remove_var("APB_PAUSE_GRACE_MS") };
+}
+
+/// A run stopped while its probe runs: the probe stops with it and
+/// journals nothing.
+#[test]
+fn a_probe_is_cancelled_when_the_run_is_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, "probestop");
+    common::seed_main(root);
+    let prog = hanging_probe_stub(root);
+    let _env = Env::set(&prog);
+    let res = run(root, "probestop", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Paused);
+    let (seq, ..) = last_pause(&events(root, &res.run_id));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (r, id) = (root.to_path_buf(), res.run_id.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send(probe_before_wake(&r, &id, seq));
+    });
+    let sent = std::time::Instant::now();
+    while calls(root) < 2 {
+        assert!(
+            sent.elapsed() < std::time::Duration::from_secs(20),
+            "no probe"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    apb_engine::stop::stop_run(root, &res.run_id).unwrap();
+    let probe = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the probe kept running past the stop");
+    assert_eq!(probe.unwrap(), WakeProbe::Superseded);
+    assert!(probes(&events(root, &res.run_id)).is_empty());
+}

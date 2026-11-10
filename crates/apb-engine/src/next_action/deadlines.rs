@@ -102,6 +102,19 @@ pub fn host_task(clock: Clock, deadline_ms: Option<u64>) -> Option<AutoProgress>
     ))
 }
 
+/// The run's deadline: the run ends aborted at it. `At` while its clock
+/// runs, assured only while a live driver holds the run (its watch ends it;
+/// a parked run's deadline waker is not observed), `Frozen` while a person
+/// paused the run or it ended (the deadline clock stops then).
+pub fn run_deadline(clock: Clock, events: &[Event]) -> Option<AutoProgress> {
+    let v = crate::run_view::deadline(events, u128::from(clock.now_ms))?;
+    let clock = Clock {
+        paused: v.frozen,
+        ..clock
+    };
+    Some(clock.progress(v.remaining_ms, AutoOutcome::RunDeadline))
+}
+
 /// A pause with `until`: a resume attempt, never assured (the waker may
 /// probe, pause again or wait for the lock, and its process is not
 /// observed). The time is absolute: a pause does not freeze its own end.
@@ -242,5 +255,78 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A run with a 10 min deadline started at 0: `At` its end while the
+    /// clock runs (assured only under a live driver), `Frozen` with what
+    /// is left once a person paused it or it ended, nothing without one.
+    #[test]
+    fn the_run_deadline_is_at_its_end_or_frozen() {
+        const MIN: u64 = 60_000;
+        let base = || {
+            vec![
+                ev(
+                    0,
+                    0,
+                    EventPayload::RunStarted {
+                        playbook: "p".into(),
+                        version: "1.0.0".into(),
+                        definition: None,
+                        external_data: false,
+                    },
+                ),
+                ev(
+                    1,
+                    0,
+                    serde_json::from_value(serde_json::json!({
+                        "type": "run_provenance",
+                        "deadline": { "total_ms": 10 * MIN, "source": "run" }
+                    }))
+                    .unwrap(),
+                ),
+            ]
+        };
+        let clock = |driver_alive| Clock {
+            now_ms: 4 * MIN,
+            paused: false,
+            driver_alive,
+        };
+        for alive in [true, false] {
+            assert_eq!(
+                run_deadline(clock(alive), &base()),
+                Some(AutoProgress::At {
+                    at_ms: 10 * MIN,
+                    outcome: AutoOutcome::RunDeadline,
+                    assured: alive,
+                })
+            );
+        }
+        let frozen = Some(AutoProgress::Frozen {
+            remaining_ms: 7 * MIN,
+            outcome: AutoOutcome::RunDeadline,
+        });
+        let mut paused = base();
+        paused.push(ev(
+            2,
+            u128::from(3 * MIN),
+            EventPayload::RunPaused {
+                reason: "later".into(),
+                by: Some(crate::pause::kind::PauseBy::Operator),
+                mode: None,
+                until: None,
+                keep_lock: false,
+            },
+        ));
+        assert_eq!(run_deadline(clock(false), &paused), frozen);
+        let mut ended = base();
+        ended.push(ev(
+            2,
+            u128::from(3 * MIN),
+            EventPayload::RunFinished {
+                outcome: "failed".into(),
+            },
+        ));
+        assert_eq!(run_deadline(clock(false), &ended), frozen);
+        assert_eq!(run_deadline(clock(true), &base()[..1]), None);
     }
 }

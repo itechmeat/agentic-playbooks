@@ -1847,7 +1847,11 @@ fn a_publish_whose_gate_did_not_approve_plans_nothing() {
     assert_eq!(intents(&events), 0);
 }
 
-/// Appends a channel entry by hand, stamped as `channel` would be.
+/// Appends a channel entry by hand, stamped as `channel` would be. The
+/// JSON text goes out in one write, as `review::append_decision` writes a
+/// `String`: a `Value` formatted straight into the file is many small
+/// writes, and a drive reading between them finds a torn line and fails
+/// the run.
 fn forge_entry(dir: &Path, seq: u64, nonce: &str, channel: &str) {
     use std::io::Write;
     let line = serde_json::json!({
@@ -1863,7 +1867,7 @@ fn forge_entry(dir: &Path, seq: u64, nonce: &str, channel: &str) {
         .create(true)
         .open(dir.join("reviews.jsonl"))
         .unwrap();
-    writeln!(file, "{line}").unwrap();
+    file.write_all(format!("{line}\n").as_bytes()).unwrap();
 }
 
 #[test]

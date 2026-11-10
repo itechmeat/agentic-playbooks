@@ -187,6 +187,7 @@ fn supervised_wake_without_command_then_abort() {
         Control::Abort {
             reason: "test abort".into(),
             by: None,
+            graceful: false,
         },
     )
     .unwrap();
@@ -1095,6 +1096,7 @@ fn a_doomed_join_is_failed_and_woken_on_instead_of_being_batch_executed() {
         Control::Abort {
             reason: "join is unrecoverable".into(),
             by: None,
+            graceful: false,
         },
     )
     .unwrap();
@@ -1236,6 +1238,7 @@ fn abort_control_ends_autonomous_drive_as_aborted() {
         Control::Abort {
             reason: "pre-seeded abort".into(),
             by: None,
+            graceful: false,
         },
     )
     .unwrap();
@@ -1306,6 +1309,7 @@ fn resumed_agent_supervised_run_still_parks_for_its_supervisor() {
         Control::Abort {
             reason: "test done".into(),
             by: None,
+            graceful: false,
         },
     )
     .unwrap();

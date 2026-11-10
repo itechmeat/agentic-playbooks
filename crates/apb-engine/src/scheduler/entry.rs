@@ -147,6 +147,16 @@ pub struct RunOptions {
     /// manifest and on `run_started`; a child and a `continued_from`
     /// successor of a flagged run are flagged whatever this says.
     pub external_data: bool,
+    /// The run's deadline argument, milliseconds on the deadline clock
+    /// (`apb run --deadline`, MCP and HTTP `deadline`): overrides the
+    /// playbook's `deadline:` (see [`crate::run_deadline`]). Ignored for a
+    /// child, a scenario and an eval run.
+    pub deadline_ms: Option<u64>,
+    /// The start key and the request its surface captured (`apb run
+    /// --start-key`, MCP and HTTP `start_key`): a top-level start only;
+    /// ignored for a child, a scenario and an eval run (see
+    /// [`crate::start_key`]).
+    pub start_key: Option<apb_core::start_key::StartKeyRequest>,
 }
 
 /// A permit hands the engine exactly what the gate verified (decision record
@@ -210,7 +220,24 @@ impl Prepared {
             return Ok(());
         };
         let run_dir = self.run_dir.clone();
+        let run_id = run_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let claimed = acquire_queued_tree(root, self.worktree.as_deref(), wait, &mut || {
+            // A run whose deadline passed in the queue ends there, without
+            // the lock: the stop ends it aborted `deadline_exceeded` (nothing
+            // drives it yet).
+            if crate::event::read_all_lossy_tail(&run_dir)
+                .is_ok_and(|ev| crate::run_deadline::expired(&ev, apb_core::clock::now_ms()))
+            {
+                let _ = crate::run_deadline::stop_if_expired(
+                    root,
+                    &run_id,
+                    crate::run_deadline::Expect::Any,
+                );
+                return true;
+            }
             // A stop posted while the run sits in the queue must not have to
             // wait for the workdir to free before it takes effect.
             matches!(crate::control::pending_stop_seq(&run_dir), Ok(Some(_)))
@@ -581,7 +608,26 @@ pub fn drive_run_from_dir(root: &Path, run_id: &str) -> Result<RunResult, Engine
             .workdir_queue_wait_ms
             .map(Duration::from_millis)
             .unwrap_or_default();
-        acquire_handover_within(root, tree, wait)?
+        // A run with a deadline waits no longer than the time it has left,
+        // and ends at it when the tree did not come free.
+        let events = crate::event::read_all_lossy_tail(&run_dir).unwrap_or_default();
+        let cap = crate::run_deadline::remaining_ms(&events, apb_core::clock::now_ms())
+            .map(Duration::from_millis);
+        match acquire_handover_within(root, tree, wait, cap) {
+            Ok(g) => g,
+            Err(e) => {
+                // This process never drove the run, so the pid its spawner
+                // published names no driver that would consume an abort:
+                // it is let go first, and an expired run is ended here.
+                crate::driver::let_go_unclaimed(&run_dir);
+                let _ = crate::run_deadline::stop_if_expired(
+                    root,
+                    run_id,
+                    crate::run_deadline::Expect::Any,
+                );
+                return Err(e);
+            }
+        }
     } else {
         None
     };
@@ -760,12 +806,13 @@ pub fn run_cancel(root: &Path, run_id: &str) -> Result<(), EngineError> {
         Control::Abort {
             reason: "run_cancel".into(),
             by: Some(crate::pause::kind::PauseBy::Supervisor),
+            graceful: false,
         },
     )?;
     // Propagate the abort into any non-terminal sub-playbook children (spec C):
     // an abort of the parent must reach a child that is blocking the parent
     // (e.g. a child paused on human_review).
-    crate::stop::abort_children(root, run_id, crate::pause::kind::PauseBy::Supervisor)?;
+    crate::stop::abort_children(root, run_id, crate::pause::kind::PauseBy::Supervisor, false)?;
     Ok(())
 }
 

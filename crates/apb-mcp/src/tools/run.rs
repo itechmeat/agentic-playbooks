@@ -48,6 +48,10 @@ pub struct StartArgs {
     /// The run processes external data (the effective flag from
     /// `apb_engine::external_data::for_start`).
     pub external_data: bool,
+    /// The run's deadline argument, milliseconds (`deadline`).
+    pub deadline_ms: Option<u64>,
+    /// The start key and the request captured from the tool arguments.
+    pub start_key: Option<apb_core::start_key::StartKeyRequest>,
 }
 
 /// The engine options of an MCP start in `mode`. Fail-fast on a busy
@@ -76,7 +80,84 @@ pub fn start_options(a: StartArgs, mode: RunMode) -> RunOptions {
         launch: a.launch,
         unattended: a.unattended,
         external_data: a.external_data,
+        deadline_ms: a.deadline_ms,
+        start_key: a.start_key,
         ..RunOptions::default()
+    }
+}
+
+/// The answer of a keyed start whose run already started: the run and
+/// its status; the caller follows it with `run_wait`.
+pub fn already_started(root: &Path, run_id: &str) -> Value {
+    let status = apb_engine::run_view::RunView::load(&root.join(".apb/runs").join(run_id), run_id)
+        .map(|v| v.run_status.as_str())
+        .unwrap_or("running");
+    json!({ "run_id": run_id, "already_started": true, "status": status })
+}
+
+/// A start result with the engine's `AlreadyStarted` (a race lost after
+/// the lookup) answered as a repeat.
+pub fn or_already_started(
+    root: &Path,
+    r: Result<Value, apb_engine::error::EngineError>,
+) -> Result<Value, ToolError> {
+    match r {
+        Err(apb_engine::error::EngineError::AlreadyStarted(id)) => Ok(already_started(root, &id)),
+        other => other.map_err(ToolError::from),
+    }
+}
+
+/// What a keyed start's lookup leaves a start surface.
+pub enum Keyed {
+    /// The start goes ahead with this request.
+    Go(apb_core::start_key::StartKeyRequest),
+    /// The run already started: this is the answer.
+    Answer(Value),
+}
+
+/// The key checked, the request captured and looked up; the refusal JSON
+/// (`policy`, `detail`, and `run_id` for a conflict) otherwise.
+pub fn keyed_lookup(
+    root: &std::path::Path,
+    scope_label: &str,
+    id: &str,
+    raw: &str,
+    reuse: bool,
+    fields: &apb_core::start_key::StartRequestFields,
+) -> Result<Keyed, Value> {
+    let refusal = |code: &str, detail: String| json!({ "policy": code, "detail": detail });
+    let key = apb_core::start_key::StartKey::parse(raw)
+        .map_err(|e| refusal(apb_core::start_key::INVALID, e))?;
+    let request = apb_core::start_key::StartRequest::capture(fields)
+        .map_err(|e| refusal(apb_core::start_key::INVALID, e.to_string()))?;
+    let req = apb_core::start_key::StartKeyRequest {
+        key,
+        reuse,
+        request,
+    };
+    match apb_engine::start_key::lookup(root, scope_label, id, &req) {
+        Ok(apb_engine::start_key::Lookup::Free) => Ok(Keyed::Go(req)),
+        Ok(apb_engine::start_key::Lookup::Started { run_id, .. }) => {
+            Ok(Keyed::Answer(already_started(root, &run_id)))
+        }
+        Ok(apb_engine::start_key::Lookup::Conflict { run_id }) => Err(json!({
+            "policy": apb_engine::start_key::CONFLICT,
+            "detail": format!("the key names run `{run_id}`, started with other params or instruction; use another key"),
+            "run_id": run_id,
+        })),
+        Err(e) => {
+            let msg = match &e {
+                apb_engine::error::EngineError::Conflict(m)
+                | apb_engine::error::EngineError::Invalid(m) => m.clone(),
+                other => other.to_string(),
+            };
+            let (code, detail) = msg
+                .split_once(": ")
+                .filter(|(c, _)| c.starts_with("start_key_"))
+                .map(|(c, d)| (c.to_string(), d.to_string()))
+                .unwrap_or_else(|| ("start_key_state_unreadable".to_string(), msg.clone()));
+            Err(refusal(&code, detail))
+        }
     }
 }
 
@@ -88,11 +169,13 @@ pub fn playbook_run(
     version: Option<&str>,
     args: StartArgs,
 ) -> Result<Value, ToolError> {
-    let res = run(root, id, version, start_options(args, RunMode::Autonomous))?;
-    Ok(super::budget::with_start_blocks(
-        root,
-        json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }),
-    ))
+    let res = run(root, id, version, start_options(args, RunMode::Autonomous)).map(|res| {
+        super::budget::with_start_blocks(
+            root,
+            json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }),
+        )
+    });
+    or_already_started(root, res)
 }
 
 /// A non-blocking run start for a regular (non-supervised) MCP client:
@@ -112,11 +195,9 @@ pub fn playbook_run_background(
     args: StartArgs,
 ) -> Result<Value, ToolError> {
     let opts = start_options(args, RunMode::Autonomous);
-    let run_id = apb_engine::start_detached(root, id, version, opts)?;
-    Ok(super::budget::with_start_blocks(
-        root,
-        json!({ "run_id": run_id }),
-    ))
+    let res = apb_engine::start_detached(root, id, version, opts)
+        .map(|run_id| super::budget::with_start_blocks(root, json!({ "run_id": run_id })));
+    or_already_started(root, res)
 }
 
 /// The filter of a run listing from a surface's arguments: `scope` is
@@ -285,6 +366,24 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
     // What `run.previous_success.*` renders, as the start recorded it:
     // times and keys only, never the snapshotted output values. Absent
     // for a run whose definition does not read the namespace.
+    if let Some(d) = apb_engine::run_view::deadline(&view.events, apb_core::clock::now_ms()) {
+        out["deadline"] = json!(d);
+    }
+    // Runs started from a run step: the starter this run records, and the
+    // runs a step of this run started in this project.
+    if let Some(tag) = apb_engine::run_view::start_key(&view.events) {
+        out["start_key"] = json!(tag);
+    }
+    if let Some(by) = apb_engine::run_view::started_by(&dir) {
+        out["started_by"] = json!(by);
+    }
+    let started = apb_engine::run_view::started_runs(root, run_id);
+    if !started.runs.is_empty() {
+        out["started_runs"] = json!(started.runs);
+    }
+    if started.truncated {
+        out["started_runs_truncated"] = json!(true);
+    }
     if let Some(ps) = apb_engine::run_view::previous_success(&view.events) {
         out["previous_success"] = json!(ps);
     }
@@ -1008,26 +1107,27 @@ pub fn run_resume(
     run_resume_with(
         root,
         run_id,
-        from_node,
-        allow_environment_drift,
-        budget,
-        launch,
-        None,
+        &apb_engine::ResumeRequest {
+            from_node,
+            allow_environment_drift,
+            budget,
+            launch,
+            ..apb_engine::ResumeRequest::operator()
+        },
     )
 }
 
 /// [`run_resume`] that also starts waiting retries now: their
 /// `retry_expedited` is journaled with `run_resumed`, so a refused resume
 /// waives no delay.
+/// `req` is the resume as the caller asks for it (an operator's resume:
+/// its `by` is ignored).
 pub fn run_resume_with(
     root: &Path,
     run_id: &str,
-    from_node: Option<&str>,
-    allow_environment_drift: bool,
-    budget: Option<&apb_engine::budget::BudgetResume>,
-    launch: Option<&apb_engine::gate::launch::LaunchGrant>,
-    retry_now: Option<apb_engine::scheduler::RetryNow<'_>>,
+    req: &apb_engine::ResumeRequest<'_>,
 ) -> Result<Value, ToolError> {
+    let from_node = req.from_node;
     // Compute the resume decision up front so the ack reports where and why the
     // run resumes. This must run BEFORE the drive: once the run reaches a
     // terminal state, an argument-free `plan_resume` would refuse it.
@@ -1064,12 +1164,8 @@ pub fn run_resume_with(
     // `apb_engine::budget::admit_resume`); its refusal is an answer the
     // caller acts on, with the budget it is about.
     let req = apb_engine::ResumeRequest {
-        from_node,
-        allow_environment_drift,
-        budget,
-        launch,
-        retry_now,
-        ..apb_engine::ResumeRequest::operator()
+        by: apb_engine::pause::PauseBy::Operator,
+        ..*req
     };
     match apb_engine::resume_detached_req(root, run_id, &req) {
         Ok(_) => {}
@@ -1092,7 +1188,9 @@ pub fn run_resume_with(
         obj.insert("resumed_early".into(), json!(true));
         obj.insert("pause_until".into(), json!(until));
     }
-    if allow_environment_drift && let Some(obj) = ack.as_object_mut() {
+    if req.allow_environment_drift
+        && let Some(obj) = ack.as_object_mut()
+    {
         obj.insert(
             "note".into(),
             json!(
@@ -1135,11 +1233,9 @@ pub fn playbook_run_supervised(
     // MCP session that called playbook_run, hence RunMode::Supervised, not AgentSupervised
     // (heartbeat oversight in drive does not touch this path).
     let opts = start_options(args, RunMode::Supervised);
-    let run_id = apb_engine::start_detached(root, id, version, opts)?;
-    Ok(super::budget::with_start_blocks(
-        root,
-        json!({ "run_id": run_id }),
-    ))
+    let res = apb_engine::start_detached(root, id, version, opts)
+        .map(|run_id| super::budget::with_start_blocks(root, json!({ "run_id": run_id })));
+    or_already_started(root, res)
 }
 
 /// Stops a run and reports what that took: signaling a live driver (whose

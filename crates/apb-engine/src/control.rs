@@ -25,6 +25,11 @@ pub enum Control {
         /// becomes. Absent in older control files. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<crate::pause::kind::PauseBy>,
+        /// Kill the attempts in flight with SIGTERM and the grace period of
+        /// a `--now` pause instead of at once. Absent (false) in older
+        /// control files and for `apb stop`. Additive.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        graceful: bool,
     },
     ContextAppend {
         note: String,
@@ -257,4 +262,29 @@ pub fn read_control_after(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Control;
+
+    /// An `abort` line an older apb wrote (no `graceful`) decodes as an
+    /// immediate abort, and an immediate abort writes no `graceful`.
+    #[test]
+    fn an_old_abort_line_decodes_as_immediate() {
+        let old: Control =
+            serde_json::from_str(r#"{"cmd":"abort","reason":"stop requested"}"#).unwrap();
+        assert!(matches!(
+            old,
+            Control::Abort {
+                graceful: false,
+                ..
+            }
+        ));
+        let line = serde_json::to_string(&old).unwrap();
+        assert!(!line.contains("graceful"), "{line}");
+        let new: Control =
+            serde_json::from_str(r#"{"cmd":"abort","reason":"x","graceful":true}"#).unwrap();
+        assert!(matches!(new, Control::Abort { graceful: true, .. }));
+    }
 }

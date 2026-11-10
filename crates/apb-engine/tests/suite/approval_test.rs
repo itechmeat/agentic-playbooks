@@ -910,6 +910,7 @@ fn a_refused_finish_in_a_supervised_run_raises_a_wake() {
         Control::Abort {
             reason: "stop".into(),
             by: None,
+            graceful: false,
         },
     )
     .unwrap();

@@ -765,7 +765,7 @@ pub(crate) fn park_for_supervisor(
                 write_control_cursor(run_dir, seq)?;
                 return Ok(WakeOutcome::Terminal(RunStatus::Paused));
             }
-            Control::Abort { reason, by } => {
+            Control::Abort { reason, by, .. } => {
                 log.append(EventPayload::RunAborted { reason, by })?;
                 write_control_cursor(run_dir, seq)?;
                 return Ok(WakeOutcome::Terminal(RunStatus::Aborted));

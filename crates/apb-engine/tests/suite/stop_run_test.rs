@@ -31,7 +31,7 @@ use apb_engine::error::EngineError;
 use apb_engine::event::{EventLog, EventPayload, read_all};
 use apb_engine::scheduler::{RunOptions, RunResult, post_supervisor_command, resume, run};
 use apb_engine::state::{RunState, RunStatus};
-use apb_engine::stop::{StopOutcome, stop_run};
+use apb_engine::stop::{StopOutcome, StopRequest, stop_run, stop_run_with};
 
 /// The stub agent sleeps this long. An abort that does not actually interrupt
 /// the in-flight process would make the drive take at least this long, so the
@@ -1798,4 +1798,191 @@ fn a_supervisor_interrupt_falls_back_as_supervisor_interrupted() {
         ),
         "{fallbacks:?}"
     );
+}
+
+// ---- Graceful engine aborts (routine operations, D0) ----
+
+const SCRIPT_WF: &str = r#"
+schema: 1
+id: gracefulstop
+name: Graceful Stop
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: s, type: script, script: "scripts/s.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: s }
+  - { from: s, to: done }
+"#;
+
+/// A script that announces itself, records a SIGTERM as `term_seen` and
+/// sleeps far longer than the test waits.
+fn seed_trapping_script(root: &Path) {
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/gracefulstop/1.0.0");
+    fs::create_dir_all(vdir.join("scripts")).unwrap();
+    fs::write(vdir.join("playbook.yaml"), SCRIPT_WF).unwrap();
+    fs::write(root.join(".apb/playbooks/gracefulstop/current"), "1.0.0").unwrap();
+    let d = root.display();
+    fs::write(
+        vdir.join("scripts/s.sh"),
+        format!(
+            "trap 'touch \"{d}/term_seen\"; exit 1' TERM\ntouch \"{d}/s_running\"\nsleep 30 & wait $!\necho ok\n"
+        ),
+    )
+    .unwrap();
+    common::seed_main(root);
+}
+
+/// Sets the given variables for the guard's life, under the env lock.
+struct VarsEnv {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    keys: Vec<&'static str>,
+}
+
+impl VarsEnv {
+    fn set(vars: &[(&'static str, &str)]) -> Self {
+        let lock = common::env_lock();
+        for (k, v) in vars {
+            unsafe { std::env::set_var(k, v) };
+        }
+        Self {
+            _lock: lock,
+            keys: vars.iter().map(|(k, _)| *k).collect(),
+        }
+    }
+}
+
+impl Drop for VarsEnv {
+    fn drop(&mut self) {
+        for k in &self.keys {
+            unsafe { std::env::remove_var(k) };
+        }
+    }
+}
+
+const ENGINE_REASON: &str = "deadline_exceeded: the run passed its deadline of 1m";
+
+fn graceful(due: Option<apb_engine::stop::StopDue<'_>>) -> StopRequest<'_> {
+    StopRequest {
+        by: apb_engine::pause::kind::PauseBy::Engine,
+        reason: ENGINE_REASON,
+        graceful: true,
+        due,
+    }
+}
+
+/// Starts the trapping script run and waits until the script runs.
+fn graceful_run(root: &Path) -> (String, mpsc::Receiver<Result<RunResult, EngineError>>) {
+    seed_trapping_script(root);
+    let (tx, rx) = mpsc::channel();
+    let r = root.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&r, "gracefulstop", None, RunOptions::default()));
+    });
+    let run_id = find_run_id(root, "gracefulstop-");
+    poll_until("the script to start", || {
+        root.join("s_running").is_file().then_some(())
+    });
+    (run_id, rx)
+}
+
+/// A graceful engine abort sends SIGTERM first and ends the run aborted
+/// with its own reason, by the engine.
+#[cfg(unix)]
+#[test]
+fn graceful_abort_sends_sigterm_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let _env = VarsEnv::set(&[("APB_PAUSE_GRACE_MS", "3000")]);
+    let (run_id, rx) = graceful_run(root);
+    let outcome = stop_run_with(root, &run_id, &graceful(None)).unwrap();
+    assert_eq!(outcome, StopOutcome::SignaledLiveDriver);
+    let res = rx.recv_timeout(ABORT_DEADLINE).unwrap().unwrap();
+    assert_eq!(res.outcome, RunStatus::Aborted);
+    assert!(
+        root.join("term_seen").is_file(),
+        "the script must get SIGTERM before any SIGKILL"
+    );
+    let events = read_all(&root.join(".apb/runs").join(&run_id)).unwrap();
+    let aborted = events.iter().find_map(|e| match &e.payload {
+        EventPayload::RunAborted { reason, by } => Some((reason.clone(), *by)),
+        _ => None,
+    });
+    assert_eq!(
+        aborted,
+        Some((
+            ENGINE_REASON.to_string(),
+            Some(apb_engine::pause::kind::PauseBy::Engine)
+        ))
+    );
+}
+
+/// The attempt a graceful abort kills closes as an abort, never as a pause:
+/// no `run_paused`, the node is finished, and the interrupted attempt is
+/// followed by the run's abort.
+#[cfg(unix)]
+#[test]
+fn a_graceful_abort_closes_the_attempt_as_aborted() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let _env = VarsEnv::set(&[("APB_PAUSE_GRACE_MS", "300")]);
+    let (run_id, rx) = graceful_run(root);
+    stop_run_with(root, &run_id, &graceful(None)).unwrap();
+    let res = rx.recv_timeout(ABORT_DEADLINE).unwrap().unwrap();
+    assert_eq!(res.outcome, RunStatus::Aborted);
+    let events = read_all(&root.join(".apb/runs").join(&run_id)).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunPaused { .. })),
+        "a graceful abort read as a pause"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::NodeFinished { node, .. } if node == "s")),
+        "the node is left open, as a pause leaves it for a resume"
+    );
+    let interrupted = events.iter().position(|e| {
+        matches!(&e.payload, EventPayload::AttemptFinished { status, .. } if status == "interrupted")
+    });
+    let aborted = events
+        .iter()
+        .position(|e| matches!(e.payload, EventPayload::RunAborted { .. }));
+    if let Some(i) = interrupted {
+        assert!(aborted.is_some_and(|a| a > i));
+    }
+}
+
+/// `apb stop` stays immediate: its control line carries no `graceful`.
+#[test]
+fn apb_stop_stays_immediate() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = seed_abandoned_run(dir.path(), "stopflow-imm");
+    stop_run(dir.path(), "stopflow-imm").unwrap();
+    let text = fs::read_to_string(run_dir.join("control.jsonl")).unwrap();
+    assert!(text.contains("\"abort\""), "{text}");
+    assert!(!text.contains("graceful"), "{text}");
+}
+
+/// A stop whose condition does not hold under the event lock writes
+/// nothing: no control line, no event.
+#[test]
+fn a_stop_that_is_not_due_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = seed_abandoned_run(dir.path(), "stopflow-nd");
+    let before = fs::read(run_dir.join("events.jsonl")).unwrap();
+    let never = |_: &[apb_engine::event::Event]| false;
+    let outcome = stop_run_with(dir.path(), "stopflow-nd", &graceful(Some(&never))).unwrap();
+    assert_eq!(outcome, StopOutcome::NotDue);
+    assert!(!run_dir.join("control.jsonl").exists());
+    assert_eq!(fs::read(run_dir.join("events.jsonl")).unwrap(), before);
+    // With the condition holding, the dead run is finalized with the reason.
+    let always = |_: &[apb_engine::event::Event]| true;
+    let outcome = stop_run_with(dir.path(), "stopflow-nd", &graceful(Some(&always))).unwrap();
+    assert_eq!(outcome, StopOutcome::FinalizedDeadRun);
+    let text = fs::read_to_string(run_dir.join("control.jsonl")).unwrap();
+    assert!(text.contains("\"graceful\":true"), "{text}");
 }

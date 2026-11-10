@@ -53,7 +53,7 @@ impl StopContext<'_> {
     pub(crate) fn reason(&self) -> Option<StopReason> {
         let graceful = self
             .kill
-            .is_some_and(|k| k.load(Ordering::SeqCst) && crate::pause::interrupt::is_graceful(k));
+            .is_some_and(|k| k.load(Ordering::SeqCst) && crate::pause::interrupt::is_pause(k));
         let same_flag = self.kill.is_some_and(|k| std::ptr::eq(k, self.cancel));
         if self.cancel.load(Ordering::SeqCst) && !(same_flag && graceful) {
             return Some(StopReason::RunAborted);
@@ -109,7 +109,7 @@ mod tests {
         let c = ctx(&cancel, &kill, &interrupt);
         assert_eq!(c.reason(), Some(StopReason::SupervisorInterrupted));
         assert!(!c.ends_chain(), "a supervisor interrupt keeps the walk");
-        crate::pause::interrupt::mark_graceful(&kill);
+        crate::pause::interrupt::mark_graceful(&kill, crate::pause::interrupt::Graceful::Pause);
         kill.store(true, Ordering::SeqCst);
         let c = ctx(&cancel, &kill, &interrupt);
         assert_eq!(c.reason(), Some(StopReason::RunPaused));
@@ -137,7 +137,29 @@ mod tests {
         assert_eq!(one(&node), None);
         node.store(true, Ordering::SeqCst);
         assert_eq!(one(&node), Some(StopReason::RunAborted));
-        crate::pause::interrupt::mark_graceful(&node);
+        crate::pause::interrupt::mark_graceful(&node, crate::pause::interrupt::Graceful::Pause);
+        assert_eq!(one(&node), Some(StopReason::RunPaused));
+        crate::pause::interrupt::unmark_graceful(&node);
+    }
+
+    /// A node flag a graceful abort latched reads as an abort: only its
+    /// kill was graceful.
+    #[test]
+    fn a_graceful_abort_mark_reads_as_an_abort() {
+        let node = AtomicBool::new(false);
+        let one = |f: &AtomicBool| {
+            StopContext {
+                cancel: f,
+                kill: Some(f),
+                interrupt: None,
+            }
+            .reason()
+        };
+        crate::pause::interrupt::mark_graceful(&node, crate::pause::interrupt::Graceful::Abort);
+        node.store(true, Ordering::SeqCst);
+        assert_eq!(one(&node), Some(StopReason::RunAborted));
+        crate::pause::interrupt::unmark_graceful(&node);
+        crate::pause::interrupt::mark_graceful(&node, crate::pause::interrupt::Graceful::Pause);
         assert_eq!(one(&node), Some(StopReason::RunPaused));
         crate::pause::interrupt::unmark_graceful(&node);
     }

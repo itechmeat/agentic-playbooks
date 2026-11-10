@@ -332,6 +332,9 @@ pub fn add_to(out: &mut Value, actions: &RunActions, caller: ActionCaller) {
     if actions.children_truncated {
         out["children_truncated"] = json!(true);
     }
+    if let Some(d) = &actions.run_deadline {
+        out["run_deadline"] = json!(d);
+    }
 }
 
 /// The next actions of the run at `dir`, redacted through `redaction` (the

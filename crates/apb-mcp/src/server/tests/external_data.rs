@@ -20,6 +20,9 @@ fn seed(root: &Path) {
 
 fn args(external_data: Option<bool>, remember: Option<bool>) -> PlaybookRunArgs {
     PlaybookRunArgs {
+        deadline: None,
+        start_key: None,
+        start_key_reuse: None,
         id: "quick".into(),
         version: None,
         params: BTreeMap::from([("customer".to_string(), "acme".to_string())]),
@@ -145,6 +148,7 @@ async fn a_flagged_start_is_flagged_and_shown_and_remember_is_refused() {
     // stays as it was.
     let journal = fs::read(dir.join("events.jsonl")).unwrap();
     let resume = |flag: Option<bool>| RunResumeArgs {
+        deadline: None,
         run_id: run_id.clone(),
         from_node: None,
         retry_now: false,
@@ -335,5 +339,137 @@ fn the_read_only_server_lists_no_start_tool() {
         "run_resume",
     ] {
         assert!(!listed.iter().any(|n| n == start), "{start}");
+    }
+}
+
+/// This process as a step of a flagged run under `root` (`APB_RUN_ID` and
+/// `APB_RUN_DIR`), restored on drop. Hold `CROSS_ENV_LOCK`.
+struct FlaggedStep {
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl FlaggedStep {
+    fn enter(root: &Path) -> Self {
+        let dir = root.join(".apb/runs/step-ext");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("events.jsonl"),
+            "{\"seq\":1,\"ts\":1,\"type\":\"run_started\",\"playbook\":\"t\",\"version\":\"1.0.0\",\"external_data\":true}\n",
+        )
+        .unwrap();
+        let saved = ["APB_RUN_ID", "APB_RUN_DIR"]
+            .map(|k| (k, std::env::var_os(k)))
+            .to_vec();
+        // SAFETY: CROSS_ENV_LOCK serializes the tests that touch the env.
+        unsafe {
+            std::env::set_var("APB_RUN_ID", "step-ext");
+            std::env::set_var("APB_RUN_DIR", &dir);
+        }
+        FlaggedStep { saved }
+    }
+}
+
+impl Drop for FlaggedStep {
+    fn drop(&mut self) {
+        for (k, v) in &self.saved {
+            // SAFETY: as in `enter`.
+            unsafe {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+}
+
+fn trial_args(external_data: Option<bool>) -> PlaybookTrialArgs {
+    PlaybookTrialArgs {
+        id: "quick".into(),
+        version: None,
+        params: BTreeMap::new(),
+        instruction: None,
+        scope: None,
+        confirm_launch: None,
+        launch_version: None,
+        launch_choice: None,
+        external_data,
+    }
+}
+
+/// A trial a step of a flagged run starts without the flag is flagged; an
+/// explicit `false` is refused `external_data_immutable` before a run
+/// directory exists.
+#[tokio::test]
+async fn a_trial_from_a_flagged_step_is_flagged() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cfg = ConfigDirGuard::new();
+    let proj = tempfile::tempdir().unwrap();
+    let root = proj.path();
+    seed(root);
+    let _step = FlaggedStep::enter(root);
+    let server = WfMcp::new(root.to_path_buf());
+    let before = run_count(root);
+    let refused = json_of(&server.playbook_trial_for(Parameters(trial_args(Some(false))), None));
+    assert_eq!(refused["error"], "external_data_immutable", "{refused}");
+    assert_eq!(run_count(root), before, "a refused trial left a run");
+    let out = json_of(&server.playbook_trial_for(Parameters(trial_args(None)), None));
+    let run_id = out["run_id"].as_str().unwrap_or_else(|| panic!("{out}"));
+    let dir = root.join(".apb/runs").join(run_id);
+    assert!(
+        apb_engine::manifest::read(&dir)
+            .unwrap()
+            .unwrap()
+            .external_data
+    );
+}
+
+/// An executed plan a step of a flagged run starts without the flag is
+/// flagged in the target workspace; an explicit `false` is refused.
+#[tokio::test]
+async fn an_executed_plan_from_a_flagged_step_is_flagged() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = tempfile::tempdir().unwrap();
+    let (a, b, b_id) = setup_two(cfg.path());
+    let _step = FlaggedStep::enter(a.path());
+    let server = WfMcp::new(a.path().to_path_buf());
+    let execute = |flag: Option<bool>| {
+        let server = &server;
+        let b_id = &b_id;
+        async move {
+            let plan = prepared_token(server, b_id).await;
+            json_of(
+                &server
+                    .playbook_execute_plan(Parameters(PlaybookExecutePlanArgs {
+                        plan_token: plan["plan_token"].as_str().unwrap().to_string(),
+                        acknowledge_untrusted: None,
+                        confirm_irreversible: None,
+                        budget: None,
+                        launch_version: None,
+                        launch_choice: None,
+                        confirm_launch: None,
+                        external_data: flag,
+                    }))
+                    .await,
+            )
+        }
+    };
+    let runs = b.path().join(".apb/runs");
+    let before = fs::read_dir(&runs).map(|r| r.count()).unwrap_or(0);
+    let refused = execute(Some(false)).await;
+    assert_eq!(refused["error"], "external_data_immutable", "{refused}");
+    assert_eq!(fs::read_dir(&runs).map(|r| r.count()).unwrap_or(0), before);
+    let out = execute(None).await;
+    let run_id = out["run_ref"]["run_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(
+        apb_engine::manifest::read(&runs.join(run_id))
+            .unwrap()
+            .unwrap()
+            .external_data
+    );
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
     }
 }

@@ -36,6 +36,14 @@ pub(super) struct Report {
     pub(super) link: Option<String>,
     /// What `run.previous_success.*` renders, as the start recorded it.
     pub(super) previous_success: Option<crate::run_view::PreviousSuccessView>,
+    /// The deadline line (`45m, 12m left (ends ...)`); absent without one.
+    pub(super) deadline: Option<String>,
+    /// The start key's MAC prefix the run was started with.
+    pub(super) start_key: Option<String>,
+    /// The run step this run was started from, as a line.
+    pub(super) started_by: Option<String>,
+    /// The runs a step of this run started in this project, as a line.
+    pub(super) started_runs: Option<String>,
     /// The nodes that render untrusted text, as the start recorded them.
     pub(super) untrusted: Vec<crate::event::UntrustedNode>,
     pub(super) journal: Vec<Event>,
@@ -101,6 +109,15 @@ impl Report {
         let (graph, definition) = view.graph_and_definition(run_dir);
         let previous_success = crate::run_view::previous_success(&view.events);
         let untrusted = crate::run_view::untrusted_nodes(&view.events);
+        let deadline = crate::run_view::deadline(&view.events, u128::from(now))
+            .map(|d| crate::run_view::deadline_line(&d));
+        let start_key = crate::run_view::start_key(&view.events);
+        let here = apb_core::projects::registered_id(root);
+        let started_by = crate::run_view::started_by(run_dir)
+            .map(|by| crate::run_view::started_by_line(&by, here.as_deref()));
+        let started = crate::run_view::started_runs(root, &run_id);
+        let started_runs = (!started.runs.is_empty() || started.truncated)
+            .then(|| crate::run_view::started_runs_line(&started));
         let mut events = view.events;
         let journal = events.split_off(journal_cut);
         Ok(Report {
@@ -111,6 +128,10 @@ impl Report {
             notify,
             link: crate::people::link::run_link(root, &run_id),
             previous_success,
+            deadline,
+            start_key,
+            started_by,
+            started_runs,
             untrusted,
             goal: readout.goal,
             outcome,

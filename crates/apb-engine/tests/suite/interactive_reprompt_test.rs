@@ -400,6 +400,7 @@ fn abort_while_parked_finalizes_run_aborted_without_answer() {
         Control::Abort {
             reason: "stop while parked".into(),
             by: None,
+            graceful: false,
         },
     )
     .unwrap();

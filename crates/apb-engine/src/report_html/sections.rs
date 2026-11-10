@@ -144,20 +144,21 @@ pub(super) fn header(w: &Writer, title: &str, report: &Report) -> Markup {
             link,
         ]),
     );
-    let previous = report
-        .previous_success
-        .as_ref()
-        .map(|ps| {
-            Markup::el(
-                "p",
-                Some("meta"),
-                Markup::text(&format!(
-                    "previous success: {}",
-                    crate::run_view::previous_success_line(ps)
-                )),
-            )
-        })
-        .unwrap_or_default();
+    let meta = |label: &str, line: Option<String>| {
+        line.map(|l| Markup::el("p", Some("meta"), Markup::text(&format!("{label}: {l}"))))
+            .unwrap_or_default()
+    };
+    let previous = meta(
+        "previous success",
+        report
+            .previous_success
+            .as_ref()
+            .map(crate::run_view::previous_success_line),
+    );
+    let deadline = meta("deadline", report.deadline.clone());
+    let start_key = meta("start key", report.start_key.clone());
+    let started_by = meta("started by", report.started_by.clone());
+    let started_runs = meta("started runs in this project", report.started_runs.clone());
     let external = if report.external_data {
         Markup::el(
             "p",
@@ -167,7 +168,15 @@ pub(super) fn header(w: &Writer, title: &str, report: &Report) -> Markup {
     } else {
         Markup::default()
     };
-    Markup::concat([head, previous, external])
+    Markup::concat([
+        head,
+        previous,
+        deadline,
+        start_key,
+        started_by,
+        started_runs,
+        external,
+    ])
 }
 
 /// The nodes that render untrusted text, as the start recorded them;

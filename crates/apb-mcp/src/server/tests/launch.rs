@@ -22,6 +22,9 @@ fn seed(root: &Path, decl: &str) {
 fn start(confirm: Option<&Value>) -> PlaybookRunArgs {
     let arg = |k: &str| confirm.and_then(|c| c[k].as_str()).map(str::to_string);
     PlaybookRunArgs {
+        deadline: None,
+        start_key: None,
+        start_key_reuse: None,
         id: "quick".into(),
         version: None,
         params: BTreeMap::new(),
@@ -343,6 +346,7 @@ async fn playbook_run_with_continued_from_goes_through_the_launch_check() {
 fn resume_args(run_id: &str, confirm: Option<&Value>) -> RunResumeArgs {
     let arg = |k: &str| confirm.and_then(|c| c[k].as_str()).map(str::to_string);
     RunResumeArgs {
+        deadline: None,
         run_id: run_id.to_string(),
         from_node: Some("note".into()),
         retry_now: false,

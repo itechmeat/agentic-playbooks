@@ -233,6 +233,34 @@ pub struct RunDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub previous_success: Option<apb_engine::run_view::PreviousSuccessView>,
+    /// The run's deadline: its total, what is left and whether the clock is
+    /// frozen. Left out for a run without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub deadline: Option<apb_engine::run_view::RunDeadlineView>,
+    /// The first characters of the start key's MAC the run was started
+    /// with (never the key). Left out for a run started without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub start_key: Option<String>,
+    /// The run step this run was started from, as its launch record names
+    /// it. Left out for every other run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub started_by: Option<apb_core::launch::StartedBy>,
+    /// The runs a step of this run started in this project, newest first.
+    /// Left out when there is none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        test,
+        ts(as = "Option<Vec<apb_engine::run_view::StartedRunView>>", optional)
+    )]
+    pub started_runs: Vec<apb_engine::run_view::StartedRunView>,
+    /// The scan behind `started_runs` stopped at its bound: older entries
+    /// may be missing.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(test, ts(optional, as = "Option<bool>"))]
+    pub started_runs_truncated: bool,
     /// The nodes that render untrusted text, as the start recorded them.
     /// Left out for a run without any.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -546,6 +574,7 @@ pub(crate) async fn get_run_handler(
     let worktree = view.state.worktree.clone();
     let unknown_events = view.unknown.len();
     let driven_by = view.driven_by();
+    let started = apb_engine::run_view::started_runs(&root, &id);
     // The journal, the outputs and the progress move into the answer when
     // this handler holds the one view the actions were read from (the
     // observation is gone), and are copied from that same view otherwise.
@@ -591,6 +620,11 @@ pub(crate) async fn get_run_handler(
         unattended,
         external_data,
         previous_success: apb_engine::run_view::previous_success(&events),
+        deadline: apb_engine::run_view::deadline(&events, apb_core::clock::now_ms()),
+        start_key: apb_engine::run_view::start_key(&events),
+        started_by: apb_engine::run_view::started_by(&run_dir),
+        started_runs: started.runs,
+        started_runs_truncated: started.truncated,
         untrusted: apb_engine::run_view::untrusted_nodes(&events),
         goal,
         candidate_trial,
@@ -1011,6 +1045,11 @@ pub(crate) struct ResumeBody {
     /// different value is refused (409 `external_data_immutable`).
     #[serde(default)]
     external_data: Option<bool>,
+    /// More time on the run's deadline clock (a duration such as `30m`); a
+    /// run past its deadline resumes only with it. 400 `deadline_invalid`
+    /// when it does not parse.
+    #[serde(default)]
+    deadline: Option<String>,
 }
 
 /// Who the dashboard's retry-now is journaled as (`retry_expedited.by`): a
@@ -1091,6 +1130,24 @@ pub(crate) async fn post_resume_handler(
         Err(e) => return e,
     };
     let body = body.map(|Json(b)| b).unwrap_or_default();
+    let deadline_ms = match body
+        .deadline
+        .as_deref()
+        .map(apb_engine::run_deadline::parse_arg)
+    {
+        None => None,
+        Some(Ok(ms)) => Some(ms),
+        Some(Err(e)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "policy": apb_engine::run_deadline::DEADLINE_INVALID,
+                    "detail": e,
+                })),
+            )
+                .into_response();
+        }
+    };
     // The order of refusals is MCP `run_resume`'s: the arguments, then the
     // run gate, then "nothing waits to retry".
     if let Some(refusal) = apb_mcp::tools::run::retry_now_arg_refusal(
@@ -1200,6 +1257,7 @@ pub(crate) async fn post_resume_handler(
             node: body.node.as_deref(),
             by: retry_now_by(&state.auth),
         }),
+        deadline_ms,
         ..apb_engine::ResumeRequest::operator()
     };
     match apb_engine::resume_detached_req(&root, &id, &req) {

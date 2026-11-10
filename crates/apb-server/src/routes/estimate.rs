@@ -19,7 +19,7 @@ use serde::Deserialize;
 use crate::state::*;
 
 /// The budget of a run start (`RunBody.budget`).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, serde::Serialize)]
 pub(crate) struct BudgetBody {
     #[serde(default)]
     tokens: Option<u64>,

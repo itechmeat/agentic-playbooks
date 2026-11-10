@@ -199,12 +199,28 @@ pub struct PlaybookRunArgs {
     /// for a successor of a flagged run.
     #[serde(default)]
     pub external_data: Option<bool>,
+    /// deadline - end the run aborted (deadline_exceeded) once it has run
+    /// this long (a duration such as `45m`), the time a person paused it
+    /// left out; overrides the playbook's `deadline:`. Refused with
+    /// deadline_invalid when it is not a duration greater than zero.
+    #[serde(default)]
+    pub deadline: Option<String>,
+    /// start_key - pass the scheduler's or event's id so a repeat answers
+    /// the run already started (already_started: true) instead of starting
+    /// another; another request under the key is refused
+    /// start_key_conflict. Kept 7 days, never stored in clear.
+    #[serde(default)]
+    pub start_key: Option<String>,
+    /// start_key_reuse - with start_key: start a new run under a key whose
+    /// run failed or was aborted (a person's decision).
+    #[serde(default)]
+    pub start_key_reuse: Option<bool>,
 }
 
 /// A run's budget argument. A predictive stop, not a security control: the
 /// run pauses before a node whose median spend from comparable runs no
 /// longer fits.
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, JsonSchema)]
 pub struct BudgetArg {
     /// Input plus output tokens over the run's agent attempts.
     #[serde(default)]
@@ -569,6 +585,11 @@ pub struct RunResumeArgs {
     /// never changes after the start.
     #[serde(default)]
     pub external_data: Option<bool>,
+    /// deadline - give the run this much more time on its deadline clock (a
+    /// duration such as `30m`); ask the person first. A run past its
+    /// deadline is refused deadline_passed without it.
+    #[serde(default)]
+    pub deadline: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

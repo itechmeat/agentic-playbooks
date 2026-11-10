@@ -36,6 +36,9 @@ pub(crate) struct ReadCtx<'a> {
     /// The engine site the read acts under (`@baseline`, `@follow_up`): a
     /// connector call resolves the grant the manifest recorded for it.
     pub site: &'a str,
+    /// At most this many seconds for one connector read (the run's deadline
+    /// left, rounded up, at least 1); `None` without a deadline.
+    pub cap_secs: Option<u64>,
 }
 
 impl ReadCtx<'_> {

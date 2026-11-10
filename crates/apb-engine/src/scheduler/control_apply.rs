@@ -65,7 +65,7 @@ pub(crate) fn scan_control(
     let pending_control = read_control_after(run_dir, *control_cursor)?;
     for entry in pending_control.iter().cloned() {
         match entry.cmd {
-            Control::Abort { reason, by } => {
+            Control::Abort { reason, by, .. } => {
                 // Effect first, cursor persisted last: if `log.append` errs
                 // (ordinary I/O failure), the entry must NOT be marked
                 // applied - it has to resurface on the next drive rather
@@ -230,7 +230,7 @@ pub(crate) fn scan_control(
     // real entry in hand.
     if let Some(blocked_node) = blocked_by.as_ref() {
         let salvage = pending_control.iter().find_map(|e| match &e.cmd {
-            Control::Abort { reason, by } => Some((
+            Control::Abort { reason, by, .. } => Some((
                 e.seq,
                 RunStatus::Aborted,
                 reason.clone(),

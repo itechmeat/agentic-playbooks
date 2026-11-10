@@ -113,7 +113,10 @@ pub fn run_script_with_env(
 }
 
 /// [`run_script_with_env`] that also removes the `remove` variables from
-/// the environment the script inherits.
+/// the environment the script inherits. A script never inherits attempt
+/// credentials ([`crate::adapter::ATTEMPT_CREDENTIAL_ENV`]): it runs no
+/// attempt, and the ones in apb's environment belong to the step of
+/// another run that started this drive; `env` sets a list item's own.
 #[allow(clippy::too_many_arguments)]
 pub fn run_script_with_env_removed(
     version_dir: &Path,
@@ -128,7 +131,7 @@ pub fn run_script_with_env_removed(
     let (program, script_path) = resolve(version_dir, script_rel, runner)?;
     let mut cmd = command_for_runtime(&program, &script_path);
     cmd.current_dir(workdir);
-    for k in remove {
+    for k in crate::adapter::ATTEMPT_CREDENTIAL_ENV.iter().chain(remove) {
         cmd.env_remove(k);
     }
     for (k, v) in env {

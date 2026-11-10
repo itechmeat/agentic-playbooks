@@ -115,15 +115,24 @@ pub fn refuse_step_if_flagged(
     let Some(run_id) = step.run_id.as_deref() else {
         return Ok(());
     };
-    let named = std::env::var_os("APB_RUN_DIR")
-        .map(PathBuf::from)
-        .filter(|d| d.file_name().is_some_and(|n| n == run_id) && d.is_dir());
-    match named.or_else(|| run_dir_in(root, run_id)) {
+    match step_run_dir(root, step) {
         Some(dir) => refuse_if_flagged(&dir, what),
         None => Err(EngineError::Invalid(format!(
             "{RUN}: {what}: the step's run `{run_id}` is not found, so whether it processes external data cannot be told"
         ))),
     }
+}
+
+/// The run directory of the run step this process runs in: the one
+/// `APB_RUN_DIR` names when its directory name is the step's `run_id`,
+/// else the run of that id under the project `root`. `None` outside a run
+/// step, or when the step's run is found nowhere.
+pub fn step_run_dir(root: &Path, step: &apb_core::step_env::StepCaller) -> Option<PathBuf> {
+    let run_id = step.run_id.as_deref()?;
+    let named = std::env::var_os("APB_RUN_DIR")
+        .map(PathBuf::from)
+        .filter(|d| d.file_name().is_some_and(|n| n == run_id) && d.is_dir());
+    named.or_else(|| run_dir_in(root, run_id))
 }
 
 /// The run directory of `run_id` under the project `root`: a production
@@ -141,31 +150,56 @@ pub fn run_dir_in(root: &Path, run_id: &str) -> Option<PathBuf> {
 
 /// The effective flag of a start in the project `root`: what the caller
 /// asked (`requested`, `None` when it said nothing), inherited from a
-/// flagged parent run or `continued_from` predecessor. An explicit `false`
-/// under a flagged parent or predecessor is refused with
-/// `external_data_immutable`. Called by every start surface before its own
-/// checks; preparation applies the same inheritance as a backstop.
+/// flagged parent run, `continued_from` predecessor or the run whose step
+/// starts it (`step_run`, [`step_run_dir`]; found or not verified, its flag
+/// passes on: inheriting only keeps more out). An explicit `false` under a
+/// flagged one is refused with `external_data_immutable`. Called by every
+/// start surface before its own checks; preparation applies the same
+/// inheritance as a backstop.
 pub fn for_start(
     root: &Path,
     requested: Option<bool>,
     parent_run: Option<&str>,
     continued_from: Option<&str>,
+    step_run: Option<&Path>,
 ) -> Result<bool, Refusal> {
+    let step = step_run.map(|d| {
+        (
+            d.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            d.to_path_buf(),
+        )
+    });
     let inherited = [parent_run, continued_from]
         .into_iter()
         .flatten()
-        .filter_map(|id| run_dir_in(root, id).map(|d| (id, d)))
+        .filter_map(|id| run_dir_in(root, id).map(|d| (id.to_string(), d)))
+        .chain(step)
         .find(|(_, d)| is_flagged(d));
     match (inherited, requested) {
         (Some((id, _)), Some(false)) => Err(Refusal::new(
             IMMUTABLE,
             format!(
-                "run `{id}` processed external data, so a run that continues it does too; leave external_data out or pass true"
+                "run `{id}` processed external data, so a run that continues it or that its step starts does too; leave external_data out or pass true"
             ),
         )),
         (Some(_), _) => Ok(true),
         (None, r) => Ok(r.unwrap_or(false)),
     }
+}
+
+/// [`for_start`] of a start made by this process (no parent): the run step
+/// it runs in, if any, is found through the environment
+/// ([`step_run_dir`]). The CLI and MCP start surfaces call it; the
+/// dashboard server is never a run step and calls [`for_start`] with none.
+pub fn for_surface_start(
+    root: &Path,
+    requested: Option<bool>,
+    continued_from: Option<&str>,
+) -> Result<bool, Refusal> {
+    let step = step_run_dir(root, &apb_core::step_env::StepCaller::from_env());
+    for_start(root, requested, None, continued_from, step.as_deref())
 }
 
 /// Refuses a flagged start that also asks to remember its input, with

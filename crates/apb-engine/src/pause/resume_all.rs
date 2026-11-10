@@ -91,6 +91,9 @@ pub enum ResumeAllAction {
     /// The launch policy refused the caller for a run never authorized: left
     /// as it is, not marked driverless.
     LaunchRefused { detail: String },
+    /// A run past its deadline with no driver (its deadline waker died
+    /// with the machine): ended aborted `deadline_exceeded`.
+    DeadlineStopped,
 }
 
 /// One run [`resume_all`] considered.
@@ -229,6 +232,31 @@ pub fn resume_all_as(root: &Path, ask: &LaunchAsk<'_>) -> Result<Vec<ResumeAllEn
                 eprintln!("apb: follow-up of run `{run_id}`: {e}");
             }
             continue;
+        }
+        // A run with a deadline and no driver: ended when its deadline
+        // passed (no waker survives a reboot, and an indefinite pause would
+        // otherwise outlive it), else its deadline waker comes back.
+        if crate::run_deadline::in_force(&events).is_some()
+            && crate::liveness::driver_alive(&run_dir, &run_id) != Some(true)
+        {
+            if crate::run_deadline::expired(&events, now) {
+                if matches!(
+                    crate::run_deadline::stop_if_expired(
+                        root,
+                        &run_id,
+                        crate::run_deadline::Expect::Any
+                    ),
+                    Ok(true)
+                ) {
+                    out.push(ResumeAllEntry {
+                        run_id,
+                        action: ResumeAllAction::DeadlineStopped,
+                    });
+                    continue;
+                }
+            } else {
+                crate::run_deadline::arm_waker(root, &run_id);
+            }
         }
         // A released run's own driver exited on purpose: its waker resumes
         // it, or this pass does once its time came (at once when one of its

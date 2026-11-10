@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 pub mod billing;
 pub mod budget;
 pub mod cause;
+pub mod clock;
 pub mod display;
 pub(crate) mod interrupt;
 pub mod kind;
@@ -24,6 +25,9 @@ pub mod waker;
 
 pub use crate::resume_kind::WakeHold;
 pub use cause::cause_of;
+use clock::closes_pause;
+pub use clock::{deadline_elapsed_ms, ended_intervals, paused_intervals};
+pub(crate) use clock::{holds, release_wake};
 pub use interrupt::{DEFAULT_GRACE, GRACE_ENV};
 pub use kind::{PauseBy, PauseCause, PauseMode};
 pub use probe::{WakeProbe, probe_before_wake};
@@ -207,66 +211,6 @@ fn last_pause(events: &[Event]) -> Option<(&Event, u128)> {
     Some((last?, since?))
 }
 
-/// An event that ends a paused interval. A paused run has no driver, so
-/// apart from `run_resumed` only a stop (`run_aborted`) or a resume older
-/// than `run_resumed` (the next `node_started`) can follow a pause.
-fn closes_pause(p: &EventPayload) -> bool {
-    matches!(
-        p,
-        EventPayload::RunResumed { .. }
-            | EventPayload::RunAborted { .. }
-            | EventPayload::RunFinished { .. }
-            | EventPayload::NodeStarted { .. }
-    )
-}
-
-/// The paused intervals of a run, `[start, end)` in epoch milliseconds, in
-/// journal order. An interval still open at the end of the journal runs to
-/// `now_ms`.
-pub fn paused_intervals(events: &[Event], now_ms: u128) -> Vec<(u128, u128)> {
-    let mut out = Vec::new();
-    let mut open: Option<u128> = None;
-    for e in events {
-        if is_legacy_resume_marker(&e.payload) {
-            continue;
-        }
-        if matches!(e.payload, EventPayload::RunPaused { .. }) {
-            open.get_or_insert(e.ts);
-        } else if closes_pause(&e.payload)
-            && let Some(start) = open.take()
-        {
-            out.push((start, e.ts.max(start)));
-        }
-    }
-    if let Some(start) = open {
-        out.push((start, now_ms.max(start)));
-    }
-    out
-}
-
-/// The spans a run sat ended before a `run_resumed` brought it back to
-/// life, `[run_finished | run_aborted, run_resumed)`: a run resumed days
-/// after it failed was not running in between. An end no resume follows is
-/// the run's end, not a span.
-pub fn ended_intervals(events: &[Event]) -> Vec<(u128, u128)> {
-    let mut out = Vec::new();
-    let mut ended: Option<u128> = None;
-    for e in events {
-        match e.payload {
-            EventPayload::RunFinished { .. } | EventPayload::RunAborted { .. } => {
-                ended.get_or_insert(e.ts);
-            }
-            EventPayload::RunResumed { .. } => {
-                if let Some(start) = ended.take() {
-                    out.push((start, e.ts.max(start)));
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
 /// Milliseconds of `[from, to)` the run was not active: paused, or ended
 /// before a resume ([`ended_intervals`]). The run-time clock of the run
 /// listing and `apb stats`.
@@ -338,28 +282,6 @@ pub fn active_elapsed_seconds(run_dir: &std::path::Path, now_ms: u128) -> Option
     u64::try_from(active / 1000).ok()
 }
 
-/// Whether the run is paused by the `run_paused` at journal sequence `seq`.
-pub(crate) fn holds(events: &[Event], seq: u64) -> bool {
-    crate::state::RunState::fold(events).run_status == RunStatus::Paused
-        && events
-            .iter()
-            .rev()
-            .find(|e| matches!(e.payload, EventPayload::RunPaused { .. }))
-            .map(|e| e.seq)
-            == Some(seq)
-}
-
-impl WakeHold {
-    /// Whether this pause or release still holds the run whose journal is
-    /// `events`.
-    pub(crate) fn holds(self, events: &[Event]) -> bool {
-        match self {
-            WakeHold::Pause(seq) => holds(events, seq),
-            WakeHold::Release(seq) => release_wake(events, seq).is_some(),
-        }
-    }
-}
-
 impl From<WakeHold> for crate::waker::WakerFor {
     fn from(hold: WakeHold) -> Self {
         match hold {
@@ -367,22 +289,6 @@ impl From<WakeHold> for crate::waker::WakerFor {
             WakeHold::Release(seq) => crate::waker::WakerFor::Release(seq),
         }
     }
-}
-
-/// When the release at journal sequence `seq` wakes the run, while that
-/// release still holds it: its `wake_at_ms`, or 0 (at once) when one of
-/// its waiting retries was expedited since. `None` once anything else
-/// (a resume, a pause, a stop, another release) replaced it.
-pub(crate) fn release_wake(events: &[Event], seq: u64) -> Option<u64> {
-    let state = crate::state::RunState::fold(events);
-    if state.run_status != RunStatus::Running {
-        return None;
-    }
-    let released = state.released.filter(|r| r.seq == seq)?;
-    if state.deferred.values().any(|d| d.expedited) {
-        return Some(0);
-    }
-    Some(released.wake_at_ms)
 }
 
 /// How long past its wake time a release may wait for its waker before a
@@ -404,6 +310,7 @@ pub(crate) fn release_lost(
 
 #[cfg(test)]
 mod tests {
+    use super::clock::parked;
     use super::*;
 
     fn ev(ts: u128, payload: EventPayload) -> Event {
@@ -430,6 +337,145 @@ mod tests {
                 attempt: 1,
             },
         )
+    }
+
+    const MIN: u128 = 60_000;
+
+    fn run_started(ts: u128) -> Event {
+        ev(
+            ts,
+            EventPayload::RunStarted {
+                playbook: "p".into(),
+                version: "1.0.0".into(),
+                definition: None,
+                external_data: false,
+            },
+        )
+    }
+
+    fn paused_by_at(ts: u128, by: PauseBy) -> Event {
+        ev(
+            ts,
+            EventPayload::RunPaused {
+                reason: "x".into(),
+                by: Some(by),
+                mode: None,
+                until: None,
+                keep_lock: false,
+            },
+        )
+    }
+
+    fn finished(ts: u128) -> Event {
+        ev(
+            ts,
+            EventPayload::RunFinished {
+                outcome: "failed".into(),
+            },
+        )
+    }
+
+    /// An engine pause counts, a person's does not: 10 min each inside 30.
+    #[test]
+    fn the_deadline_clock_leaves_out_only_a_persons_pause() {
+        let events = vec![
+            run_started(0),
+            paused_by_at(MIN, PauseBy::Engine),
+            resumed(11 * MIN),
+            paused_by_at(15 * MIN, PauseBy::Operator),
+            resumed(25 * MIN),
+        ];
+        assert_eq!(deadline_elapsed_ms(&events, 30 * MIN), 20 * MIN);
+    }
+
+    /// An ended span before a resume does not count, and an end with no
+    /// resume does not age: a day later the clock reads the end.
+    #[test]
+    fn an_ended_run_does_not_age() {
+        let ended = vec![run_started(0), finished(10 * MIN)];
+        assert_eq!(deadline_elapsed_ms(&ended, 24 * 60 * MIN), 10 * MIN);
+        let resumed_later = vec![run_started(0), finished(10 * MIN), resumed(70 * MIN)];
+        assert_eq!(deadline_elapsed_ms(&resumed_later, 75 * MIN), 15 * MIN);
+    }
+
+    /// A person's pause overlapping an ended span is left out once.
+    #[test]
+    fn overlaps_are_left_out_once() {
+        let events = vec![
+            run_started(0),
+            paused_by_at(5 * MIN, PauseBy::Operator),
+            ev(
+                10 * MIN,
+                EventPayload::RunAborted {
+                    reason: "x".into(),
+                    by: None,
+                },
+            ),
+            resumed(20 * MIN),
+        ];
+        // Paused [5, 10) by a person, ended [10, 20): 15 min left out of 30.
+        assert_eq!(deadline_elapsed_ms(&events, 30 * MIN), 15 * MIN);
+    }
+
+    /// A pause whose owner changes without a resume splits the clock at the
+    /// change, and the paused intervals stay one interval.
+    #[test]
+    fn a_replaced_pause_counts_only_the_engine_part() {
+        let person_then_engine = vec![
+            run_started(0),
+            paused_by_at(MIN, PauseBy::Operator),
+            paused_by_at(11 * MIN, PauseBy::Engine),
+            resumed(21 * MIN),
+        ];
+        let engine_then_person = vec![
+            run_started(0),
+            paused_by_at(MIN, PauseBy::Engine),
+            paused_by_at(11 * MIN, PauseBy::Operator),
+            resumed(21 * MIN),
+        ];
+        for events in [&person_then_engine, &engine_then_person] {
+            // 1 min before, 10 min of engine pause, 0 after: 11 min.
+            assert_eq!(deadline_elapsed_ms(events, 21 * MIN), 11 * MIN);
+            assert_eq!(
+                paused_intervals(events, 21 * MIN),
+                vec![(MIN, 21 * MIN)],
+                "the paused intervals changed"
+            );
+        }
+    }
+
+    /// The park in force: a pause, a release and a replaced pause each give
+    /// their hold; a resumed or ended run gives none.
+    #[test]
+    fn parked_names_the_hold_in_force() {
+        let paused_run = vec![run_started(0), paused_by_at(1, PauseBy::Engine)];
+        assert_eq!(parked(&paused_run), Some(WakeHold::Pause(1)));
+        let replaced = vec![
+            run_started(0),
+            paused_by_at(1, PauseBy::Engine),
+            paused_by_at(2, PauseBy::Supervisor),
+        ];
+        assert_eq!(parked(&replaced), Some(WakeHold::Pause(2)));
+        let released = vec![
+            run_started(0),
+            ev(
+                3,
+                EventPayload::DriveReleased {
+                    wake_at_ms: 10_000,
+                    nodes: vec!["a".into()],
+                },
+            ),
+        ];
+        assert_eq!(parked(&released), Some(WakeHold::Release(3)));
+        let mut resumed_run = paused_run.clone();
+        resumed_run.push(resumed(4));
+        assert_eq!(parked(&resumed_run), None);
+        let ended = vec![
+            run_started(0),
+            paused_by_at(1, PauseBy::Engine),
+            finished(5),
+        ];
+        assert_eq!(parked(&ended), None);
     }
 
     #[test]

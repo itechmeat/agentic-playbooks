@@ -118,6 +118,11 @@ pub(crate) fn apply_patch(
     {
         return append_patch_rejected(log, reason);
     }
+    // The deadline is the run's contract: only a person changes it, at a
+    // resume.
+    if let Some(reason) = crate::run_deadline::patch_refusal(playbook, &loaded.playbook) {
+        return append_patch_rejected(log, reason);
+    }
     // A person-only gate and an approval are a person's constraints: a
     // supervisor's patch never weakens them, nor continues past a gate no
     // decision answered.
@@ -154,7 +159,7 @@ pub(crate) fn apply_patch(
     // supervisor's patch never drops such a feature (`approval::
     // patch_refusal` above); a guarded run whose patched definition names
     // none all the same ends its guard only once the patch is journaled.
-    let guard = super::prepare::run_guard(&loaded.playbook);
+    let guard = super::prepare::run_guard(&loaded.playbook, &events);
     let was_guarded = latest_guard(&events).is_some_and(|r| !r.is_empty());
     if let Some(guard) = guard.clone() {
         log.append(guard)?;
@@ -192,7 +197,7 @@ pub(crate) fn apply_patch(
 
 /// The `requires` of the latest `run_guard` of `events`, `None` when the
 /// run never journaled one.
-fn latest_guard(events: &[Event]) -> Option<&[String]> {
+pub(super) fn latest_guard(events: &[Event]) -> Option<&[String]> {
     events.iter().rev().find_map(|e| match &e.payload {
         EventPayload::RunGuard { requires } => Some(requires.as_slice()),
         _ => None,
@@ -485,6 +490,18 @@ mod tests {
         guard: Option<&[&str]>,
         continue_from: &str,
     ) -> (bool, Vec<String>) {
+        patch_run_with(running, patched, guard, continue_from, &[])
+    }
+
+    /// [`patch_run`] with `extra` journaled after `run_started` (a
+    /// `run_provenance` that records a run argument).
+    fn patch_run_with(
+        running: &str,
+        patched: &str,
+        guard: Option<&[&str]>,
+        continue_from: &str,
+        extra: &[EventPayload],
+    ) -> (bool, Vec<String>) {
         let root = tempfile::tempdir().unwrap();
         apb_core::registry::init_project(root.path()).unwrap();
         let next = patched.replace("version: 1.0.0", "version: 1.0.1");
@@ -505,6 +522,9 @@ mod tests {
             external_data: false,
         })
         .unwrap();
+        for p in extra {
+            log.append(p.clone()).unwrap();
+        }
         if let Some(requires) = guard {
             log.append(EventPayload::RunGuard {
                 requires: requires.iter().map(|s| s.to_string()).collect(),
@@ -587,6 +607,52 @@ mod tests {
         );
     }
 
+    /// A run whose deadline is a run argument (no `deadline:` in the
+    /// definition) keeps its `deadline` guard through a supervisor's
+    /// patch, and a patch that adds a `deadline:` is refused.
+    #[test]
+    fn a_patch_keeps_the_guard_and_refuses_a_deadline_change() {
+        let provenance: EventPayload = serde_json::from_value(serde_json::json!({
+            "type": "run_provenance",
+            "deadline": { "total_ms": 600_000, "source": "run" }
+        }))
+        .unwrap();
+        let edited = GATED.replace("name: g\n", "name: g2\n");
+        assert_ne!(edited, GATED, "the fixture changed");
+        let (applied, events) = patch_run_with(
+            GATED,
+            &edited,
+            Some(&["deadline"]),
+            "gate",
+            std::slice::from_ref(&provenance),
+        );
+        assert!(applied, "{events:?}");
+        assert_eq!(
+            events,
+            [
+                r#"run_guard["deadline"]"#,
+                "patch_applied",
+                "run_migrated",
+                "node_finished",
+                r#"run_guard["deadline"]"#,
+            ]
+        );
+        let with_deadline = GATED.replace("version: 1.0.0\n", "version: 1.0.0\ndeadline: 1h\n");
+        assert_ne!(with_deadline, GATED);
+        let (applied, events) = patch_run_with(
+            GATED,
+            &with_deadline,
+            Some(&["deadline"]),
+            "gate",
+            &[provenance],
+        );
+        assert!(!applied, "{events:?}");
+        assert!(
+            events[0].starts_with("patch_rejected deadline_changed"),
+            "{events:?}"
+        );
+    }
+
     /// A supervisor's patch never drops `person_only`: the run keeps its
     /// definition and its guard.
     #[test]
@@ -646,6 +712,8 @@ mod tests {
         })
         .unwrap();
         log.append(EventPayload::RunProvenance {
+            deadline: None,
+            start_key: None,
             origin: Some("project".into()),
             digest: None,
             execution_root: None,

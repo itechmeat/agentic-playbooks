@@ -220,6 +220,7 @@ impl Drop for Supervised {
                 Control::Abort {
                     reason: "the test ended early".into(),
                     by: None,
+                    graceful: false,
                 },
             );
             let _ = d.join();

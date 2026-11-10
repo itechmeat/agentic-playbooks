@@ -217,3 +217,64 @@ fn a_quick_scenario_run_journals_what_a_real_run_journals() {
     };
     assert_eq!(state(&real_events), state(&quick_events));
 }
+
+/// A scenario's timing is scripted: one scenario played against two copies
+/// of the playbook that differ only in `deadline: 1m` journals the same
+/// events (normalized as above, the digests of the definition removed), and
+/// neither `run_provenance` carries a deadline, nor does any run guard.
+#[test]
+fn a_scenario_ignores_the_deadline() {
+    let _lock = common::env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    fs::write(cfg.path().join("decisions.yaml"), DECISIONS).unwrap();
+    let _env = [
+        common::EnvVar::set("APB_CONFIG_DIR", cfg.path()),
+        common::EnvVar::set("APB_DECISIONS_ALLOW_FAKE", "1"),
+    ];
+    let play = |deadline: &str| {
+        let root = tempfile::tempdir().unwrap();
+        project(root.path());
+        let yaml = PLAYBOOK.replace("version: 1.0.0\n", &format!("version: 1.0.0\n{deadline}"));
+        fs::write(
+            root.path()
+                .join(".apb/playbooks/parity/1.0.0/playbook.yaml"),
+            yaml,
+        )
+        .unwrap();
+        let prep = ScenarioPrep {
+            scenario: yaml_serde::from_str::<Scenario>(SCENARIO).unwrap(),
+            level: ScenarioLevel::Quick,
+            scenario_digest: "sha256:parity".into(),
+            max_requests: 20,
+            sent: Default::default(),
+            external_data: false,
+        };
+        let r = run_scenario(root.path(), "parity", None, &prep).unwrap();
+        let events = read_all(&r.run_dir).unwrap();
+        let mut n = normalized(&events);
+        n.iter_mut().for_each(|v| {
+            decision_of(v);
+            if let Value::Object(m) = v {
+                m.remove("digest");
+            }
+        });
+        (r.outcome, n, root)
+    };
+    let (plain_outcome, plain, _a) = play("");
+    let (dl_outcome, with_deadline, _b) = play("deadline: 1m\n");
+    assert_eq!(plain_outcome, dl_outcome);
+    assert_eq!(
+        plain, with_deadline,
+        "the deadline changed the scenario's journal"
+    );
+    for e in &with_deadline {
+        assert!(
+            !(e["type"] == "run_provenance" && e.get("deadline").is_some()),
+            "a scenario recorded a deadline"
+        );
+        assert!(
+            !(e["type"] == "run_guard" && e.to_string().contains("deadline")),
+            "a scenario guarded a deadline"
+        );
+    }
+}

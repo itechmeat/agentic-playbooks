@@ -347,6 +347,24 @@ pub fn driver_alive(run_dir: &Path, run_id: &str) -> Option<bool> {
     parent_driven_alive(run_dir)
 }
 
+/// Whether a drive claims this run right now: a live `driver.pid`, or the
+/// `driven_by` marker a parent's in-process drive of it holds, with that
+/// parent live. Unlike [`driver_alive`], the `parent_run` of its run config
+/// alone does not count: a parked child (its drive returned to the parent,
+/// which drives on) is driven by nobody while its parent is live.
+pub(crate) fn drive_claimed(run_dir: &Path, run_id: &str) -> bool {
+    if crate::driver::read_driver_pid(run_dir).is_some_and(|pid| driver_pid_is_live(pid, run_id)) {
+        return true;
+    }
+    let Some(parent_id) = crate::driver::read_driven_by(run_dir) else {
+        return false;
+    };
+    let Some(parent_dir) = run_dir.parent().map(|p| p.join(&parent_id)) else {
+        return false;
+    };
+    parent_dir.is_dir() && driver_alive(&parent_dir, &parent_id) == Some(true)
+}
+
 /// Whether this run is driven in-process by a live parent drive.
 ///
 /// `Some(true)` / `Some(false)` when a parent relationship is known;

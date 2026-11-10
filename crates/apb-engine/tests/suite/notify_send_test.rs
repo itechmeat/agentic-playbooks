@@ -1199,6 +1199,7 @@ fn a_failed_node_is_notified_while_the_run_waits_for_its_supervisor() {
         apb_engine::control::Control::Abort {
             reason: "done".into(),
             by: None,
+            graceful: false,
         },
     )
     .unwrap();

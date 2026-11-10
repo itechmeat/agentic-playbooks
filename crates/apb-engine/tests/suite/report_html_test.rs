@@ -396,6 +396,27 @@ fn the_report_shows_the_previous_success_line_when_recorded() {
     assert!(!html.contains("previous success:"), "{html}");
 }
 
+/// The header's deadline line: the ended run's deadline, frozen with what
+/// was left; absent without a deadline.
+#[test]
+fn the_report_shows_the_deadline_line_when_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = run_dir(dir.path(), true, "done", 0);
+    let path = d.join("events.jsonl");
+    let content = std::fs::read_to_string(&path).unwrap();
+    let mut lines: Vec<String> = content.lines().map(String::from).collect();
+    lines.insert(
+        1,
+        r#"{"seq":100,"ts":1,"type":"run_provenance","deadline":{"total_ms":2700000,"source":"playbook"}}"#.into(),
+    );
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    let html = render(dir.path(), &d).unwrap();
+    assert!(html.contains("deadline: 45m, "), "{html}");
+    let dir2 = tempfile::tempdir().unwrap();
+    let d2 = run_dir(dir2.path(), true, "done", 0);
+    assert!(!render(dir2.path(), &d2).unwrap().contains("deadline: "));
+}
+
 /// The untrusted-input section: present when the run recorded followers,
 /// absent otherwise.
 #[test]

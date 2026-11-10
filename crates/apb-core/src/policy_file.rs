@@ -50,6 +50,27 @@ pub struct PolicyFile {
     pub notify: NotifyPolicy,
     pub launch: LaunchSection,
     pub billing: crate::billing::section::BillingSection,
+    pub runs: RunsSection,
+}
+
+/// The `runs:` section: how long apb keeps what a run start leaves.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RunsSection {
+    /// The days a start key is remembered (1 to 365, default 7). A project
+    /// file may only lengthen the machine's.
+    pub start_key_days: Option<u32>,
+}
+
+impl RunsSection {
+    fn validate(&self) -> Result<(), String> {
+        match self.start_key_days {
+            Some(d) if !(1..=365).contains(&d) => {
+                Err(format!("runs.start_key_days is {d}; use 1 to 365 days"))
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 /// The `launch:` section: the default for every playbook an agent
@@ -254,6 +275,21 @@ impl Policies {
         Ok(policies)
     }
 
+    /// The days a start key is remembered: the machine's
+    /// `runs.start_key_days` (7 when unset), lengthened by the project's
+    /// (a project file never shortens it).
+    pub fn start_key_days(&self) -> u32 {
+        let machine = self
+            .machine
+            .runs
+            .start_key_days
+            .unwrap_or(crate::start_key::DEFAULT_DAYS);
+        self.project
+            .runs
+            .start_key_days
+            .map_or(machine, |p| p.max(machine))
+    }
+
     /// Whether a default subscription covers `playbook`: both files'
     /// `playbooks` filters pass it.
     pub fn covers(&self, playbook: &PlaybookKey) -> bool {
@@ -301,6 +337,7 @@ fn parse_as(raw: &str, source: PolicySource) -> Result<PolicyFile, String> {
     };
     file.notify.validate()?;
     file.launch.validate(source)?;
+    file.runs.validate()?;
     Ok(file)
 }
 
@@ -368,9 +405,46 @@ fn summary(file: &PolicyFile) -> String {
         ));
     }
     sets.extend(file.billing.describe());
+    if let Some(d) = file.runs.start_key_days {
+        sets.push(format!("runs.start_key_days {d}"));
+    }
     if sets.is_empty() {
         "valid, sets nothing".into()
     } else {
         format!("valid, {}", sets.join(", "))
+    }
+}
+
+#[cfg(test)]
+mod runs_tests {
+    use super::*;
+
+    /// `runs.start_key_days` reads within 1 to 365 days and names the key
+    /// when it is out of range; a project file only lengthens it.
+    #[test]
+    fn start_key_days_is_checked_and_a_project_only_lengthens_it() {
+        let ten = parse("runs:\n  start_key_days: 10\n").unwrap();
+        assert_eq!(ten.runs.start_key_days, Some(10));
+        for bad in ["0", "366"] {
+            let e = parse(&format!("runs:\n  start_key_days: {bad}\n")).unwrap_err();
+            assert!(e.contains("runs.start_key_days"), "{e}");
+        }
+        assert!(parse("runs:\n  other: 1\n").is_err());
+        let both = |m: Option<u32>, p: Option<u32>| Policies {
+            machine: PolicyFile {
+                runs: RunsSection { start_key_days: m },
+                ..Default::default()
+            },
+            project: PolicyFile {
+                runs: RunsSection { start_key_days: p },
+                ..Default::default()
+            },
+        };
+        assert_eq!(both(None, None).start_key_days(), 7);
+        assert_eq!(both(Some(30), Some(3)).start_key_days(), 30);
+        assert_eq!(both(Some(3), Some(30)).start_key_days(), 30);
+        assert_eq!(both(Some(3), None).start_key_days(), 3);
+        assert_eq!(both(None, Some(3)).start_key_days(), 7);
+        assert!(summary(&ten).contains("runs.start_key_days 10"));
     }
 }

@@ -67,8 +67,22 @@ pub enum StoreError {
     InvalidId(String),
     #[error("the file has schema {0}, newer than this apb understands")]
     NewerSchema(u32),
+    /// A present file that does not verify or parse, under a transaction
+    /// that refuses to replace it ([`Unsigned::Refuse`]).
+    #[error("{} does not verify", .0.display())]
+    Unverified(PathBuf),
     #[error(transparent)]
     Io(#[from] io::Error),
+}
+
+/// What a transaction does with a present file that does not verify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unsigned {
+    /// Read it as a fresh file and replace it on the next write (the known
+    /// problems and the corrections ledger).
+    Replace,
+    /// Refuse it: [`StoreError::Unverified`], nothing written.
+    Refuse,
 }
 
 /// The directory of `scope`'s files under the execution root `root`.
@@ -84,7 +98,8 @@ fn checked_id(playbook: &str) -> Result<(), StoreError> {
     }
 }
 
-fn file<T: SignedDoc>(root: &Path, scope: Scope, playbook: &str) -> PathBuf {
+/// The path of `playbook`'s file under `scope`.
+pub fn file<T: SignedDoc>(root: &Path, scope: Scope, playbook: &str) -> PathBuf {
     dir(root, T::DIR, scope).join(format!("{playbook}.json"))
 }
 
@@ -193,11 +208,34 @@ where
     T: SignedDoc,
     E: From<StoreError>,
 {
+    transact(root, scope, playbook, Unsigned::Replace, change)
+}
+
+/// [`update`] with the choice of what a present file that does not verify
+/// means: under the file's lock, `change` gets the signed file;
+/// [`Unsigned::Refuse`] returns [`StoreError::Unverified`] for a present
+/// file that does not verify or parse, writing nothing. The lock is held
+/// only for the transaction.
+pub fn transact<T, R, E>(
+    root: &Path,
+    scope: Scope,
+    playbook: &str,
+    unsigned: Unsigned,
+    change: impl FnOnce(&mut T) -> Result<(R, bool), E>,
+) -> Result<R, E>
+where
+    T: SignedDoc,
+    E: From<StoreError>,
+{
     checked_id(playbook)?;
     let _held: DirLock = lock_dir(&dir(root, T::DIR, scope), &format!("{playbook}.json.lock"))
         .map_err(StoreError::Io)?;
-    // An unsigned file reads as a fresh one: it is replaced.
-    let mut f = read::<T>(root, scope, playbook)?.file;
+    let loaded = read::<T>(root, scope, playbook)?;
+    if !loaded.signed && unsigned == Unsigned::Refuse {
+        return Err(StoreError::Unverified(file::<T>(root, scope, playbook)).into());
+    }
+    // Under `Replace` an unsigned file reads as a fresh one: it is replaced.
+    let mut f = loaded.file;
     let (out, changed) = change(&mut f)?;
     if changed {
         write(root, scope, playbook, f)?;
@@ -369,5 +407,91 @@ mod tests {
             read::<Doc>(root, scope, "../evil"),
             Err(StoreError::InvalidId(_))
         ));
+    }
+
+    fn add(root: &Path, unsigned: Unsigned, entry: &str) -> Result<(), StoreError> {
+        transact(root, Scope::Project, "p", unsigned, |f: &mut Doc| {
+            f.entries.push(entry.to_string());
+            Ok::<_, StoreError>(((), true))
+        })
+    }
+
+    /// `Refuse` on garbage and on a valid shape without a MAC is
+    /// `Unverified` and leaves the bytes as they were.
+    #[test]
+    fn refuse_leaves_an_unverified_file_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let path = file::<Doc>(root, Scope::Project, "p");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for bytes in [
+            &b"not json at all"[..],
+            br#"{"schema":1,"scope":"project","playbook":"p","entries":["a"]}"#,
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            let e = add(root, Unsigned::Refuse, "x").unwrap_err();
+            assert!(
+                matches!(e, StoreError::Unverified(ref p) if *p == path),
+                "{e:?}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        // A missing file is fresh, not unverified.
+        std::fs::remove_file(&path).unwrap();
+        add(root, Unsigned::Refuse, "x").unwrap();
+        add(root, Unsigned::Refuse, "y").unwrap();
+        let loaded = read::<Doc>(root, Scope::Project, "p").unwrap();
+        assert!(loaded.signed);
+        assert_eq!(loaded.file.entries, ["x", "y"]);
+    }
+
+    /// `Replace` replaces an unsigned file, as `update` always did.
+    #[test]
+    fn replace_replaces_an_unverified_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let path = file::<Doc>(root, Scope::Project, "p");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"garbage").unwrap();
+        add(root, Unsigned::Replace, "x").unwrap();
+        let loaded = read::<Doc>(root, Scope::Project, "p").unwrap();
+        assert!(loaded.signed);
+        assert_eq!(loaded.file.entries, ["x"]);
+    }
+
+    /// Two writers interleaving through `transact` lose nothing.
+    #[test]
+    fn transact_serializes_writers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let threads: Vec<_> = (0..2)
+            .map(|t| {
+                let root = root.clone();
+                std::thread::spawn(move || {
+                    for i in 0..100 {
+                        transact(
+                            &root,
+                            Scope::Project,
+                            "p",
+                            Unsigned::Refuse,
+                            |f: &mut Doc| {
+                                let n = f.entries.len();
+                                // Widen the window between the read and the write.
+                                std::thread::yield_now();
+                                f.entries.push(format!("{t}-{i}-{n}"));
+                                Ok::<_, StoreError>(((), true))
+                            },
+                        )
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let loaded = read::<Doc>(&root, Scope::Project, "p").unwrap();
+        assert!(loaded.signed, "the MAC does not verify");
+        assert_eq!(loaded.file.entries.len(), 200);
     }
 }

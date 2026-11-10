@@ -471,6 +471,7 @@ fn a_supervised_driver_without_a_valid_handoff_is_the_cli_without_a_terminal() {
                 policy: apb_core::launch::LaunchPolicy::Deny,
                 sources: vec!["declared deny".into()],
                 billing: None,
+                started_by: None,
             },
             binding: HandoffBinding::Nonce {
                 nonce: nonce.into(),
@@ -480,6 +481,8 @@ fn a_supervised_driver_without_a_valid_handoff_is_the_cli_without_a_terminal() {
         version: "1.0.0".into(),
         choice: Choice::Current,
         consent: None,
+        deadline_ms: None,
+        start_key: None,
     };
     let handshake = p.root().join("handshake");
     let drive = |via_shell: bool, handoff: Option<&Path>| {

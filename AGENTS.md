@@ -31,7 +31,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
-  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`), `output_types` for the typed output field contract V167-V168, `write_scope` for a declared write scope V170-V172, `previous_success` for the `run.previous_success` grammar, the `when_none` block and V176; `nodes` also holds V68, ids that start with `@`
+  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`), `output_types` for the typed output field contract V167-V168, `write_scope` for a declared write scope V170-V172, `deadline` for a run's `deadline` V200, `previous_success` for the `run.previous_success` grammar, the `when_none` block and V176; `nodes` also holds V68, ids that start with `@`
   are the engine's, V101, `audience` on a finish without a prompt, and
   V163, a `success_check` `scope` that names no glob or one that does not
   compile, and V173, a `prove_fails_first` proof that cannot mean anything), the
@@ -40,7 +40,16 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   a filtered `finished` (`Coverage`), and `precedence` combining them),
   the settings file `policy.yaml` of the machine and the project
   (`policy_file.rs`: the strict reader of its `notify:` filters and its
-  `launch:` section, and the doctor line; nothing in apb writes it), the
+  `launch:` section, its `runs:` section (`start_key_days`, a project
+  only lengthening the machine's), and the doctor line; nothing in apb
+  writes it), the start key's pure half (`start_key.rs`: `StartKey::parse`,
+  the frozen `StartRequest` captured from `StartRequestFields` once by a
+  launch surface, `StartKeyRequest`, and `StartKeysFile`, the signed
+  per-playbook file of key MACs under `.apb/start-keys/`, with pending and
+  bound entries), `LaunchRecord.started_by` (`StartedBy`, the run step a
+  run was started from, and `MAX_START_CHAIN`),
+  the signed store's `transact` with `Unsigned::Refuse` (`signed_store.rs`)
+  and `fsutil::try_hold_lock`, the one-attempt probe of a `HeldLock`, the
   billed use (`billing.rs`: the `billing:` section of `policy.yaml`,
   `EffectiveBilling` with a project only narrowing, the `BillingRecord` a
   run keeps and `covers`), the
@@ -426,7 +435,26 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `scheduler/quota_probe`; `budget` the budget pause's reason and request,
   `cause` the cause a quota, budget or billing pause's reason names,
   `billing` the billing pause a spawn takes),
-  the run budget (`budget.rs`; `budget/`: `kind` the journal-facing types,
+  the start key (`start_key.rs`: `lookup` every launch surface asks
+  before its gate, `claim` taken in preparation before the tree lock and
+  held as a pending entry whose owner's `HeldLock` decides it, `attach`
+  after `allocate_run`, `bind` after `run_provenance`, the `Drop` that
+  keeps a failed start's key and frees a refused one, the run check of an
+  entry, `EngineError::AlreadyStarted` and the doctor line), runs started
+  from a run step (`step_start.rs`: `CallerSnapshot`, `resolve` through
+  the connector layer's attempt binding, never storing the token,
+  `chain_of` and the `start_chain_too_deep` bound, called from
+  `gate::launch::decide` for a run step's new start only;
+  `run_view/started.rs` the starter and the reverse links read from the
+  new runs' records, bounded at 500 run directories),
+  the run deadline (`run_deadline.rs`: the deadline in force, the
+  `DeadlineLatch` every work site checks through `refuses_work`, the
+  graceful stop decided under the event lock (`stop_if_expired` over
+  `stop::stop_run_with` and `StopRequest.due`), the resume rules
+  `deadline_passed` and the grant, the patch rule; `pause/clock.rs` the
+  deadline clock over owned pause segments and `parked`, the park in
+  force; `WakerFor::Deadline` and `pause::waker::run_deadline_waker`; the
+  graceful kinds of `pause::interrupt`), the run budget (`budget.rs`; `budget/`: `kind` the journal-facing types,
   `fold` the limit in force and the gate's pauses and waivers, `spent` what
   the run spent per dimension with unknown attempts imputed, `gate` the pure
   admission decision, `resume` what a resume may change, `start` the check
@@ -807,6 +835,28 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   frontend from `web/` embedded via rust-embed (`assets.rs`, `web/dist`).
 
 ### Concepts that span files
+
+- **Routine operations** (spec
+  `docs/superpowers/specs/2026-11-09-routine-operations-design.md`): a
+  start key (`--start-key`, MCP and HTTP `start_key`) makes a start happen
+  once per event: the surface captures the request from the caller's own
+  arguments before its gate, preparation claims the key before the tree
+  lock in a signed store that refuses a file that does not verify, and a
+  repeat answers the run already started (`already_started`), another
+  request `start_key_conflict`; a failed run holds its key until a
+  person's `--start-key-reuse`. A run started from a run step records
+  `started_by` in its launch record (verified through the attempt binding,
+  chains bounded at 5 across projects, a flagged starter flagging the
+  start); nothing is written into the starter, whose surfaces list the
+  runs its steps started in its project. A run's `deadline` (the playbook field, `--deadline`)
+  is measured on the deadline clock (wall time without a person's pause
+  and the time it sat ended) and ends the run aborted `deadline_exceeded`
+  in every state: driving (the latch at every work site and the run watch),
+  queued for the tree, parked (one deadline waker per run) and after a
+  reboot (`apb resume --all`). The stop is a graceful engine abort decided
+  under the run's event lock, so a resume's grant committed first counts;
+  a plain resume past the deadline is refused `deadline_passed`. The run
+  guard names `deadline`, and a supervisor patch may not change it.
 
 - **Run quality** (`docs/QUALITY.md`): a playbook's `quality:` block names
   the built-in criteria and at most three of its own. The rules grader

@@ -227,3 +227,36 @@ mod tests {
         assert!(parse_until("2026-10-16T08:00:59Z", 0).is_ok());
     }
 }
+
+/// A duration in milliseconds the way an author writes one: descending
+/// units without zero groups (`45m`, `1h30m`, `2d`, `3s`); under a second
+/// reads `0s`. The inverse of [`parse_duration_str`] for whole seconds.
+pub fn format_duration_ms(ms: u64) -> String {
+    let mut secs = ms / 1000;
+    if secs == 0 {
+        return "0s".into();
+    }
+    let mut out = String::new();
+    for (unit, size) in [("d", 86_400), ("h", 3600), ("m", 60), ("s", 1)] {
+        let n = secs / size;
+        if n > 0 {
+            out.push_str(&format!("{n}{unit}"));
+            secs -= n * size;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    #[test]
+    fn formats_round_trip_through_the_parser() {
+        for text in ["45m", "1h30m", "2d", "3s", "1d2h3m4s"] {
+            let ms = parse_duration_str(text).unwrap() * 1000;
+            assert_eq!(format_duration_ms(ms), text);
+        }
+        assert_eq!(format_duration_ms(999), "0s");
+    }
+}

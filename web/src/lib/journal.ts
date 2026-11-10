@@ -125,6 +125,11 @@ function eventNote(e: WfEvent): string | undefined {
   const notification = notifyEventNote(e.type, r)
   if (notification) return notification
   switch (e.type) {
+    // A run its deadline ended reads as such, whatever the reason's tail.
+    case 'run_aborted':
+      return typeof r.reason === 'string' && r.reason.startsWith('deadline_exceeded')
+        ? 'deadline exceeded'
+        : undefined
     case 'session_handoff':
       return r.warm
         ? `warm: continues the session of ${String(r.from_node ?? '')}`

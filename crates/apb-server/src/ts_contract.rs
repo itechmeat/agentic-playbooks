@@ -149,6 +149,12 @@ fn render_types() -> String {
         apb_engine::run_view::ReadOnlyViolation::decl(&cfg),
         apb_engine::run_view::ReadOnlyRow::decl(&cfg),
         apb_engine::run_view::PreviousSuccessView::decl(&cfg),
+        apb_engine::run_view::RunDeadlineView::decl(&cfg),
+        apb_engine::event::DeadlineSource::decl(&cfg),
+        // Runs started from a run step: the starter and the reverse links.
+        apb_core::launch::StartedBy::decl(&cfg),
+        apb_engine::run_view::StartedRunView::decl(&cfg),
+        apb_engine::run_view::StartedRuns::decl(&cfg),
         apb_engine::event::UntrustedNode::decl(&cfg),
         // --- 0.23.0 stats (C3) ---
         apb_engine::run_stats::Rate::decl(&cfg),

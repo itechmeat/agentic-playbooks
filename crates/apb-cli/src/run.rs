@@ -564,6 +564,23 @@ pub(crate) struct RunArgs {
     /// history). Fixed for the run's lifetime; refused with --remember
     #[arg(long, conflicts_with = "estimate")]
     pub external_data: bool,
+    /// End the run aborted (deadline_exceeded) once it has run this long
+    /// (a duration, `45m`, `2h`), the time a person paused it left out.
+    /// Overrides the playbook's `deadline:`. `apb resume --deadline` grants
+    /// more time
+    #[arg(long, value_name = "DURATION")]
+    pub deadline: Option<String>,
+    /// Start this run at most once per KEY (a CI run id, an event id, a
+    /// date): a repeat with the same key and the same params and
+    /// instruction answers the run already started instead of starting
+    /// another; another request under the key is refused. Kept 7 days
+    /// (policy.yaml runs.start_key_days); never stored in clear
+    #[arg(long, value_name = "KEY", conflicts_with = "estimate")]
+    pub start_key: Option<String>,
+    /// With --start-key: start a new run under a key whose run failed or
+    /// was aborted
+    #[arg(long, requires = "start_key")]
+    pub start_key_reuse: bool,
 }
 
 /// `--remember`: stores what the start was given once the run gate and the
@@ -658,6 +675,7 @@ struct CliStart {
     budget: Option<apb_core::budget::BudgetRequest>,
     notify: Option<apb_core::notify::NotifyRequest>,
     external_data: bool,
+    deadline_ms: Option<u64>,
 }
 
 impl CliStart {
@@ -676,9 +694,114 @@ impl CliStart {
             budget: self.budget,
             notify: self.notify,
             external_data: self.external_data,
+            deadline_ms: self.deadline_ms,
             ..RunOptions::default()
         }
     }
+}
+
+/// The arguments of `apb run` a start key's request binds, as typed.
+pub(crate) struct StartRequestArgs<'a> {
+    pub version: Option<&'a str>,
+    pub params: &'a BTreeMap<String, String>,
+    pub instruction: Option<&'a str>,
+    pub worktree: Option<&'a str>,
+    pub overrides: Option<&'a apb_core::overrides::RunOverrides>,
+    pub execution: Option<&'a str>,
+    pub supervise: bool,
+    pub cache: CacheRunMode,
+    pub deadline_ms: Option<u64>,
+    pub budget: Option<&'a apb_core::budget::BudgetRequest>,
+    pub unattended: bool,
+    pub allow_shared_workdir: bool,
+    pub continued_from: Option<&'a str>,
+    pub external_data: bool,
+}
+
+/// The request a start key of `apb run` binds: a plain mapping of the
+/// arguments as typed (`--version` as given, the budget flags as typed,
+/// never what a candidate or the budget question made of them).
+pub(crate) fn start_request(a: &StartRequestArgs<'_>) -> apb_core::start_key::StartRequestFields {
+    let overrides = a
+        .overrides
+        .and_then(|o| serde_json::to_vec(o).ok())
+        .map(|b| apb_core::content::sha256_hex(&b));
+    apb_core::start_key::StartRequestFields {
+        v: apb_core::start_key::REQUEST_V,
+        version: a.version.map(str::to_string),
+        params: a.params.clone(),
+        instruction: a.instruction.map(str::to_string),
+        worktree: a.worktree.map(str::to_string),
+        overrides,
+        execution: a.execution.map(str::to_string),
+        supervision: apb_core::start_key::label(&if a.supervise {
+            RunMode::AgentSupervised
+        } else {
+            RunMode::Autonomous
+        }),
+        cache: apb_core::start_key::label(&a.cache),
+        max_parallel: None,
+        max_patches_per_run: None,
+        context_max_bytes: None,
+        context_compact_model: None,
+        deadline_ms: a.deadline_ms,
+        budget: a.budget.and_then(|b| serde_json::to_value(b).ok()),
+        unattended: a.unattended,
+        allow_shared_workdir: a.allow_shared_workdir,
+        continued_from: a.continued_from.map(str::to_string),
+        external_data: a.external_data,
+    }
+}
+
+/// The lookup of a keyed `apb run` before its gate: `None` when the start
+/// goes ahead, else the exit (a repeat prints the run and, in the
+/// foreground, waits for it like `apb wait`; another request is refused).
+fn key_lookup(
+    root: &Path,
+    name: &str,
+    req: &apb_core::start_key::StartKeyRequest,
+    detached: bool,
+) -> Option<ExitCode> {
+    match apb_engine::start_key::lookup(root, "project", name, req) {
+        Ok(apb_engine::start_key::Lookup::Free) => None,
+        Ok(apb_engine::start_key::Lookup::Started { run_id, .. }) => {
+            Some(already_started(root, &run_id, detached))
+        }
+        Ok(apb_engine::start_key::Lookup::Conflict { run_id }) => {
+            eprintln!(
+                "run refused ({}): the key names run {run_id}, started with other params or instruction; use another key",
+                apb_engine::start_key::CONFLICT
+            );
+            Some(ExitCode::from(2))
+        }
+        Err(e) => Some(key_refused(&e)),
+    }
+}
+
+/// A start key refusal: its code first, exit 2.
+fn key_refused(e: &apb_engine::error::EngineError) -> ExitCode {
+    let msg = match e {
+        apb_engine::error::EngineError::Conflict(m)
+        | apb_engine::error::EngineError::Invalid(m) => m.clone(),
+        other => other.to_string(),
+    };
+    match msg.split_once(": ") {
+        Some((code, rest)) if code.starts_with("start_key_") => {
+            eprintln!("run refused ({code}): {rest}")
+        }
+        _ => eprintln!("run refused: {msg}"),
+    }
+    ExitCode::from(2)
+}
+
+/// The answer of a keyed start whose run already started: the run, then,
+/// in the foreground, what `apb wait <run>` gives.
+fn already_started(root: &Path, run_id: &str, detached: bool) -> ExitCode {
+    println!("run already started: {run_id} (start key)");
+    if detached {
+        return ExitCode::SUCCESS;
+    }
+    wait_cmd(root, run_id, None, false)
 }
 
 /// Parses repeatable `--param key=value` flags.
@@ -720,8 +843,20 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         remember,
         unattended,
         external_data,
+        deadline,
+        start_key,
+        start_key_reuse,
     } = args;
     let (name, version) = (name.as_str(), version.as_deref());
+    // A deadline argument that does not parse is refused before anything.
+    let deadline_ms = match deadline.as_deref().map(apb_engine::run_deadline::parse_arg) {
+        None => None,
+        Some(Ok(ms)) => Some(ms),
+        Some(Err(e)) => {
+            eprintln!("run refused ({e})");
+            return ExitCode::from(2);
+        }
+    };
     let execution = execution.as_deref();
     if Registry::open(root).is_err() {
         eprintln!("no project here (run `apb init`)");
@@ -743,10 +878,9 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
     // External data (capability run-external-data): the effective flag
     // (inherited from a flagged predecessor) and the remember refusal,
     // before anything is written.
-    let external_data = match apb_engine::external_data::for_start(
+    let external_data = match apb_engine::external_data::for_surface_start(
         root,
         external_data.then_some(true),
-        None,
         continued_from.as_deref(),
     )
     .and_then(|flag| apb_engine::external_data::check_remember(flag, remember).map(|()| flag))
@@ -757,6 +891,96 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // clap's `conflicts_with` already refuses `--no-cache --refresh-cache`
+    // together before we get here; this is just the flags-to-enum mapping.
+    let cache = if no_cache {
+        CacheRunMode::Off
+    } else if refresh_cache {
+        CacheRunMode::Refresh
+    } else {
+        CacheRunMode::Auto
+    };
+    let parsed = match parse_params(params) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let budget = match budget.request() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let notify = match notify.request() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("bad notify flags: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    // Run-level overrides from a yaml file (spec 11).
+    let overrides = match overrides_path.as_deref() {
+        Some(path) => match std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|raw| apb_core::overrides::RunOverrides::from_yaml(&raw))
+        {
+            Ok(o) => Some(o),
+            Err(e) => {
+                eprintln!("bad --overrides `{}`: {e}", path.display());
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+    // The start key: the request captured from the arguments as typed,
+    // before the gate, a candidate or the budget question change anything,
+    // and the read-only lookup before them.
+    let start_key = match start_key.as_deref() {
+        None => None,
+        Some(raw) => {
+            let fields = start_request(&StartRequestArgs {
+                version,
+                params: &parsed,
+                instruction: instruction.as_deref(),
+                worktree: worktree.as_deref(),
+                overrides: overrides.as_ref(),
+                execution: execution_mode.map(|m| m.as_str()),
+                supervise,
+                cache,
+                deadline_ms,
+                budget: budget.as_ref(),
+                unattended,
+                allow_shared_workdir,
+                continued_from: continued_from.as_deref(),
+                external_data,
+            });
+            let req = match apb_core::start_key::StartKey::parse(raw).and_then(|key| {
+                apb_core::start_key::StartRequest::capture(&fields)
+                    .map_err(|e| e.to_string())
+                    .map(|request| apb_core::start_key::StartKeyRequest {
+                        key,
+                        reuse: start_key_reuse,
+                        request,
+                    })
+            }) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("run refused ({}): {e}", apb_core::start_key::INVALID);
+                    return ExitCode::from(2);
+                }
+            };
+            if let Some(exit) = key_lookup(root, name, &req, detach || supervise) {
+                return exit;
+            }
+            Some(req)
+        }
+    };
+    // The checks that read the environment or the settings (the unattended
+    // mode's, the execution resolution) come after the lookup: a repeat of
+    // a keyed start answers its run even when the environment changed.
     // An unattended start that also asks for what the mode cannot hold
     // (supervision, host execution, asked for or resolved) is refused
     // before anything is written, by the run gate's own check, with the
@@ -795,36 +1019,6 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    // clap's `conflicts_with` already refuses `--no-cache --refresh-cache`
-    // together before we get here; this is just the flags-to-enum mapping.
-    let cache = if no_cache {
-        CacheRunMode::Off
-    } else if refresh_cache {
-        CacheRunMode::Refresh
-    } else {
-        CacheRunMode::Auto
-    };
-    let parsed = match parse_params(params) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(2);
-        }
-    };
-    let budget = match budget.request() {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(2);
-        }
-    };
-    let notify = match notify.request() {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("bad notify flags: {e}");
-            return ExitCode::from(2);
-        }
-    };
     let request = apb_core::execution::ExecutionRequest {
         mode: execution_mode,
         ..Default::default()
@@ -835,20 +1029,6 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
             eprintln!("run failed: {e}");
             return ExitCode::from(2);
         }
-    };
-    // Run-level overrides from a yaml file (spec 11).
-    let overrides = match overrides_path.as_deref() {
-        Some(path) => match std::fs::read_to_string(path)
-            .map_err(|e| e.to_string())
-            .and_then(|raw| apb_core::overrides::RunOverrides::from_yaml(&raw))
-        {
-            Ok(o) => Some(o),
-            Err(e) => {
-                eprintln!("bad --overrides `{}`: {e}", path.display());
-                return ExitCode::from(2);
-            }
-        },
-        None => None,
     };
     if estimate {
         return crate::budget::estimate_cmd(
@@ -975,6 +1155,10 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
                 by: g.by,
                 nonce: g.nonce,
             }),
+            deadline_ms,
+            start_key: start_key
+                .as_ref()
+                .map(apb_engine::launch_handoff::HandoffStartKey::of),
         };
         let handoff = match apb_engine::launch_handoff::write(root, &handoff) {
             Ok(p) => p,
@@ -1008,6 +1192,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         budget: None,
         notify: None,
         external_data,
+        deadline_ms,
     }
     .options();
     opts.overrides = overrides;
@@ -1015,6 +1200,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
     opts.execution = request;
     opts.unattended = unattended;
     opts.eval = eval;
+    opts.start_key = start_key;
     // The consent and the `expected_*` pins come from the run gate
     // (`gate_run`).
     let start_version = match gate_run(root, name, version, false, &mut opts, &how, &launch) {
@@ -1061,6 +1247,9 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
     }
     if detach {
         return match apb_engine::start_detached(root, name, version, opts) {
+            Err(apb_engine::error::EngineError::AlreadyStarted(id)) => {
+                already_started(root, &id, true)
+            }
             Ok(run_id) => {
                 println!("run started: {run_id}");
                 print_recalled(root, &run_id);
@@ -1081,6 +1270,9 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         return run_host_foreground(root, name, version, opts);
     }
     match run(root, name, version, opts) {
+        Err(apb_engine::error::EngineError::AlreadyStarted(id)) => {
+            already_started(root, &id, false)
+        }
         Ok(res) => {
             if res.outcome == RunStatus::Running {
                 let exit = released_exit(root, &res.run_id);
@@ -1112,6 +1304,9 @@ fn run_host_foreground(
 ) -> ExitCode {
     let run_id = match apb_engine::run_background(root, name, version, opts) {
         Ok(id) => id,
+        Err(apb_engine::error::EngineError::AlreadyStarted(id)) => {
+            return already_started(root, &id, false);
+        }
         Err(e) => {
             eprintln!("run failed: {e}");
             return ExitCode::from(2);
@@ -1147,6 +1342,9 @@ fn run_host_foreground(
         }
     }
 }
+
+/// The handshake of a supervised child whose keyed start found its run.
+const ALREADY: &str = "ALREADY: ";
 
 /// Spawns `playbook __drive-supervised ...` as a separate OS process detached
 /// from the current one (null stdio, we do not wait for it to finish) - it is
@@ -1254,6 +1452,10 @@ pub(crate) fn spawn_detached_supervised(
                 eprintln!("run failed: {msg}");
                 return ExitCode::from(2);
             }
+            if let Some(id) = content.strip_prefix(ALREADY) {
+                println!("run already started: {id} (start key)");
+                return ExitCode::SUCCESS;
+            }
             println!("supervised run started: {content}");
             return ExitCode::SUCCESS;
         }
@@ -1313,6 +1515,7 @@ pub(crate) fn drive_supervised_child(
         budget,
         notify,
         external_data,
+        deadline_ms: None,
     }
     .options();
     // The launch decision and the consent the parent obtained, from the
@@ -1339,7 +1542,11 @@ pub(crate) fn drive_supervised_child(
             version: v,
             choice,
             consent,
+            deadline_ms,
+            start_key,
         })) => {
+            opts.deadline_ms = deadline_ms;
+            opts.start_key = start_key.and_then(|k| k.request());
             launch = launch
                 .confirmed(Some(
                     apb_engine::gate::launch::LaunchConfirmation::Forwarded {
@@ -1368,6 +1575,12 @@ pub(crate) fn drive_supervised_child(
     let version = start_version.as_deref();
     let prepared = match prepare_supervised_background(root, name, version, opts) {
         Ok(p) => p,
+        // A keyed start that lost the race to the same request: the parent
+        // answers that run.
+        Err(apb_engine::error::EngineError::AlreadyStarted(id)) => {
+            let _ = atomic_write(handshake, format!("{ALREADY}{id}").as_bytes());
+            return ExitCode::SUCCESS;
+        }
         Err(e) => {
             let _ = atomic_write(handshake, format!("ERR: {e}").as_bytes());
             return ExitCode::from(2);
@@ -1400,6 +1613,8 @@ pub(crate) struct DriveRunArgs<'a> {
     pub(crate) retry_now: Option<apb_engine::scheduler::RetryNow<'a>>,
     pub(crate) budget_json: Option<&'a str>,
     pub(crate) launch_handoff: Option<&'a Path>,
+    /// More time the resume grants the run's deadline, milliseconds.
+    pub(crate) deadline_ms: Option<u64>,
 }
 
 /// Body of the hidden `__drive-run` subcommand: the detached driver process.
@@ -1422,6 +1637,7 @@ pub(crate) fn drive_run_child(root: &Path, run_id: &str, args: &DriveRunArgs<'_>
         retry_now,
         budget_json,
         launch_handoff,
+        deadline_ms,
     } = *args;
     // The resume's launch grant, from the handoff its parent wrote; without
     // a valid one the engine continues only a run that needs none.
@@ -1463,6 +1679,7 @@ pub(crate) fn drive_run_child(root: &Path, run_id: &str, args: &DriveRunArgs<'_>
                     budget: budget.as_ref(),
                     launch: launch.as_ref(),
                     retry_now,
+                    deadline_ms,
                 },
             )
         })
@@ -1519,6 +1736,8 @@ pub(crate) enum WakerFor {
     Notify,
     /// The follow-up due after the run's `run_finished` at this seq.
     FollowUp(u64),
+    /// The run's deadline while no driver holds it.
+    Deadline,
 }
 
 /// Body of the hidden `__pause-waker` subcommand (issue #200): sleeps until
@@ -1541,6 +1760,12 @@ pub(crate) fn pause_waker_cmd(root: &Path, run_id: &str, waker: WakerFor) -> Exi
             .map(|_| apb_engine::pause::WakeOutcome::Superseded),
         WakerFor::FollowUp(seq) => {
             apb_engine::follow_up::waker::run_follow_up_waker(root, run_id, seq);
+            Ok(apb_engine::pause::WakeOutcome::Superseded)
+        }
+        // The deadline waker resumes nothing: it ends the run at its
+        // deadline or exits when it has nothing to watch.
+        WakerFor::Deadline => {
+            apb_engine::pause::waker::run_deadline_waker(root, run_id);
             Ok(apb_engine::pause::WakeOutcome::Superseded)
         }
     };
@@ -1832,13 +2057,14 @@ fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
     }
     let redaction = apb_engine::run_redact::WorkspaceRedaction::new(root);
     crate::util::with_run_redaction(redaction.run_dir(&run_dir), || {
-        run_detail_text(&redaction, run_id, &run_dir)
+        run_detail_text(&redaction, root, run_id, &run_dir)
     })
 }
 
 /// The text of `apb runs <run_id>`, printed inside the run's redaction.
 fn run_detail_text(
     redaction: &apb_engine::run_redact::WorkspaceRedaction,
+    root: &Path,
     run_id: &str,
     run_dir: &Path,
 ) -> ExitCode {
@@ -1905,6 +2131,37 @@ fn run_detail_text(
         say!(
             "  limit: {}",
             sanitize_for_terminal(&limit.detail, QUESTION_TEXT_MAX)
+        );
+    }
+    if let Some(d) = apb_engine::run_view::deadline(&view.events, apb_core::clock::now_ms()) {
+        say!("  deadline: {}", apb_engine::run_view::deadline_line(&d));
+    }
+    if let Some(tag) = apb_engine::run_view::start_key(&view.events) {
+        say!(
+            "  start key: {}",
+            sanitize_for_terminal(&tag, QUESTION_TEXT_MAX)
+        );
+    }
+    // Runs started from a run step: this run's starter, and the runs its
+    // steps started in this project.
+    if let Some(by) = apb_engine::run_view::started_by(&run_dir) {
+        let here = apb_core::projects::registered_id(root);
+        say!(
+            "  started by {}",
+            sanitize_for_terminal(
+                &apb_engine::run_view::started_by_line(&by, here.as_deref()),
+                QUESTION_TEXT_MAX
+            )
+        );
+    }
+    let started = apb_engine::run_view::started_runs(root, run_id);
+    if !started.runs.is_empty() || started.truncated {
+        say!(
+            "  started runs in this project: {}",
+            sanitize_for_terminal(
+                &apb_engine::run_view::started_runs_line(&started),
+                QUESTION_TEXT_MAX
+            )
         );
     }
     if let Some(ps) = apb_engine::run_view::previous_success(&view.events) {
@@ -2306,7 +2563,16 @@ pub(crate) fn resume_cmd(
     budget: &crate::budget::ResumeBudgetFlags,
     launch: &crate::launch::LaunchFlags,
     external_data: Option<bool>,
+    deadline: Option<&str>,
 ) -> ExitCode {
+    let deadline_ms = match deadline.map(apb_engine::run_deadline::parse_arg) {
+        None => None,
+        Some(Ok(ms)) => Some(ms),
+        Some(Err(e)) => {
+            eprintln!("resume refused ({e})");
+            return ExitCode::from(2);
+        }
+    };
     let budget = match budget.request() {
         Ok(b) => b,
         Err(e) => {
@@ -2370,6 +2636,7 @@ pub(crate) fn resume_cmd(
             node: a.node,
             by: retry_now_by(),
         }),
+        deadline_ms,
         ..apb_engine::ResumeRequest::operator()
     };
     // 0.24.0 irreversible consent: a run of an irreversible tree with no
@@ -2496,6 +2763,9 @@ pub(crate) fn resume_all_cmd(root: &Path, launch: &crate::launch::LaunchFlags) -
                         format!("left as is, the workdir is busy: {detail}")
                     }
                     ResumeAllAction::LeftPaused => "left paused".to_string(),
+                    ResumeAllAction::DeadlineStopped => {
+                        "deadline_stopped: ended at its deadline".to_string()
+                    }
                     ResumeAllAction::Rearmed { wake_at_ms } => format!(
                         "waits until {}, a waker is armed",
                         apb_core::clock::iso_utc(*wake_at_ms)
@@ -2770,6 +3040,8 @@ pub(crate) fn stop_cmd(root: &Path, run_id: &str) -> ExitCode {
             println!("{run_id} had already finished, so no run was stopped");
             ExitCode::SUCCESS
         }
+        // A person's stop has no condition: never not due.
+        Ok(StopOutcome::NotDue) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("stop failed: {e}");
             ExitCode::from(2)

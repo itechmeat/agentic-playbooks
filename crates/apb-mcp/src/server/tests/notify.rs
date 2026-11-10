@@ -21,6 +21,9 @@ fn seed_quick(root: &Path, yaml: &str) {
 
 fn start_args(notify: serde_json::Value) -> PlaybookRunArgs {
     PlaybookRunArgs {
+        deadline: None,
+        start_key: None,
+        start_key_reuse: None,
         id: "quick".into(),
         version: None,
         params: BTreeMap::new(),

@@ -4346,6 +4346,67 @@ outright (`budget_change_refused`).
 | V97 | error | `budget.tokens` is 0, or `budget.usd` is not a finite amount greater than 0 |
 | V98 | warning | a `budget` on a playbook with no agent node and no `playbook` node, so it never applies |
 
+## deadline (a run's wall-clock limit)
+
+`deadline` bounds how long the world waits for a run. It is a duration
+(`45m`, `2h`, `1d`) on the deadline clock: wall time since the run
+started, without the time a person paused it and the time it sat ended
+before a resume. Engine and supervisor pauses (a quota pause, a budget
+pause), waits on reviews and questions, and the wait for a busy working
+tree all count: a digest that waited out a quota until noon is stale.
+
+```yaml
+deadline: 45m
+```
+
+The run argument overrides it: `apb run --deadline 30m`, MCP
+`playbook_run { deadline: "30m" }`, the HTTP start body
+`{ "deadline": "30m" }`. A value that does not parse is refused
+`deadline_invalid` before anything starts.
+
+When the deadline passes, the run ends `run_aborted` with a reason that
+starts with `deadline_exceeded:` (by the engine), whatever state it is in:
+
+1. Driving: no node, attempt, batch member or list item starts after the
+   deadline, and the attempts in flight get SIGTERM, the grace period of a
+   `--now` pause, then SIGKILL. They close as aborted. An open host task is
+   closed `cancelled`; apb has no process to signal there, so the host's
+   subagent may still finish its work, and its submission is refused.
+2. Queued for the working tree: the run ends without taking the lock.
+3. Paused or released with no driver: one deadline waker per run ends it.
+   A person's pause freezes the clock, so it is never ended while a person
+   holds it.
+4. After a reboot: `apb resume --all` ends a run whose deadline passed
+   (`deadline_stopped`) and arms the waker of one with time left.
+
+A sub-playbook child takes no deadline of its own: its parent's stop
+reaches it, also while it is still being prepared. A baseline check's
+connector read on the drive thread waits no longer than the time left; a
+read the deadline cut short records nothing, so a resume with more time
+reads it afresh. A send in flight stays in the send ledger as `unknown`.
+
+Resuming: a plain resume of a run past its deadline is refused
+`deadline_passed`. `apb resume <run> --deadline 30m` (MCP `run_resume {
+deadline }`, the HTTP resume body `deadline`) gives it that much more time
+from now. The engine never resumes a run past its deadline, and a quota
+probe never runs for one.
+
+A supervisor patch may not add, drop or change `deadline`
+(`deadline_changed`); only a person grants time, at a resume. A run with a
+deadline carries a run guard naming `deadline`, so an apb that does not
+know the field refuses to continue it rather than run it without its
+limit. A scenario run ignores `deadline` (its timing is scripted), and an
+eval run keeps its own wall-clock limit.
+
+Every run surface shows the deadline: `apb runs <id>` prints `deadline:
+45m, 12m left (ends <UTC>)`, `deadline: 45m, 12m left, frozen (paused by a
+person)` or `deadline: 45m, exceeded`; MCP `run_status`, the HTTP run
+detail and the dashboard carry the `deadline` block.
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| V200 | error | `deadline` is not a duration, is zero, under 1 minute or over 30 days |
+
 ## goal (target and criteria)
 
 Optional. The goal this playbook exists to reach, in the owner's words, plus
@@ -4905,6 +4966,26 @@ edges:
   project: a later step or a person changes them.
 - Gate the node with `human_review` after it when an owner should see the
   findings before anything is patched.
+
+## Starting a run from a run step
+
+A step may start another playbook (`apb run <id>` in a script or an
+agent's shell, MCP `playbook_run` from an agent). The new run records the
+run whose step started it (`started_by`: the run, its workspace, the node
+and the attempt), and both surfaces show the link: `apb runs <new>` prints
+`started by run <id> (node <n>, attempt <k>)` and `apb runs <starter>`
+prints `started runs in this project: ...`. The list covers the starter's
+own project and the newest 500 runs there; when it may be incomplete it
+says so. A run started in another registered project names its starter
+and workspace on its own surfaces.
+
+- Chains are bounded: five runs that each started the next from a step is
+  the most; a sixth start is refused `start_chain_too_deep`. A resume is
+  never refused for this, and sub-playbook nesting does not count.
+- A step of a run that processes external data starts runs that do too
+  (`external_data: true` is inherited, and `false` is refused).
+- The starter is verified only while the starting step is still open and
+  its attempt token matches; a forged `APB_RUN_ID` reads as not verified.
 
 ## Linking runs, commits and tracker records
 

@@ -109,10 +109,14 @@ pub(super) fn run_batches(run: &ListRun<'_, '_, '_>) -> Result<End, EngineError>
     Ok(End::Done)
 }
 
-/// Why admission stops: an abort the watcher latched, or a pause (or an
-/// abort) posted and not applied yet. The control channel is read as well as
-/// the flags, so an item is never admitted after a pause request returned.
+/// Why admission stops: an abort the watcher latched, the run's deadline
+/// passed (its stop is posted here), or a pause (or an abort) posted and
+/// not applied yet. The control channel is read as well as the flags, so an
+/// item is never admitted after a pause request returned.
 fn stopped(run: &ListRun<'_, '_, '_>) -> Option<End> {
+    if crate::run_deadline::refuses_work(run.ctx.run_dir) {
+        return Some(End::Halted);
+    }
     if let Some(stop) = run.stop {
         if stop.cancel.load(Ordering::SeqCst) {
             return Some(End::Cancelled);

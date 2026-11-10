@@ -616,6 +616,9 @@ impl WfMcp {
         };
         let started = tools::playbook_run_supervised(&self.root, &id, version.as_deref(), start);
         let value = match started {
+            // A keyed start that found its run: no token for a run this
+            // session did not start.
+            Ok(v) if v["already_started"] == true => return to_call_tool_result(Ok(v)),
             Ok(v) => v,
             Err(e) => return to_call_tool_result(Err(e)),
         };

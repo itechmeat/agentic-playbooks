@@ -376,6 +376,47 @@ fn a_resume_before_submission_re_exposes_the_same_task() {
     assert_eq!(wait_outcome(root, &run_id), "succeeded");
 }
 
+/// A detached resume carries a person's deadline grant to the driver it
+/// spawns: a host-mode run resumes in a detached `__drive-run`, and that
+/// child journals the grant on its `run_resumed`, guard first.
+#[test]
+fn a_detached_resume_carries_the_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root);
+    let run_id = start_detached(root);
+    let _guard = crate::common::RunGuard::new(root, &run_id);
+    task_of(root, &run_id, "plan");
+    kill_driver(root, &run_id);
+    let out = crate::common::apb_std()
+        .args(["resume", &run_id, "--deadline", "5m"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let granted = poll("the granted run_resumed", || {
+        read_all(&run_dir(root, &run_id))
+            .ok()?
+            .into_iter()
+            .find_map(|e| match e.payload {
+                EventPayload::RunResumed { deadline, .. } => deadline,
+                _ => None,
+            })
+    });
+    assert_eq!(
+        granted.source,
+        apb_engine::run_deadline::DeadlineSource::Resume
+    );
+    assert!(granted.total_ms >= 300_000, "{granted:?}");
+    let ev = read_all(&run_dir(root, &run_id)).unwrap();
+    assert!(ev.iter().any(|e| matches!(&e.payload,
+        EventPayload::RunGuard { requires } if requires.iter().any(|r| r == "deadline"))));
+}
+
 #[test]
 fn a_resume_after_submission_consumes_it_without_a_new_task() {
     let dir = tempfile::tempdir().unwrap();

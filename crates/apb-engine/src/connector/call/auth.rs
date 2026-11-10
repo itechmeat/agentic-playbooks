@@ -29,9 +29,13 @@ pub(crate) type ResolvedSecrets = (BTreeMap<String, Secret>, Vec<Redaction>);
 /// Returns the secrets map keyed by FIELD name (for the render context) and
 /// the redactions. A var that resolves
 /// nowhere, or a command that fails, is a Config error naming the field.
+/// Each helper gets its fixed bound or the call's time left (`deadline`),
+/// whichever is shorter; a helper with no time left is not started and
+/// fails as a timeout, like a slow service.
 pub(crate) fn resolve_secrets(
     root: &Path,
     account: &ManifestAccount,
+    deadline: std::time::Instant,
 ) -> Result<ResolvedSecrets, CallError> {
     let mut secrets = BTreeMap::new();
     let mut redactions = Vec::new();
@@ -49,7 +53,17 @@ pub(crate) fn resolve_secrets(
         secrets.insert(field.clone(), value);
     }
     for (field, cmdline) in &account.cmd {
-        let value = secrets::resolve_cmd(cmdline, secrets::CMD_SECRET_TIMEOUT)
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(CallError::new(
+                CallErrorCode::Timeout,
+                format!(
+                    "the call's time ran out before the secret helper of account `{}` field `{field}` could run",
+                    account.name
+                ),
+            ));
+        }
+        let value = secrets::resolve_cmd(cmdline, secrets::CMD_SECRET_TIMEOUT.min(left))
             .map_err(|e| cmd_secret_error(&account.name, field, e))?;
         // resolve_cmd rejects empty output, so the value is always non-empty
         // and safe to register for redaction. The label carries no secret.

@@ -16,7 +16,9 @@ mod spawn_env;
 mod stop;
 
 pub use failure::{AgentFailure, ErrorClass};
-pub use spawn_env::{ATTEMPT_TOKEN_ENV, ITEM_ID_ENV, SpawnEnv};
+pub use spawn_env::{
+    ATTEMPT_CREDENTIAL_ENV, ATTEMPT_TOKEN_ENV, ITEM_FILE_ENV, ITEM_ID_ENV, SpawnEnv,
+};
 
 use output::{headless_capture, incomplete_failure, pipes_failure, stream_capture};
 
@@ -122,9 +124,6 @@ fn wait_bounded(child: &mut Child, budget: Duration) -> Option<std::io::Result<E
         }
     }
 }
-
-/// The variable that names the file holding a list item's JSON.
-pub const ITEM_FILE_ENV: &str = "APB_ITEM_FILE";
 
 /// The env a list item's script step and its item check both get: its id
 /// and the file holding its JSON. A file path that is not valid UTF-8 is

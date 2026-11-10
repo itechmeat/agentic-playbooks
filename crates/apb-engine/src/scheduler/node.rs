@@ -876,6 +876,16 @@ fn execute_node_kind(
         return Err(drive_handled_refusal(node_id, &node.kind));
     }
     let mut events: Vec<EventPayload> = Vec::new();
+    // A run past its deadline starts no execution: a sequential node, a
+    // batch or pipeline member, a list item, a deferred retry and a resumed
+    // visit all pass here. Written off like work an abort reached first.
+    if crate::run_deadline::refuses_work(run_dir) {
+        return Ok(AttemptOutcome::Finished {
+            status: NodeStatus::Cancelled,
+            output: "cancelled".into(),
+            events,
+        });
+    }
     // The approval a node with `requires_approval` needs is checked again
     // as each execution begins, not only when its visit was admitted: a
     // resume of an open visit, a deferred retry and a list item all start
@@ -1776,8 +1786,10 @@ fn execute_node_kind(
                     // stays where it is.
                     let mut infra_retry = false;
                     // Cancellation (this branch lost a join:any) - exit with status
-                    // Cancelled, not counting this as a failure.
-                    if cancel.load(Ordering::Relaxed) {
+                    // Cancelled, not counting this as a failure. A run past
+                    // its deadline spawns no further attempt either.
+                    if cancel.load(Ordering::Relaxed) || crate::run_deadline::refuses_work(run_dir)
+                    {
                         return Ok(AttemptOutcome::Finished {
                             status: NodeStatus::Cancelled,
                             output: "cancelled".to_string(),
@@ -4372,6 +4384,11 @@ pub(crate) fn execute_finish_answer(
             env_scrub,
         );
         for try_i in 0..=retries {
+            // A run past its deadline spawns no composer attempt, a retry or
+            // a fallback step, even before its watch latched the cancel.
+            if crate::run_deadline::refuses_work(run_dir) {
+                return Ok((NodeStatus::Cancelled, "cancelled".to_string(), events));
+            }
             attempt += 1;
             // Host execution mode (0.23.0): the closing answer is a host task
             // too; the report contract stays off (see `report_contract`).
@@ -5071,10 +5088,28 @@ pub(crate) fn run_playbook_node(
         }
     };
     let child_run_id = cp.run_id.clone();
+    #[cfg(any(test, feature = "testing"))]
+    crate::deadline_hooks::at(crate::deadline_hooks::Hook::ChildPrepared, &cp.run_dir);
     log.append(EventPayload::ChildRunStarted {
         node_id: node_id.to_string(),
         run_id: child_run_id.clone(),
     })?;
+    // Publish first, then check: a stop of the parent that landed while the
+    // child was prepared (before `abort_children` could find it) reaches it
+    // here, so its first control scan ends it before any node starts. A
+    // stop after the append finds it through `abort_children`.
+    if crate::run_deadline::refuses_work(run_dir)
+        || matches!(crate::control::pending_stop_seq(run_dir), Ok(Some(_)))
+    {
+        crate::control::post_control(
+            &cp.run_dir,
+            crate::control::Control::Abort {
+                reason: crate::stop::PARENT_ABORTED_REASON.into(),
+                by: Some(crate::pause::kind::PauseBy::Engine),
+                graceful: true,
+            },
+        )?;
+    }
     let res = drive(
         cp.playbook.clone(),
         &cp.run_dir,

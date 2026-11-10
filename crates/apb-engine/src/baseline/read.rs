@@ -189,7 +189,10 @@ pub(crate) fn call_connector_json(
             full: false,
         },
         call,
-        read.timeout_seconds,
+        match ctx.cap_secs {
+            Some(cap) => read.timeout_seconds.min(cap),
+            None => read.timeout_seconds,
+        },
     );
     readable_body(&result).cloned()
 }

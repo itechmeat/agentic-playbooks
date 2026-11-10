@@ -556,7 +556,7 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
                 // A pause never closes a host task (issue #200): a `--now`
                 // pause leaves it open, and the resume adopts it with its
                 // clock frozen across the pause.
-                if !crate::pause::interrupt::is_graceful(cancel) {
+                if !crate::pause::interrupt::is_pause(cancel) {
                     let note = super::fork::cancel_note(self.run_dir, task.node);
                     let _ = self.close(&task_id, "cancelled", note);
                 }

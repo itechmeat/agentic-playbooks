@@ -809,6 +809,7 @@ mod tests {
             Control::Abort {
                 reason: "stop requested".into(),
                 by: None,
+                graceful: false,
             },
         )
         .unwrap();

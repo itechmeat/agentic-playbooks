@@ -1076,6 +1076,59 @@ export type PreviousSuccessView = { run_id?: string, started_at?: string, finish
  */
 keys?: Array<string>, withheld?: Array<string>, fallback: boolean, };
 
+export type RunDeadlineView = { total_ms: number, elapsed_ms: number, remaining_ms: number, source: DeadlineSource, 
+/**
+ * A person paused the run, or it ended: the clock does not run.
+ */
+frozen: boolean, 
+/**
+ * Wall-clock end while it runs (RFC 3339 UTC); absent while frozen.
+ */
+ends_at?: string, };
+
+export type DeadlineSource = "playbook" | "run" | "resume";
+
+export type StartedBy = { run_id: string, 
+/**
+ * The registered workspace id of the starting run's project
+ * (`projects::registered_id`); absent when it has none.
+ */
+workspace_id?: string, node?: string, 
+/**
+ * The attempt whose token the caller carried (an agent step or a host
+ * task's subagent); absent for a script step.
+ */
+attempt?: number, host_task?: string, 
+/**
+ * The starting run was found, created by this installation, not
+ * ended, and the node (and the token, when given) match its journal.
+ */
+verified: boolean, 
+/**
+ * 1 for a run a step of a run outside any chain started; the
+ * starter's chain + 1 after that.
+ */
+chain: number, };
+
+export type StartedRunView = { run_id: string, playbook: string, 
+/**
+ * `project` or `global`: where its definition came from.
+ */
+scope: string, node?: string, attempt?: number, };
+
+export type StartedRuns = { 
+/**
+ * Newest first, at most [`STARTED_RUNS_MAX`].
+ */
+runs: Array<StartedRunView>, 
+/**
+ * The project holds more run directories than the scan's bound
+ * ([`STARTED_RUNS_SCAN`]): entries among those it did not read may be
+ * missing. Journal-write order says nothing about start times, so no
+ * run inside the bound proves the rest complete.
+ */
+truncated: boolean, };
+
 export type UntrustedNode = { node: string, sources: Array<string>, outward?: Array<string>, secrets?: Array<string>, accepted?: string, };
 
 export type Rate = { count: number, of: number, rate?: number, };
@@ -2204,7 +2257,12 @@ sources: Array<string>,
  * record an older apb wrote; such a run is checked against the
  * settings in force at each spawn.
  */
-billing?: BillingRecord, };
+billing?: BillingRecord, 
+/**
+ * The run step this run was started from (`run_step:cli` or
+ * `run_step:mcp` initiators). Absent for every other start. Additive.
+ */
+started_by?: StartedBy, };
 
 export type BillingRecord = { 
 /**
@@ -2667,6 +2725,31 @@ external_data?: boolean,
  */
 previous_success?: PreviousSuccessView, 
 /**
+ * The run's deadline: its total, what is left and whether the clock is
+ * frozen. Left out for a run without one.
+ */
+deadline?: RunDeadlineView, 
+/**
+ * The first characters of the start key's MAC the run was started
+ * with (never the key). Left out for a run started without one.
+ */
+start_key?: string, 
+/**
+ * The run step this run was started from, as its launch record names
+ * it. Left out for every other run.
+ */
+started_by?: StartedBy, 
+/**
+ * The runs a step of this run started in this project, newest first.
+ * Left out when there is none.
+ */
+started_runs?: Array<StartedRunView>, 
+/**
+ * The scan behind `started_runs` stopped at its bound: older entries
+ * may be missing.
+ */
+started_runs_truncated?: boolean, 
+/**
  * The nodes that render untrusted text, as the start recorded them.
  * Left out for a run without any.
  */
@@ -2818,7 +2901,7 @@ export type ArgValue = { "kind": "given", value: string, } | { "kind": "choice",
 
 export type ActionArg = { name: string, value: ArgValue, required: boolean, };
 
-export type AutoOutcome = "answered_default" | "timer_elapses" | "attempt_fails" | "wait_times_out" | "resume_attempt" | "retry_attempt";
+export type AutoOutcome = "answered_default" | "timer_elapses" | "attempt_fails" | "wait_times_out" | "resume_attempt" | "retry_attempt" | "run_deadline";
 
 export type AutoProgress = { "kind": "at", at_ms: number, outcome: AutoOutcome, assured: boolean, } | { "kind": "frozen", remaining_ms: number, outcome: AutoOutcome, };
 
@@ -2883,7 +2966,12 @@ primary?: number,
 /**
  * A live child sat too deep to be observed; its waits are not here.
  */
-children_truncated?: boolean, };
+children_truncated?: boolean, 
+/**
+ * When the run's deadline ends it ([`super::deadlines::run_deadline`]);
+ * absent without a deadline in force.
+ */
+run_deadline?: AutoProgress, };
 
 export type StartActionCode = "confirm_irreversible_start" | "fix_requirement" | "acknowledge_untrusted" | "confirm_launch" | "launch_by_person";
 

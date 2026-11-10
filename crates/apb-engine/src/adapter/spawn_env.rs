@@ -24,6 +24,22 @@ pub const ATTEMPT_TOKEN_ENV: &str = "APB_ATTEMPT_TOKEN";
 /// The variable that names the list item an attempt runs (`list:`).
 pub const ITEM_ID_ENV: &str = "APB_ITEM_ID";
 
+/// The variable that names the file holding a list item's JSON.
+pub const ITEM_FILE_ENV: &str = "APB_ITEM_FILE";
+
+/// The variables that bind a process to one attempt of one run: its
+/// number, token, host task, list item and evidence session. A step apb
+/// spawns gets its own or none, never the ones of the process that drives
+/// it (a drive started from another run's step carries that step's).
+pub const ATTEMPT_CREDENTIAL_ENV: [&str; 6] = [
+    "APB_ATTEMPT",
+    ATTEMPT_TOKEN_ENV,
+    "APB_HOST_TASK",
+    ITEM_ID_ENV,
+    ITEM_FILE_ENV,
+    crate::evidence::SESSION_ENV,
+];
+
 /// What apb sets on and removes from a spawned agent's environment.
 /// `scrub` is the union of env var names referenced by ANY installed
 /// connector config (both scopes), removed from the child so a connector

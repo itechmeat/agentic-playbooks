@@ -319,8 +319,8 @@ fn a_successor_of_a_flagged_run_is_flagged() {
     );
     assert_eq!(outcome, RunStatus::Succeeded);
     assert!(external_data::is_flagged(&run_dir(root, &next)));
-    let refusal =
-        external_data::for_start(root, Some(false), None, Some(flagged.as_str())).unwrap_err();
+    let refusal = external_data::for_start(root, Some(false), None, Some(flagged.as_str()), None)
+        .unwrap_err();
     assert_eq!(refusal.code, external_data::IMMUTABLE);
 }
 
@@ -336,6 +336,7 @@ fn normalized(root: &Path, id: &str) -> Vec<serde_json::Value> {
             o.remove("external_data");
             for k in [
                 "duration_ms",
+                "spawn_ms",
                 "execution_root",
                 "apb",
                 "token",

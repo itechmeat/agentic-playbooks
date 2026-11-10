@@ -103,6 +103,8 @@ pub fn request_pause(
     if req.until.is_some() {
         super::waker::spawn_waker(root, run_id, seq);
     }
+    // A run with a deadline ends at it while it stays parked.
+    crate::run_deadline::arm_waker(root, run_id);
     Ok(PauseOutcome::Journaled { seq })
 }
 
@@ -174,6 +176,7 @@ pub(crate) fn after_release(
     // (`deferred::try_release`); a guard still held here is dropped too.
     drop(lock.take());
     super::waker::spawn_release_waker(root, run_id, released.seq);
+    crate::run_deadline::arm_waker(root, run_id);
 }
 
 /// Called by the drive when it ends `paused` (issue #200, design 4): the
@@ -204,4 +207,5 @@ pub(crate) fn after_pause(
     if until.is_some() {
         super::waker::spawn_waker(root, run_id, seq);
     }
+    crate::run_deadline::arm_waker(root, run_id);
 }

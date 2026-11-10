@@ -153,6 +153,15 @@ fn doctor_env(root: &Path, mut out: Out) -> ExitCode {
     for (warn, subject, detail) in apb_mcp::setup::doctor_lines(root) {
         out.line(if warn { WARN } else { OK }, subject, &detail);
     }
+    // A start-key file that does not verify refuses its playbook's keyed
+    // starts until a person moves it aside.
+    if let Some(detail) = apb_engine::start_key::doctor_line(root) {
+        out.line(
+            WARN,
+            "start keys",
+            &sanitize_for_terminal(&detail, SANDBOX_LINE_MAX),
+        );
+    }
     out.finish(blocking)
 }
 
