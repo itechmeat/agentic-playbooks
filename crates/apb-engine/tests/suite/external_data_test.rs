@@ -336,6 +336,7 @@ fn normalized(root: &Path, id: &str) -> Vec<serde_json::Value> {
             o.remove("external_data");
             for k in [
                 "duration_ms",
+                "spawn_ms",
                 "execution_root",
                 "apb",
                 "token",
