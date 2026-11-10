@@ -296,8 +296,12 @@ fn a_starter_in_another_registered_project_keeps_its_chain() {
             c.run_dir = Some(dir.clone());
             // Not registered: not verified, chain 1.
             assert!(!started(b.path(), &c).verified);
-            apb_core::projects::touch(a.path());
-            let ws = apb_core::projects::registered_id(a.path()).expect("registered");
+            // `bind_id`, not `touch`: `touch` registers nothing under `CI`.
+            let ws = apb_core::projects::bind_id(a.path()).expect("registered");
+            assert_eq!(
+                apb_core::projects::registered_id(a.path()).as_deref(),
+                Some(ws.as_str())
+            );
             let by = started(b.path(), &c);
             assert!(by.verified, "{by:?}");
             assert_eq!(by.chain, 3);

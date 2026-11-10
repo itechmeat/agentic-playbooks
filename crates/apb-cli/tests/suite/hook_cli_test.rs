@@ -75,7 +75,13 @@ impl Hook {
             cmd.env(k, v);
         }
         let mut child = cmd.spawn().unwrap();
-        child.stdin.take().unwrap().write_all(stdin).unwrap();
+        // A hook that is off here (inside a run step, `APB_SAVE_NUDGE=off`)
+        // exits before it reads its stdin, so the write may find the pipe
+        // closed: that is the hook's answer, not a failure.
+        match child.stdin.take().unwrap().write_all(stdin) {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+            other => other.unwrap(),
+        }
         let out = child.wait_with_output().unwrap();
         assert!(
             out.stderr.is_empty(),

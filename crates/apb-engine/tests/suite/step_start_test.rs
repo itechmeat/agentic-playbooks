@@ -90,7 +90,9 @@ fn project() -> tempfile::TempDir {
         )
         .unwrap();
     }
-    apb_core::projects::touch(root);
+    // `bind_id`, not `touch`: `touch` registers nothing under `CI` or
+    // `APB_NO_REGISTRY`, and the starter must be registered to be verified.
+    apb_core::projects::bind_id(root).unwrap();
     dir
 }
 
