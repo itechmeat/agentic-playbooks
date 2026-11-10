@@ -18,7 +18,7 @@
 //! they never leave this process except inside the outgoing `auth` block.
 
 mod account;
-mod attempt;
+pub(crate) mod attempt;
 pub(crate) mod auth;
 pub(crate) mod encode;
 mod http;
@@ -743,7 +743,7 @@ fn build_prepared(
     let (secrets, mut redactions) = if dry_run {
         (BTreeMap::new(), Vec::new())
     } else {
-        resolve_secrets(root, maccount)?
+        resolve_secrets(root, maccount, deadline)?
     };
 
     // 7b. SMTP: render the message/connection off the same resolved secrets and

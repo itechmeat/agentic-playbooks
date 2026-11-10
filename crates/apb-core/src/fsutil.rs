@@ -806,6 +806,17 @@ pub struct HeldLock {
 /// `WouldBlock` error. The file is created private and is never followed
 /// through a symbolic link.
 pub fn hold_lock(dir: &Path, lock_name: &str) -> io::Result<HeldLock> {
+    hold_lock_within(dir, lock_name, LOCK_ATTEMPTS)
+}
+
+/// [`hold_lock`] with one attempt and no wait: `WouldBlock` at once while
+/// another handle (in this process or another) holds it. A probe of
+/// whether an owner is alive.
+pub fn try_hold_lock(dir: &Path, lock_name: &str) -> io::Result<HeldLock> {
+    hold_lock_within(dir, lock_name, 1)
+}
+
+fn hold_lock_within(dir: &Path, lock_name: &str, attempts: u32) -> io::Result<HeldLock> {
     crate::process_mode::guard_write(&dir.join(lock_name))?;
     fs::create_dir_all(dir)?;
     let path = dir.join(lock_name);
@@ -817,11 +828,11 @@ pub fn hold_lock(dir: &Path, lock_name: &str) -> io::Result<HeldLock> {
         opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     let file = opts.open(&path)?;
-    for attempt in 0..LOCK_ATTEMPTS {
+    for attempt in 0..attempts {
         match file.try_lock() {
             Ok(()) => return Ok(HeldLock { _file: file }),
             Err(fs::TryLockError::WouldBlock) => {
-                if attempt + 1 < LOCK_ATTEMPTS {
+                if attempt + 1 < attempts {
                     std::thread::sleep(std::time::Duration::from_millis(LOCK_STEP_MS));
                 }
             }
@@ -1305,5 +1316,19 @@ mod write_new_tests {
             .filter(|n| n.starts_with(".tmp-"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// A second open of a held lock in the same process is refused at once,
+    /// and taken after the first is dropped.
+    #[test]
+    fn try_hold_lock_refuses_while_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = try_hold_lock(tmp.path(), "r.lock").unwrap();
+        let started = std::time::Instant::now();
+        let e = try_hold_lock(tmp.path(), "r.lock").err().unwrap();
+        assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        drop(first);
+        try_hold_lock(tmp.path(), "r.lock").unwrap();
     }
 }

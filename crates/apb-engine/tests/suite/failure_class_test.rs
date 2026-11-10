@@ -477,6 +477,7 @@ fn an_abort_during_a_backoff_ends_the_run_promptly() {
         Control::Abort {
             reason: "stop during backoff".into(),
             by: None,
+            graceful: false,
         },
     )
     .unwrap();

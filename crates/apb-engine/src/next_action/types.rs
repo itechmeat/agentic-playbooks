@@ -187,6 +187,9 @@ pub enum AutoOutcome {
     ResumeAttempt,
     /// A deferred retry's delay passes and the node's next attempt starts.
     RetryAttempt,
+    /// The run's deadline passes and the run ends aborted
+    /// `deadline_exceeded`.
+    RunDeadline,
 }
 
 impl AutoOutcome {
@@ -324,6 +327,11 @@ pub struct RunActions {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
     pub children_truncated: bool,
+    /// When the run's deadline ends it ([`super::deadlines::run_deadline`]);
+    /// absent without a deadline in force.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub run_deadline: Option<AutoProgress>,
 }
 
 impl NextAction {

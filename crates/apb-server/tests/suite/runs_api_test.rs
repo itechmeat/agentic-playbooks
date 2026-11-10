@@ -908,6 +908,46 @@ async fn post_playbook_run_continued_from_establishes_lineage() {
     assert_eq!(succ_cfg.continued_from.as_deref(), Some(first_id.as_str()));
 }
 
+/// A keyed start: the repeat is 200 with the run already started,
+/// another request under the key 409 `start_key_conflict`, a bad key 400.
+#[tokio::test]
+async fn post_playbook_run_with_a_start_key() {
+    let _cfg = common::config_sandbox().await;
+    let dir = seed_with_run();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let body =
+        |who: &str, key: &str| serde_json::json!({ "params": { "who": who }, "start_key": key });
+    let (status, first) =
+        post_json(app.clone(), "/api/playbooks/noagent/run", body("a", "ev-1")).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let run_id = first["run_id"].as_str().unwrap().to_string();
+    let _reaper = crate::driver_reaper::DriverReaper::new(dir.path(), &run_id);
+    let (status, again) =
+        post_json(app.clone(), "/api/playbooks/noagent/run", body("a", "ev-1")).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["already_started"], true);
+    assert_eq!(again["run_id"], run_id.as_str());
+    let (status, other) =
+        post_json(app.clone(), "/api/playbooks/noagent/run", body("b", "ev-1")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{other}");
+    assert_eq!(other["policy"], "start_key_conflict");
+    assert_eq!(other["run_id"], run_id.as_str());
+    let (status, bad) = post_json(
+        app.clone(),
+        "/api/playbooks/noagent/run",
+        body("a", " padded"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    assert_eq!(bad["policy"], "start_key_invalid");
+    let (_, detail) = get_json(app, &format!("/api/runs/{run_id}")).await;
+    assert_eq!(
+        detail["start_key"].as_str().map(str::len),
+        Some(12),
+        "{detail}"
+    );
+}
+
 /// The Run dialog's "Remember for this project": a start with `remember`
 /// keeps its params and instruction for the next start of this playbook.
 #[tokio::test]
@@ -1797,6 +1837,54 @@ async fn resume_refuses_unknown_and_finished_runs() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _) = post_json(app, "/api/runs/done-1/resume", serde_json::json!({})).await;
     assert_eq!(status, StatusCode::CONFLICT);
+}
+
+/// A run paused by the engine past its deadline: a plain resume body is
+/// refused 409 `deadline_passed`, an unparsable `deadline` 400
+/// `deadline_invalid`, and a body with `deadline` resumes it detached.
+#[tokio::test]
+async fn resume_body_deadline_grants_time() {
+    let _cfg = common::config_sandbox().await;
+    apb_core::run_origin::ensure_key().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    let provenance: apb_engine::event::EventPayload = serde_json::from_value(serde_json::json!({
+        "type": "run_provenance",
+        "deadline": { "total_ms": 1, "source": "run" }
+    }))
+    .unwrap();
+    let mut pause = paused_event("budget (test)");
+    if let apb_engine::event::EventPayload::RunPaused { by, .. } = &mut pause {
+        *by = Some(apb_engine::pause::PauseBy::Engine);
+    }
+    seed_stamped_run(dir.path(), "dl-1", GATE, &[provenance, pause]);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let _reaper = crate::driver_reaper::DriverReaper::new(dir.path(), "dl-1");
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let uri = "/api/runs/dl-1/resume";
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let text = res.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&text);
+    assert!(text.contains("deadline_passed"), "{text}");
+    let (status, out) =
+        post_json(app.clone(), uri, serde_json::json!({ "deadline": "soon" })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
+    assert_eq!(out["policy"], "deadline_invalid");
+    let (status, out) = post_json(app, uri, serde_json::json!({ "deadline": "10m" })).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["detached"], true);
 }
 
 /// Resuming goes through the same consent check as MCP `run_resume`: a paused
@@ -2904,6 +2992,8 @@ async fn get_run_detail_shows_previous_success_without_values() {
     })
     .unwrap();
     log.append(apb_engine::event::EventPayload::RunProvenance {
+        deadline: None,
+        start_key: None,
         origin: Some("project".into()),
         digest: None,
         execution_root: None,

@@ -358,6 +358,7 @@ fn a_mid_attempt_control_message_is_journaled_received_before_the_attempt_ends()
         Control::Abort {
             reason: "test done".into(),
             by: None,
+            graceful: false,
         },
     )
     .unwrap();

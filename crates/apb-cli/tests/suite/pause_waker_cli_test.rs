@@ -319,3 +319,176 @@ fn a_follow_up_waker_is_armed_and_reads_in_time() {
         "{events:?}"
     );
 }
+
+// ---- The run deadline while a run is parked (routine operations) ----
+
+/// The pids of the `apb __pause-waker` processes watching `run_id`'s
+/// deadline.
+fn deadline_wakers(run_id: &str) -> Vec<u32> {
+    let out = std::process::Command::new("pgrep")
+        .args(["-f", &format!("__pause-waker .*{run_id}.*--deadline")])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect()
+}
+
+/// Starts `wake` detached with `--deadline <deadline>` and pauses it as
+/// the engine does (no `until`, a budget pause); returns once the drained
+/// driver journaled the pause.
+fn start_and_park(root: &Path, deadline: &str) -> (String, RunGuard) {
+    fs::write(root.join("slow"), "").unwrap();
+    let out = crate::common::apb_std()
+        .args(["run", "wake", "--detach", "--deadline", deadline])
+        .env("APB_WAKER_POLL_MS", "50")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{stdout} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run_id = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("run started: "))
+        .expect("run id")
+        .trim()
+        .to_string();
+    let guard = RunGuard::new(root, &run_id);
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    poll("the script to start", || {
+        root.join("s_running").is_file().then_some(())
+    });
+    let req = PauseRequest {
+        reason: Some("budget (test)".into()),
+        by: Some(PauseBy::Engine),
+        ..PauseRequest::default()
+    };
+    request_pause(root, &run_id, &req).unwrap();
+    fs::remove_file(root.join("slow")).unwrap();
+    poll("the run to park", || {
+        read_all(&run_dir)
+            .ok()?
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunPaused { .. }))
+            .then_some(())
+    });
+    let _ = fs::remove_file(root.join("s_running"));
+    (run_id, guard)
+}
+
+fn deadline_aborted(root: &Path, run_id: &str) -> bool {
+    read_all(&root.join(".apb/runs").join(run_id))
+        .unwrap()
+        .iter()
+        .any(|e| {
+            matches!(&e.payload,
+            EventPayload::RunAborted { reason, .. } if reason.starts_with("deadline_exceeded:"))
+        })
+}
+
+/// A run the engine parked with no `until`: the driver leaves the deadline
+/// waker behind, and the waker ends the run at its deadline.
+#[test]
+fn deadline_waker_ends_a_parked_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root);
+    let (run_id, _guard) = start_and_park(root, "4s");
+    poll("the run to end at its deadline", || {
+        deadline_aborted(root, &run_id).then_some(())
+    });
+    assert!(
+        !read_all(&root.join(".apb/runs").join(&run_id))
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunResumed { .. })),
+        "the waker resumed the run"
+    );
+}
+
+/// After a reboot no waker is left: `apb resume --all` ends a run past its
+/// deadline (`deadline_stopped`) and gives a run with time left its
+/// deadline waker back.
+#[test]
+fn resume_all_ends_an_expired_indefinite_pause() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root);
+    let (short, _g1) = start_and_park(root, "4s");
+    let (long, _g2) = start_and_park(root, "1h");
+    for id in [&short, &long] {
+        let pids = poll("the deadline waker", || {
+            let p = deadline_wakers(id);
+            (!p.is_empty()).then_some(p)
+        });
+        for pid in pids {
+            crate::common::sig::kill_pid(pid);
+        }
+        poll("the waker to die", || {
+            deadline_wakers(id).is_empty().then_some(())
+        });
+    }
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(
+        !deadline_aborted(root, &short),
+        "a killed waker ended the run"
+    );
+    let out = crate::common::apb_std()
+        .args(["resume", "--all"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.contains(short.as_str()) && l.contains("deadline_stopped")),
+        "{stdout}"
+    );
+    assert!(deadline_aborted(root, &short));
+    poll("the long run's waker back", || {
+        (!deadline_wakers(&long).is_empty()).then_some(())
+    });
+    for pid in deadline_wakers(&long) {
+        crate::common::sig::kill_pid(pid);
+    }
+}
+
+/// A person's plain resume of a parked run past its deadline is refused
+/// `deadline_passed` and leaves the run to a deadline waker it arms, which
+/// ends the run (here its first waker was killed).
+#[test]
+fn a_refused_resume_leaves_the_run_to_its_deadline_waker() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root);
+    let (run_id, _guard) = start_and_park(root, "3s");
+    let pids = poll("the deadline waker", || {
+        let p = deadline_wakers(&run_id);
+        (!p.is_empty()).then_some(p)
+    });
+    for pid in pids {
+        crate::common::sig::kill_pid(pid);
+    }
+    poll("the waker to die", || {
+        deadline_wakers(&run_id).is_empty().then_some(())
+    });
+    std::thread::sleep(Duration::from_secs(4));
+    let out = crate::common::apb_std()
+        .args(["resume", &run_id])
+        .env("APB_WAKER_POLL_MS", "50")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("deadline_passed"), "{stderr}");
+    poll("the armed waker to end the run", || {
+        deadline_aborted(root, &run_id).then_some(())
+    });
+}

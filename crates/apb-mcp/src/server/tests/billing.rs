@@ -84,6 +84,9 @@ fn seed(root: &Path, codex: &Path) {
 fn start(confirm: Option<&Value>) -> PlaybookRunArgs {
     let arg = |k: &str| confirm.and_then(|c| c[k].as_str()).map(str::to_string);
     PlaybookRunArgs {
+        deadline: None,
+        start_key: None,
+        start_key_reuse: None,
         id: "quick".into(),
         version: None,
         params: BTreeMap::new(),

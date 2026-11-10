@@ -60,6 +60,10 @@ impl From<apb_core::signed_store::StoreError> for EngineError {
                 "the store file has schema {s}, newer than this apb understands"
             )),
             apb_core::signed_store::StoreError::Io(io) => EngineError::Io(io),
+            apb_core::signed_store::StoreError::Unverified(path) => EngineError::Conflict(format!(
+                "{} does not verify (it was changed outside apb or written by another installation)",
+                path.display()
+            )),
         }
     }
 }

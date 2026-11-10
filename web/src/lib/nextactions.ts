@@ -94,6 +94,7 @@ const OUTCOME: Record<AutoOutcome, string> = {
   wait_times_out: 'the wait times out and fails',
   resume_attempt: 'apb tries to resume the run',
   retry_attempt: "the node's retry starts",
+  run_deadline: 'the run ends at its deadline',
 }
 
 /** What a wait does by itself, with the time in the viewer's local time. */

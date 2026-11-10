@@ -71,6 +71,8 @@ impl BaselineRun<'_> {
             guard_tree: true,
             scripts_label: "baseline scripts",
             site: apb_core::baseline::BASELINE_SITE,
+            // A read on the drive thread ends with the run's deadline.
+            cap_secs: crate::run_deadline::latch(self.run_dir).map(|l| l.left_secs()),
         }
     }
 }
@@ -108,7 +110,7 @@ pub(crate) fn ensure_before(
                 &run.ctx(phase::BEFORE, cancel, &events, &spawn_env),
                 None,
             );
-            if cancel.load(Ordering::SeqCst) {
+            if cut_short(run, cancel) {
                 return Ok(false);
             }
             snap
@@ -116,6 +118,15 @@ pub(crate) fn ensure_before(
         log.append(snap.event(&check.id, phase::BEFORE))?;
     }
     Ok(true)
+}
+
+/// Whether a read just returned was cut short: the stop's flag latched, or
+/// the run's deadline passed (a read its cap cut ends at that instant).
+/// Either way nothing is journaled for the check: the next drive (a resume
+/// with more time) reads it afresh.
+fn cut_short(run: &BaselineRun<'_>, cancel: &AtomicBool) -> bool {
+    cancel.load(Ordering::SeqCst)
+        || crate::run_deadline::latch(run.run_dir).is_some_and(|l| l.expired())
 }
 
 /// The before snapshot of `check` in predecessor run `from`, labelled as
@@ -188,7 +199,7 @@ pub(crate) fn after_and_compare(
             None => {
                 let ctx = run.ctx(phase::AFTER, cancel, &events, &spawn_env);
                 let snap = read(check, &ctx, before);
-                if cancel.load(Ordering::SeqCst) {
+                if cut_short(run, cancel) {
                     return Ok(AfterOutcome::Interrupted);
                 }
                 log.append(snap.event(&check.id, phase::AFTER))?;

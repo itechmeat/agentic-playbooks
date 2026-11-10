@@ -148,5 +148,13 @@ pub fn next_actions(obs: &Observation) -> RunActions {
         primary: (!actions.is_empty()).then_some(0),
         actions,
         children_truncated: obs.truncated(),
+        run_deadline: deadlines::run_deadline(
+            deadlines::Clock {
+                now_ms: obs.now_ms,
+                paused: false,
+                driver_alive: obs.driver_alive(),
+            },
+            &obs.view.events,
+        ),
     }
 }

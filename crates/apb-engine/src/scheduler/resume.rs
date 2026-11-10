@@ -445,6 +445,11 @@ pub struct ResumeRequest<'a> {
     /// journaled with `run_resumed`, under the same lock and checks, so a
     /// refused resume waives no delay.
     pub retry_now: Option<RetryNow<'a>>,
+    /// More time, milliseconds, a person grants the run's deadline from now
+    /// (`apb resume --deadline`, see [`crate::run_deadline`]): journaled on
+    /// `run_resumed` under the event lock. `None` keeps the deadline in
+    /// force, and a plain resume past it is refused.
+    pub deadline_ms: Option<u64>,
 }
 
 impl ResumeRequest<'_> {
@@ -457,6 +462,7 @@ impl ResumeRequest<'_> {
             budget: None,
             launch: None,
             retry_now: None,
+            deadline_ms: None,
         }
     }
 }
@@ -502,6 +508,7 @@ fn resume_detached_inner(
         budget,
         launch,
         retry_now,
+        deadline_ms,
     } = *req;
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -510,6 +517,9 @@ fn resume_detached_inner(
     if !run_dir.is_dir() {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
+    // The deadline, synchronously: a plain resume past it is refused here,
+    // before any spawn, so the caller sees the refusal.
+    deadline_preflight(root, run_id, deadline_ms, by)?;
     // The launch authorization, checked here without writing anything, so
     // a refusal reaches the caller; the driver commits it.
     crate::resume_launch::verify_resume_launch(root, run_id, launch)
@@ -561,6 +571,7 @@ fn resume_detached_inner(
             retry_now,
             budget_json: budget_json.as_deref(),
             launch_handoff: handoff.as_deref(),
+            deadline_ms,
         },
     );
     let pid = match spawned {
@@ -825,6 +836,11 @@ fn journal_resumed(
     if res.is_err() {
         give_lock_back(run_dir, plan.run_id, guard);
     }
+    // A resume refused at its deadline: once the event lock is released,
+    // the run is ended (an engine resume) or left to its deadline waker.
+    if let Err(e) = &res {
+        crate::run_deadline::after_refusal(plan.root, plan.run_id, e);
+    }
     res
 }
 
@@ -844,6 +860,8 @@ struct ResumeJournal<'a> {
     launch: Option<&'a crate::gate::launch::LaunchGrant>,
     /// A child reattached by its parent's resume.
     nested: bool,
+    /// More time a person grants the deadline (see [`ResumeRequest`]).
+    deadline_ms: Option<u64>,
 }
 
 fn try_journal_resumed(
@@ -852,6 +870,8 @@ fn try_journal_resumed(
     plan: &ResumeJournal<'_>,
     mut payload: EventPayload,
 ) -> Result<bool, EngineError> {
+    #[cfg(any(test, feature = "testing"))]
+    crate::deadline_hooks::at(crate::deadline_hooks::Hook::BeforeResumeCommit, run_dir);
     let _event_lock = apb_core::fsutil::lock_dir(run_dir, crate::stop::EVENT_LOCK)?;
     let events = read_all(run_dir)?;
     let refusal = match plan.hold {
@@ -861,6 +881,37 @@ fn try_journal_resumed(
     };
     if let Some(why) = refusal {
         return Err(EngineError::Conflict(why.into()));
+    }
+    // The deadline, final: decided under the lock a deadline stop decides
+    // under, on the journal read here, so a run that expired since the
+    // preflight is refused before `run_resumed`, and a grant committed
+    // here is seen by any later stop.
+    let now = apb_core::clock::now_ms();
+    if !plan.nested {
+        if let Some(e) = crate::run_deadline::resume_refusal(
+            &events,
+            plan.run_id,
+            plan.deadline_ms,
+            plan.by,
+            now,
+        ) {
+            return Err(e);
+        }
+        if let Some(grant_ms) = plan.deadline_ms {
+            let granted = crate::run_deadline::grant(&events, grant_ms, now);
+            if let EventPayload::RunResumed { deadline, .. } = &mut payload {
+                *deadline = Some(granted);
+            }
+            // The run's guard names the deadline from here on.
+            let mut requires: Vec<String> = super::patch::latest_guard(&events)
+                .map(<[String]>::to_vec)
+                .unwrap_or_default();
+            let name = apb_core::validate::GuardedFeature::Deadline.as_str();
+            if !requires.iter().any(|r| r == name) {
+                requires.push(name.to_string());
+                log.append(EventPayload::RunGuard { requires })?;
+            }
+        }
     }
     // The launch authorization is committed here, under the event lock and
     // after the supersede checks, so a refused or superseded resume leaves
@@ -892,6 +943,32 @@ fn try_journal_resumed(
     }
     log.append(payload)?;
     Ok(changed)
+}
+
+/// The synchronous deadline check of a resume before it spawns or locks
+/// anything ([`crate::run_deadline::resume_refusal`]); an engine resume of a
+/// run past its deadline ends the run.
+fn deadline_preflight(
+    root: &Path,
+    run_id: &str,
+    deadline_ms: Option<u64>,
+    by: PauseBy,
+) -> Result<(), EngineError> {
+    let run_dir = root.join(".apb/runs").join(run_id);
+    let events = crate::event::read_all_lossy_tail(&run_dir)?;
+    match crate::run_deadline::resume_refusal(
+        &events,
+        run_id,
+        deadline_ms,
+        by,
+        apb_core::clock::now_ms(),
+    ) {
+        None => Ok(()),
+        Some(e) => {
+            crate::run_deadline::after_refusal(root, run_id, &e);
+            Err(e)
+        }
+    }
 }
 
 /// The busy lock of a resume that journaled no `run_resumed`: parked under
@@ -1008,6 +1085,7 @@ fn resume_inner_checked(
         budget,
         launch,
         retry_now,
+        deadline_ms,
     } = *req;
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -1020,6 +1098,11 @@ fn resume_inner_checked(
     // stops before it journals or locks anything.
     if let Some(hold) = hold {
         still_holds(root, run_id, hold)?;
+    }
+    // A resume past the deadline: refused with nothing journaled (the
+    // final check is under the event lock, at the commit).
+    if !allow_shared_workdir {
+        deadline_preflight(root, run_id, deadline_ms, by)?;
     }
     // Anti-drift: agent binary must not silently change between start and resume.
     let drift_events = check_environment_drift(&run_dir, allow_environment_drift)?;
@@ -1159,6 +1242,7 @@ fn resume_inner_checked(
             // parent (its pin, see `run_playbook_node`), not by a check of
             // its own.
             nested: allow_shared_workdir,
+            deadline_ms,
         },
         &mut guard,
         EventPayload::RunResumed {
@@ -1168,6 +1252,7 @@ fn resume_inner_checked(
             launch: None,
             definition: Some(definition),
             apb: crate::event::apb_version(),
+            deadline: None,
         },
     )?;
     // A budget set on a run that started without one needs the run's

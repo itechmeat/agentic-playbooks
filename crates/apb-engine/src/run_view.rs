@@ -359,6 +359,12 @@ pub fn run_limits(events: &[Event]) -> Vec<crate::event::RunLimit> {
         .unwrap_or_default()
 }
 
+mod started;
+pub use started::{
+    STARTED_RUNS_MAX, STARTED_RUNS_SCAN, StartedRunView, StartedRuns, started_by, started_by_line,
+    started_runs, started_runs_line,
+};
+
 /// The record of `run.previous_success.*` a surface shows: everything but
 /// the output values, which reach the prompts and stay there.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -413,6 +419,76 @@ pub fn previous_success(events: &[Event]) -> Option<PreviousSuccessView> {
         }),
         _ => None,
     })
+}
+
+/// The first characters of the start key's MAC the run was started with
+/// (`run_provenance.start_key`); `None` for a run started without a key.
+pub fn start_key(events: &[Event]) -> Option<String> {
+    events.iter().find_map(|e| match &e.payload {
+        crate::event::EventPayload::RunProvenance { start_key, .. } => start_key.clone(),
+        _ => None,
+    })
+}
+
+/// A run's deadline as every surface shows it (`apb runs <id>`, MCP
+/// `run_status`, the HTTP run detail, the report).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RunDeadlineView {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub total_ms: u64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub elapsed_ms: u64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub remaining_ms: u64,
+    pub source: crate::event::DeadlineSource,
+    /// A person paused the run, or it ended: the clock does not run.
+    pub frozen: bool,
+    /// Wall-clock end while it runs (RFC 3339 UTC); absent while frozen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub ends_at: Option<String>,
+}
+
+/// The run's deadline view at `now_ms`; `None` without a deadline.
+pub fn deadline(events: &[Event], now_ms: u128) -> Option<RunDeadlineView> {
+    let d = crate::pause::clock::in_force(events)?;
+    let elapsed =
+        u64::try_from(crate::pause::clock::deadline_elapsed_ms(events, now_ms)).unwrap_or(u64::MAX);
+    let remaining = d.total_ms.saturating_sub(elapsed);
+    let frozen = crate::state::RunState::fold(events)
+        .run_status
+        .is_terminal()
+        || crate::pause::clock::paused_by(events) == Some(crate::pause::kind::PauseBy::Operator);
+    let ends_at = (!frozen).then(|| {
+        apb_core::clock::iso_utc(
+            u64::try_from(now_ms)
+                .unwrap_or(u64::MAX)
+                .saturating_add(remaining),
+        )
+    });
+    Some(RunDeadlineView {
+        total_ms: d.total_ms,
+        elapsed_ms: elapsed,
+        remaining_ms: remaining,
+        source: d.source,
+        frozen,
+        ends_at,
+    })
+}
+
+/// The one text line of a deadline view: `45m, 12m left (ends <UTC>)`,
+/// `45m, 12m left, frozen (paused by a person)`, or `45m, exceeded`.
+pub fn deadline_line(v: &RunDeadlineView) -> String {
+    let total = apb_core::duration::format_duration_ms(v.total_ms);
+    if v.remaining_ms == 0 {
+        return format!("{total}, exceeded");
+    }
+    let left = apb_core::duration::format_duration_ms(v.remaining_ms);
+    match &v.ends_at {
+        Some(at) => format!("{total}, {left} left (ends {at})"),
+        None => format!("{total}, {left} left, frozen (paused by a person)"),
+    }
 }
 
 /// What a run surface reports for a liveness it did not probe.
@@ -1360,5 +1436,64 @@ mod tests {
         assert_eq!(view.driver_alive, Some(false));
         assert_eq!(view.run_status, RunStatus::Succeeded);
         assert!(!view.driver_dead());
+    }
+
+    /// The three line forms of a deadline view.
+    #[test]
+    fn the_deadline_line_has_three_forms() {
+        let v = |remaining_ms: u64, ends_at: Option<&str>| RunDeadlineView {
+            total_ms: 45 * 60_000,
+            elapsed_ms: 45 * 60_000 - remaining_ms,
+            remaining_ms,
+            source: crate::event::DeadlineSource::Playbook,
+            frozen: ends_at.is_none(),
+            ends_at: ends_at.map(str::to_string),
+        };
+        assert_eq!(
+            deadline_line(&v(12 * 60_000, Some("2026-11-10T10:00:00Z"))),
+            "45m, 12m left (ends 2026-11-10T10:00:00Z)"
+        );
+        assert_eq!(
+            deadline_line(&v(12 * 60_000, None)),
+            "45m, 12m left, frozen (paused by a person)"
+        );
+        assert_eq!(deadline_line(&v(0, None)), "45m, exceeded");
+    }
+
+    /// A run without a deadline has no view; one paused by a person is
+    /// frozen with no end time.
+    #[test]
+    fn a_persons_pause_freezes_the_view() {
+        let ev = |seq: u64, ts: u128, p: crate::event::EventPayload| Event {
+            seq,
+            ts,
+            payload: p,
+        };
+        let started = ev(
+            0,
+            0,
+            crate::event::EventPayload::RunStarted {
+                playbook: "p".into(),
+                version: "1".into(),
+                definition: None,
+                external_data: false,
+            },
+        );
+        assert!(deadline(std::slice::from_ref(&started), 10).is_none());
+        let prov: crate::event::EventPayload = serde_json::from_value(serde_json::json!({
+            "type": "run_provenance", "deadline": { "total_ms": 60000, "source": "run" }
+        }))
+        .unwrap();
+        let paused = crate::event::EventPayload::RunPaused {
+            reason: "x".into(),
+            by: Some(crate::pause::kind::PauseBy::Operator),
+            mode: None,
+            until: None,
+            keep_lock: false,
+        };
+        let events = vec![started, ev(1, 0, prov), ev(2, 10_000, paused)];
+        let v = deadline(&events, 30_000).unwrap();
+        assert!(v.frozen && v.ends_at.is_none());
+        assert_eq!(v.remaining_ms, 50_000);
     }
 }

@@ -329,7 +329,7 @@ enum Command {
         action: TrustAction,
     },
     /// Run a playbook
-    Run(run::RunArgs),
+    Run(Box<run::RunArgs>),
     /// Host tasks of host-execution-mode runs: list what waits for a host
     /// (all runs, or one), or submit a reply
     #[command(args_conflicts_with_subcommands = true)]
@@ -495,6 +495,10 @@ enum Command {
             require_equals = true
         )]
         confirm_irreversible: Option<String>,
+        /// Give the run this much more time on its deadline clock (a
+        /// duration, `30m`): a run past its deadline resumes only with it
+        #[arg(long, value_name = "DURATION", conflicts_with = "all")]
+        deadline: Option<String>,
         #[command(flatten)]
         budget: budget::ResumeBudgetFlags,
         #[command(flatten)]
@@ -907,6 +911,10 @@ enum Command {
         /// (`apb_engine::launch_handoff`). Only meaningful with `--resume`.
         #[arg(long = "launch-handoff", value_name = "FILE")]
         launch_handoff: Option<PathBuf>,
+        /// More time the resume grants the run's deadline, milliseconds.
+        /// Only meaningful with `--resume`.
+        #[arg(long = "deadline-ms")]
+        deadline_ms: Option<u64>,
     },
     /// The waker of a paused run with an `until` (issue #200): sleeps until
     /// then and resumes the run only if the same pause still holds it. Spawned
@@ -922,8 +930,8 @@ enum Command {
         /// The journal sequence of the `run_paused` this waker belongs to.
         #[arg(
             long,
-            required_unless_present_any = ["release", "notify", "follow_up"],
-            conflicts_with_all = ["release", "notify", "follow_up"]
+            required_unless_present_any = ["release", "notify", "follow_up", "deadline"],
+            conflicts_with_all = ["release", "notify", "follow_up", "deadline"]
         )]
         seq: Option<u64>,
         /// The journal sequence of the `drive_released` this waker belongs
@@ -939,6 +947,10 @@ enum Command {
         /// time comes.
         #[arg(long = "follow-up")]
         follow_up: Option<u64>,
+        /// The run's deadline waker, instead of resuming anything: it ends
+        /// the run at its deadline while no driver holds it.
+        #[arg(long, conflicts_with_all = ["release", "notify", "follow_up"])]
+        deadline: bool,
     },
     /// One scenario run (`apb eval --level quick|smoke`), in scenario
     /// mode: writes only below `.apb/scenario-runs/`, starts no program and
@@ -1139,7 +1151,7 @@ fn main() -> ExitCode {
         Some(Command::Trust { action }) => trust_cmd(&root, action),
         Some(Command::Intent { action }) => intent_cmd(&root, action),
         Some(Command::Evidence { action }) => evidence::evidence_cmd(&root, action),
-        Some(Command::Run(args)) => run_cmd(&root, args),
+        Some(Command::Run(args)) => run_cmd(&root, *args),
         Some(Command::Tasks {
             action,
             run_id,
@@ -1243,6 +1255,7 @@ fn main() -> ExitCode {
             budget,
             launch,
             external_data,
+            deadline,
             ..
         }) => resume_cmd(
             &root,
@@ -1256,6 +1269,7 @@ fn main() -> ExitCode {
             &budget,
             &launch,
             external_data,
+            deadline.as_deref(),
         ),
         Some(Command::Launch {
             cmd:
@@ -1467,6 +1481,7 @@ fn main() -> ExitCode {
             retry_now_by,
             budget_json,
             launch_handoff,
+            deadline_ms,
         }) => drive_run_child(
             &run_root,
             &run_id,
@@ -1502,6 +1517,7 @@ fn main() -> ExitCode {
                 }),
                 budget_json: budget_json.as_deref(),
                 launch_handoff: launch_handoff.as_deref(),
+                deadline_ms,
             },
         ),
         Some(Command::PauseWaker {
@@ -1511,10 +1527,12 @@ fn main() -> ExitCode {
             release,
             notify,
             follow_up,
+            deadline,
         }) => pause_waker_cmd(
             &run_root,
             &run_id,
             match (seq, release, follow_up) {
+                _ if deadline => crate::run::WakerFor::Deadline,
                 _ if notify => crate::run::WakerFor::Notify,
                 (_, _, Some(f)) => crate::run::WakerFor::FollowUp(f),
                 (_, Some(r), _) => crate::run::WakerFor::Release(r),

@@ -17,6 +17,10 @@ const PROBE_PROMPT: &str = "Reply with the single word OK.";
 /// quota quickly.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How often a running probe re-reads the run's journal for a reason to
+/// stop.
+const PROBE_WATCH: Duration = Duration::from_millis(200);
+
 /// How a probe went.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProbeRun {
@@ -27,11 +31,19 @@ pub(crate) enum ProbeRun {
     /// No probe could be built (the executor is not in the node's chain any
     /// more, no manifest); the reason.
     Unavailable(String),
+    /// The probe was stopped while it ran ([`probe_unwanted`]); the reason.
+    Cancelled(&'static str),
 }
 
 /// Runs the probe for node `node` of the run at `run_dir`, on the chain step
-/// whose agent and model are `agent` and `model`.
-pub(crate) fn run_quota_probe(run_dir: &Path, node: &str, agent: &str, model: &str) -> ProbeRun {
+/// whose agent and model are `agent` and `model`, for the pause `hold`.
+pub(crate) fn run_quota_probe(
+    run_dir: &Path,
+    node: &str,
+    agent: &str,
+    model: &str,
+    hold: crate::resume_kind::WakeHold,
+) -> ProbeRun {
     let (ri, process_env) = match probe_invocation(run_dir, node, agent, model) {
         Ok(Some(found)) => found,
         Ok(None) => {
@@ -112,10 +124,65 @@ pub(crate) fn run_quota_probe(run_dir: &Path, node: &str, agent: &str, model: &s
             hold.reason.unwrap_or_default()
         ));
     }
-    match adapter.run(&task) {
+    // A run with a deadline is probed only while it has time left, checked
+    // right before the spawn (the waker's own check came before the
+    // preflight above), and the probe is bounded by that time: past it the
+    // run ends, and the probe's executor with it.
+    let left = read_all(run_dir)
+        .ok()
+        .and_then(|events| crate::run_deadline::remaining_ms(&events, apb_core::clock::now_ms()));
+    let task = match left {
+        Some(0) => {
+            return ProbeRun::Unavailable(
+                "the run passed its deadline: the probe is not sent".into(),
+            );
+        }
+        Some(ms) => AgentTask {
+            timeout: Some(PROBE_TIMEOUT.min(Duration::from_millis(ms))),
+            ..task
+        },
+        None => task,
+    };
+    // The bound above is the time left when the probe starts. The run can
+    // change while it runs (a resume that sets another deadline, a stop):
+    // a watch over the journal stops the executor then, through the same
+    // cancellation an attempt has.
+    let cancel = AtomicBool::new(false);
+    let done = AtomicBool::new(false);
+    let why = std::sync::OnceLock::new();
+    let ran = std::thread::scope(|s| {
+        s.spawn(|| {
+            while !done.load(Ordering::Relaxed) {
+                if let Some(reason) = probe_unwanted(run_dir, hold) {
+                    let _ = why.set(reason);
+                    cancel.store(true, Ordering::Relaxed);
+                    return;
+                }
+                std::thread::park_timeout(PROBE_WATCH);
+            }
+        });
+        let ran = adapter.run_cancellable(&task, &cancel, None, None, None, None);
+        done.store(true, Ordering::Relaxed);
+        ran
+    });
+    if let Some(reason) = why.get() {
+        return ProbeRun::Cancelled(reason);
+    }
+    match ran {
         Ok(_) => ProbeRun::Answered,
         Err(f) => ProbeRun::Failed(f.message),
     }
+}
+
+/// Why a running probe must stop, on the run's journal as it is now: the
+/// pause it probes for no longer holds the run (a resume, the only way its
+/// deadline changes, a stop, another pause). `None` while it holds, and for
+/// a journal that does not read: the bound the probe started with (the
+/// time left then) still ends it, as it does at the deadline of a run that
+/// stays parked.
+fn probe_unwanted(run_dir: &Path, hold: crate::resume_kind::WakeHold) -> Option<&'static str> {
+    let events = read_all(run_dir).ok()?;
+    (!hold.holds(&events)).then_some("the pause it probed for no longer holds the run")
 }
 
 /// A probed chain step and its entry's `process_env`.

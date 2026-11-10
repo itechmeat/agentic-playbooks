@@ -154,6 +154,15 @@ pub fn run_waker(root: &Path, run_id: &str, seq: u64) -> Result<WakeOutcome, Eng
             // journaled is the waker's refusal. The paid probe runs once per
             // pause, never again for a journal write, and only under this
             // pause's lease.
+            // A run past its deadline is ended, not probed: no paid probe
+            // runs for a run that is over.
+            if crate::run_deadline::stop_if_expired(
+                root,
+                run_id,
+                crate::run_deadline::Expect::Parked(WakeHold::Pause(seq)),
+            )? {
+                return Ok(WakeOutcome::Superseded);
+            }
             match super::probe::probe_before_wake(root, run_id, seq) {
                 Ok(super::WakeProbe::Repaused { seq: next, .. }) => {
                     seq = next;
@@ -302,6 +311,61 @@ pub fn spawn_held_waker(root: &Path, run_id: &str, hold: WakeHold) -> Result<(),
 /// settles it ([`crate::waker::HeldWaker::settle`]).
 pub fn start_held_waker(root: &Path, run_id: &str, hold: WakeHold) -> crate::waker::HeldWaker {
     crate::waker::start_held(root, run_id, hold.into())
+}
+
+/// The deadline waker's body (`apb __pause-waker --deadline`): holds the
+/// lease `deadline` and polls the journal. The park is the next value of
+/// [`super::clock::parked`], so a park replaced while it waits (a quota
+/// probe's re-pause, a supervisor's pause over the engine's) needs no new
+/// waker. It ends when the run is terminal, when a live driver holds it
+/// (that drive has its own watch), when the park is a person's pause (the
+/// clock is frozen), or once it ended the run at its deadline.
+pub fn run_deadline_waker(root: &Path, run_id: &str) {
+    let run_dir = root.join(".apb/runs").join(run_id);
+    let Ok(Some(_lease)) =
+        crate::waker::Lease::try_take(&run_dir, crate::waker::WakerFor::Deadline)
+    else {
+        return;
+    };
+    crate::waker::acknowledge_held();
+    let poll = poll();
+    loop {
+        let Ok(events) = crate::event::read_all_lossy_tail(&run_dir) else {
+            return;
+        };
+        if crate::state::RunState::fold(&events)
+            .run_status
+            .is_terminal()
+            || crate::run_deadline::in_force(&events).is_none()
+            || crate::liveness::driver_alive(&run_dir, run_id) == Some(true)
+            || super::clock::paused_by(&events) == Some(super::kind::PauseBy::Operator)
+        {
+            return;
+        }
+        let Some(hold) = super::clock::parked(&events) else {
+            // Neither driven nor parked (a resume about to start its
+            // driver): look again.
+            std::thread::sleep(poll);
+            continue;
+        };
+        let now = apb_core::clock::now_ms();
+        // Not due under the lock (replaced meanwhile) or the lock was busy:
+        // look again.
+        if crate::run_deadline::expired(&events, now)
+            && matches!(
+                crate::run_deadline::stop_if_expired(
+                    root,
+                    run_id,
+                    crate::run_deadline::Expect::Parked(hold),
+                ),
+                Ok(true)
+            )
+        {
+            return;
+        }
+        let left = crate::run_deadline::remaining_ms(&events, now).unwrap_or(0);
+        std::thread::sleep(poll.min(std::time::Duration::from_millis(left.saturating_add(20))));
+    }
 }
 
 #[cfg(test)]

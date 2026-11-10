@@ -157,6 +157,42 @@ fn flagged_runs_do_not_crowd_out_history() {
     );
 }
 
+/// The step's run: `step_run_dir` finds it the way the step refusal did
+/// (`APB_RUN_DIR` when it names the step's run, else the run of that id
+/// under the project); a flagged step run flags the start and refuses an
+/// explicit `false`; a step run not found passes nothing on.
+#[test]
+fn a_step_of_a_flagged_run_flags_the_start() {
+    child(
+        "external_data::tests::a_step_of_a_flagged_run_flags_the_start",
+        |root| {
+            let plain = seed(root, "plain", 1, Source::None);
+            let flagged = seed(root, "flagged", 2, Source::Boolean);
+            let step = |id: &str| apb_core::step_env::StepCaller {
+                run_id: Some(id.into()),
+                host_task: None,
+            };
+            unsafe { std::env::remove_var("APB_RUN_DIR") };
+            assert_eq!(step_run_dir(root, &step("flagged")), Some(flagged.clone()));
+            assert_eq!(step_run_dir(root, &step("ghost")), None);
+            let elsewhere = tempfile::tempdir().unwrap();
+            let named = elsewhere.path().join("plain");
+            std::fs::create_dir_all(&named).unwrap();
+            unsafe { std::env::set_var("APB_RUN_DIR", &named) };
+            assert_eq!(step_run_dir(root, &step("plain")), Some(named.clone()));
+            // A named directory of another run id is not the step's.
+            assert_eq!(step_run_dir(root, &step("flagged")), Some(flagged.clone()));
+            unsafe { std::env::remove_var("APB_RUN_DIR") };
+            assert_eq!(for_start(root, None, None, None, Some(&flagged)), Ok(true));
+            let refused = for_start(root, Some(false), None, None, Some(&flagged)).unwrap_err();
+            assert_eq!(refused.code, IMMUTABLE);
+            assert!(refused.body().to_string().contains("flagged"));
+            assert_eq!(for_start(root, None, None, None, Some(&plain)), Ok(false));
+            assert_eq!(for_start(root, None, None, None, None), Ok(false));
+        },
+    );
+}
+
 /// The start rule: a flagged predecessor makes the start flagged, an
 /// explicit `false` under it is refused, and an unflagged one leaves the
 /// request as it is; the remember refusal; the resume check both ways.
@@ -167,16 +203,22 @@ fn the_start_the_remember_and_the_resume_rules() {
         |root| {
             let plain = seed(root, "plain", 1, Source::None);
             let flagged = seed(root, "flagged", 2, Source::Boolean);
-            assert_eq!(for_start(root, None, None, Some("flagged")), Ok(true));
-            assert_eq!(for_start(root, Some(true), None, Some("flagged")), Ok(true));
-            assert_eq!(for_start(root, None, Some("flagged"), None), Ok(true));
-            let refused = for_start(root, Some(false), None, Some("flagged")).unwrap_err();
+            assert_eq!(for_start(root, None, None, Some("flagged"), None), Ok(true));
+            assert_eq!(
+                for_start(root, Some(true), None, Some("flagged"), None),
+                Ok(true)
+            );
+            assert_eq!(for_start(root, None, Some("flagged"), None, None), Ok(true));
+            let refused = for_start(root, Some(false), None, Some("flagged"), None).unwrap_err();
             assert_eq!(refused.code, IMMUTABLE);
             assert_eq!(refused.body()["error"], IMMUTABLE);
-            assert_eq!(for_start(root, None, None, Some("plain")), Ok(false));
-            assert_eq!(for_start(root, Some(true), None, Some("plain")), Ok(true));
-            assert_eq!(for_start(root, Some(false), None, None), Ok(false));
-            assert_eq!(for_start(root, None, None, Some("../x")), Ok(false));
+            assert_eq!(for_start(root, None, None, Some("plain"), None), Ok(false));
+            assert_eq!(
+                for_start(root, Some(true), None, Some("plain"), None),
+                Ok(true)
+            );
+            assert_eq!(for_start(root, Some(false), None, None, None), Ok(false));
+            assert_eq!(for_start(root, None, None, Some("../x"), None), Ok(false));
 
             assert_eq!(
                 check_remember(true, true).unwrap_err().code,

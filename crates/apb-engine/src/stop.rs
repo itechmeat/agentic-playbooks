@@ -52,7 +52,8 @@ use std::time::Duration;
 
 use crate::control::{Control, post_control, read_control_after, write_control_cursor};
 use crate::error::EngineError;
-use crate::event::{EventLog, EventPayload, read_all_for_stop};
+use crate::event::{Event, EventLog, EventPayload, read_all_for_stop};
+use crate::pause::interrupt::Graceful;
 use crate::pause::kind::PauseBy;
 use crate::state::{RunState, RunStatus};
 
@@ -93,6 +94,29 @@ pub enum StopOutcome {
     /// What the variant promises is only this: no terminal event was written
     /// by us, because the run already had one.
     AlreadyTerminal,
+    /// The stop's condition ([`StopRequest::due`]) did not hold on the
+    /// journal read under the event lock: nothing was posted or written.
+    NotDue,
+}
+
+/// The condition of an engine stop, checked on the journal under the event
+/// lock ([`StopRequest::due`]).
+pub type StopDue<'a> = &'a dyn Fn(&[Event]) -> bool;
+
+/// What a stop says and how it treats the attempts in flight.
+pub struct StopRequest<'a> {
+    /// Who stopped the run; journaled on its `run_aborted`.
+    pub by: PauseBy,
+    /// The reason journaled on the `run_aborted`.
+    pub reason: &'a str,
+    /// Kill the attempts in flight with SIGTERM and a grace period, as a
+    /// `--now` pause does, instead of at once. The attempts still close as
+    /// aborted.
+    pub graceful: bool,
+    /// Checked on the journal read under the event lock, before anything is
+    /// posted; `false` is [`StopOutcome::NotDue`] and nothing is written.
+    /// `None` for a person's stop. With it set the event lock is required.
+    pub due: Option<StopDue<'a>>,
 }
 
 impl StopOutcome {
@@ -102,6 +126,7 @@ impl StopOutcome {
             StopOutcome::SignaledLiveDriver => "signaled_live_driver",
             StopOutcome::FinalizedDeadRun => "finalized_dead_run",
             StopOutcome::AlreadyTerminal => "already_terminal",
+            StopOutcome::NotDue => "not_due",
         }
     }
 }
@@ -130,6 +155,25 @@ pub fn stop_run(root: &Path, run_id: &str) -> Result<StopOutcome, EngineError> {
 /// engine stopping an eval repetition past its limit. A stop a person did
 /// not make is news to whoever is notified about the run's end.
 pub fn stop_run_by(root: &Path, run_id: &str, by: PauseBy) -> Result<StopOutcome, EngineError> {
+    stop_run_with(
+        root,
+        run_id,
+        &StopRequest {
+            by,
+            reason: STOP_REASON,
+            graceful: false,
+            due: None,
+        },
+    )
+}
+
+/// [`stop_run_by`] with its own reason and kill: the one stop path.
+pub fn stop_run_with(
+    root: &Path,
+    run_id: &str,
+    req: &StopRequest<'_>,
+) -> Result<StopOutcome, EngineError> {
+    let by = req.by;
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
@@ -138,32 +182,58 @@ pub fn stop_run_by(root: &Path, run_id: &str, by: PauseBy) -> Result<StopOutcome
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
 
-    // Best effort, like every other lock_dir caller in the tree: a lock we
-    // could not take must not stop an operator from stopping a run.
-    let _lock = apb_core::fsutil::lock_dir(&run_dir, EVENT_LOCK).ok();
+    // A person's stop is best effort, like every other lock_dir caller in
+    // the tree: a lock we could not take must not stop an operator from
+    // stopping a run. A stop decided on the journal (`due`) needs the lock:
+    // without it a resume could commit between the decision and the stop;
+    // it tries again on its next poll.
+    #[cfg(any(test, feature = "testing"))]
+    if req.due.is_some() {
+        crate::deadline_hooks::at(crate::deadline_hooks::Hook::StopBeforeLock, &run_dir);
+    }
+    let _lock = match req.due {
+        Some(_) => Some(apb_core::fsutil::lock_dir(&run_dir, EVENT_LOCK)?),
+        None => apb_core::fsutil::lock_dir(&run_dir, EVENT_LOCK).ok(),
+    };
 
     // An event a newer apb wrote does not block a stop (see
     // `read_all_for_stop`): this first read warns about it, the later ones
     // stay quiet.
-    if is_terminal(RunState::fold(&read_all_for_stop(&run_dir, true)?).run_status) {
+    let events = read_all_for_stop(&run_dir, true)?;
+    if is_terminal(RunState::fold(&events).run_status) {
         return Ok(StopOutcome::AlreadyTerminal);
+    }
+    if let Some(due) = req.due {
+        if !due(&events) {
+            return Ok(StopOutcome::NotDue);
+        }
+        #[cfg(any(test, feature = "testing"))]
+        crate::deadline_hooks::at(crate::deadline_hooks::Hook::StopDecided, &run_dir);
     }
 
     let seq = post_control(
         &run_dir,
         Control::Abort {
-            reason: STOP_REASON.into(),
+            reason: req.reason.into(),
             by: Some(by),
+            graceful: req.graceful,
         },
     )?;
     // An operator stop of a parent must reach the children that are blocking
     // it, exactly as `run_cancel` does.
-    abort_children(root, run_id, by)?;
+    abort_children(root, run_id, by, req.graceful)?;
 
     // The same drive-claim answer every status surface reports: a sub-playbook
     // child is driven in-process by its parent and owns no `driver.pid`, so a
     // bare pid check would call it driverless and write over a live drive.
-    if crate::liveness::driver_alive(&run_dir, run_id) == Some(true) {
+    // A parked run is driven only by a drive that claims it: a child whose
+    // drive returned to its parent is not driven by that live parent.
+    let driven = if crate::pause::clock::parked(&events).is_some() {
+        crate::liveness::drive_claimed(&run_dir, run_id)
+    } else {
+        crate::liveness::driver_alive(&run_dir, run_id) == Some(true)
+    };
+    if driven {
         return Ok(StopOutcome::SignaledLiveDriver);
     }
 
@@ -193,7 +263,7 @@ pub fn stop_run_by(root: &Path, run_id: &str, by: PauseBy) -> Result<StopOutcome
     // loop's own Abort arm, which advances the cursor, so it happens once.
     let mut log = EventLog::open_for_stop(&run_dir)?;
     log.append(EventPayload::RunAborted {
-        reason: STOP_REASON.into(),
+        reason: req.reason.into(),
         by: Some(by),
     })?;
     crate::run_end::record(&run_dir);
@@ -210,14 +280,51 @@ pub fn stop_run_by(root: &Path, run_id: &str, by: PauseBy) -> Result<StopOutcome
 /// the parent maps to a failed node. Each child's abort is journaled as made
 /// `by` whoever stopped the parent, so a person's stop is not news to them
 /// in the children either.
-pub(crate) fn abort_children(root: &Path, run_id: &str, by: PauseBy) -> Result<(), EngineError> {
+/// A graceful parent stop is graceful in its children too.
+pub(crate) fn abort_children(
+    root: &Path,
+    run_id: &str,
+    by: PauseBy,
+    graceful: bool,
+) -> Result<(), EngineError> {
     let run_dir = root.join(".apb/runs").join(run_id);
     let events = read_all_for_stop(&run_dir, false)?;
     for e in &events {
         if let EventPayload::ChildRunStarted { run_id: child, .. } = &e.payload {
             let child_dir = root.join(".apb/runs").join(child);
-            if child_dir.is_dir()
-                && !is_terminal(RunState::fold(&read_all_for_stop(&child_dir, false)?).run_status)
+            if !child_dir.is_dir() {
+                continue;
+            }
+            let child_events = read_all_for_stop(&child_dir, false)?;
+            if is_terminal(RunState::fold(&child_events).run_status) {
+                continue;
+            }
+            // A parked child (a quota pause handed back to its parent, a
+            // released drive) has no driver to apply a posted abort, and
+            // `apb resume --all` never wakes a child: it is ended through
+            // the one stop path, decided under its event lock while it is
+            // still parked (a resume that committed first is signalled
+            // instead), and its own children with it.
+            if crate::pause::clock::parked(&child_events).is_some() {
+                let still_parked =
+                    |ev: &[crate::event::Event]| crate::pause::clock::parked(ev).is_some();
+                match stop_run_with(
+                    root,
+                    child,
+                    &StopRequest {
+                        by,
+                        reason: PARENT_ABORTED_REASON,
+                        graceful,
+                        due: Some(&still_parked),
+                    },
+                ) {
+                    Ok(StopOutcome::NotDue) => {}
+                    Ok(_) => continue,
+                    Err(e) => {
+                        eprintln!("apb: warning: failed to stop parked child run `{child}`: {e}")
+                    }
+                }
+            }
             {
                 // Best-effort per child (a child that raced to terminal or lost
                 // its dir must not block the parent abort), but no longer
@@ -230,11 +337,12 @@ pub(crate) fn abort_children(root: &Path, run_id: &str, by: PauseBy) -> Result<(
                     Control::Abort {
                         reason: PARENT_ABORTED_REASON.into(),
                         by: Some(by),
+                        graceful,
                     },
                 ) {
                     eprintln!("apb: warning: failed to post abort to child run `{child}`: {e}");
                 }
-                abort_children(root, child, by)?;
+                abort_children(root, child, by, graceful)?;
             }
         }
     }
@@ -264,13 +372,14 @@ const WATCH_SLICE: Duration = Duration::from_millis(25);
 #[derive(Default)]
 pub(crate) struct CancelFanout {
     inner: std::sync::Mutex<FanoutInner>,
-    /// The `--now` pause fanout (issue #200): every flag it latches is
-    /// marked graceful (`pause::interrupt`), so its kill site terminates the
-    /// work with SIGTERM and a grace period instead of a bare SIGKILL.
-    graceful: bool,
-    /// The pause fanout a stop fanout hands node kill flags to as well, via
-    /// [`CancelFanout::register_pausable`].
-    pause: Option<Arc<CancelFanout>>,
+    /// The `--now` pause fanout (issue #200) and the graceful abort fanout:
+    /// every flag it latches is marked graceful of this kind
+    /// (`pause::interrupt`), so its kill site terminates the work with
+    /// SIGTERM and a grace period instead of a bare SIGKILL.
+    graceful: Option<Graceful>,
+    /// The pause and graceful abort fanouts a stop fanout hands node kill
+    /// flags to as well, via [`CancelFanout::register_pausable`].
+    pausable: Vec<Arc<CancelFanout>>,
 }
 
 #[derive(Default)]
@@ -290,7 +399,7 @@ impl CancelFanout {
         FanoutGuard {
             fanout: Arc::clone(self),
             flag: Arc::clone(flag),
-            also: None,
+            also: Vec::new(),
         }
     }
 
@@ -301,15 +410,15 @@ impl CancelFanout {
     /// members off as cancelled.
     pub(crate) fn register_pausable(self: &Arc<Self>, flag: &Arc<AtomicBool>) -> FanoutGuard {
         let mut guard = self.register(flag);
-        if let Some(pause) = &self.pause {
-            guard.also = Some(Box::new(pause.register(flag)));
+        for other in &self.pausable {
+            guard.also.push(other.register(flag));
         }
         guard
     }
 
     fn latch(&self, flag: &AtomicBool) {
-        if self.graceful {
-            crate::pause::interrupt::mark_graceful(flag);
+        if let Some(kind) = self.graceful {
+            crate::pause::interrupt::mark_graceful(flag, kind);
         }
         flag.store(true, Ordering::SeqCst);
     }
@@ -337,8 +446,9 @@ impl CancelFanout {
 pub(crate) struct FanoutGuard {
     fanout: Arc<CancelFanout>,
     flag: Arc<AtomicBool>,
-    /// The same flag's registration with the pause fanout, if any.
-    also: Option<Box<FanoutGuard>>,
+    /// The same flag's registrations with the pause and graceful abort
+    /// fanouts.
+    also: Vec<FanoutGuard>,
 }
 
 impl Drop for FanoutGuard {
@@ -349,7 +459,7 @@ impl Drop for FanoutGuard {
             .lock()
             .expect("cancel fanout mutex poisoned");
         inner.flags.retain(|f| !Arc::ptr_eq(f, &self.flag));
-        if self.fanout.graceful {
+        if self.fanout.graceful.is_some() {
             crate::pause::interrupt::unmark_graceful(&self.flag);
         }
     }
@@ -402,11 +512,18 @@ impl StopWatcher {
             pause_now,
         } = flags;
         let pause_fanout = Arc::new(CancelFanout {
-            graceful: true,
+            graceful: Some(Graceful::Pause),
+            ..CancelFanout::default()
+        });
+        // A graceful abort (an engine stop such as a run's deadline) kills
+        // the node flags the pause fanout knows the same graceful way, but
+        // marks them as an abort: the attempts close aborted.
+        let abort_fanout = Arc::new(CancelFanout {
+            graceful: Some(Graceful::Abort),
             ..CancelFanout::default()
         });
         let fanout = Arc::new(CancelFanout {
-            pause: Some(Arc::clone(&pause_fanout)),
+            pausable: vec![Arc::clone(&pause_fanout), Arc::clone(&abort_fanout)],
             ..CancelFanout::default()
         });
         let _cancel_guard = fanout.register(&cancel);
@@ -430,6 +547,16 @@ impl StopWatcher {
                         .iter()
                         .any(|e| matches!(e.cmd, Control::Abort { .. }))
                     {
+                        // A graceful abort marks the node kill flags before
+                        // the stop fanout latches them; never the pause
+                        // fanout and never `pause_now`: the attempts close
+                        // as aborted, only their kill is graceful.
+                        if entries
+                            .iter()
+                            .any(|e| matches!(e.cmd, Control::Abort { graceful: true, .. }))
+                        {
+                            abort_fanout.fire();
+                        }
                         halt.store(true, Ordering::SeqCst);
                         fanout_thread.fire();
                         // Abort is terminal for the drive; the drive loop

@@ -157,6 +157,7 @@ fn read_ctx<'b>(run: &'b ListRun<'_, '_, '_>, events: &'b [crate::event::Event])
         guard_tree: run.workers == 1,
         scripts_label: "item check scripts",
         site: apb_core::baseline::BASELINE_SITE,
+        cap_secs: crate::run_deadline::latch(ctx.run_dir).map(|l| l.left_secs()),
     }
 }
 

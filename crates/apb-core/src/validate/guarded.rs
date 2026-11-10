@@ -7,7 +7,8 @@
 //! know `run.previous_success` drops the block and would render the
 //! namespace empty and re-read the whole window; one that does not know
 //! the untrusted markers drops them and would run the node without the
-//! prompt section. A run whose definition uses any of them carries a `run_guard`
+//! prompt section; one that does not know `deadline` would continue the
+//! run without its limit. A run whose definition uses any of them carries a `run_guard`
 //! naming them after every checkpoint, so such an apb refuses to continue
 //! it. A later release adds names here instead of a new guard.
 
@@ -40,11 +41,14 @@ pub enum GuardedFeature {
     /// drops the markers and would run the node without the prompt
     /// section.
     UntrustedInput,
+    /// The run has a wall-clock limit (`deadline`, a run argument or a
+    /// resume's grant); an older apb would continue the run without it.
+    Deadline,
 }
 
 impl GuardedFeature {
     /// Every feature this binary knows, in declaration order.
-    pub const ALL: [GuardedFeature; 7] = [
+    pub const ALL: [GuardedFeature; 8] = [
         GuardedFeature::ApprovalBinding,
         GuardedFeature::PersonOnly,
         GuardedFeature::RequiredApproval,
@@ -52,6 +56,7 @@ impl GuardedFeature {
         GuardedFeature::WriteScope,
         GuardedFeature::PreviousSuccess,
         GuardedFeature::UntrustedInput,
+        GuardedFeature::Deadline,
     ];
 
     /// The name a `run_guard` carries.
@@ -64,6 +69,7 @@ impl GuardedFeature {
             GuardedFeature::WriteScope => "write_scope",
             GuardedFeature::PreviousSuccess => "previous_success",
             GuardedFeature::UntrustedInput => "untrusted_input",
+            GuardedFeature::Deadline => "deadline",
         }
     }
 
@@ -104,6 +110,9 @@ pub fn guarded_features(playbook: &Playbook) -> Vec<GuardedFeature> {
     if !crate::untrusted::analyze(playbook).followers.is_empty() {
         used.insert(GuardedFeature::UntrustedInput);
     }
+    if playbook.deadline.is_some() {
+        used.insert(GuardedFeature::Deadline);
+    }
     used.into_iter().collect()
 }
 
@@ -121,6 +130,21 @@ mod tests {
     /// Each declaration names its own feature, a definition using several
     /// names each once in declaration order, and a definition using none
     /// needs no guard.
+    /// `deadline:` names `deadline`, and this binary knows eight features.
+    #[test]
+    fn a_deadline_is_a_guarded_feature() {
+        let pb = Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndeadline: 45m\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+        )
+        .unwrap();
+        assert_eq!(guarded_features(&pb), vec![GuardedFeature::Deadline]);
+        assert_eq!(GuardedFeature::ALL.len(), 8);
+        assert_eq!(
+            GuardedFeature::parse("deadline"),
+            Some(GuardedFeature::Deadline)
+        );
+    }
+
     #[test]
     fn each_declaration_names_its_feature_once_in_order() {
         use GuardedFeature::*;

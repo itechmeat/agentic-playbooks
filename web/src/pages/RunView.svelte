@@ -631,7 +631,7 @@
               >
             {/if}
           </div>
-          <RunDriveNotes released={detail.released} drivenBy={detail.driven_by} previousSuccess={detail.previous_success} untrusted={detail.untrusted} externalData={detail.external_data ?? false} />
+          <RunDriveNotes released={detail.released} drivenBy={detail.driven_by} previousSuccess={detail.previous_success} untrusted={detail.untrusted} externalData={detail.external_data ?? false} deadline={detail.deadline} startedBy={detail.started_by} startedRuns={detail.started_runs} startedRunsTruncated={detail.started_runs_truncated ?? false} startKey={detail.start_key} {workspace} />
         </header>
 
         <RunProgress progress={detail.progress} status={detail.run_status} runKey={`${workspace}/${id}`} />

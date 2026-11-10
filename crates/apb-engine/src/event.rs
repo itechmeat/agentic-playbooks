@@ -192,6 +192,18 @@ pub enum EventPayload {
         /// says (display only). Additive.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         untrusted: Vec<UntrustedNode>,
+        /// The run's deadline at start (`crate::run_deadline`). Additive.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        deadline: Option<RunDeadline>,
+        /// The first 12 hex characters of the start key's MAC when the run
+        /// was started with one (display and pruning only; never the key).
+        /// Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_key: Option<String>,
     },
     NodeStarted {
         node: String,
@@ -546,6 +558,15 @@ pub enum EventPayload {
         /// Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         apb: Option<String>,
+        /// The deadline a person granted at this resume
+        /// (`crate::run_deadline`): the clock's total from here on. Absent
+        /// for a resume that granted none. Additive.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        deadline: Option<RunDeadline>,
     },
     RunFinished {
         outcome: String,
@@ -3583,6 +3604,7 @@ impl EventPayload {
             launch: None,
             definition: None,
             apb: None,
+            deadline: None,
         }
     }
 
@@ -3823,6 +3845,31 @@ fn parse_journal(bytes: &[u8], tolerate_torn_tail: bool) -> Result<JournalRead, 
         Some(e) if !tolerate_torn_tail => Err(Unreadable::Tail(e)),
         _ => Ok(out),
     }
+}
+
+// --- routine operations: the run deadline's journal shape ---
+
+/// Where the deadline in force came from.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeadlineSource {
+    /// The playbook's `deadline:`.
+    Playbook,
+    /// A run argument at start (`--deadline`, `deadline`).
+    Run,
+    /// A person's grant at a resume.
+    Resume,
+}
+
+/// A run's deadline: the total on the deadline clock.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunDeadline {
+    /// The total on the deadline clock, milliseconds.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub total_ms: u64,
+    pub source: DeadlineSource,
 }
 
 #[cfg(test)]

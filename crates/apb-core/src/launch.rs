@@ -71,7 +71,46 @@ pub struct LaunchRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub billing: Option<crate::billing::BillingRecord>,
+    /// The run step this run was started from (`run_step:cli` or
+    /// `run_step:mcp` initiators). Absent for every other start. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub started_by: Option<StartedBy>,
 }
+
+/// The run whose step started a run, as the new run's launch record keeps
+/// it. The attempt token the step carried is never stored: the record
+/// keeps the attempt number it resolved to.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartedBy {
+    pub run_id: String,
+    /// The registered workspace id of the starting run's project
+    /// (`projects::registered_id`); absent when it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub node: Option<String>,
+    /// The attempt whose token the caller carried (an agent step or a host
+    /// task's subagent); absent for a script step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub attempt: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub host_task: Option<String>,
+    /// The starting run was found, created by this installation, not
+    /// ended, and the node (and the token, when given) match its journal.
+    pub verified: bool,
+    /// 1 for a run a step of a run outside any chain started; the
+    /// starter's chain + 1 after that.
+    pub chain: u32,
+}
+
+/// The deepest chain of runs started from run steps.
+pub const MAX_START_CHAIN: u32 = crate::schema::MAX_SUBPLAYBOOK_DEPTH as u32;
 
 /// The source of a policy nothing sets.
 pub const DEFAULT_SOURCE: &str = "default";
@@ -217,6 +256,44 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    fn record() -> LaunchRecord {
+        LaunchRecord {
+            kind: "start".into(),
+            initiator: "run_step:cli".into(),
+            confirmation: None,
+            policy: LaunchPolicy::Allow,
+            sources: vec![DEFAULT_SOURCE.into()],
+            billing: None,
+            started_by: None,
+        }
+    }
+
+    /// A record an older apb wrote has no `started_by` and decodes; one
+    /// with it round-trips and never names a token.
+    #[test]
+    fn a_launch_record_with_and_without_started_by_reads() {
+        let old = r#"{"kind":"start","initiator":"cli","policy":"allow","sources":["default"]}"#;
+        let r: LaunchRecord = serde_json::from_str(old).unwrap();
+        assert_eq!(r.started_by, None);
+        assert!(!serde_json::to_string(&r).unwrap().contains("started_by"));
+        let with = LaunchRecord {
+            started_by: Some(StartedBy {
+                run_id: "t-1".into(),
+                workspace_id: Some("ws1".into()),
+                node: Some("triage".into()),
+                attempt: Some(2),
+                host_task: None,
+                verified: true,
+                chain: 1,
+            }),
+            ..record()
+        };
+        let text = serde_json::to_string(&with).unwrap();
+        assert!(!text.contains("token"), "{text}");
+        assert_eq!(serde_json::from_str::<LaunchRecord>(&text).unwrap(), with);
+        assert_eq!(MAX_START_CHAIN, 5);
     }
 
     #[test]

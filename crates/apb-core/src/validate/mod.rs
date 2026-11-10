@@ -12,6 +12,7 @@ mod baseline;
 mod budget;
 pub mod cloud_models;
 mod connectors;
+mod deadline;
 mod decisions;
 mod edges;
 mod evidence;
@@ -452,6 +453,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     unattended::check_unattended(playbook, ctx, &mut r); // V141-V143
     output_types::check_output_types(playbook, &mut r); // V167, V168
     write_scope::check_write_scope(playbook, &mut r); // V170-V172
+    deadline::check_deadline(playbook, &mut r); // V200
     cloud_models::check_cloud_models(playbook, ctx, &mut r); // V220-V222
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08

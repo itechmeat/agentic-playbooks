@@ -51,10 +51,27 @@ pub(crate) fn lines(actions: &RunActions) -> Vec<String> {
             out.push(format!("  {}", unattended_line(u)));
         }
     }
+    if let Some(d) = &actions.run_deadline {
+        out.push(deadline_line(d));
+    }
     if actions.children_truncated {
         out.push("note: a sub-playbook run sat too deep to be observed".into());
     }
     out
+}
+
+/// When the run's deadline ends it: at a time while its clock runs,
+/// frozen with what is left while a person paused it or it ended.
+fn deadline_line(d: &AutoProgress) -> String {
+    match d {
+        AutoProgress::At { at_ms, .. } => format!(
+            "the run ends at its deadline at {}",
+            apb_core::clock::iso_utc(*at_ms)
+        ),
+        AutoProgress::Frozen { remaining_ms, .. } => {
+            format!("deadline frozen, {} left", duration_words(*remaining_ms))
+        }
+    }
 }
 
 /// Why this CLI may not take an action, in words: where it is taken
@@ -170,6 +187,7 @@ fn auto_what(outcome: AutoOutcome) -> &'static str {
         AutoOutcome::WaitTimesOut => "the wait times out and fails",
         AutoOutcome::ResumeAttempt => "apb tries to resume the run",
         AutoOutcome::RetryAttempt => "the node's retry starts",
+        AutoOutcome::RunDeadline => "the run ends at its deadline",
     }
 }
 
@@ -304,6 +322,7 @@ mod tests {
                 actions: vec![a],
                 primary: None,
                 children_truncated: false,
+                run_deadline: None,
             };
             let cli = lines(&actions).join("\n");
             let line = format!("not from here ({}): ", r.as_str());
@@ -793,6 +812,7 @@ mod tests {
             ],
             primary: Some(0),
             children_truncated: false,
+            run_deadline: None,
         };
         let out = lines(&actions);
         let unattended: Vec<&String> = out.iter().filter(|l| l.contains("unattended:")).collect();
@@ -806,6 +826,39 @@ mod tests {
             ],
             "{out:#?}"
         );
+    }
+
+    /// The run's deadline gets its own line: when it ends the run, or
+    /// frozen with what is left.
+    #[test]
+    fn next_action_lines_say_when_the_deadline_ends_the_run() {
+        let with = |d| RunActions {
+            observed_at_ms: 0,
+            status: apb_engine::state::RunStatus::Running,
+            stop: apb_engine::next_action::StopVerdict::NeedsInput,
+            actions: Vec::new(),
+            primary: None,
+            children_truncated: false,
+            run_deadline: Some(d),
+        };
+        let at = lines(&with(AutoProgress::At {
+            at_ms: 0,
+            outcome: AutoOutcome::RunDeadline,
+            assured: true,
+        }));
+        assert_eq!(
+            at,
+            [format!(
+                "the run ends at its deadline at {}",
+                apb_core::clock::iso_utc(0)
+            )]
+        );
+        let frozen = lines(&with(AutoProgress::Frozen {
+            remaining_ms: 120_000,
+            outcome: AutoOutcome::RunDeadline,
+        }));
+        assert_eq!(frozen.len(), 1);
+        assert!(frozen[0].starts_with("deadline frozen, "), "{frozen:?}");
     }
 
     #[test]

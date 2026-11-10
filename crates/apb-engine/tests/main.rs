@@ -549,6 +549,9 @@ mod run_retro_test;
 // Unix-only: its agents are shell scripts.
 #[path = "suite/evidence_freshness_test.rs"]
 mod evidence_freshness_test;
+#[path = "suite/run_deadline_test.rs"]
+mod run_deadline_test;
+// Unix-only: a link to a run directory.
 #[cfg(unix)]
 #[path = "suite/run_graph_test.rs"]
 mod run_graph_test;
@@ -576,11 +579,17 @@ mod session_handoff_test;
 mod shell_portability_test;
 #[path = "suite/stall_test.rs"]
 mod stall_test;
+#[cfg(unix)]
+#[path = "suite/start_key_test.rs"]
+mod start_key_test;
 #[path = "suite/state_test.rs"]
 mod state_test;
 #[cfg(unix)]
 #[path = "suite/status_file_test.rs"]
 mod status_file_test;
+#[cfg(unix)]
+#[path = "suite/step_start_test.rs"]
+mod step_start_test;
 #[path = "suite/stop_run_test.rs"]
 mod stop_run_test;
 #[path = "suite/subplaybook_run_test.rs"]

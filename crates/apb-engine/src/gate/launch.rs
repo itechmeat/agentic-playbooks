@@ -443,6 +443,8 @@ impl LaunchGrant {
                 policy: parent.policy,
                 sources: parent.sources.clone(),
                 billing: parent.billing.clone(),
+                // A child is never marked: its run step is its parent's.
+                started_by: None,
             },
             permit_digest: None,
             policy_state: None,
@@ -474,6 +476,7 @@ pub fn is_launch_refusal(policy: &str) -> bool {
         policy,
         ASK_POLICY | DENY_POLICY | STEP_POLICY | ENGINE_POLICY | CHOICE_CHANGED | POLICY_CHANGED
     ) || policy == SETTINGS_INVALID
+        || policy == crate::step_start::CHAIN_TOO_DEEP
         || policy == floor::INVALID
         || super::billing::is_billing_refusal(policy)
 }
@@ -799,6 +802,27 @@ pub fn nonce(
     apb_core::content::short_nonce("launch", &lines)
 }
 
+/// The run step a new start is made from ([`crate::step_start::resolve`]),
+/// or its refusal `start_chain_too_deep`. Only a run step's new start (a
+/// start, a trial, an executed plan, a continue) names one: a resume keeps
+/// the record its start wrote and is never refused for its chain.
+fn started_by(
+    ctx: &LaunchContext,
+    root: &Path,
+) -> Result<Option<apb_core::launch::StartedBy>, Value> {
+    let new_start = matches!(
+        ctx.kind,
+        LaunchKind::Start
+            | LaunchKind::Trial
+            | LaunchKind::ExecutePlan
+            | LaunchKind::ContinueFrom { .. }
+    );
+    if !new_start || !matches!(ctx.initiator, Initiator::RunStep { .. }) {
+        return Ok(None);
+    }
+    crate::step_start::resolve(root, &crate::step_start::CallerSnapshot::from_env())
+}
+
 /// The launch check: the grant, or the structured refusal with every hint
 /// a retry needs. The launch policy decides first; then the billing check
 /// ([`super::billing`]): `deny` refuses everyone, `ask` needs a person's
@@ -820,6 +844,7 @@ pub fn decide(
             None,
         ));
     }
+    let started_by = started_by(ctx, subject.root)?;
     let expected = nonce(subject, effective, &ctx.kind, billing);
     let grant = |confirmation: Option<String>, billed: Option<String>| LaunchGrant {
         record: LaunchRecord {
@@ -829,6 +854,7 @@ pub fn decide(
             policy: effective.policy,
             sources: effective.sources.clone(),
             billing: Some(billing.record(billed)),
+            started_by: started_by.clone(),
         },
         permit_digest: Some(subject.permit_digest.clone()),
         policy_state: Some(policy_state(effective)),

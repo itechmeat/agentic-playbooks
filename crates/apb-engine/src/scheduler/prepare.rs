@@ -472,9 +472,32 @@ fn external_data_start(place: &Placement, opts: &mut RunOptions) {
     };
     if opts.parent_run.as_deref().is_some_and(flagged)
         || opts.continued_from.as_deref().is_some_and(flagged)
+        || opts
+            .launch
+            .as_ref()
+            .and_then(|g| g.record.started_by.as_ref())
+            .is_some_and(|by| starter_flagged(&place.runs, by))
     {
         opts.external_data = true;
     }
+}
+
+/// Whether the run a step of which started this one is flagged: under this
+/// project's runs, or under the registered root of its workspace.
+fn starter_flagged(runs: &Path, by: &apb_core::launch::StartedBy) -> bool {
+    if !apb_core::registry::is_safe_segment(&by.run_id) {
+        return false;
+    }
+    let here = runs.join(&by.run_id);
+    let there = by
+        .workspace_id
+        .as_deref()
+        .and_then(|ws| apb_core::projects::resolve_root(ws).ok())
+        .map(|root| root.join(".apb/runs").join(&by.run_id));
+    [Some(here), there]
+        .into_iter()
+        .flatten()
+        .any(|d| d.is_dir() && crate::external_data::is_flagged(&d))
 }
 
 /// The recall of a start that applies nothing remembered.
@@ -1044,6 +1067,26 @@ pub(crate) fn prepare_placed(
         }
     };
 
+    // The start key is claimed before the tree lock, so a repeat while the
+    // first run holds the tree answers that run, not "workdir busy"; the
+    // claim stays pending (its owner this preparation) until the run is
+    // verifiable.
+    let keyed = opts
+        .start_key
+        .as_ref()
+        .filter(|_| scenario.is_none() && opts.eval.is_none() && opts.parent_run.is_none());
+    let mut key_claim = match keyed {
+        Some(req) => Some(crate::start_key::claim(
+            root,
+            t.origin_label,
+            id,
+            req,
+            &apb_core::step_env::StepCaller::from_env(),
+        )?),
+        None => None,
+    };
+    let start_key_tag = keyed.and_then(crate::start_key::shown_tag);
+
     let is_write = scenario.is_none() && playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
     let mut queued_workdir = None;
     let mut queued_reason = String::new();
@@ -1068,6 +1111,11 @@ pub(crate) fn prepare_placed(
         crate::run_lineage::validate_continued_from(root, pred, id)?;
     }
     let (run_id, run_dir, mut log) = allocate_run(&place.runs, id)?;
+    if let Some(c) = key_claim.as_mut() {
+        c.attach(&run_id)?;
+        #[cfg(any(test, feature = "testing"))]
+        crate::start_key::test_hooks::after_attach(root);
+    }
     // A scenario run's session answers every boundary from here on.
     if let Some(sp) = scenario {
         crate::scenario::session::register(
@@ -1374,6 +1422,13 @@ pub(crate) fn prepare_placed(
     // Run provenance (spec 3): the definition scope, content fingerprint,
     // execution root, and profiles used. A separate event right after
     // RunStarted.
+    // The deadline in force from the start: a top-level production run
+    // only (a scenario's timing is scripted, an eval keeps its own, a child
+    // is stopped through its parent).
+    let deadline =
+        (opts.parent_run.is_none() && opts.depth == 0 && scenario.is_none() && opts.eval.is_none())
+            .then(|| crate::run_deadline::at_start(&playbook, opts.deadline_ms))
+            .flatten();
     log.append(EventPayload::RunProvenance {
         origin: Some(t.origin_label.into()),
         digest: Some(digest),
@@ -1395,12 +1450,19 @@ pub(crate) fn prepare_placed(
                 accepted: f.accepted.clone(),
             })
             .collect(),
+        deadline,
+        start_key: start_key_tag,
     })?;
     // A definition using a feature an older apb would drop is guarded from
     // here on: every checkpoint carries the guard, so such an apb refuses
-    // to continue the run.
-    if let Some(guard) = run_guard(&playbook) {
+    // to continue the run. A deadline from the run argument alone is named
+    // too.
+    if let Some(guard) = run_guard_of(&playbook, deadline.is_some()) {
         log.append(guard)?;
+    }
+    // The run is verifiable now: its key is bound to it.
+    if let Some(c) = key_claim.take() {
+        c.bind()?;
     }
     // The known problems this run shows its agents, rechecked where their
     // source changed, journaled once (only for a playbook whose
@@ -1521,6 +1583,19 @@ fn check_launch(
                         now.sources.join(", ")
                     )));
                 }
+            }
+            // Backstop of the chain bound (the grant may come from a
+            // handoff file): a record past it never starts.
+            if let Some(by) = &g.record.started_by
+                && by.chain > apb_core::launch::MAX_START_CHAIN
+            {
+                return Err(EngineError::Invalid(format!(
+                    "{}: run `{}` starts a chain of {} runs started from run steps; at most {} are allowed",
+                    crate::step_start::CHAIN_TOO_DEEP,
+                    by.run_id,
+                    by.chain,
+                    apb_core::launch::MAX_START_CHAIN
+                )));
             }
             // The final check commits the start: a billing confirmation is
             // spent now, not by a check that refused for another reason.
@@ -1679,8 +1754,27 @@ pub(super) fn decision_settings(
 
 /// The `run_guard` a run of `playbook` journals, `None` when it uses no
 /// guarded feature (`apb_core::validate::guarded_features`).
-pub(crate) fn run_guard(playbook: &Playbook) -> Option<EventPayload> {
-    let requires: Vec<String> = apb_core::validate::guarded_features(playbook)
+pub(crate) fn run_guard(
+    playbook: &Playbook,
+    events: &[crate::event::Event],
+) -> Option<EventPayload> {
+    run_guard_of(playbook, crate::run_deadline::in_force(events).is_some())
+}
+
+/// [`run_guard`] with the run's contract given: the definition's features,
+/// with `deadline` named exactly when a deadline is in force for the run
+/// (a scenario, an eval and a child ignore the playbook's).
+fn run_guard_of(playbook: &Playbook, deadline: bool) -> Option<EventPayload> {
+    use apb_core::validate::GuardedFeature;
+    let mut features: Vec<GuardedFeature> = apb_core::validate::guarded_features(playbook)
+        .into_iter()
+        .filter(|f| *f != GuardedFeature::Deadline)
+        .collect();
+    if deadline {
+        features.push(GuardedFeature::Deadline);
+        features.sort();
+    }
+    let requires: Vec<String> = features
         .into_iter()
         .map(|f| f.as_str().to_string())
         .collect();

@@ -103,6 +103,7 @@ pub mod secret;
 pub mod server_auth;
 pub mod signed_store;
 pub mod skills;
+pub mod start_key;
 pub mod stats;
 pub mod step_env;
 pub mod store;

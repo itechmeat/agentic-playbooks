@@ -53,6 +53,8 @@ impl From<StoreError> for ProblemsError {
             StoreError::InvalidId(id) => ProblemsError::InvalidId(id),
             StoreError::NewerSchema(s) => ProblemsError::NewerSchema(s),
             StoreError::Io(e) => ProblemsError::Io(e),
+            // Only a `Refuse` transaction returns it; this store replaces.
+            e @ StoreError::Unverified(_) => ProblemsError::Io(io::Error::other(e.to_string())),
         }
     }
 }

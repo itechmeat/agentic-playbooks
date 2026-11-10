@@ -373,6 +373,7 @@ fn autonomous_preseeded_abort_via_post_supervisor_command() {
         Control::Abort {
             reason: "preseeded via post_supervisor_command".into(),
             by: None,
+            graceful: false,
         },
     )
     .unwrap();

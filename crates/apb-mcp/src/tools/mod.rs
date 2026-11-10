@@ -99,6 +99,7 @@ impl From<apb_core::signed_store::StoreError> for ToolError {
                 "the file has schema {n}, newer than this apb understands; upgrade apb to read it"
             )),
             StoreError::Io(e) => ToolError::Engine(e.to_string()),
+            e @ StoreError::Unverified(_) => ToolError::Conflict(e.to_string()),
         }
     }
 }
@@ -110,6 +111,9 @@ impl From<EngineError> for ToolError {
             EngineError::Registry(RegistryError::NotFound(w)) => ToolError::NotFound(w),
             EngineError::Conflict(m) => ToolError::Conflict(m),
             m @ EngineError::AlreadyAnswered(_) => ToolError::Conflict(m.to_string()),
+            EngineError::AlreadyStarted(id) => {
+                ToolError::Conflict(format!("already_started: {id}"))
+            }
             // A workdir held by another live write-run is a retry-actionable
             // conflict, not a hard failure (#102.5): the caller can try again
             // shortly instead of treating this like any other engine error.

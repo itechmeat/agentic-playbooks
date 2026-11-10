@@ -40,6 +40,9 @@ fn seed_budgeted(root: &Path) {
 
 fn start_args(budget: Option<BudgetArg>) -> PlaybookRunArgs {
     PlaybookRunArgs {
+        deadline: None,
+        start_key: None,
+        start_key_reuse: None,
         id: "bud".into(),
         version: None,
         params: BTreeMap::new(),
@@ -198,6 +201,7 @@ fn ask_paused(root: &Path) -> String {
 
 fn resume_args(run_id: &str, confirm_budget: Option<String>) -> RunResumeArgs {
     RunResumeArgs {
+        deadline: None,
         run_id: run_id.into(),
         from_node: None,
         retry_now: false,

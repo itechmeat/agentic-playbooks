@@ -8,6 +8,7 @@ use rmcp::model::CallToolResult;
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, tool, tool_router};
 use serde_json::json;
+use std::collections::BTreeMap;
 
 use super::args::*;
 use super::{WfMcp, sliced_wait, to_call_tool_result, with_execution, with_warnings};
@@ -48,6 +49,13 @@ impl WfMcp {
         client: Option<String>,
     ) -> CallToolResult {
         let scope = scope.as_deref().unwrap_or("project");
+        // The effective flag, inherited from a flagged step's run, before
+        // the gate (the caller's tri-state value kept until here).
+        let external_data =
+            match apb_engine::external_data::for_surface_start(&self.root, external_data, None) {
+                Ok(flag) => flag,
+                Err(refusal) => return to_call_tool_result(Ok(refusal.body())),
+            };
         let launch = super::mcp_launch(
             client,
             apb_engine::gate::launch::LaunchKind::Trial,
@@ -55,7 +63,7 @@ impl WfMcp {
             launch_version,
             launch_choice,
         )
-        .with_external_data(external_data == Some(true));
+        .with_external_data(external_data);
         to_call_tool_result(tools::playbook_trial(
             &self.root,
             &id,
@@ -186,7 +194,13 @@ impl WfMcp {
             id: payload.id.clone(),
             version: Some(payload.version.clone()),
         };
-        let external_data = external_data == Some(true);
+        // The effective flag, inherited from a flagged step's run (a step of
+        // this project), before the gate.
+        let external_data =
+            match apb_engine::external_data::for_surface_start(&self.root, external_data, None) {
+                Ok(flag) => flag,
+                Err(refusal) => return to_call_tool_result(Ok(refusal.body())),
+            };
         let launch = super::mcp_launch(
             client.clone(),
             apb_engine::gate::launch::LaunchKind::ExecutePlan,
@@ -338,7 +352,7 @@ impl WfMcp {
 
     #[tool(
         name = "playbook_run",
-        description = "Run a playbook with the given parameters and instruction. Pass supervise: \"self\" to run it in the background under the caller's supervision and receive a supervisor token; pass background: true to start it in the background and get a run_id immediately, then follow it with run_wait (not by polling run_status). Without either, the call blocks until the run ends. execution: leave it out (cli, the default: apb runs the agent CLIs the profiles name) unless the person asked for mono, host or single-agent mode, or for the run to use your own subagents; then pass execution: \"host\": apb spawns no CLI, the run starts in the background, and every agent step comes back from run_wait as a pending task that you execute with your own subagent tool (never by launching an agent CLI; see run_wait) and submit with run_task_submit. A background or supervised run may also hand you a task on its own when none of a step's CLIs can start (not installed or not logged in). A playbook whose effects include irreversible (push, merge, deploy, publish) is refused with policy irreversible_requires_confirmation, its sources and a consent_nonce: show the sources to the person and, if they agree, call again with confirm_irreversible set to that consent_nonce. acknowledge_untrusted answers trust only; a trust refusal of an irreversible playbook lists its irreversible sources and consent_nonce too, so one question covers both. budget (tokens, usd, on_no_estimate: ask, pause or continue) limits the run's spend over the playbook's own budget: block; the run pauses before a node whose median spend from comparable runs no longer fits. With on_no_estimate ask and nodes that have no estimate, the start is refused with budget_needs_decision, the estimate and the unestimated nodes: ask the person pause or continue and call again with budget.on_no_estimate set to the answer. Every start answer carries estimate (time, tokens, cost from comparable runs, with a summary) and budget when the run has one. notify (only when the person asked to hear about the run): true uses the machine's notify target, false turns notifications off, an object sets on and/or target; a target that cannot be used refuses the start with notify_unavailable. unattended: true (only when the person asked for a run nobody watches, such as CI): every wait without a declared unattended outcome fails the run with hitl_required instead of waiting; it grants no consent or trust, and with execution host or supervise self it is refused with unattended_unsupported.",
+        description = "Run a playbook with the given parameters and instruction. Pass supervise: \"self\" to run it in the background under the caller's supervision and receive a supervisor token; pass background: true to start it in the background and get a run_id immediately, then follow it with run_wait (not by polling run_status). Without either, the call blocks until the run ends. execution: leave it out (cli, the default: apb runs the agent CLIs the profiles name) unless the person asked for mono, host or single-agent mode, or for the run to use your own subagents; then pass execution: \"host\": apb spawns no CLI, the run starts in the background, and every agent step comes back from run_wait as a pending task that you execute with your own subagent tool (never by launching an agent CLI; see run_wait) and submit with run_task_submit. A background or supervised run may also hand you a task on its own when none of a step's CLIs can start (not installed or not logged in). A playbook whose effects include irreversible (push, merge, deploy, publish) is refused with policy irreversible_requires_confirmation, its sources and a consent_nonce: show the sources to the person and, if they agree, call again with confirm_irreversible set to that consent_nonce. acknowledge_untrusted answers trust only; a trust refusal of an irreversible playbook lists its irreversible sources and consent_nonce too, so one question covers both. budget (tokens, usd, on_no_estimate: ask, pause or continue) limits the run's spend over the playbook's own budget: block; the run pauses before a node whose median spend from comparable runs no longer fits. With on_no_estimate ask and nodes that have no estimate, the start is refused with budget_needs_decision, the estimate and the unestimated nodes: ask the person pause or continue and call again with budget.on_no_estimate set to the answer. Every start answer carries estimate (time, tokens, cost from comparable runs, with a summary) and budget when the run has one. notify (only when the person asked to hear about the run): true uses the machine's notify target, false turns notifications off, an object sets on and/or target; a target that cannot be used refuses the start with notify_unavailable. unattended: true (only when the person asked for a run nobody watches, such as CI): every wait without a declared unattended outcome fails the run with hitl_required instead of waiting; it grants no consent or trust, and with execution host or supervise self it is refused with unattended_unsupported. start_key: pass the scheduler's or event's id so a repeat answers the run already started (already_started: true) instead of starting another; another request under the key is refused start_key_conflict.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn playbook_run_tool(
@@ -380,17 +394,30 @@ impl WfMcp {
             launch_choice,
             unattended,
             external_data,
+            deadline,
+            start_key,
+            start_key_reuse,
         }): Parameters<PlaybookRunArgs>,
         client: Option<String>,
     ) -> CallToolResult {
         let unattended = unattended == Some(true);
+        // A deadline argument that does not parse is refused first.
+        let deadline_ms = match deadline.as_deref().map(apb_engine::run_deadline::parse_arg) {
+            None => None,
+            Some(Ok(ms)) => Some(ms),
+            Some(Err(e)) => {
+                return to_call_tool_result(Ok(json!({
+                    "policy": apb_engine::run_deadline::DEADLINE_INVALID,
+                    "detail": e,
+                })));
+            }
+        };
         // External data (capability run-external-data): the effective flag
         // (inherited from a flagged predecessor) and the remember refusal,
         // before every other check and before anything is written.
-        let external_data = match apb_engine::external_data::for_start(
+        let external_data = match apb_engine::external_data::for_surface_start(
             &self.root,
             external_data,
-            None,
             continued_from.as_deref(),
         )
         .and_then(|flag| {
@@ -417,6 +444,69 @@ impl WfMcp {
             },
         };
         let host_requested = requested_mode == Some(apb_core::execution::ExecutionMode::Host);
+        // Definition scope: a global playbook runs in the current project.
+        // An unknown scope is not silently treated as project - we refuse it (spec 9).
+        let origin = match scope.as_deref() {
+            None | Some("project") => apb_core::scope::Origin::Project { workspace_id: None },
+            Some("global") => apb_core::scope::Origin::Global,
+            Some(other) => {
+                return to_call_tool_result(Ok(json!({
+                    "error": "unknown_scope",
+                    "detail": format!("scope must be \"project\" or \"global\", got `{other}`"),
+                })));
+            }
+        };
+        // The start key: the request captured from the tool arguments as
+        // passed (the version as asked, never the candidate the gate
+        // picks), then the read-only lookup before the gate.
+        let start_key = match start_key.as_deref() {
+            None => None,
+            Some(raw) => {
+                let fields = start_request(&StartRequestOf {
+                    version: version.as_deref(),
+                    params: &params,
+                    instruction: instruction.as_deref(),
+                    worktree: worktree.as_deref(),
+                    execution: requested_mode.map(|m| m.as_str()),
+                    supervise: supervise.as_deref(),
+                    deadline_ms,
+                    budget: budget.as_ref(),
+                    unattended,
+                    continued_from: continued_from.as_deref(),
+                    external_data,
+                });
+                let scope_label = match origin {
+                    apb_core::scope::Origin::Global => "global",
+                    _ => "project",
+                };
+                match tools::run::keyed_lookup(
+                    &self.root,
+                    scope_label,
+                    &id,
+                    raw,
+                    start_key_reuse == Some(true),
+                    &fields,
+                ) {
+                    Ok(tools::run::Keyed::Go(req)) => Some(req),
+                    Ok(tools::run::Keyed::Answer(v)) => return to_call_tool_result(Ok(v)),
+                    Err(v) => {
+                        let wref = apb_core::scope::PlaybookRef {
+                            origin: origin.clone(),
+                            id: id.clone(),
+                            version: version.clone(),
+                        };
+                        return to_call_tool_result(Ok(tools::actions::policy_refusal(
+                            apb_engine::next_action::start::StartOf::of(&wref),
+                            v,
+                        )));
+                    }
+                }
+            }
+        };
+        // The checks that read the environment or the settings (the
+        // unattended mode's, the execution resolution) come after the
+        // lookup: a repeat of a keyed start answers its run even when the
+        // environment changed.
         // An unattended start that also asks for host execution (or
         // resolves to it) or for supervision is refused before anything
         // else, by the run gate's own check: both would wait with nobody to
@@ -470,18 +560,6 @@ impl WfMcp {
                 background
             };
         // --- end host execution mode ---
-        // Definition scope: a global playbook runs in the current project.
-        // An unknown scope is not silently treated as project - we refuse it (spec 9).
-        let origin = match scope.as_deref() {
-            None | Some("project") => apb_core::scope::Origin::Project { workspace_id: None },
-            Some("global") => apb_core::scope::Origin::Global,
-            Some(other) => {
-                return to_call_tool_result(Ok(json!({
-                    "error": "unknown_scope",
-                    "detail": format!("scope must be \"project\" or \"global\", got `{other}`"),
-                })));
-            }
-        };
         // The server-side policy gate (spec 9) applies to ALL run modes,
         // including supervise:"self": lifecycle, digest trust, preflight.
         // Cross-workspace goes through the two-phase contract. check_run
@@ -651,6 +729,8 @@ impl WfMcp {
             notify,
             unattended,
             external_data,
+            deadline_ms,
+            start_key,
         };
 
         // supervise:"self" - a project-scoped supervised run (a global scope
@@ -666,7 +746,7 @@ impl WfMcp {
 
         let started = if matches!(origin, apb_core::scope::Origin::Global) {
             let opts = tools::start_options(start, apb_engine::RunMode::Autonomous);
-            if background == Some(true) {
+            let r = if background == Some(true) {
                 apb_engine::start_detached_resolved(&resolved_def, opts)
                     .map(|run_id| json!({ "run_id": run_id, "scope": "global" }))
             } else {
@@ -674,8 +754,8 @@ impl WfMcp {
                     json!({ "run_id": res.run_id, "outcome": res.outcome.as_str(), "scope": "global" })
                 })
             }
-            .map(|out| tools::budget::with_start_blocks(&self.root, out))
-            .map_err(ToolError::from)
+            .map(|out| tools::budget::with_start_blocks(&self.root, out));
+            tools::run::or_already_started(&self.root, r)
         } else if background == Some(true) {
             tools::playbook_run_background(&self.root, &id, version.as_deref(), start)
         } else {
@@ -1071,6 +1151,7 @@ impl WfMcp {
             launch_version,
             launch_choice,
             external_data,
+            deadline,
         }): Parameters<RunResumeArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> CallToolResult {
@@ -1091,6 +1172,7 @@ impl WfMcp {
                 launch_version,
                 launch_choice,
                 external_data,
+                deadline,
             },
             client,
         )
@@ -1113,12 +1195,23 @@ impl WfMcp {
             launch_version,
             launch_choice,
             external_data,
+            deadline,
         }: RunResumeArgs,
         client: Option<String>,
     ) -> CallToolResult {
         let root = match self.effective_root(workspace.as_deref()) {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        let deadline_ms = match deadline.as_deref().map(apb_engine::run_deadline::parse_arg) {
+            None => None,
+            Some(Ok(ms)) => Some(ms),
+            Some(Err(e)) => {
+                return to_call_tool_result(Ok(json!({
+                    "policy": apb_engine::run_deadline::DEADLINE_INVALID,
+                    "detail": e,
+                })));
+            }
         };
         // A waiting retry to start now. A host over MCP may relay a person or
         // act on its own, so it is recorded as the host, never as the
@@ -1230,16 +1323,20 @@ impl WfMcp {
         let resumed = tools::run::run_resume_with(
             &root,
             &run_id,
-            from_node.as_deref(),
-            allow_environment_drift,
-            budget.as_ref(),
-            grant.as_ref(),
-            retry_nodes
-                .as_ref()
-                .map(|_| apb_engine::scheduler::RetryNow {
-                    node: node.as_deref(),
-                    by: retry_by,
-                }),
+            &apb_engine::ResumeRequest {
+                from_node: from_node.as_deref(),
+                allow_environment_drift,
+                budget: budget.as_ref(),
+                launch: grant.as_ref(),
+                retry_now: retry_nodes
+                    .as_ref()
+                    .map(|_| apb_engine::scheduler::RetryNow {
+                        node: node.as_deref(),
+                        by: retry_by,
+                    }),
+                deadline_ms,
+                ..apb_engine::ResumeRequest::operator()
+            },
         )
         .map(|mut ack| {
             // Only a resume that went ahead started the retry; a refused one
@@ -1392,4 +1489,46 @@ impl WfMcp {
         ))
     }
     // --- end host execution mode ---
+}
+
+/// The tool arguments of `playbook_run` a start key's request binds, as
+/// passed.
+pub(crate) struct StartRequestOf<'a> {
+    pub version: Option<&'a str>,
+    pub params: &'a BTreeMap<String, String>,
+    pub instruction: Option<&'a str>,
+    pub worktree: Option<&'a str>,
+    pub execution: Option<&'a str>,
+    pub supervise: Option<&'a str>,
+    pub deadline_ms: Option<u64>,
+    pub budget: Option<&'a BudgetArg>,
+    pub unattended: bool,
+    pub continued_from: Option<&'a str>,
+    pub external_data: bool,
+}
+
+/// The request a start key of MCP `playbook_run` binds: a plain mapping
+/// of the arguments as passed.
+pub(crate) fn start_request(a: &StartRequestOf<'_>) -> apb_core::start_key::StartRequestFields {
+    let supervision = if a.supervise == Some("self") {
+        apb_engine::RunMode::Supervised
+    } else {
+        apb_engine::RunMode::Autonomous
+    };
+    apb_core::start_key::StartRequestFields {
+        v: apb_core::start_key::REQUEST_V,
+        version: a.version.map(str::to_string),
+        params: a.params.clone(),
+        instruction: a.instruction.map(str::to_string),
+        worktree: a.worktree.map(str::to_string),
+        execution: a.execution.map(str::to_string),
+        supervision: apb_core::start_key::label(&supervision),
+        cache: apb_core::start_key::label(&apb_engine::run_config::CacheRunMode::Auto),
+        deadline_ms: a.deadline_ms,
+        budget: a.budget.and_then(|b| serde_json::to_value(b).ok()),
+        unattended: a.unattended,
+        continued_from: a.continued_from.map(str::to_string),
+        external_data: a.external_data,
+        ..Default::default()
+    }
 }

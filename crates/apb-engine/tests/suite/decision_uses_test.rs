@@ -1202,6 +1202,7 @@ fn supervisor_auto_retry_stops_at_its_cap_and_wakes_the_supervisor() {
         apb_engine::control::Control::Abort {
             reason: "test".into(),
             by: None,
+            graceful: false,
         },
     )
     .unwrap();

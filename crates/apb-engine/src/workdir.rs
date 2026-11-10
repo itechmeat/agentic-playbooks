@@ -427,7 +427,7 @@ fn take_mutex(lock_path: &Path) -> std::io::Result<apb_core::fsutil::DirLock> {
 ///   * no lock, or a stale one: acquire normally (the parent died before it
 ///     could hand anything over).
 pub fn acquire_handover(root: &Path) -> Result<Option<WorkdirGuard>, EngineError> {
-    acquire_handover_within(root, None, HANDOVER_WAIT)
+    acquire_handover_within(root, None, HANDOVER_WAIT, None)
 }
 
 /// `acquire_handover` with a caller-chosen ceiling, never shorter than
@@ -435,14 +435,19 @@ pub fn acquire_handover(root: &Path) -> Result<Option<WorkdirGuard>, EngineError
 /// top of each other: the handover race with its parent, and the unrelated
 /// write-run that made the run queue in the first place. Both are the same
 /// poll, so they get one deadline rather than two.
+///
+/// `cap`, the time a run with a deadline has left, bounds the whole wait,
+/// the handover floor included: past it the run ends rather than waits.
 pub fn acquire_handover_within(
     root: &Path,
     tree: Option<&Path>,
     wait: Duration,
+    cap: Option<Duration>,
 ) -> Result<Option<WorkdirGuard>, EngineError> {
+    let wait = wait.max(HANDOVER_WAIT);
     wait_for_workdir(
         tree_lock_path(root, tree),
-        wait.max(HANDOVER_WAIT),
+        cap.map_or(wait, |c| wait.min(c)),
         HANDOVER_STEP,
         LockWait::Handover,
     )

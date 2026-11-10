@@ -159,6 +159,8 @@ fn observe_due_leased(
         guard_tree: true,
         scripts_label: "follow-up scripts",
         site: apb_core::follow_up::FOLLOW_UP_SITE,
+        // Read after the run ended: outside its deadline.
+        cap_secs: None,
     };
     // Scrub before anything is stored: a scrubber that cannot resolve the
     // run's secrets withholds the whole observation.

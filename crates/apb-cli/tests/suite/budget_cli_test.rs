@@ -193,3 +193,158 @@ fn raise_budget_tokens_resumes() {
         .success()
         .stdout(predicate::str::contains("finished: succeeded"));
 }
+
+/// Runs `apb <args>` in `root` on a pseudo-terminal that is the child's
+/// controlling terminal (the budget question reads `/dev/tty`), answering
+/// `answer` once `prompt` appeared. Returns the exit code and everything
+/// the child wrote.
+#[cfg(unix)]
+fn run_on_tty(
+    root: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    prompt: &str,
+    answer: &str,
+) -> (Option<i32>, String) {
+    use std::io::{Read as _, Write as _};
+    use std::os::fd::{FromRawFd as _, OwnedFd};
+    use std::os::unix::process::CommandExt as _;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    let (mut master, mut slave): (libc::c_int, libc::c_int) = (0, 0);
+    let mut winsize = libc::winsize {
+        ws_row: 40,
+        ws_col: 120,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let winsize_ptr = std::ptr::addr_of_mut!(winsize);
+    // SAFETY: openpty writes two descriptors this function then owns.
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            winsize_ptr,
+        )
+    };
+    assert_eq!(rc, 0, "openpty failed");
+    // SAFETY: both descriptors are fresh and owned here.
+    let master = unsafe { OwnedFd::from_raw_fd(master) };
+    let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+    let mut cmd = crate::common::apb_std();
+    cmd.args(args)
+        .current_dir(root)
+        .stdin(std::process::Stdio::from(slave.try_clone().unwrap()))
+        .stdout(std::process::Stdio::from(slave.try_clone().unwrap()))
+        .stderr(std::process::Stdio::from(slave.try_clone().unwrap()));
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    // SAFETY: only async-signal-safe calls between fork and exec: a new
+    // session, then the pty on stdin as its controlling terminal.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().unwrap();
+    drop(slave);
+    let seen = Arc::new(Mutex::new(String::new()));
+    let sink = Arc::clone(&seen);
+    let mut reader = std::fs::File::from(master.try_clone().unwrap());
+    let pump = std::thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        while let Ok(n) = reader.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            sink.lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+    });
+    let mut writer = std::fs::File::from(master.try_clone().unwrap());
+    let limit = Instant::now() + Duration::from_secs(60);
+    let mut answered = false;
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if !answered && seen.lock().unwrap().contains(prompt) {
+            writer.write_all(answer.as_bytes()).unwrap();
+            writer.flush().unwrap();
+            answered = true;
+        }
+        if Instant::now() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("no exit; terminal so far:\n{}", seen.lock().unwrap());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // A detached driver keeps the terminal open, so the reader never sees
+    // its end: what the child wrote is read after a short settle, and the
+    // reader thread is left to end with the terminal.
+    std::thread::sleep(Duration::from_millis(300));
+    drop(pump);
+    let text = seen.lock().unwrap().clone();
+    assert!(answered, "the question was never asked:\n{text}");
+    (status.code(), text)
+}
+
+/// The answer a person gives to the `on_no_estimate: ask` question is not
+/// part of a keyed start's request: the request is captured from the
+/// arguments before the question, so the same arguments repeated without
+/// a terminal answer the run the first start made, not
+/// `start_key_conflict`.
+#[cfg(unix)]
+#[test]
+fn a_budget_answer_does_not_change_the_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let stub = seed(root, "1.0.0", "");
+    let vdir = root.join(".apb/playbooks/bud/1.0.0");
+    fs::write(
+        vdir.join("playbook.yaml"),
+        PLAYBOOK.replace("on_no_estimate: continue", "on_no_estimate: ask"),
+    )
+    .unwrap();
+    let args = ["run", "bud", "--detach", "--start-key", "budget-answer-1"];
+    let (code, text) = run_on_tty(
+        root,
+        &args,
+        &[("APB_AGENT_CMD", &stub)],
+        "pause before such a node or continue? [p/c]",
+        "p\n",
+    );
+    assert_eq!(code, Some(0), "{text}");
+    let run_id = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("run started: "))
+        .expect("run id")
+        .trim()
+        .to_string();
+    let _guard = RunGuard::new(root, &run_id);
+    let again = apb()
+        .args(args)
+        .env("APB_AGENT_CMD", &stub)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let (out, err) = (
+        String::from_utf8_lossy(&again.stdout),
+        String::from_utf8_lossy(&again.stderr),
+    );
+    assert_eq!(again.status.code(), Some(0), "{out} {err}");
+    assert!(
+        out.contains(&format!("run already started: {run_id} (start key)")),
+        "{out} {err}"
+    );
+    assert_eq!(run_ids(root), 1);
+}

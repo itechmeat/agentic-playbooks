@@ -6,7 +6,7 @@
 //!
 //! Each waker holds a lease for its whole life: an OS lock (`flock` on
 //! unix) on a file under `runs/<id>/wakers/` named for what it waits for
-//! (`pause-<seq>`, `release-<seq>`, `notify`). The OS drops the lock when
+//! (`pause-<seq>`, `release-<seq>`, `notify`, `deadline`). The OS drops the lock when
 //! the process dies, so a lease outlives no waker. A second waker for the
 //! same wait finds the lease held and exits at once, `apb resume --all`
 //! spawns none while one is held, and its own resume of a due wait waits
@@ -30,6 +30,9 @@ pub enum WakerFor {
     Notify,
     /// The follow-up due after the `run_finished` at this journal sequence.
     FollowUp(u64),
+    /// The run's deadline while no driver holds it: one waker per run,
+    /// whatever parks it (`crate::run_deadline::run_deadline_waker`).
+    Deadline,
 }
 
 impl WakerFor {
@@ -39,6 +42,7 @@ impl WakerFor {
             WakerFor::Release(seq) => format!("release-{seq}"),
             WakerFor::Notify => "notify".into(),
             WakerFor::FollowUp(seq) => format!("follow-up-{seq}"),
+            WakerFor::Deadline => "deadline".into(),
         }
     }
 
@@ -49,6 +53,7 @@ impl WakerFor {
             WakerFor::Release(seq) => vec!["--release".into(), seq.to_string()],
             WakerFor::Notify => vec!["--notify".into()],
             WakerFor::FollowUp(seq) => vec!["--follow-up".into(), seq.to_string()],
+            WakerFor::Deadline => vec!["--deadline".into()],
         }
     }
 
@@ -58,6 +63,7 @@ impl WakerFor {
             WakerFor::Pause(_) | WakerFor::Release(_) => "it waits until a set time",
             WakerFor::Notify => "a notification waits for a retry",
             WakerFor::FollowUp(_) => "a follow-up check waits for its time",
+            WakerFor::Deadline => "a run's deadline waits for its time",
         }
     }
 
@@ -68,6 +74,7 @@ impl WakerFor {
                 format!("`apb resume {run_id}` or `apb resume --all` picks it up")
             }
             WakerFor::Notify | WakerFor::FollowUp(_) => "`apb resume --all` picks it up".into(),
+            WakerFor::Deadline => "`apb resume --all` ends it".into(),
         }
     }
 }

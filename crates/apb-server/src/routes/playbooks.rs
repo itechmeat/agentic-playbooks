@@ -238,6 +238,17 @@ pub(crate) struct RunBody {
     /// `external_data_remember_refused`), before anything is written.
     #[serde(default)]
     external_data: Option<bool>,
+    /// The run's deadline (a duration such as `45m`): it ends aborted
+    /// `deadline_exceeded` once it has run that long. Overrides the
+    /// playbook's `deadline:`; 400 `deadline_invalid` when it does not parse.
+    #[serde(default)]
+    deadline: Option<String>,
+    /// A key that makes the start happen at most once per event (see
+    /// `apb_engine::start_key`): a repeat answers the run already started.
+    #[serde(default)]
+    start_key: Option<String>,
+    #[serde(default)]
+    start_key_reuse: bool,
 }
 
 /// The launch context of a click in the dashboard: a person's with keys;
@@ -310,6 +321,24 @@ pub(crate) async fn run_playbook_handler(
         Ok(r) => r,
         Err(e) => return e,
     };
+    let deadline_ms = match body
+        .deadline
+        .as_deref()
+        .map(apb_engine::run_deadline::parse_arg)
+    {
+        None => None,
+        Some(Ok(ms)) => Some(ms),
+        Some(Err(e)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "policy": apb_engine::run_deadline::DEADLINE_INVALID,
+                    "detail": e,
+                })),
+            )
+                .into_response();
+        }
+    };
     // External data (capability run-external-data): the effective flag
     // (inherited from a flagged predecessor) and the remember refusal,
     // before every other check and before anything is written.
@@ -318,11 +347,61 @@ pub(crate) async fn run_playbook_handler(
         body.external_data,
         None,
         body.continued_from.as_deref(),
+        // The dashboard server is never a run step.
+        None,
     )
     .and_then(|flag| apb_engine::external_data::check_remember(flag, body.remember).map(|()| flag))
     {
         Ok(flag) => flag,
         Err(refusal) => return (StatusCode::CONFLICT, Json(refusal.body())).into_response(),
+    };
+    // The start key: the request captured from the body as sent, then the
+    // read-only lookup before the gate. 200 with the run a repeat started,
+    // 409 for another request under the key, 400 for a bad key.
+    let start_key = match body.start_key.as_deref() {
+        None => None,
+        Some(raw) => {
+            let fields = apb_core::start_key::StartRequestFields {
+                v: apb_core::start_key::REQUEST_V,
+                params: body.params.clone(),
+                instruction: body.instruction.clone(),
+                worktree: body.worktree.clone(),
+                supervision: apb_core::start_key::label(&apb_engine::RunMode::Autonomous),
+                cache: apb_core::start_key::label(&apb_engine::run_config::CacheRunMode::Auto),
+                deadline_ms,
+                budget: body
+                    .budget
+                    .as_ref()
+                    .and_then(|b| serde_json::to_value(b).ok()),
+                unattended: body.unattended,
+                continued_from: body.continued_from.clone(),
+                external_data,
+                ..Default::default()
+            };
+            let looked = {
+                let (root, id, raw) = (root.clone(), id.clone(), raw.to_string());
+                let reuse = body.start_key_reuse;
+                tokio::task::spawn_blocking(move || {
+                    apb_mcp::tools::run::keyed_lookup(&root, "project", &id, &raw, reuse, &fields)
+                })
+                .await
+            };
+            match looked {
+                Ok(Ok(apb_mcp::tools::run::Keyed::Go(req))) => Some(req),
+                Ok(Ok(apb_mcp::tools::run::Keyed::Answer(v))) => return Json(v).into_response(),
+                Ok(Err(refusal)) => {
+                    let status = if refusal["policy"] == apb_core::start_key::INVALID {
+                        StatusCode::BAD_REQUEST
+                    } else {
+                        StatusCode::CONFLICT
+                    };
+                    return (status, Json(refusal)).into_response();
+                }
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+                }
+            }
+        }
     };
     let launch_kind = match &body.continued_from {
         Some(pred) => apb_engine::gate::launch::LaunchKind::ContinueFrom {
@@ -363,6 +442,7 @@ pub(crate) async fn run_playbook_handler(
     let mut opts = apb_engine::RunOptions {
         unattended: body.unattended,
         external_data,
+        deadline_ms,
         instruction: body.instruction,
         params: body.params,
         continued_from: body.continued_from,
@@ -372,6 +452,7 @@ pub(crate) async fn run_playbook_handler(
         // parameters are already persisted, so nothing depends on the caller
         // still being around when the engine frees up.
         workdir_queue_wait: state.workdir_queue_wait,
+        start_key,
         ..Default::default()
     };
 
@@ -519,6 +600,10 @@ pub(crate) async fn run_playbook_handler(
             }
             // The estimate the run started with and its budget.
             Json(apb_mcp::tools::budget::with_start_blocks(&root, answer)).into_response()
+        }
+        // A keyed start that lost the race to the same request.
+        Err(apb_engine::EngineError::AlreadyStarted(run_id)) => {
+            Json(apb_mcp::tools::run::already_started(&root, &run_id)).into_response()
         }
         Err(apb_engine::EngineError::NotFound(what)) => {
             (StatusCode::NOT_FOUND, what).into_response()

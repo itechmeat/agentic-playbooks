@@ -277,6 +277,7 @@ fn rebind_with_drifted_bundle_is_refused_and_pinning_holds() {
         Control::Abort {
             reason: "test cleanup".into(),
             by: None,
+            graceful: false,
         },
     )
     .unwrap();

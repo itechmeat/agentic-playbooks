@@ -409,3 +409,56 @@ fn a_supervised_external_data_start_is_flagged() {
         text.contains("\"type\":\"run_finished\"").then_some(())
     });
 }
+
+/// A keyed `--supervise` start hands its key to the `__drive-supervised`
+/// child in the handoff file, never on its argv (the supervisor stub
+/// records its parent's command line), and a repeat answers the run.
+#[cfg(target_os = "linux")]
+#[test]
+fn start_key_is_not_on_the_child_argv() {
+    let dir = seeded();
+    let parent_argv = dir.path().join("parent_argv.txt");
+    let stub = dir.path().join("agent_stub.sh");
+    fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\ntr '\\0' ' ' < /proc/$PPID/cmdline >> '{}'\necho >> '{}'\nexit 0\n",
+            parent_argv.display(),
+            parent_argv.display()
+        ),
+    )
+    .unwrap();
+    set_executable(&stub);
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let key = "event-key-7f3a";
+    let out = playbook()
+        .args(["run", "svnoagent", "--supervise", "--start-key", key])
+        .current_dir(dir.path())
+        .env("APB_AGENT_CMD", &stub)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{stdout} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run_id = extract_run_id(&stdout, &dir.path().join(".apb/runs"));
+    let argv = poll_until("the supervisor's parent argv", || {
+        let t = fs::read_to_string(&parent_argv).ok()?;
+        t.contains("__drive-supervised").then_some(t)
+    });
+    assert!(!argv.contains(key), "the key is on the child argv: {argv}");
+    assert!(!argv.contains("start-key"), "{argv}");
+    let again = playbook()
+        .args(["run", "svnoagent", "--supervise", "--start-key", key])
+        .current_dir(dir.path())
+        .env("APB_AGENT_CMD", &stub)
+        .output()
+        .unwrap();
+    let again = String::from_utf8_lossy(&again.stdout).to_string();
+    assert!(
+        again.contains(&format!("run already started: {run_id} (start key)")),
+        "{again}"
+    );
+}

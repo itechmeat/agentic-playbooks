@@ -641,6 +641,9 @@ async fn supervise_self_returns_token() {
 
     let result = server
         .playbook_run(Parameters(PlaybookRunArgs {
+            deadline: None,
+            start_key: None,
+            start_key_reuse: None,
             id: "noagent_sv".to_string(),
             version: None,
             params: BTreeMap::new(),
@@ -702,6 +705,9 @@ async fn playbook_run_remember_keeps_the_input_for_this_project() {
     let token = format!("ghp_{}", "b".repeat(36));
     let result = server
         .playbook_run(Parameters(PlaybookRunArgs {
+            deadline: None,
+            start_key: None,
+            start_key_reuse: None,
             id: "noagent_sv".to_string(),
             version: None,
             params: BTreeMap::from([
@@ -751,6 +757,9 @@ async fn playbook_run_remember_keeps_the_input_for_this_project() {
     assert_eq!(memory["values"][0]["value"], "world");
 
     let start = |version: Option<&str>, who: &str| PlaybookRunArgs {
+        deadline: None,
+        start_key: None,
+        start_key_reuse: None,
         id: "noagent_sv".to_string(),
         version: version.map(str::to_string),
         params: if who.is_empty() {
@@ -836,6 +845,9 @@ async fn background_run_returns_run_id_without_blocking() {
     };
     let result = server
         .playbook_run(Parameters(PlaybookRunArgs {
+            deadline: None,
+            start_key: None,
+            start_key_reuse: None,
             id: "slowscript".to_string(),
             version: None,
             params: BTreeMap::new(),
@@ -2013,6 +2025,9 @@ async fn global_scope_playbook_runs_in_current_project() {
     let server = WfMcp::new(proj.path().to_path_buf());
     let res = server
         .playbook_run(Parameters(PlaybookRunArgs {
+            deadline: None,
+            start_key: None,
+            start_key_reuse: None,
             id: "noagent".into(),
             version: None,
             params: BTreeMap::new(),
@@ -2166,6 +2181,9 @@ async fn a_host_request_under_the_kill_switch_returns_the_execution_note() {
     let server = WfMcp::new(dir.path().to_path_buf());
     let result = server
         .playbook_run(Parameters(PlaybookRunArgs {
+            deadline: None,
+            start_key: None,
+            start_key_reuse: None,
             id: "noagent_sv".to_string(),
             version: None,
             params: BTreeMap::new(),
@@ -2283,6 +2301,9 @@ fn rel_args(
     supervise: Option<&str>,
 ) -> PlaybookRunArgs {
     PlaybookRunArgs {
+        deadline: None,
+        start_key: None,
+        start_key_reuse: None,
         id: "rel".into(),
         version: None,
         params: BTreeMap::new(),
@@ -2598,6 +2619,7 @@ async fn run_resume_asks_once_for_a_run_without_consent() {
     let resume = |confirm: Option<ConfirmIrreversibleArg>| {
         server.run_resume_for(
             RunResumeArgs {
+                deadline: None,
                 run_id: run_id.clone(),
                 from_node: Some("note".into()),
                 retry_now: false,
@@ -2712,8 +2734,13 @@ mod billing;
 mod budget;
 // The corrections ledger: the list, a person's decision, and no run step.
 mod corrections;
+// The run deadline on `run_resume`: a grant, a refusal, a bad duration.
+mod deadline;
+// The start key on `playbook_run`: a repeat, a conflict, a candidate and a
+// global start that do not change the request.
 #[path = "../../../apb-engine/tests/support/driver_reaper.rs"]
 mod driver_reaper;
+mod start_key;
 // External data runs on the start and run tools.
 mod external_data;
 // The launch policy of agents on the start and authoring tools.
@@ -2785,6 +2812,9 @@ async fn playbook_run_refuses_a_param_without_a_value() {
     let server = WfMcp::new(dir.path().to_path_buf());
     let result = server
         .playbook_run(Parameters(PlaybookRunArgs {
+            deadline: None,
+            start_key: None,
+            start_key_reuse: None,
             id: "noagent_sv".to_string(),
             version: None,
             params: BTreeMap::new(),
@@ -2883,6 +2913,7 @@ fn run_resume_retry_now_expedites_a_live_run() {
     )
     .unwrap();
     let args = |node: &str| RunResumeArgs {
+        deadline: None,
         run_id: "r-defer".into(),
         from_node: None,
         retry_now: true,
@@ -2983,6 +3014,9 @@ fn unattended_args(
     background: Option<bool>,
 ) -> PlaybookRunArgs {
     PlaybookRunArgs {
+        deadline: None,
+        start_key: None,
+        start_key_reuse: None,
         id: id.to_string(),
         version: None,
         params: BTreeMap::new(),
@@ -3114,6 +3148,9 @@ async fn playbook_run_refuses_a_param_that_does_not_match_its_pattern() {
     params_map.insert("who".to_string(), "a b".to_string());
     let result = server
         .playbook_run(Parameters(PlaybookRunArgs {
+            deadline: None,
+            start_key: None,
+            start_key_reuse: None,
             id: "noagent_sv".to_string(),
             version: None,
             params: params_map,

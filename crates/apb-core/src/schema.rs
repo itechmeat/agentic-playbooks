@@ -199,6 +199,12 @@ pub struct Playbook {
     /// [`crate::follow_up`]). Additive to schema 2; no migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up: Option<crate::follow_up::FollowUp>,
+    /// The run's deadline: it ends aborted (`deadline_exceeded`) once it has
+    /// run this long (a duration, `45m`), the time a person paused it left
+    /// out (see `apb_engine::run_deadline`). A run argument overrides it.
+    /// Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<String>,
     /// What `run.previous_success.*` renders when no earlier run of this
     /// playbook succeeded (see [`crate::previous_success`]). Additive to
     /// schema 2; no migration.

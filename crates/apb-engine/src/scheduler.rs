@@ -559,6 +559,7 @@ fn engine_pause(
         launch: None,
         definition: None,
         apb: None,
+        deadline: None,
     })?;
     Ok(true)
 }
@@ -728,6 +729,20 @@ fn drive_inner(
     // unrelated run's agent. `apb connector call`, spawned as a child of the
     // agent, resolves secrets from the dotenv files itself.
     let env_scrub = apb_core::connector::resolve::all_referenced_env_names(root);
+    // The run's deadline (routine operations): its expiry as a wall-clock
+    // instant, registered for every place this drive starts work, and a
+    // watch that ends the run at that instant. A drive that starts past it
+    // stops at once.
+    let (_deadline_latch, _deadline_watch) = {
+        let events = crate::event::read_all_lossy_tail(run_dir).unwrap_or_default();
+        match crate::run_deadline::DeadlineLatch::of(&events, apb_core::clock::now_ms()) {
+            Some(latch) => (
+                Some(crate::run_deadline::register(root, run_dir, &run_id, latch)),
+                Some(DeadlineWatch::start_run(root, run_dir, &run_id, latch)),
+            ),
+            None => (None, None),
+        }
+    };
     // The other active branch heads (besides `current`). A linear run keeps the
     // frontier empty - behavior identical to the old single `current`. A fork
     // (several unconditional outgoing edges) puts the extra targets here; when the
@@ -968,6 +983,9 @@ fn drive_inner(
 
     loop {
         supervisor::ensure_run_dir(run_dir)?;
+        // A run past its deadline starts nothing more: the stop is posted
+        // here, and the control scan below applies it.
+        crate::run_deadline::refuses_work(run_dir);
         // A scenario that missed an answer under `on_missing: error` stops
         // the run at once.
         if let Some(e) = crate::scenario::session::halt_error(run_dir) {
@@ -1566,6 +1584,14 @@ fn drive_inner(
                                     // before the batch; it spends nothing now.
                                     reserved.release(&n);
                                     continue;
+                                }
+                                // A run past its deadline admits no queued
+                                // member: the stop is posted, and the run
+                                // ends aborted at the loop top.
+                                if crate::run_deadline::refuses_work(run_dir) {
+                                    halt.store(true, Ordering::SeqCst);
+                                    queue.clear();
+                                    break;
                                 }
                                 // A pause: no NEW work, and NOTHING is written
                                 // off. A paused run is resumable and `Cancelled`

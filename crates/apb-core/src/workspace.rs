@@ -20,8 +20,8 @@ const WORKSPACE_FILE: &str = "workspace.local";
 /// the agent saw), the node result cache, soft-deleted playbooks, schema
 /// migration backups, the workdir lock, the log of decisions asked outside
 /// a run (`decisions.jsonl`), remembered run input, the known problems and corrections
-/// stores, scenario runs, the open billing challenges and the launch
-/// handoff files. The one list
+/// stores, scenario runs, the open billing challenges, the launch
+/// handoff files and the start keys. The one list
 /// `ensure_local_ignored` writes; a new runtime path under `.apb/` belongs
 /// here.
 pub const LOCAL_ENTRIES: &[&str] = &[
@@ -47,6 +47,9 @@ pub const LOCAL_ENTRIES: &[&str] = &[
     // The single-use launch handoff files a checked launch crosses a
     // detached spawn in (`apb_engine::launch_handoff`).
     "handoff/",
+    // The keyed MACs of start keys and their reservations, signed by this
+    // installation (`apb_core::start_key`).
+    "start-keys/",
 ];
 
 /// The projects `dir` lies in, nearest first: `dir` itself and every
@@ -253,6 +256,7 @@ mod tests {
             "scenario-runs/",
             "launch-challenges/",
             "handoff/",
+            "start-keys/",
         ] {
             assert!(LOCAL_ENTRIES.contains(&entry), "{entry} missing");
         }

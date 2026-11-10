@@ -30,6 +30,36 @@ verdict in its exit code:
 | 4 | the run is paused, its driver is gone, or it is released while a deferred retry waits | fail; `apb resume <run_id>` continues it (`--retry-now` starts a waiting retry at once) |
 | 5 | `--timeout` elapsed while the run was still going | fail, and `apb stop <run_id>` |
 
+### Starting once: `--start-key`
+
+A job that a runner may retry, or a timer that may fire twice, passes a
+key that names the event the run is for:
+
+```sh
+apb run nightly-digest --detach --unattended --start-key "${{ github.run_id }}"
+apb run nightly-digest --detach --start-key "digest-$(date +%F)"
+```
+
+A repeat with the same key and the same arguments starts nothing: it prints
+`run already started: <run_id> (start key)` and, without `--detach`, waits
+for that run and exits like `apb wait <run_id>`, so a retried job reads the
+first run's verdict (a failed run is exit 1, not a new attempt). Another
+request under the key (other params, instruction, version, deadline,
+`--no-cache`, `--supervise`, `--external-data` and so on) is refused
+`start_key_conflict` with exit 2. A key whose run failed or was aborted is
+used again only with `--start-key-reuse`, a person's decision; a run step
+cannot pass it.
+
+`${{ github.run_id }}` stays the same across re-runs of a job, so a re-run
+follows the first run; adding `${{ github.run_attempt }}` to the key makes
+every re-run a new start. Keys are kept 7 days (`runs.start_key_days` in
+`policy.yaml`, 1 to 365; a project file may only lengthen it). apb stores
+only a MAC of the key under this installation's key, never the key; a key
+that looks like a credential is refused `start_key_invalid`. When the file
+of keys under `.apb/start-keys/` does not verify, every keyed start of that
+playbook is refused `start_key_state_unreadable` until a person moves the
+file aside (`apb doctor` names it); unkeyed starts are not affected.
+
 ### Following automatic progress: `--follow-auto`
 
 The default `apb wait` returns as soon as anything stops the run itself: a
@@ -162,6 +192,14 @@ then continue with `apb wait <run_id> --follow-auto`, the form for CI. On an
 ephemeral runner nobody will come back to the run: start it unattended.
 
 ## Unattended runs
+
+A run that nobody watches should also have an end. `apb run --deadline
+45m` (or `deadline: 45m` in the playbook) ends the run aborted
+`deadline_exceeded` once it has run that long, even while it waits on a
+quota pause, a review nobody answers or a busy working tree, so a stuck job
+turns into an exit code (`apb wait` exits 1) instead of holding the tree
+into the next scheduled run. The time a person paused the run is left out.
+See "deadline" in `docs/HOWTO-authoring.md`.
 
 `apb run --unattended` (MCP `playbook_run { unattended: true }`, the HTTP
 start body `{ "unattended": true }`) starts a run that nobody attends. Every

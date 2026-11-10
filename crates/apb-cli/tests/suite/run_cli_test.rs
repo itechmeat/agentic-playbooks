@@ -578,6 +578,7 @@ fn drive_supervised_takes_its_consent_only_from_its_parents_handoff() {
                     policy: apb_core::launch::LaunchPolicy::Allow,
                     sources: vec![],
                     billing: None,
+                    started_by: None,
                 },
                 binding: HandoffBinding::Nonce { nonce: "x".into() },
                 config_dir: None,
@@ -588,6 +589,8 @@ fn drive_supervised_takes_its_consent_only_from_its_parents_handoff() {
                 by: "cli".into(),
                 nonce: "x".into(),
             }),
+            deadline_ms: None,
+            start_key: None,
         },
     )
     .unwrap();
@@ -769,4 +772,465 @@ fn an_unattended_run_records_and_shows_its_mode() {
         .clone();
     let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
     assert!(v.get("unattended").is_none(), "{v}");
+}
+
+/// The run's `--deadline` is recorded on `run_provenance` and guarded; an
+/// unparsable value is refused `deadline_invalid` before any run file.
+#[test]
+fn deadline_flag_is_recorded() {
+    let dir = seeded();
+    playbook()
+        .args(["run", "noagent", "--param", "who=x", "--deadline", "soon"])
+        .current_dir(dir.path())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("deadline_invalid"));
+    assert!(no_runs(dir.path()));
+    playbook()
+        .args(["run", "noagent", "--param", "who=x", "--deadline", "45m"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let run = only_run(dir.path());
+    let text = fs::read_to_string(run.join("events.jsonl")).unwrap();
+    assert!(
+        text.contains("\"deadline\":{\"total_ms\":2700000,\"source\":\"run\"}"),
+        "{text}"
+    );
+    assert!(text.contains("\"requires\":[\"deadline\"]"), "{text}");
+}
+
+/// `apb resume <id> --deadline` reaches a detached driver: a host-free
+/// failed run resumed with more time journals the grant on `run_resumed`.
+#[test]
+fn resume_deadline_flag_reaches_the_driver() {
+    let dir = seeded();
+    playbook()
+        .args(["run", "noagent", "--param", "who=x", "--deadline", "10m"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let run = only_run(dir.path());
+    let id = run.file_name().unwrap().to_string_lossy().into_owned();
+    playbook()
+        .args(["resume", &id, "--from-node", "note", "--deadline", "5m"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let text = fs::read_to_string(run.join("events.jsonl")).unwrap();
+    let resumed = text
+        .lines()
+        .find(|l| l.contains("\"type\":\"run_resumed\""))
+        .expect("a run_resumed");
+    assert!(resumed.contains("\"source\":\"resume\""), "{resumed}");
+}
+
+/// A run `apb run` starts from a run step names its starter on `apb runs
+/// <id>`, and `apb runs <starter>` lists it under the runs its steps
+/// started in this project.
+#[test]
+fn a_step_started_run_and_its_starter_name_each_other() {
+    let dir = seeded();
+    let root = dir.path();
+    // A first run makes the installation key the starter is stamped with.
+    playbook()
+        .args(["run", "noagent", "--param", "who=x"])
+        .current_dir(root)
+        .assert()
+        .success();
+    let starter = root.join(".apb/runs/t-1");
+    fs::create_dir_all(&starter).unwrap();
+    fs::write(
+        starter.join("events.jsonl"),
+        concat!(
+            "{\"seq\":1,\"ts\":1,\"type\":\"run_started\",\"playbook\":\"triage\",\"version\":\"1.0.0\"}\n",
+            "{\"seq\":2,\"ts\":2,\"type\":\"node_started\",\"node\":\"triage\",\"attempt\":1}\n",
+            "{\"seq\":3,\"ts\":3,\"type\":\"attempt_started\",\"node\":\"triage\",\"attempt\":2,\"agent\":\"claude\",\"token\":\"tok-cli-1\"}\n",
+        ),
+    )
+    .unwrap();
+    apb_core::run_origin::stamp_in(crate::common::sandbox_config_dir(), &starter, "t-1").unwrap();
+    let out = playbook()
+        .args(["run", "noagent", "--param", "who=y", "--detach"])
+        .env("APB_RUN_ID", "t-1")
+        .env("APB_RUN_DIR", &starter)
+        .env("APB_NODE_ID", "triage")
+        .env("APB_ATTEMPT_TOKEN", "tok-cli-1")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{stdout} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let id = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("run started: "))
+        .expect("run id")
+        .trim()
+        .to_string();
+    let shown = |run: &str| {
+        let out = playbook()
+            .args(["runs", run])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    let new = shown(&id);
+    assert!(
+        new.contains("started by run t-1 (node triage, attempt 2)"),
+        "{new}"
+    );
+    let starter_text = shown("t-1");
+    assert!(
+        starter_text.contains(&format!("started runs in this project: {id} (noagent)")),
+        "{starter_text}"
+    );
+    let manifest = fs::read_to_string(root.join(".apb/runs").join(&id).join("manifest.yaml"))
+        .unwrap_or_default();
+    assert!(!manifest.contains("tok-cli-1"), "the token was stored");
+}
+
+/// An agent of run A (chain 1) starts run B; B's script step starts run C.
+/// The script inherits the environment of the `apb run` that drove B, A's
+/// attempt credentials included, yet it is verified by its own run context:
+/// C names B's script node, verified, at chain 3.
+#[test]
+fn a_script_step_of_a_step_started_run_is_verified_by_its_own_run() {
+    let dir = seeded();
+    let root = dir.path();
+    playbook()
+        .args(["run", "noagent", "--param", "who=x"])
+        .current_dir(root)
+        .assert()
+        .success();
+    let vdir = root.join(".apb/playbooks/chainer/1.0.0");
+    fs::create_dir_all(vdir.join("scripts")).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        "schema: 2\nid: chainer\nname: chainer\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: kick, type: script, script: \"scripts/kick.sh\", runner: sh }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: kick }\n  - { from: kick, to: done }\n",
+    )
+    .unwrap();
+    fs::write(
+        vdir.join("scripts/kick.sh"),
+        "\"$APB_TEST_BIN\" run noagent --param who=c --allow-shared-workdir > \"$APB_TEST_OUT\" 2>&1\n",
+    )
+    .unwrap();
+    fs::write(root.join(".apb/playbooks/chainer/current"), "1.0.0").unwrap();
+    let a = root.join(".apb/runs/a-1");
+    fs::create_dir_all(&a).unwrap();
+    fs::write(
+        a.join("events.jsonl"),
+        concat!(
+            "{\"seq\":1,\"ts\":1,\"type\":\"run_started\",\"playbook\":\"triage\",\"version\":\"1.0.0\"}\n",
+            "{\"seq\":2,\"ts\":2,\"type\":\"node_started\",\"node\":\"triage\",\"attempt\":1}\n",
+            "{\"seq\":3,\"ts\":3,\"type\":\"attempt_started\",\"node\":\"triage\",\"attempt\":1,\"agent\":\"claude\",\"token\":\"tok-chain-a\"}\n",
+        ),
+    )
+    .unwrap();
+    let manifest = serde_json::json!({
+        "profiles": [], "node_bindings": {},
+        "launch": {
+            "kind": "start", "initiator": "run_step:cli", "policy": "allow", "sources": [],
+            "started_by": { "run_id": "earlier", "verified": true, "chain": 1 }
+        }
+    });
+    fs::write(a.join("manifest.yaml"), manifest.to_string()).unwrap();
+    apb_core::run_origin::stamp_in(crate::common::sandbox_config_dir(), &a, "a-1").unwrap();
+    let out_file = root.join("c-out.txt");
+    let out = playbook()
+        .args(["run", "chainer"])
+        .env("APB_RUN_ID", "a-1")
+        .env("APB_RUN_DIR", &a)
+        .env("APB_NODE_ID", "triage")
+        .env("APB_ATTEMPT", "1")
+        .env("APB_ATTEMPT_TOKEN", "tok-chain-a")
+        .env("APB_TEST_BIN", crate::common::apb_bin())
+        .env("APB_TEST_OUT", &out_file)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{} {} | C: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+        fs::read_to_string(&out_file).unwrap_or_default()
+    );
+    let by_of = |id: &str| apb_engine::run_view::started_by(&root.join(".apb/runs").join(id));
+    let ids: Vec<String> = fs::read_dir(root.join(".apb/runs"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let b = ids
+        .iter()
+        .find(|id| id.starts_with("chainer-"))
+        .expect("run B");
+    let b_by = by_of(b).expect("B names its starter");
+    assert_eq!(
+        (b_by.run_id.as_str(), b_by.verified, b_by.chain),
+        ("a-1", true, 2)
+    );
+    let c = ids
+        .iter()
+        .find(|id| by_of(id).is_some_and(|by| &by.run_id == b))
+        .unwrap_or_else(|| {
+            panic!(
+                "no run names B; C said: {}",
+                fs::read_to_string(&out_file).unwrap_or_default()
+            )
+        });
+    let c_by = by_of(c).unwrap();
+    assert_eq!(c_by.node.as_deref(), Some("kick"));
+    assert_eq!(
+        (c_by.verified, c_by.chain, c_by.attempt),
+        (true, 3, None),
+        "{c_by:?}"
+    );
+}
+
+// ---- the start key ----
+
+/// Runs `apb run <args>` in `root`; returns (exit code, stdout, stderr).
+fn apb_run(root: &std::path::Path, args: &[&str]) -> (i32, String, String) {
+    let out = playbook()
+        .arg("run")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+fn run_count(root: &std::path::Path) -> usize {
+    fs::read_dir(root.join(".apb/runs"))
+        .map(|r| r.count())
+        .unwrap_or(0)
+}
+
+#[test]
+fn start_key_repeat_detach_prints_the_run() {
+    let dir = seeded();
+    let root = dir.path();
+    let args = [
+        "noagent",
+        "--param",
+        "who=x",
+        "--start-key",
+        "ci-42",
+        "--detach",
+    ];
+    let (code, out, err) = apb_run(root, &args);
+    assert_eq!(code, 0, "{out} {err}");
+    let id = out
+        .lines()
+        .find_map(|l| l.strip_prefix("run started: "))
+        .expect("run id")
+        .trim()
+        .to_string();
+    let (code, out, err) = apb_run(root, &args);
+    assert_eq!(code, 0, "{out} {err}");
+    assert!(
+        out.contains(&format!("run already started: {id} (start key)")),
+        "{out}"
+    );
+    assert_eq!(run_count(root), 1);
+    let shown = playbook()
+        .args(["runs", &id])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&shown.stdout).contains("start key: "));
+}
+
+/// The start key is looked up before the checks that depend on the
+/// environment: an unattended host start the kill switch turned into cli
+/// started, and the same arguments without the switch answer that run
+/// instead of being refused `unattended_unsupported`.
+#[test]
+fn start_key_repeat_is_answered_before_runtime_checks() {
+    let dir = seeded();
+    let root = dir.path();
+    let args = [
+        "run",
+        "noagent",
+        "--param",
+        "who=x",
+        "--unattended",
+        "--execution",
+        "host",
+        "--start-key",
+        "env-1",
+        "--detach",
+    ];
+    let first = playbook()
+        .args(args)
+        .env("APB_EXECUTION", "cli")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&first.stdout).to_string();
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "{out} {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let id = out
+        .lines()
+        .find_map(|l| l.strip_prefix("run started: "))
+        .expect("run id")
+        .trim()
+        .to_string();
+    let again = playbook()
+        .args(args)
+        .env_remove("APB_EXECUTION")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let (out, err) = (
+        String::from_utf8_lossy(&again.stdout),
+        String::from_utf8_lossy(&again.stderr),
+    );
+    assert_eq!(again.status.code(), Some(0), "{out} {err}");
+    assert!(
+        out.contains(&format!("run already started: {id} (start key)")),
+        "{out} {err}"
+    );
+    assert_eq!(run_count(root), 1);
+}
+
+const FAILS: &str = "schema: 2\nid: fails\nname: fails\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: s, type: script, script: \"scripts/s.sh\", runner: sh }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: s }\n  - { from: s, to: done }\n";
+
+#[test]
+fn start_key_repeat_of_a_failed_run_exits_1() {
+    let dir = seeded();
+    let root = dir.path();
+    let v = root.join(".apb/playbooks/fails/1.0.0");
+    fs::create_dir_all(v.join("scripts")).unwrap();
+    fs::write(v.join("playbook.yaml"), FAILS).unwrap();
+    fs::write(v.join("scripts/s.sh"), "exit 1\n").unwrap();
+    fs::write(root.join(".apb/playbooks/fails/current"), "1.0.0").unwrap();
+    let (code, _, _) = apb_run(root, &["fails", "--start-key", "k"]);
+    assert_eq!(code, 1);
+    let (code, out, err) = apb_run(root, &["fails", "--start-key", "k"]);
+    assert_eq!(code, 1, "{out} {err}");
+    assert!(out.contains("run already started:"), "{out}");
+    assert_eq!(run_count(root), 1);
+    let (code, out, err) = apb_run(root, &["fails", "--start-key", "k", "--start-key-reuse"]);
+    assert_eq!(code, 1, "{out} {err}");
+    assert_eq!(run_count(root), 2, "a reuse starts a new run");
+}
+
+#[test]
+fn start_key_conflict_exits_2() {
+    let dir = seeded();
+    let root = dir.path();
+    let (code, ..) = apb_run(root, &["noagent", "--param", "who=x", "--start-key", "k"]);
+    assert_eq!(code, 0);
+    for extra in [
+        vec!["--param", "who=y"],
+        vec!["--param", "who=x", "--version", "1.0.0"],
+        vec!["--param", "who=x", "--deadline", "10m"],
+        vec!["--param", "who=x", "--external-data"],
+        vec!["--param", "who=x", "--worktree", "."],
+    ] {
+        let mut args = vec!["noagent", "--start-key", "k"];
+        args.extend(extra.iter().copied());
+        let (code, out, err) = apb_run(root, &args);
+        assert_eq!(code, 2, "{extra:?}: {out} {err}");
+        assert!(
+            err.contains("run refused (start_key_conflict)"),
+            "{extra:?}: {err}"
+        );
+    }
+    assert_eq!(run_count(root), 1);
+    let token = format!(
+        "ghp_{}",
+        "a1B2c3D4e5".repeat(4).chars().take(36).collect::<String>()
+    );
+    let (code, _, err) = apb_run(
+        root,
+        &["noagent", "--param", "who=x", "--start-key", &token],
+    );
+    assert_eq!(code, 2);
+    assert!(err.contains("start_key_invalid"), "{err}");
+    assert!(!err.contains(&token), "the key was printed");
+}
+
+#[test]
+fn start_key_conflict_on_no_cache() {
+    let dir = seeded();
+    let root = dir.path();
+    let (code, ..) = apb_run(root, &["noagent", "--param", "who=x", "--start-key", "k"]);
+    assert_eq!(code, 0);
+    let (code, _, err) = apb_run(
+        root,
+        &[
+            "noagent",
+            "--param",
+            "who=x",
+            "--start-key",
+            "k",
+            "--no-cache",
+        ],
+    );
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("start_key_conflict"), "{err}");
+}
+
+#[test]
+fn start_key_conflict_on_supervise() {
+    let dir = seeded();
+    let root = dir.path();
+    let (code, ..) = apb_run(root, &["noagent", "--param", "who=x", "--start-key", "k"]);
+    assert_eq!(code, 0);
+    let (code, _, err) = apb_run(
+        root,
+        &[
+            "noagent",
+            "--param",
+            "who=x",
+            "--start-key",
+            "k",
+            "--supervise",
+        ],
+    );
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("start_key_conflict"), "{err}");
+    assert_eq!(run_count(root), 1);
+}
+
+/// The request is what the caller passed: a keyed start without params
+/// recalls remembered input; the input remembered changes; the same keyed
+/// start answers the first run instead of a conflict.
+#[test]
+fn the_request_is_what_the_caller_passed() {
+    let dir = seeded();
+    let root = dir.path();
+    let (code, ..) = apb_run(root, &["noagent", "--param", "who=a", "--remember"]);
+    assert_eq!(code, 0);
+    let (code, out, err) = apb_run(root, &["noagent", "--start-key", "k", "--detach"]);
+    assert_eq!(code, 0, "{out} {err}");
+    let id = out
+        .lines()
+        .find_map(|l| l.strip_prefix("run started: "))
+        .expect("run id")
+        .trim()
+        .to_string();
+    let (code, ..) = apb_run(root, &["noagent", "--param", "who=b", "--remember"]);
+    assert_eq!(code, 0);
+    let (code, out, err) = apb_run(root, &["noagent", "--start-key", "k", "--detach"]);
+    assert_eq!(code, 0, "{out} {err}");
+    assert!(
+        out.contains(&format!("run already started: {id} (start key)")),
+        "{out} {err}"
+    );
 }

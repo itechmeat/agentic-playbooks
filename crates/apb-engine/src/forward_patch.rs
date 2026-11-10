@@ -251,7 +251,7 @@ type Unchanged = fn(&Playbook, &Playbook) -> bool;
 
 /// The parts of the definition a forward patch may not change, as (the
 /// refusal code, why, the comparison), in the order they are checked.
-fn protected_fields() -> [(&'static str, &'static str, Unchanged); 8] {
+fn protected_fields() -> [(&'static str, &'static str, Unchanged); 9] {
     [
         (
             "goal_changed",
@@ -291,6 +291,11 @@ fn protected_fields() -> [(&'static str, &'static str, Unchanged); 8] {
             "launch_policy_changed",
             "`agent_launch` is approved content: only a person may change a playbook's launch policy",
             |a, b| a.agent_launch == b.agent_launch,
+        ),
+        (
+            "deadline_changed",
+            "the run's `deadline` is not a supervisor's to change",
+            |a, b| a.deadline == b.deadline,
         ),
     ]
 }

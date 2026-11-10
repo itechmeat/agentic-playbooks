@@ -462,6 +462,22 @@ every playbook as `allow`. The policy holds only while every apb on the
 machine is this release or newer; `apb doctor` warns when another apb is on
 `PATH`.
 
+**Runs started from a run step.** A start a run step makes (an agent, a
+script or a host task's subagent calling `apb run` or MCP `playbook_run`,
+`playbook_trial` or `playbook_execute_plan`) records its starter in the
+new run's launch record as `started_by`: the starting run, its workspace,
+the node, the attempt number, whether it was verified and the chain
+depth. It is verified only for a run this installation created, not ended,
+whose open attempt (or script visit) the step's token binds to; the token
+itself is never stored. A chain of such starts is bounded at 5 runs, across
+projects: a sixth is refused `start_chain_too_deep` on every surface. A
+resume is never refused for its chain, and a sub-playbook child is not
+marked. A step of a run started with `external_data: true` starts a run
+with the flag too; an explicit `false` there is refused
+`external_data_immutable`. Nothing is written into the starting run: its
+surfaces list the runs its steps started in the same project from their
+records.
+
 ## Billed use
 
 Agent work can be paid for in two ways: on a subscription login, or billed

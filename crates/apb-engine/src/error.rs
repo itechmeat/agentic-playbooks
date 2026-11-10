@@ -12,6 +12,9 @@ pub enum EngineError {
     /// Surfaces that map HTTP status codes treat this as 409 Conflict.
     #[error("conflict: {0}")]
     Conflict(String),
+    /// A start key named a run that already started; nothing was started.
+    #[error("already started: {0}")]
+    AlreadyStarted(String),
     /// The request an answer or a decision names already has one, queued or
     /// journaled: a second one would answer nothing (or a later round).
     #[error("already answered: {0}")]

@@ -21,6 +21,7 @@ fn post_and_read_control_with_cursor() {
         Control::Abort {
             reason: "cancel".into(),
             by: None,
+            graceful: false,
         },
     )
     .unwrap();

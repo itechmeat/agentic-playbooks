@@ -44,11 +44,47 @@ pub enum Handoff {
         choice: crate::gate::launch::Choice,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         consent: Option<ForwardedConsent>,
+        /// The run's deadline argument, milliseconds (`--deadline`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deadline_ms: Option<u64>,
+        /// The start key, its reuse and the request tag the parent
+        /// captured: never on the child's argv.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_key: Option<HandoffStartKey>,
     },
     /// An eval case: the decision bound to the definition under test.
     Eval { grant: HandoffGrant },
     /// A detached resume: the grant the driver commits.
     Resume(LaunchGrant),
+}
+
+/// A keyed start's key as a handoff carries it: the key, its reuse and
+/// the request tag the surface captured, verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffStartKey {
+    pub key: String,
+    pub reuse: bool,
+    pub request: String,
+}
+
+impl HandoffStartKey {
+    pub fn of(req: &apb_core::start_key::StartKeyRequest) -> Self {
+        HandoffStartKey {
+            key: req.key.expose().to_string(),
+            reuse: req.reuse,
+            request: req.request.tag().to_string(),
+        }
+    }
+
+    /// The request again on the receiving side (a key that no longer
+    /// parses carries none).
+    pub fn request(self) -> Option<apb_core::start_key::StartKeyRequest> {
+        Some(apb_core::start_key::StartKeyRequest {
+            key: apb_core::start_key::StartKey::parse(&self.key).ok()?,
+            reuse: self.reuse,
+            request: apb_core::start_key::StartRequest::from_handoff(self.request),
+        })
+    }
 }
 
 /// The irreversible consent a parent obtained: who gave it and the nonce of
@@ -238,6 +274,7 @@ mod tests {
                 policy: LaunchPolicy::Ask,
                 sources: vec![],
                 billing: None,
+                started_by: None,
             },
             permit_digest: Some("p".into()),
             policy_state: Some("s".into()),
