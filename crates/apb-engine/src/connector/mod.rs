@@ -17,11 +17,15 @@
 
 pub mod call;
 pub mod completeness;
+pub(crate) mod compose;
 pub mod contract_test;
 pub mod effect;
+pub(crate) mod files;
 pub mod imap;
 pub mod inbox;
 pub mod intent;
+pub(crate) mod mime_read;
+pub mod oauth;
 pub mod prompt;
 pub mod result;
 pub mod run;

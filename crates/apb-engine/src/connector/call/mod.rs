@@ -19,20 +19,25 @@
 
 mod account;
 mod attempt;
-mod auth;
+pub(crate) mod auth;
 pub(crate) mod encode;
 mod http;
+pub(crate) mod paginate;
+pub(crate) mod render;
 mod request;
-mod response;
+pub(crate) mod response;
 mod send_once;
+pub(crate) mod shape;
 mod target;
+pub(crate) mod url_encode;
+pub(crate) mod wire;
 
 pub use account::select_live_account;
 use account::{account_selection_error, select_account};
 pub use attempt::AttemptClaim;
 use auth::{non_secret_fields, resolve_secrets};
-use encode::{assemble_url, encode_args_for_url, encode_component};
 use http::HttpCall;
+use render::{insert_at_path, render_http};
 use request::validate_args;
 pub use request::{CallContext, CallRequest};
 pub(crate) use request::{CallOrigin, TargetPins};
@@ -42,35 +47,23 @@ pub(crate) use target::LiveTarget;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use apb_core::connector::config;
 use apb_core::connector::def::{ConnectorDoc, FunctionSpec};
+use apb_core::connector::oauth::check_scopes;
 use apb_core::connector::secrets;
 use apb_core::connector::store;
-use apb_core::connector::template::{
-    RenderCtx, render_body, render_encoded, render_raw, resolve_optional_arg,
-    single_args_placeholder,
-};
 use apb_core::secret::{Redaction, Secret};
 use apb_core::trust::{TrustStore, account_trust_id};
 use serde_json::{Value, json};
 
-use crate::connector::intent::stamp::{self, Stamp};
+use crate::connector::intent::stamp::Stamp;
 use crate::event::{EventLog, EventPayload};
 use crate::manifest::{self, ManifestAccount, ManifestConnector, ManifestConnectorGrant};
 
-/// The maximum response body read into memory (spec 6.1). A longer body is
-/// cut at the cap: a read-only call fails as `incomplete_response`, a call
-/// that may have changed the world stays a success but carries
-/// `response_complete: false` on its result.
-const BODY_CAP: usize = 1024 * 1024;
-
 /// The default User-Agent (spec 4.4): ureq sends its own, and GitHub rejects
 /// requests without one it recognizes. Overridden by a function `headers`
-/// entry naming `User-Agent`.
-const USER_AGENT: &str = concat!("apb/", env!("CARGO_PKG_VERSION"));
-
 /// Where a reached call belongs, for its journal record: the attempt it
 /// ran in, who made it, and the send intent it carried out.
 #[derive(Debug, Clone, Default)]
@@ -87,6 +80,7 @@ struct CallScope {
 // message redaction live in `connector_result`, the shared sink both the HTTP
 // and SMTP call paths point at (keeps the file graph acyclic). Re-exported here
 // so the public path `apb_engine::connector::call::{CallError, ...}` is stable.
+pub(crate) use crate::connector::result::Dispatched;
 pub use crate::connector::result::{
     BodyIncomplete, CallError, CallErrorCode, CallOk, IncompleteReason,
 };
@@ -108,6 +102,12 @@ struct EventMeta {
     /// Whether the response body was read whole (`Some(true)`), cut or failed
     /// partway (`Some(false)`), or completeness does not apply (`None`).
     response_complete: Option<bool>,
+    /// Warnings of the call (a rotated refresh token): shown in the result
+    /// JSON, never journaled.
+    warnings: Vec<String>,
+    /// Pages a paginated read attempted, the failed one included; `None`
+    /// for every other call.
+    pages: Option<u32>,
     scope: CallScope,
 }
 
@@ -166,32 +166,45 @@ fn execute_bounded(req: CallRequest, ctx: &CallContext, max_secs: Option<u64>) -
             }
             let mut value = ok.to_success_json();
             settle_send(&req, &meta, Ok(&ok), &mut value);
+            add_warnings(&mut value, &meta.warnings);
             (value, true)
         }
         Outcome::Executed(err, meta) => {
             append_event(&req, &meta);
             let mut value = err.to_json();
-            settle_send(&req, &meta, Err(&err), &mut value);
-            (value, false)
+            let now_ok = settle_send(&req, &meta, Err(&err), &mut value);
+            add_warnings(&mut value, &meta.warnings);
+            (value, now_ok)
         }
         Outcome::Gate(err) => (err.to_json(), false),
     }
 }
 
-/// Settles the send intent a reached call carried out, if any.
+/// Settles the send intent a reached call carried out, if any. Returns
+/// whether the send is now ok (a confirmed send, or a conflict that
+/// `conflict: confirms` proves): the caller's ok hint follows it (D3).
 fn settle_send(
     req: &CallRequest,
     meta: &EventMeta,
     result: Result<&CallOk, &CallError>,
     value: &mut Value,
-) {
+) -> bool {
     if let Some(tracked) = &meta.scope.send {
         let facts = crate::connector::effect::CallFacts {
             outcome: &meta.outcome,
             http_status: meta.http_status,
             response_complete: meta.response_complete,
         };
-        send_once::finish(req.run_dir, tracked, facts, result, value);
+        return send_once::finish(req.run_dir, tracked, facts, result, value);
+    }
+    result.is_ok()
+}
+
+/// Puts the call's warnings at the top level of the result JSON, ok or
+/// error, when there are any. Warnings are never journaled.
+fn add_warnings(value: &mut Value, warnings: &[String]) {
+    if !warnings.is_empty() {
+        value["warnings"] = json!(warnings);
     }
 }
 
@@ -210,7 +223,7 @@ enum Outcome {
 fn run(req: &CallRequest, ctx: &CallContext, max_secs: Option<u64>) -> Outcome {
     // 1-8: gate + render. Terminates as a dry-run, an answer, or a gate
     // rejection, none of which carries event metadata.
-    let (mut prepared, scope) = match prepare(req, ctx) {
+    let (mut prepared, scope) = match prepare(req, ctx, max_secs) {
         Ok(Staged::Ready(Prepared::DryRun(v), _)) => return Outcome::DryRun(v),
         Ok(Staged::Ready(Prepared::Call(p), scope)) => (*p, scope),
         Ok(Staged::Answer(ok)) => return Outcome::Answer(ok),
@@ -230,11 +243,21 @@ fn run(req: &CallRequest, ctx: &CallContext, max_secs: Option<u64>) -> Outcome {
     // it is read off the prepared call before dispatch consumes it.
     let http_like = matches!(prepared, PreparedCall::Http(_));
     let started = Instant::now();
-    let (result, http_status) = prepared.dispatch();
+    let dispatched = prepared.dispatch();
     let duration_ms = started.elapsed().as_millis() as u64;
+    let Dispatched {
+        result,
+        http_status,
+        pages,
+        warnings,
+    } = dispatched;
     let response_complete = match (&result, http_like) {
         (Ok(ok), true) => ok.response_complete(),
-        (Err(err), true) if err.code == CallErrorCode::IncompleteResponse => Some(false),
+        (Err(err), true)
+            if err.code == CallErrorCode::IncompleteResponse || err.incomplete.is_some() =>
+        {
+            Some(false)
+        }
         _ => None,
     };
     let (outcome, http_status) = match &result {
@@ -253,6 +276,8 @@ fn run(req: &CallRequest, ctx: &CallContext, max_secs: Option<u64>) -> Outcome {
         smtp_subject,
         smtp_recipients,
         response_complete,
+        warnings,
+        pages,
         scope,
     };
     match result {
@@ -312,10 +337,11 @@ impl PreparedCall {
     /// Lowers the call's timeout to at most `secs` (never raises it). A
     /// mock answers at once, and an inbox call reads local state.
     fn cap_timeout(&mut self, secs: u64) {
+        let lowered = Instant::now() + Duration::from_secs(secs);
         match self {
-            PreparedCall::Http(h) => h.timeout_sec = h.timeout_sec.min(secs),
+            PreparedCall::Http(h) => h.deadline = h.deadline.min(lowered),
             PreparedCall::Smtp { call, .. } => call.cap_timeout(secs),
-            PreparedCall::Imap { call, .. } => call.cap_timeout(secs),
+            PreparedCall::Imap { call, .. } => call.cap_deadline(lowered),
             PreparedCall::Mock { .. } | PreparedCall::Inbox { .. } => {}
         }
     }
@@ -354,26 +380,50 @@ impl PreparedCall {
         }
     }
 
-    /// Executes the call, returning the mapped result and the HTTP status when
-    /// a response (or a mock status) was obtained.
-    fn dispatch(self) -> (Result<CallOk, CallError>, Option<u16>) {
+    /// Executes the call, returning the mapped result, the HTTP status when
+    /// a response (or a mock status) was obtained, the pages a paginated
+    /// read attempted, and the call's warnings.
+    fn dispatch(self) -> Dispatched {
         match self {
             PreparedCall::Mock { status, body, .. } => {
                 // A mock body is complete by construction: no read happened,
                 // so no incompleteness can be reported, whatever the
                 // function's read_only flag says.
-                (map_status(status, body, None, None, false), Some(status))
+                Dispatched {
+                    result: map_status(status, body, None, None, false),
+                    http_status: Some(status),
+                    pages: None,
+                    warnings: Vec::new(),
+                }
             }
             PreparedCall::Http(h) => h.send(),
             // An smtp call has no HTTP status; the event log records the
             // endpoint plus subject/recipient count, never a status code.
-            PreparedCall::Smtp { call, .. } => (call.send(), None),
+            PreparedCall::Smtp { call, .. } => Dispatched {
+                result: call.send(),
+                http_status: None,
+                pages: None,
+                warnings: Vec::new(),
+            },
             // An imap call likewise has no HTTP status; the event log records
             // only the endpoint (spec 3.4: no subjects).
-            PreparedCall::Imap { call, .. } => (call.send(), None),
+            PreparedCall::Imap { mut call, .. } => {
+                let warnings = std::mem::take(&mut call.warnings);
+                Dispatched {
+                    result: call.send(),
+                    http_status: None,
+                    pages: None,
+                    warnings,
+                }
+            }
             // An inbox call never leaves the machine, so there is no status
             // and nothing to redact.
-            PreparedCall::Inbox { call, .. } => (call.send(), None),
+            PreparedCall::Inbox { call, .. } => Dispatched {
+                result: call.send(),
+                http_status: None,
+                pages: None,
+                warnings: Vec::new(),
+            },
         }
     }
 }
@@ -381,7 +431,11 @@ impl PreparedCall {
 /// Gate + resolve + render (steps 1-8). Returns a dry-run terminal, a
 /// `PreparedCall` with its journal scope, or an answer that needs no call;
 /// or a gate error for any pre-execution failure.
-fn prepare(req: &CallRequest, ctx: &CallContext) -> Result<Staged, CallError> {
+fn prepare(
+    req: &CallRequest,
+    ctx: &CallContext,
+    max_secs: Option<u64>,
+) -> Result<Staged, CallError> {
     // 1, 2 and 4: where the call goes (the run's grant and snapshot, or a
     // live trust-checked target).
     let target = target::resolve(req, ctx)?;
@@ -476,6 +530,19 @@ fn prepare(req: &CallRequest, ctx: &CallContext) -> Result<Staged, CallError> {
     } else {
         &req.args
     };
+    // D7: the attachments directory this call writes into, node and list
+    // item included, each segment through the file name sanitizer; the op
+    // appends the uid.
+    let item = ctx
+        .claim
+        .item
+        .as_deref()
+        .map(|i| crate::connector::files::safe_file_name(Some(i), 0));
+    let attachments_dir = format!(
+        "attachments/{}{}",
+        crate::connector::files::safe_file_name(Some(req.node_id), 0),
+        item.as_deref().map(|i| format!("/{i}")).unwrap_or_default(),
+    );
     let built = build_prepared(
         &target.function,
         &target.doc,
@@ -487,6 +554,9 @@ fn prepare(req: &CallRequest, ctx: &CallContext) -> Result<Staged, CallError> {
             dry_run: req.dry_run,
             full: req.full,
             stamp: stamp.as_ref(),
+            max_secs,
+            files: Some(req.run_dir),
+            attachments_dir: Some(attachments_dir.as_str()),
         },
     );
     match built {
@@ -543,6 +613,17 @@ struct CallMode<'a> {
     dry_run: bool,
     full: bool,
     stamp: Option<&'a Stamp<'a>>,
+    /// The caller's bound on the whole call, folded into the one deadline
+    /// `build_prepared` starts.
+    max_secs: Option<u64>,
+    /// The run directory attachment writes anchor at (D7), set in
+    /// `prepare` from `req.run_dir`. `None` for a live call (healthcheck,
+    /// playground), where `save_attachments` is refused.
+    files: Option<&'a Path>,
+    /// The attachments directory beneath `files` for this call:
+    /// `attachments/<node>[/<item>]`, every segment through the file name
+    /// sanitizer; the op appends the uid. Set only with `files`.
+    attachments_dir: Option<&'a str>,
 }
 
 /// The rendered HTTP shape of a function - method, the pre-auth URL (function
@@ -552,24 +633,6 @@ struct CallMode<'a> {
 /// dry-run terminal, the live send path, and the offline `tests.yaml` runner
 /// (`connector_test`), so a contract test renders exactly what a `--dry-run`
 /// call renders.
-pub struct RenderedRequest {
-    pub method: String,
-    pub pre_auth_url: String,
-    pub rendered_body: Option<Value>,
-    /// The rendered `body_form` pairs (spec
-    /// 2026-07-22-official-connectors-wave-3, section 4.1), DECODED and in
-    /// manifest (BTreeMap) order; percent-encoding happens at send time so the
-    /// offline runner and the dry-run terminal compare readable values.
-    /// `None` when the function declares no `body_form` (mutually exclusive
-    /// with `rendered_body` by validation).
-    pub rendered_form: Option<Vec<(String, String)>>,
-    /// The headers that would be sent: the rendered per-function `headers` with
-    /// the default `User-Agent` folded in unless a function header already names
-    /// it (case-insensitively). Auth headers are NOT included here (auth is
-    /// injected on the wire, after this render).
-    pub headers: BTreeMap<String, String>,
-}
-
 /// Renders a function's method, pre-auth URL, body, and headers against the
 /// given non-secret account fields, args, and secrets. `secrets` is threaded
 /// through so the render context stays uniform with the live send path (the
@@ -578,80 +641,8 @@ pub struct RenderedRequest {
 /// percent-encoded; account prefixes stay raw (spec 6.1), matching the previous
 /// inline logic exactly. The default `User-Agent` (spec 4.4) is folded into the
 /// header map unless a function header overrides it.
-pub(crate) fn render_http(
-    function: &FunctionSpec,
-    account_fields: &BTreeMap<String, String>,
-    args: &Value,
-    secrets: &BTreeMap<String, Secret>,
-    stamp: Option<&Stamp>,
-) -> Result<RenderedRequest, CallError> {
-    let ctx = RenderCtx {
-        account: account_fields,
-        args,
-        secrets,
-    };
-    let method = function.method.clone().unwrap_or_else(|| "GET".to_string());
-    // The URL base renders with raw substitution EXCEPT that `{{args.*}}` values
-    // are pre-encoded: an account field used as a URL prefix (`base_url`) is
-    // trusted config that must keep its `://` (spec 6.1) and so cannot go through
-    // whole-value percent-encoding, while argument values in a path segment must
-    // still be encoded so they cannot inject traversal or extra query structure.
-    let url_args = encode_args_for_url(args);
-    let url_ctx = RenderCtx {
-        account: account_fields,
-        args: &url_args,
-        secrets,
-    };
-    let base = render_raw(function.url.as_deref().unwrap_or(""), &url_ctx)
-        .map_err(|e| CallError::new(CallErrorCode::Config, format!("URL render failed: {e}")))?;
-    let query = render_query(function, &ctx)?;
-    let pre_auth_url = assemble_url(&base, &query);
-    validate_url(&pre_auth_url)?;
-    // Text modes prepare the named args before they reach the body, so no
-    // body template can place the raw value; a write also has forged send
-    // markers neutralized and carries its own stamp.
-    let body_args = stamp::prepare_body_args(function, args, stamp);
-    let body_ctx = RenderCtx {
-        args: &body_args,
-        ..ctx
-    };
-    let mut rendered_body = match &function.body {
-        Some(b) => Some(render_body(b, &body_ctx).map_err(|e| {
-            CallError::new(CallErrorCode::Config, format!("body render failed: {e}"))
-        })?),
-        None => None,
-    };
-    let rendered_form = if function.body_form.is_empty() {
-        None
-    } else {
-        Some(render_form(function, &body_ctx)?)
-    };
-    let mut headers = BTreeMap::new();
-    for (name, template) in &function.headers {
-        let value = render_raw(template, &ctx).map_err(|e| {
-            CallError::new(
-                CallErrorCode::Config,
-                format!("header `{name}` render failed: {e}"),
-            )
-        })?;
-        headers.insert(name.clone(), value);
-    }
-    // Default User-Agent (spec 4.4) unless a function header already names it.
-    let has_ua = headers.keys().any(|k| k.eq_ignore_ascii_case("user-agent"));
-    if !has_ua {
-        headers.insert("User-Agent".to_string(), USER_AGENT.to_string());
-    }
-    stamp::apply_key(function, stamp, &mut rendered_body, &mut headers)
-        .map_err(|m| CallError::new(CallErrorCode::Config, m))?;
-    Ok(RenderedRequest {
-        method,
-        pre_auth_url,
-        rendered_body,
-        rendered_form,
-        headers,
-    })
-}
-
+/// Sets the value at a dot path of a rendered body, creating the objects
+/// on the way. `Err` when a segment walks into a non-object.
 /// Renders the function's `body_form` pairs (spec
 /// 2026-07-22-official-connectors-wave-3, section 4.1) as DECODED key-value
 /// pairs, mirroring `render_query`'s semantics: a value that is exactly one
@@ -660,28 +651,6 @@ pub(crate) fn render_http(
 /// present (string verbatim, number/bool via their JSON text), and turns a
 /// non-scalar into a Config error; mixed-content templates keep string
 /// interpolation where an absent arg is an error.
-fn render_form(
-    function: &FunctionSpec,
-    ctx: &RenderCtx,
-) -> Result<Vec<(String, String)>, CallError> {
-    let mut pairs = Vec::new();
-    for (key, template) in &function.body_form {
-        if let Some(field) = single_args_placeholder(template)
-            && resolve_optional_arg(ctx, field).is_none()
-        {
-            continue;
-        }
-        let value = render_raw(template, ctx).map_err(|e| {
-            CallError::new(
-                CallErrorCode::Config,
-                format!("body_form render failed: {e}"),
-            )
-        })?;
-        pairs.push((key.clone(), value));
-    }
-    Ok(pairs)
-}
-
 /// Shared gate + render logic (pipeline steps 5-8): validates args against the
 /// function's schema, returns a mock immediately (no network, no secrets), or
 /// resolves secrets and renders the URL/query/body with the 6.1 hardening.
@@ -703,7 +672,18 @@ fn build_prepared(
         dry_run,
         full,
         stamp,
+        max_secs,
+        files,
+        attachments_dir,
     } = mode;
+    // The one deadline of the whole call: from here, the function's
+    // `timeout_sec`, lowered by a caller's bound. Minting, the service
+    // request, the refresh and retry after a 401, and every page share it.
+    let deadline = Instant::now()
+        + Duration::from_secs(match max_secs {
+            Some(bound) => function.timeout_sec.min(bound),
+            None => function.timeout_sec,
+        });
     // A dry-run of a send shows where its stamp goes, never a real nonce.
     let stamp = match (dry_run, function.send_once()) {
         (true, Some(_)) => Some(&Stamp::Preview),
@@ -760,7 +740,7 @@ fn build_prepared(
 
     // 7. Secrets: resolve every env-ref field. Skipped entirely for a dry-run.
     let account_fields = non_secret_fields(maccount);
-    let (secrets, redactions) = if dry_run {
+    let (secrets, mut redactions) = if dry_run {
         (BTreeMap::new(), Vec::new())
     } else {
         resolve_secrets(root, maccount)?
@@ -803,6 +783,14 @@ fn build_prepared(
             redactions,
             dry_run,
             function.timeout_sec,
+            &crate::connector::imap::ImapExtras {
+                auth: doc.auth.as_ref(),
+                files,
+                attachments_dir,
+                connector: &doc.name,
+                account: &account_name,
+                deadline: Some(deadline),
+            },
         )? {
             crate::connector::imap::ImapBuild::DryRun(v) => Ok(Prepared::DryRun(v)),
             crate::connector::imap::ImapBuild::Call(call) => {
@@ -819,11 +807,76 @@ fn build_prepared(
     // default User-Agent and any function headers are folded into
     // `rendered.headers` there, so the same bytes reach the wire and a contract
     // test alike.
-    let rendered = render_http(function, &account_fields, args, &secrets, stamp)?;
+    let mut rendered = render_http(function, &account_fields, args, &secrets, stamp)?;
     // A Basic credential leaves as base64 of `user:password`, a form no
     // single secret's redaction matches: it gets its own.
-    let mut redactions = redactions;
     redactions.extend(http::basic_redaction(auth, &account_fields, &secrets));
+
+    // D4: on the live path the composed message leaves as URL-safe base64
+    // at the body path (a dry-run and a contract case show the readable
+    // preview instead).
+    if !dry_run && let Some((at, bytes)) = rendered.mime_bytes.take() {
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::URL_SAFE.encode(bytes);
+        if let Some(body) = &mut rendered.rendered_body
+            && insert_at_path(body, &at, Value::String(encoded)).is_err()
+        {
+            return Err(CallError::new(
+                CallErrorCode::Config,
+                format!("mime path `{at}` does not name an object on the way"),
+            ));
+        }
+    }
+
+    // 8b. OAuth2 refresh: render the token source, check the declared
+    // scopes, and mint the access token, all before dispatch, so a failure
+    // here takes the pre-dispatch path (a recorded intent settles
+    // `not_sent`, and no `connector_call` is journaled: no request reached
+    // the service). A mock, an inbox read and a dry-run never render or
+    // contact the token source.
+    let mut warnings = Vec::new();
+    let mut access = None;
+    let mut token_source = None;
+    if !dry_run
+        && let Some(source) = crate::connector::oauth::TokenSource::render(
+            auth,
+            &account_fields,
+            &secrets,
+            &doc.name,
+            &account_name,
+        )?
+    {
+        if !function.scopes.is_empty() {
+            // The account's declared granted scopes are checked before the
+            // mint: the endpoint sees no request when the account already
+            // says the token cannot work.
+            if let Some(granted) = source.declared_scopes() {
+                check_scopes(&function.scopes, granted).map_err(|missing| {
+                    scope_error(function, &missing, granted, &doc.name, &account_name)
+                })?;
+            }
+        }
+        let minted = source
+            .access_token(deadline, &redactions)
+            .map_err(CallError::from)?;
+        if minted.rotated {
+            warnings.push(crate::connector::oauth::ROTATION_WARNING.to_string());
+        }
+        redactions.push(Redaction::new(minted.access.clone(), "oauth:access_token"));
+        if let Some(new) = &minted.new_refresh {
+            redactions.push(Redaction::new(new.clone(), "oauth:refresh_token"));
+        }
+        if !function.scopes.is_empty()
+            && source.declared_scopes().is_none()
+            && let Some(granted) = &minted.granted
+        {
+            check_scopes(&function.scopes, granted).map_err(|missing| {
+                scope_error(function, &missing, granted, &doc.name, &account_name)
+            })?;
+        }
+        access = Some(minted.access);
+        token_source = Some(source);
+    }
 
     if dry_run {
         let mut out = json!({
@@ -842,6 +895,14 @@ fn build_prepared(
                     .map(|(k, v)| (k.clone(), Value::String(v.clone())))
                     .collect(),
             );
+        }
+        // A paginated read shows its bounds; only the first request is
+        // shown.
+        if let Some(p) = &function.paginate {
+            out["paginate"] = json!({
+                "max_pages": p.max_pages,
+                "next": if p.next.link_header { "link_header" } else { "token" },
+            });
         }
         return Ok(Prepared::DryRun(out));
     }
@@ -862,11 +923,25 @@ fn build_prepared(
                 function.response_pick.clone()
             },
             auth: auth.cloned(),
+            access,
+            token_source,
+            deadline,
+            warnings,
+            paginate: function
+                .paginate
+                .as_ref()
+                .map(|spec| super::call::http::PagePlan {
+                    spec: spec.clone(),
+                    function: function.clone(),
+                    args: args.clone(),
+                }),
+            decode_base64url: function.decode_base64url.clone(),
+            content_types: function.content_types.clone(),
+            function_name: function.name.clone(),
             error_when: error_when.cloned(),
             secrets,
             account_fields,
-            timeout_sec: function.timeout_sec,
-            redactions,
+            redactions: std::sync::Mutex::new(redactions),
         },
     )))))
 }
@@ -897,10 +972,23 @@ fn answer_live(prepare: impl FnOnce() -> Result<Prepared, CallError>) -> (Value,
     }
     match prepare() {
         Ok(Prepared::DryRun(v)) => (v, true),
-        Ok(Prepared::Call(prepared)) => match prepared.dispatch().0 {
-            Ok(ok) => (ok.to_success_json(), true),
-            Err(err) => (err.to_json(), false),
-        },
+        Ok(Prepared::Call(prepared)) => {
+            let Dispatched {
+                result, warnings, ..
+            } = prepared.dispatch();
+            match result {
+                Ok(ok) => {
+                    let mut value = ok.to_success_json();
+                    add_warnings(&mut value, &warnings);
+                    (value, true)
+                }
+                Err(err) => {
+                    let mut value = err.to_json();
+                    add_warnings(&mut value, &warnings);
+                    (value, false)
+                }
+            }
+        }
         Err(e) => (e.to_json(), false),
     }
 }
@@ -996,6 +1084,10 @@ fn prepare_play_call(
             dry_run,
             full,
             stamp: None,
+            max_secs: None,
+            // A live call has no run: save_attachments is refused.
+            files: None,
+            attachments_dir: None,
         },
     )
 }
@@ -1019,56 +1111,10 @@ pub(crate) fn load_snapshot(run_dir: &Path, connector: &str) -> Result<Connector
 
 /// Renders the function's query pairs (keys literal, values percent-encoded)
 /// into an already-encoded `k=v&k2=v2` string.
-fn render_query(function: &FunctionSpec, ctx: &RenderCtx) -> Result<String, CallError> {
-    let mut parts = Vec::new();
-    for (key, template) in &function.query {
-        // spec 5.1: a query value that is exactly `{{args.field}}` drops the
-        // whole pair when the arg is absent, instead of erroring. An
-        // explicit null arg is treated as absent and dropped too, so a
-        // literal "null" never renders into the query string. A present,
-        // non-null arg (scalar or not) still goes through `render_encoded`
-        // below, which already renders scalars typed (string verbatim,
-        // number/bool via their JSON text) and turns a non-scalar into a
-        // Config error.
-        if let Some(field) = single_args_placeholder(template)
-            && resolve_optional_arg(ctx, field).is_none()
-        {
-            continue;
-        }
-        let value = render_encoded(template, ctx).map_err(|e| {
-            CallError::new(CallErrorCode::Config, format!("query render failed: {e}"))
-        })?;
-        parts.push(format!("{}={value}", encode_component(key)));
-    }
-    Ok(parts.join("&"))
-}
-
 /// Enforces spec 6.1 URL hardening without a URL-parsing dependency: the URL
 /// must begin (case-insensitively) with `http://` or `https://`, and the
 /// authority (between `//` and the next `/`, `?`, or `#`) must not contain
 /// userinfo (`user:pass@host`).
-fn validate_url(url: &str) -> Result<(), CallError> {
-    let lower = url.to_ascii_lowercase();
-    let after = if let Some(rest) = lower.strip_prefix("https://") {
-        &url[url.len() - rest.len()..]
-    } else if let Some(rest) = lower.strip_prefix("http://") {
-        &url[url.len() - rest.len()..]
-    } else {
-        return Err(CallError::new(
-            CallErrorCode::Config,
-            format!("rendered URL is not an absolute http(s) URL: `{url}`"),
-        ));
-    };
-    let authority_end = after.find(['/', '?', '#']).unwrap_or(after.len());
-    if after[..authority_end].contains('@') {
-        return Err(CallError::new(
-            CallErrorCode::Config,
-            "rendered URL must not contain userinfo (user:pass@host)".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 /// Appends the `ConnectorCall` event for a reached call. Best-effort: a log
 /// write failure must not change the call's already-computed result, so the
 /// error is dropped (the result was printed regardless). The call runs
@@ -1088,12 +1134,42 @@ fn append_event(req: &CallRequest, meta: &EventMeta) {
             smtp_subject: meta.smtp_subject.clone(),
             smtp_recipients: meta.smtp_recipients,
             response_complete: meta.response_complete,
+            pages: meta.pages,
             attempt: meta.scope.attempt,
             attempt_seq: meta.scope.attempt_seq,
             intent: meta.scope.send.as_ref().map(|t| t.id.clone()),
             origin: meta.scope.origin.journal_tag(),
         });
     }
+}
+
+/// The `auth` error of a function whose token lacks every scope it needs.
+/// The message names the scopes, what the token grants, and the consent
+/// command that mints a better token.
+fn scope_error(
+    function: &FunctionSpec,
+    missing: &[String],
+    granted: &std::collections::BTreeSet<String>,
+    connector: &str,
+    account: &str,
+) -> CallError {
+    let list = missing.join(", ");
+    let granted = {
+        let mut v: Vec<&String> = granted.iter().collect();
+        v.sort();
+        v.into_iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let first = missing.first().map(String::as_str).unwrap_or("");
+    CallError::new(
+        CallErrorCode::Auth,
+        format!(
+            "function `{f}` needs one of the OAuth scopes {list}; the token of account `{account}` grants {granted}. Run `apb connector oauth {connector} --account {account} --scope {first}` and store the new refresh token",
+            f = function.name,
+        ),
+    )
 }
 
 #[cfg(test)]

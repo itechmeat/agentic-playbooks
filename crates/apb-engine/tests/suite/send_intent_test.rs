@@ -57,6 +57,16 @@ fn manifest_yaml(connector: &str) -> String {
 }
 
 fn run_with(connector: &'static str, base_url: &str, grant: Grant<'_>) -> Run {
+    run_with_manifest(connector, &manifest_yaml(connector), base_url, grant)
+}
+
+/// [`run_with`] over a given connector manifest text.
+fn run_with_manifest(
+    connector: &'static str,
+    manifest_text: &str,
+    base_url: &str,
+    grant: Grant<'_>,
+) -> Run {
     let run = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     let mut m = RunExecutionManifest::default();
@@ -88,11 +98,7 @@ fn run_with(connector: &'static str, base_url: &str, grant: Grant<'_>) -> Run {
     manifest::write(run.path(), &m).unwrap();
     let cdir = run.path().join("connectors");
     std::fs::create_dir_all(&cdir).unwrap();
-    std::fs::write(
-        cdir.join(format!("{connector}.yaml")),
-        manifest_yaml(connector),
-    )
-    .unwrap();
+    std::fs::write(cdir.join(format!("{connector}.yaml")), manifest_text).unwrap();
     let secrets = root.path().join(".apb/secrets.env");
     std::fs::create_dir_all(secrets.parent().unwrap()).unwrap();
     std::fs::write(secrets, format!("{SECRET_VAR}=t0ken\n")).unwrap();
@@ -552,6 +558,50 @@ fn an_unknown_telegram_send_is_refused_unless_the_binding_allows_a_resend() {
             effect_ref: Some("5".into())
         }
     );
+}
+
+/// A write the service accepted (2xx) whose answer has a media type the
+/// function does not read went through: the guard refuses the body, but the
+/// send is not settled as not sent, so a repeat does not send again.
+#[test]
+fn an_accepted_send_with_a_refused_content_type_is_not_sent_again() {
+    let _lock = common::env_lock();
+    let stub = spawn_script(vec![
+        Reply::RespondWith(
+            200,
+            vec![("Content-Type".to_string(), "text/html".to_string())],
+            "<html>sent</html>".into(),
+        ),
+        Reply::Respond(200, r#"{"ok":true,"result":{"message_id":7}}"#.into()),
+    ]);
+    let yaml = manifest_yaml("telegram").replacen(
+        "    idempotency: { mode: none, result_ref: result.message_id }\n",
+        "    idempotency: { mode: none, result_ref: result.message_id }\n    content_types: [application/json]\n",
+        1,
+    );
+    assert!(yaml.contains("content_types"), "{yaml}");
+    let run = run_with_manifest(
+        "telegram",
+        &yaml,
+        &stub.base_url,
+        Grant::of(&["send_message"]),
+    );
+    let (first, _) = run.call("send_message", telegram_args(), Some("note"));
+    assert_eq!(code(&first), "service", "{first}");
+    assert_eq!(first["error"]["http_status"], json!(200), "{first}");
+    // Accepted means sent: confirmed by the response, with no effect id
+    // (the refused body was never read), not unknown and not open.
+    assert_eq!(
+        run.ledger().records()[0].state,
+        IntentState::Confirmed {
+            source: "response".into(),
+            effect_ref: None
+        }
+    );
+    let (again, ok) = run.call("send_message", telegram_args(), Some("note"));
+    assert!(ok, "{again}");
+    assert_eq!(again["already_sent"], json!(true), "{again}");
+    assert_eq!(stub.requests().len(), 1, "the accepted send was repeated");
 }
 
 // -- A repeatable write: untracked, exactly like an undeclared one --------
@@ -1292,4 +1342,171 @@ fn an_items_retry_after_a_send_is_answered_already_sent_by_the_ledger() {
         "another item sends its own"
     );
     assert_eq!(stub.requests().len(), 2);
+}
+// -- D3: a key conflict that confirms ------------------------------------
+
+/// An inline connector whose `send` carries a client-chosen id (the key) in
+/// the body: a 409 to a repeat of the same intent proves the first request
+/// created the item when the function declares `conflict: confirms`.
+fn conflict_connector_yaml(conflict: bool) -> String {
+    let conflict_line = if conflict {
+        "      encoding: base32hex\n      conflict: confirms\n"
+    } else {
+        ""
+    };
+    format!(
+        r#"
+name: conflictor
+version: 0.1.0
+account_fields:
+  - {{ name: api_base, required: true }}
+  - {{ name: token, required: true, secret: true }}
+functions:
+  - name: create_thing
+    description: d
+    method: POST
+    url: "{{{{account.api_base}}}}/things"
+    body: {{ t: "{{{{args.t}}}}" }}
+    args_schema: {{ type: object, properties: {{ t: {{ type: string }} }}, required: [t] }}
+    idempotency:
+      mode: key
+      field: id
+      window_sec: 86400
+{conflict_line}      result_ref: id
+"#
+    )
+}
+
+fn run_inline(conflict: bool, base_url: &str) -> Run {
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut m = RunExecutionManifest::default();
+    m.connectors.push(ManifestConnector {
+        name: "conflictor".to_string(),
+        digest: "sha256:test".to_string(),
+        accounts: vec![ManifestAccount {
+            name: "main".to_string(),
+            default: true,
+            fields: BTreeMap::from([
+                ("api_base".to_string(), base_url.to_string()),
+                ("token".to_string(), format!("{{{{env.{SECRET_VAR}}}}}")),
+            ]),
+            env: BTreeMap::from([("token".to_string(), SECRET_VAR.to_string())]),
+            cmd: BTreeMap::new(),
+            digest: "sha256:acct".to_string(),
+        }],
+    });
+    m.connector_grants.insert(
+        NODE.to_string(),
+        vec![ManifestConnectorGrant {
+            connector: "conflictor".to_string(),
+            accounts: vec!["main".to_string()],
+            functions: vec!["create_thing".to_string()],
+            max_calls: None,
+            on_unknown: None,
+        }],
+    );
+    manifest::write(run.path(), &m).unwrap();
+    let cdir = run.path().join("connectors");
+    std::fs::create_dir_all(&cdir).unwrap();
+    std::fs::write(
+        cdir.join("conflictor.yaml"),
+        conflict_connector_yaml(conflict),
+    )
+    .unwrap();
+    let secrets = root.path().join(".apb/secrets.env");
+    std::fs::create_dir_all(secrets.parent().unwrap()).unwrap();
+    std::fs::write(secrets, format!("{SECRET_VAR}=t0ken\n")).unwrap();
+    let r = Run {
+        run,
+        root,
+        connector: "conflictor",
+        current: std::sync::Mutex::new(AttemptClaim::default()),
+    };
+    r.journal(EventPayload::NodeStarted {
+        node: NODE.into(),
+        attempt: 1,
+    });
+    r.start_attempt(1);
+    r
+}
+
+fn thing_args() -> Value {
+    json!({ "t": "the thing" })
+}
+
+#[test]
+fn a_key_conflict_settles_confirmed_when_the_function_declares_it() {
+    let _lock = common::env_lock();
+    let stub = spawn_script(vec![Reply::Cut, Reply::Respond(409, "{}".into())]);
+    let run = run_inline(true, &stub.base_url);
+
+    let (first, ok) = run.call("create_thing", thing_args(), Some("create-1"));
+    assert!(!ok);
+    assert_eq!(first["effect"], "unknown");
+
+    // The repeat with the same intent gets 409: the key is an id the
+    // client chose, so the conflict proves the first request created it.
+    let (second, ok) = run.call("create_thing", thing_args(), Some("create-1"));
+    assert!(ok, "the conflict-confirmed repeat must exit ok: {second}");
+    assert_eq!(second["already_sent"], true);
+    let ref_value = second["ref"].as_str().expect("ref carries the key");
+    assert!(!ref_value.is_empty());
+
+    // Both requests carried the same id, the encoded nonce.
+    let requests = stub.requests();
+    assert_eq!(requests.len(), 2);
+    let (a, b) = (request_json(&requests[0]), request_json(&requests[1]));
+    assert_eq!(a["id"], b["id"]);
+    assert_eq!(a["id"], json!(ref_value));
+
+    let ledger = run.ledger();
+    let records = ledger.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records[1].state,
+        IntentState::Confirmed {
+            source: "key_conflict".into(),
+            effect_ref: Some(ref_value.to_string()),
+        }
+    );
+}
+
+#[test]
+fn a_key_conflict_stays_unknown_without_the_declaration() {
+    let _lock = common::env_lock();
+    let stub = spawn_script(vec![Reply::Cut, Reply::Respond(409, "{}".into())]);
+    let run = run_inline(false, &stub.base_url);
+
+    let (first, ok) = run.call("create_thing", thing_args(), Some("create-2"));
+    assert!(!ok);
+    assert_eq!(first["effect"], "unknown");
+
+    let (second, ok) = run.call("create_thing", thing_args(), Some("create-2"));
+    assert!(!ok, "a plain 409 stays unknown");
+    assert_eq!(second["effect"], "unknown");
+
+    let ledger = run.ledger();
+    let records = ledger.records();
+    assert!(matches!(records[0].state, IntentState::Unknown { .. }));
+    assert!(matches!(records[1].state, IntentState::Unknown { .. }));
+}
+
+/// The nonce is written into the key in the base32hex alphabet when the
+/// function declares `encoding: base32hex`.
+#[test]
+fn an_encoded_key_reaches_the_body() {
+    let _lock = common::env_lock();
+    let stub = spawn_script(vec![Reply::Respond(200, r#"{"id":"x"}"#.into())]);
+    let run = run_inline(true, &stub.base_url);
+    let (_, ok) = run.call("create_thing", thing_args(), Some("create-3"));
+    assert!(ok);
+    let body = request_json(&stub.requests()[0]);
+    let key = body["id"].as_str().unwrap();
+    assert!(
+        key.chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='v').contains(&c)),
+        "the key must be base32hex: {key}"
+    );
+    assert!(key.len() >= 24, "{key}");
 }

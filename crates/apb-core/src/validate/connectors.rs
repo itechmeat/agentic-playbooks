@@ -293,3 +293,65 @@ pub(crate) fn check_connector_list(
         }
     }
 }
+
+/// V187 (warning): a binding an author wrote on a node that reaches at
+/// least one `untrusted_output` function of a known, loading connector,
+/// through `all`, `read_only` or a list, without `untrusted: true`. It
+/// walks only the bindings the author wrote on a node
+/// (`node.kind.connector_bindings()`), never the synthetic engine sites the
+/// item checks, the baseline check and the follow-up read are built with:
+/// those carry `untrusted: false` and nobody could mark them.
+pub(crate) fn check_untrusted_output(
+    playbook: &Playbook,
+    ctx: &ValidationContext,
+    r: &mut ValidationReport,
+) {
+    for node in &playbook.nodes {
+        for b in node.kind.connector_bindings() {
+            if b.untrusted {
+                continue;
+            }
+            let Some(facts) = ctx.connectors.get(&b.name) else {
+                continue;
+            };
+            if facts.load_error.is_some() {
+                continue;
+            }
+            let reached: Vec<&str> = match &b.functions {
+                crate::schema::FunctionsAllow::All => facts
+                    .untrusted_output_functions
+                    .iter()
+                    .map(String::as_str)
+                    .collect(),
+                crate::schema::FunctionsAllow::List(names) => facts
+                    .untrusted_output_functions
+                    .iter()
+                    .filter(|f| names.contains(f))
+                    .map(String::as_str)
+                    .collect(),
+                crate::schema::FunctionsAllow::ReadOnly => facts
+                    .untrusted_output_functions
+                    .iter()
+                    .filter(|f| !facts.write_functions.contains(f))
+                    .map(String::as_str)
+                    .collect(),
+            };
+            if reached.is_empty() {
+                continue;
+            }
+            let list = reached
+                .iter()
+                .map(|f| format!("{}.{}", b.name, f))
+                .collect::<Vec<_>>()
+                .join(", ");
+            r.warn(
+                "V187",
+                Some(&node.id),
+                format!(
+                    "node `{}` grants {}, whose results are outside text (mail, events, files, search results); mark the binding `untrusted: true` so the untrusted-input checks (V179 to V182) see it",
+                    node.id, list
+                ),
+            );
+        }
+    }
+}

@@ -59,6 +59,39 @@ pub(crate) fn resolve_secrets(
     Ok((secrets, redactions))
 }
 
+/// Resolves only the named secret fields of `account`. The consent flow
+/// uses it for the client secret alone: the refresh token field is never
+/// resolved, so a first consent works with an unset `{{env.VAR}}` and a
+/// `{{cmd:...}}` helper does not run.
+pub(crate) fn resolve_named_secrets(
+    root: &Path,
+    account: &ManifestAccount,
+    names: &[&str],
+) -> Result<BTreeMap<String, Secret>, CallError> {
+    let mut out = BTreeMap::new();
+    for (field, var) in &account.env {
+        if !names.contains(&field.as_str()) {
+            continue;
+        }
+        let value = secrets::resolve_var(root, var).ok_or_else(|| {
+            CallError::new(
+                CallErrorCode::Config,
+                format!("secret env var `{var}` (account field `{field}`) is not set"),
+            )
+        })?;
+        out.insert(field.clone(), value);
+    }
+    for (field, cmdline) in &account.cmd {
+        if !names.contains(&field.as_str()) {
+            continue;
+        }
+        let value = secrets::resolve_cmd(cmdline, secrets::CMD_SECRET_TIMEOUT)
+            .map_err(|e| cmd_secret_error(&account.name, field, e))?;
+        out.insert(field.clone(), value);
+    }
+    Ok(out)
+}
+
 /// Maps a `CmdSecretError` to a `config` call error naming the account and
 /// field and, where the helper produced one, a trimmed stderr excerpt. The
 /// resolved secret is never part of any variant, so nothing sensitive can

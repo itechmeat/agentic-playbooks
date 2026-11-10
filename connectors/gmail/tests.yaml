@@ -1,0 +1,172 @@
+# Every case is offline: the render cases check the request a --dry-run
+# shows, the `responses` cases run the same walk/shape/pick path a live
+# call takes over scripted answers. No case contacts Google.
+cases:
+  - function: verify
+    account: { api_base: https://gmail.googleapis.com/gmail/v1, email: agent@acme.example }
+    args: {}
+    expect:
+      method: GET
+      url: https://gmail.googleapis.com/gmail/v1/users/me/profile
+
+  - function: list_labels
+    account: { api_base: https://gmail.googleapis.com/gmail/v1, email: agent@acme.example }
+    args: {}
+    expect:
+      method: GET
+      url: https://gmail.googleapis.com/gmail/v1/users/me/labels
+
+  # The exact URL: pairs in key order (a BTreeMap), `:` as %3A, an absent
+  # page_token dropping its pair.
+  - function: search_messages
+    account: { api_base: https://gmail.googleapis.com/gmail/v1, email: agent@acme.example }
+    args: { q: "is:unread", label_id: INBOX, max_results: 50 }
+    expect:
+      method: GET
+      url: "https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds=INBOX&maxResults=50&q=is%3Aunread"
+
+  # Two pages joined on the nextPageToken; the pick keeps id and threadId.
+  - function: search_messages
+    account: { api_base: https://gmail.googleapis.com/gmail/v1, email: agent@acme.example }
+    args: { q: "from:me" }
+    expect:
+      method: GET
+      url: "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=from%3Ame"
+      responses:
+        - body:
+            messages:
+              - { id: m1, threadId: t1 }
+              - { id: m2, threadId: t2 }
+            nextPageToken: tok2
+            resultSizeEstimate: 2
+        - body:
+            messages:
+              - { id: m3, threadId: t3 }
+            resultSizeEstimate: 1
+      requests:
+        - "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=from%3Ame"
+        - "https://gmail.googleapis.com/gmail/v1/users/me/messages?pageToken=tok2&q=from%3Ame"
+      result_contains:
+        ok: true
+        pages: 2
+        more: false
+        body:
+          messages:
+            - { id: m1, threadId: t1 }
+            - { id: m2, threadId: t2 }
+            - { id: m3, threadId: t3 }
+          resultSizeEstimate: 1
+
+  # Gmail leaves `messages` out when nothing matched; the result still
+  # carries an empty list.
+  - function: search_messages
+    account: { api_base: https://gmail.googleapis.com/gmail/v1, email: agent@acme.example }
+    args: { q: "is:unread" }
+    expect:
+      method: GET
+      url: "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=is%3Aunread"
+      responses:
+        - body: { resultSizeEstimate: 0 }
+      result_contains:
+        ok: true
+        body: { messages: [] }
+
+  # payload.parts[0].body.data is base64url of "Hello"; the pick keeps the
+  # decoded text. The second part is not UTF-8, so it arrives as null with
+  # a data_binary flag.
+  - function: get_message
+    account: { api_base: https://gmail.googleapis.com/gmail/v1, email: agent@acme.example }
+    args: { id: msg1 }
+    expect:
+      method: GET
+      url: "https://gmail.googleapis.com/gmail/v1/users/me/messages/msg1?format=full"
+      responses:
+        - body:
+            id: msg1
+            threadId: t1
+            labelIds: [INBOX]
+            snippet: "Hello world"
+            payload:
+              mimeType: multipart/mixed
+              headers:
+                - { name: From, value: "news@example.com" }
+                - { name: Subject, value: "Newsletter" }
+              body: { size: 0 }
+              parts:
+                - mimeType: text/plain
+                  filename: ""
+                  body: { data: SGVsbG8= }
+                - mimeType: application/octet-stream
+                  filename: blob.bin
+                  body: { data: "-_4A" }
+      result_contains:
+        ok: true
+        body:
+          payload:
+            parts:
+              - { mimeType: text/plain, filename: "", body: { data: Hello } }
+              - { mimeType: application/octet-stream, filename: blob.bin, body: { data: null, data_binary: true } }
+
+  - function: get_thread
+    account: { api_base: https://gmail.googleapis.com/gmail/v1, email: agent@acme.example }
+    args: { id: th1 }
+    expect:
+      method: GET
+      url: "https://gmail.googleapis.com/gmail/v1/users/me/threads/th1?format=metadata"
+
+  # The dry-run and contract render show the readable preview at
+  # message.raw, never base64; threadId comes from the body template.
+  - function: create_draft
+    account: { api_base: https://gmail.googleapis.com/gmail/v1, email: agent@acme.example }
+    args:
+      to: peer@example.org
+      bcc: quiet@example.org
+      subject: "Re: plan"
+      body_text: "Here is the reviewed plan."
+      in_reply_to: "<orig@example.org>"
+      references: "<first@example.org> <orig@example.org>"
+      thread_id: t1
+    expect:
+      method: POST
+      url: https://gmail.googleapis.com/gmail/v1/users/me/drafts
+      body_contains:
+        message:
+          threadId: t1
+          raw:
+            from: agent@acme.example
+            to: [peer@example.org]
+            bcc: [quiet@example.org]
+            subject: "Re: plan"
+            in_reply_to: "<orig@example.org>"
+
+  - function: send_draft
+    account: { api_base: https://gmail.googleapis.com/gmail/v1, email: agent@acme.example }
+    args: { draft_id: d1 }
+    expect:
+      method: POST
+      url: https://gmail.googleapis.com/gmail/v1/users/me/drafts/send
+      body_contains: { id: d1 }
+
+  - function: add_labels
+    account: { api_base: https://gmail.googleapis.com/gmail/v1, email: agent@acme.example }
+    args: { id: msg1, label_ids: [STARRED, todo] }
+    expect:
+      method: POST
+      url: https://gmail.googleapis.com/gmail/v1/users/me/messages/msg1/modify
+      body_contains: { addLabelIds: [STARRED, todo] }
+
+  - function: remove_labels
+    account: { api_base: https://gmail.googleapis.com/gmail/v1, email: agent@acme.example }
+    args: { id: msg1, label_ids: [INBOX] }
+    expect:
+      method: POST
+      url: https://gmail.googleapis.com/gmail/v1/users/me/messages/msg1/modify
+      body_contains: { removeLabelIds: [INBOX] }
+
+  - function: archive
+    account: { api_base: https://gmail.googleapis.com/gmail/v1, email: agent@acme.example }
+    args: { id: msg1 }
+    expect:
+      method: POST
+      url: https://gmail.googleapis.com/gmail/v1/users/me/messages/msg1/modify
+      body_contains: { removeLabelIds: [INBOX] }

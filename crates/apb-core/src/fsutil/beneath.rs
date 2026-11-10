@@ -574,6 +574,37 @@ impl Beneath {
         sys::fsync(dir.as_fd())
     }
 
+    /// Creates `name` in the directory `dir_rel` exclusively (D7): the file
+    /// must not exist, and a link at the name is never followed, so an
+    /// existing file or link is answered `AlreadyExists` and whatever it
+    /// holds stays untouched. The bytes land through the walked descriptor
+    /// with `O_EXCL | O_NOFOLLOW`, mode 0600; the file and its directory are
+    /// fsynced.
+    pub fn create_exclusive(&self, dir_rel: &str, name: &str, bytes: &[u8]) -> io::Result<()> {
+        use std::io::Write as _;
+        use std::os::fd::AsFd;
+        let segs = segments(dir_rel)?;
+        let leaf = one_segment(name)?;
+        crate::process_mode::guard_write(&self.anchor.join(dir_rel).join(leaf))?;
+        let dir = self.walk_io(&segs, dir_rel)?;
+        #[cfg(test)]
+        tests::between_steps();
+        let fd = sys::openat(
+            dir.as_fd(),
+            &sys::cstr(leaf)?,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW,
+            0o600,
+        )?;
+        let mut file = std::fs::File::from(fd);
+        let written = file.write_all(bytes).and_then(|()| file.sync_all());
+        if let Err(e) = written {
+            // A partial write must not leave a half file behind.
+            let _ = sys::unlinkat(dir.as_fd(), &sys::cstr(leaf)?, false);
+            return Err(e);
+        }
+        sys::fsync(dir.as_fd())
+    }
+
     /// Moves `from_rel` to `to_rel`, both beneath the anchor.
     pub fn rename_within(&self, from_rel: &str, to_rel: &str) -> io::Result<()> {
         use std::os::fd::AsFd;
@@ -914,6 +945,22 @@ impl Beneath {
             let _ = std::fs::remove_file(&tmp);
         }
         written
+    }
+
+    /// Creates `name` in the directory `dir_rel` exclusively (D7): the file
+    /// must not exist, and `create_new` refuses an existing file or link
+    /// with `AlreadyExists` without following it.
+    pub fn create_exclusive(&self, dir_rel: &str, name: &str, bytes: &[u8]) -> io::Result<()> {
+        use std::io::Write as _;
+        let leaf = one_segment(name)?;
+        crate::process_mode::guard_write(&self.anchor.join(dir_rel).join(leaf))?;
+        let dir = self.checked(&segments(dir_rel)?, dir_rel)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(leaf))?;
+        file.write_all(bytes)?;
+        file.sync_all()
     }
 
     /// Moves `from_rel` to `to_rel`, both beneath the anchor.
@@ -1281,6 +1328,90 @@ pub(crate) mod tests {
         );
     }
 
+    /// An existing name is answered `AlreadyExists` and its bytes stay
+    /// exactly as they were: a save that finds a file never replaces it.
+    #[test]
+    fn create_exclusive_answers_already_exists_and_keeps_the_old_bytes() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join("att/7")).unwrap();
+        std::fs::write(t.path().join("att/7/a.txt"), b"first bytes").unwrap();
+        let b = Beneath::open(t.path()).unwrap();
+        let err = b
+            .create_exclusive("att/7", "a.txt", b"replacement")
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
+        assert_eq!(
+            std::fs::read(t.path().join("att/7/a.txt")).unwrap(),
+            b"first bytes"
+        );
+        // A fresh name writes, and only that name.
+        b.create_exclusive("att/7", "b.txt", b"second").unwrap();
+        assert_eq!(
+            std::fs::read(t.path().join("att/7/b.txt")).unwrap(),
+            b"second"
+        );
+        assert_eq!(
+            std::fs::read_dir(t.path().join("att/7")).unwrap().count(),
+            2
+        );
+    }
+
+    /// A link at the name is never followed: `O_EXCL | O_NOFOLLOW` refuses
+    /// it, and the file it points at keeps its bytes.
+    #[test]
+    fn create_exclusive_never_follows_a_link_at_the_name() {
+        let t = tempfile::tempdir().unwrap();
+        let outside = t.path().join("outside");
+        std::fs::create_dir_all(t.path().join("att/7")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("target.txt"), b"outside bytes").unwrap();
+        std::os::unix::fs::symlink(outside.join("target.txt"), t.path().join("att/7/name.txt"))
+            .unwrap();
+        let b = Beneath::open(t.path()).unwrap();
+        let err = b
+            .create_exclusive("att/7", "name.txt", b"evil")
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
+        assert_eq!(
+            std::fs::read(outside.join("target.txt")).unwrap(),
+            b"outside bytes"
+        );
+        // Nothing new appeared outside.
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    }
+
+    /// The target directory is swapped for a link after its descriptor was
+    /// opened and before the file is created: the file lands in the
+    /// directory that was opened (now moved aside), never where the link
+    /// points.
+    #[test]
+    fn create_exclusive_refuses_a_directory_swapped_for_a_link() {
+        let t = tempfile::tempdir().unwrap();
+        let run = t.path().join("run");
+        let outside = t.path().join("outside");
+        std::fs::create_dir_all(run.join("attachments/staging")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let b = Beneath::open(&run).unwrap();
+        let (staging, aside, target) = (
+            run.join("attachments/staging"),
+            run.join("attachments/aside"),
+            outside.clone(),
+        );
+        BETWEEN.with(|s| {
+            *s.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(&staging, &aside).unwrap();
+                std::os::unix::fs::symlink(&target, &staging).unwrap();
+            }))
+        });
+        b.create_exclusive("attachments/staging", "a.txt", b"{}")
+            .unwrap();
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+        assert_eq!(
+            std::fs::read(run.join("attachments/aside/a.txt")).unwrap(),
+            b"{}"
+        );
+    }
+
     crate::read_only_test! {
         /// Every write is refused in a read-only process; reads are not.
         fn guard_refuses_in_read_only_child() before t = {
@@ -1292,6 +1423,7 @@ pub(crate) mod tests {
             let b = Beneath::open(t.path()).unwrap();
             assert!(b.mkdir_all("results/objects").is_err());
             assert!(b.write_new("results", "b", b"y").is_err());
+            assert!(b.create_exclusive("results", "d", b"z").is_err());
             assert!(b.rename_within("results/a", "results/c").is_err());
             assert!(b.remove("results/a").is_err());
             assert!(b.hold_lock("results", ".lock", std::time::Duration::ZERO).is_err());

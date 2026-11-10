@@ -22,7 +22,9 @@ pub mod install;
 pub mod marker;
 // No glob re-export: `official::{list,get}` would collide with `store::{list,...}`
 // under the `pub use store::*` glob below. Callers use `official::list()` etc.
+pub mod oauth;
 pub mod official;
+pub mod paginate;
 pub mod people;
 pub mod resolve;
 pub mod secrets;

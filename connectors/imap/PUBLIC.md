@@ -1,6 +1,6 @@
 ---
 display_name: IMAP Mail
-summary: Read mailboxes over IMAP with a silent-read guarantee, plus explicit read/unread marking.
+summary: Read mailboxes over IMAP with a silent-read guarantee, mark read/unread, file drafts, and save attachments into the run.
 tags: [email, imap, mail, notifications]
 publisher: apb
 ---
@@ -10,8 +10,9 @@ and `get_message` open the folder read-only with `EXAMINE`, and message
 content is fetched only with `BODY.PEEK[]`, so the `\Seen` flag cannot
 change as a side effect of a read, even on a server that would otherwise
 mark a message seen on fetch. The only functions that change anything on
-the server are `mark_read` and `mark_unread`, which are explicit,
-separately grantable calls.
+the server are `mark_read`, `mark_unread`, and `append_draft`, which adds
+one composed message to the drafts folder with the `\Draft` flag and
+never sends anything. Each is explicit and separately grantable.
 
 One connector serves any IMAP provider: the protocol is identical
 everywhere and only the connection settings differ, which is what an
@@ -20,8 +21,15 @@ account config is for.
 ## Account setup
 
 Account fields: `host` (required), `port` (required), `use_tls` (optional,
-default `true`), `auth_method` (required, `password` or `xoauth2`),
-`username` (required), `password` (required, secret).
+default `true`), `auth_method` (required, `password`, `xoauth2` or
+`oauth2`), `username` (required), `password` (secret, required for
+`password` and `xoauth2`), `from_email` and `from_name` (optional, the
+sender identity `append_draft` composes with; a draft call without
+`from_email` in the account fails naming the field). An `oauth2` account
+uses the `oauth_token_url`, `oauth_authorize_url`, `oauth_client_id`,
+`oauth_client_secret` (secret), `oauth_refresh_token` (secret),
+`oauth_scopes`, `oauth_access_type`, `oauth_prompt` and
+`oauth_granted_scopes` fields instead of a password.
 
 ```yaml
 accounts:
@@ -53,9 +61,12 @@ accounts:
 ```
 
 For a Google Workspace account where app passwords are disabled by policy,
-use `auth_method: xoauth2` with an access token from a standard OAuth
-token helper, sourced with `{{cmd:...}}` the same way the GitHub connector
-sources a CLI token.
+use `auth_method: oauth2`: run `apb connector oauth imap --account <name>`
+once in a terminal, approve the access in the browser it opens, and store
+the refresh token it prints as the account's `oauth_refresh_token` secret.
+An external token helper (`auth_method: xoauth2`, sourced with
+`{{cmd:...}}` the way the GitHub connector sources a CLI token) remains
+the alternative.
 
 ### Yandex Mail
 
@@ -76,9 +87,11 @@ accounts:
 ### Outlook and Microsoft 365
 
 Host `outlook.office365.com`, port `993`. Password authentication does not
-work here: Outlook and Microsoft 365 only accept `auth_method: xoauth2`.
-Source the access token from an external token helper (for example `oama`
-or `mutt_oauth2`) with the `{{cmd:...}}` mechanism:
+work here. The simplest path is `auth_method: oauth2` with `apb connector
+oauth imap` (an Azure app registration with a loopback redirect owns the
+client id and secret). The external token helper way (for example `oama`
+or `mutt_oauth2`, with `auth_method: xoauth2` and the `{{cmd:...}}`
+mechanism) still works:
 
 ```yaml
 accounts:
@@ -89,9 +102,6 @@ accounts:
     username: you@outlook.com
     password: "{{cmd:oama access outlook you@outlook.com}}"
 ```
-
-apb does not implement an OAuth consent flow itself; the token helper owns
-that.
 
 ### iCloud
 
@@ -115,7 +125,10 @@ without opening or reading any mailbox.
 
 ## Excluded on purpose
 
-No message deletion, no move between folders, and no sending: this
-connector only reads and marks read/unread. Sending mail is the `smtp`
-connector's job; the two are meant to be installed together for a
-read-and-reply workflow.
+No message deletion and no move between folders. No sending either:
+`append_draft` only files a message in the drafts folder, so actual
+delivery stays the `smtp` connector's job; the two are meant to be
+installed together for a read-and-reply workflow. `save_attachments`
+writes only inside the run's own directory (at most 20 files, 10 MiB per
+file, 25 MiB per call, names sanitized, nothing overwritten) and reads
+the mailbox read-only.

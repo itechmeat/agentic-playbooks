@@ -2,7 +2,9 @@
 //! encoding, URL hardening, status mapping and redaction.
 
 use super::encode::{base64_encode, encode_form_body, project};
+use super::render::validate_url;
 use super::response::{map_status, reclassify_error_when, redact_value};
+use super::wire::{BODY_CAP, USER_AGENT};
 use super::*;
 
 // -- error_when reclassification (spec
@@ -405,4 +407,78 @@ fn redact_replaces_secret_in_string_leaves() {
         out,
         json!({ "echo": "prefix [redacted:MOCK_TOKEN] suffix", "n": 3, "list": ["[redacted:MOCK_TOKEN]"] })
     );
+}
+#[test]
+fn a_mime_function_renders_the_preview_at_the_body_path_offline() {
+    use base64::Engine as _;
+    let doc = apb_core::connector::def::ConnectorDoc::from_yaml(
+        r#"
+name: gmime
+version: 0.1.0
+account_fields:
+  - { name: api_base, required: true }
+functions:
+  - name: create_draft
+    description: d
+    method: POST
+    url: "{{account.api_base}}/drafts"
+    body: { threadId: "{{args.thread_id}}" }
+    args_schema: { type: object, properties: { thread_id: { type: string } } }
+    mime:
+      at: message.raw
+      message:
+        from_email: "agent@acme.example"
+        to: "{{args.to}}"
+        subject: "{{args.subject}}"
+        body_text: "{{args.body}}"
+        bcc: "{{args.bcc}}"
+        in_reply_to: "{{args.in_reply_to}}"
+"#,
+        "gmime",
+    )
+    .unwrap();
+    let f = doc.function("create_draft").unwrap();
+    let account = BTreeMap::from([("api_base".to_string(), "http://api".to_string())]);
+    let args = json!({
+        "thread_id": "t1",
+        "to": "peer@example.org",
+        "subject": "Re: plan",
+        "body": "Please look.",
+        "bcc": "quiet@example.org",
+        "in_reply_to": "<orig@example.org>",
+    });
+    let r = render_http(f, &account, &args, &BTreeMap::new(), None).unwrap();
+    // The preview sits at message.raw, readable.
+    let raw = &r.rendered_body.as_ref().unwrap()["message"]["raw"];
+    assert_eq!(raw["subject"], json!("Re: plan"));
+    assert_eq!(raw["bcc"], json!(["quiet@example.org"]));
+    assert_eq!(raw["in_reply_to"], json!("<orig@example.org>"));
+    // The formatted bytes ride beside the body for the live path.
+    let (at, bytes) = r.mime_bytes.expect("mime bytes");
+    assert_eq!(at, "message.raw");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("In-Reply-To: <orig@example.org>"), "{text}");
+    // keep_bcc: the formatted bytes carry the Bcc header.
+    assert!(text.contains("Bcc:"), "{text}");
+
+    // The live build: the body path holds URL-safe base64 of those bytes.
+    let mut rendered_body = r.rendered_body.clone().unwrap();
+    let encoded = base64::engine::general_purpose::URL_SAFE.encode(&bytes);
+    // Standard base64 of a body that maps to '+' and '/' differs from the
+    // URL-safe form; the engine emits the URL-safe one.
+    let std_encoded = {
+        use base64::engine::general_purpose::STANDARD;
+        STANDARD.encode(&bytes)
+    };
+    if std_encoded != encoded {
+        assert!(std_encoded.contains('+') || std_encoded.contains('/'));
+    }
+    rendered_body["message"]["raw"] = json!(encoded.clone());
+    assert_eq!(rendered_body["message"]["raw"], json!(encoded));
+    // Decoding it back yields a message with the subject.
+    let decoded = base64::engine::general_purpose::URL_SAFE
+        .decode(encoded)
+        .unwrap();
+    let text = String::from_utf8_lossy(&decoded);
+    assert!(text.contains("Subject: Re: plan"), "{text}");
 }

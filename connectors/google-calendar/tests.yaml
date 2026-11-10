@@ -1,0 +1,328 @@
+cases:
+  - function: verify
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args: {}
+    expect:
+      method: GET
+      url: https://www.googleapis.com/calendar/v3/users/me/calendarList/primary
+
+  # The pick keeps the four fields an agent needs from the primary entry.
+  - function: verify
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args: {}
+    expect:
+      method: GET
+      url: https://www.googleapis.com/calendar/v3/users/me/calendarList/primary
+      responses:
+        - body:
+            kind: "calendar#calendarListEntry"
+            etag: '"1700000000000000"'
+            id: me@example.com
+            summary: me@example.com
+            timeZone: Europe/Berlin
+            accessRole: owner
+      result_contains:
+        ok: true
+        body: { id: me@example.com, summary: me@example.com, timeZone: Europe/Berlin, accessRole: owner }
+
+  - function: list_calendars
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args: { max_results: 50 }
+    expect:
+      method: GET
+      url: https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=50
+
+  # A page token an agent passes back is encoded like any other query value.
+  - function: list_calendars
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args: { page_token: "EjsKMWE==" }
+    expect:
+      method: GET
+      url: https://www.googleapis.com/calendar/v3/users/me/calendarList?pageToken=EjsKMWE%3D%3D
+
+  - function: list_calendars
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args: {}
+    expect:
+      method: GET
+      url: https://www.googleapis.com/calendar/v3/users/me/calendarList
+      responses:
+        - body:
+            kind: "calendar#calendarList"
+            items:
+              - { kind: "calendar#calendarListEntry", id: me@example.com, summary: me@example.com, primary: true, accessRole: owner, timeZone: Europe/Berlin, colorId: "14" }
+              - { kind: "calendar#calendarListEntry", id: team@group.calendar.google.com, summary: Team, accessRole: reader, timeZone: Europe/Berlin, colorId: "3" }
+      result_contains:
+        ok: true
+        pages: 1
+        more: false
+        body:
+          items:
+            - { id: me@example.com, summary: me@example.com, primary: true, accessRole: owner, timeZone: Europe/Berlin }
+            - { id: team@group.calendar.google.com, summary: Team, accessRole: reader, timeZone: Europe/Berlin }
+
+  - function: list_events
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args: { calendar_id: primary, time_min: "2026-11-10T00:00:00Z", time_max: "2026-11-11T00:00:00Z", q: "plan review" }
+    expect:
+      method: GET
+      url: https://www.googleapis.com/calendar/v3/calendars/primary/events?orderBy=startTime&q=plan%20review&singleEvents=true&timeMax=2026-11-11T00%3A00%3A00Z&timeMin=2026-11-10T00%3A00%3A00Z
+
+  # A calendar id is a path segment: its `@` is encoded.
+  - function: list_events
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args: { calendar_id: team@group.calendar.google.com, time_min: "2026-11-10T00:00:00+01:00", time_max: "2026-11-11T00:00:00+01:00", max_results: 100 }
+    expect:
+      method: GET
+      url: https://www.googleapis.com/calendar/v3/calendars/team%40group.calendar.google.com/events?maxResults=100&orderBy=startTime&singleEvents=true&timeMax=2026-11-11T00%3A00%3A00%2B01%3A00&timeMin=2026-11-10T00%3A00%3A00%2B01%3A00
+
+  # Two pages: the second request carries the first page's nextPageToken in
+  # pageToken and every other pair unchanged; the items of both pages are
+  # merged, and the last page has no token, so nothing more is left.
+  - function: list_events
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args: { calendar_id: primary, time_min: "2026-11-10T00:00:00+01:00", time_max: "2026-11-11T00:00:00+01:00", max_results: 2 }
+    expect:
+      method: GET
+      url: https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=2&orderBy=startTime&singleEvents=true&timeMax=2026-11-11T00%3A00%3A00%2B01%3A00&timeMin=2026-11-10T00%3A00%3A00%2B01%3A00
+      responses:
+        - body:
+            kind: "calendar#events"
+            summary: me@example.com
+            items:
+              - kind: "calendar#event"
+                id: e1
+                status: confirmed
+                summary: Standup
+                start: { dateTime: "2026-11-10T09:00:00+01:00" }
+                end: { dateTime: "2026-11-10T09:15:00+01:00" }
+              - kind: "calendar#event"
+                id: e2
+                status: confirmed
+                summary: Plan review
+                start: { dateTime: "2026-11-10T11:00:00+01:00" }
+                end: { dateTime: "2026-11-10T12:00:00+01:00" }
+                attendees:
+                  - { email: me@example.com, responseStatus: accepted, self: true }
+                  - { email: colleague@example.com, responseStatus: needsAction }
+            nextPageToken: "EjsKMWE=="
+        - body:
+            kind: "calendar#events"
+            summary: me@example.com
+            items:
+              - kind: "calendar#event"
+                id: e3
+                status: confirmed
+                summary: Retro
+                location: Room 4
+                start: { dateTime: "2026-11-10T16:00:00+01:00" }
+                end: { dateTime: "2026-11-10T17:00:00+01:00" }
+                organizer: { email: colleague@example.com, displayName: Colleague }
+      requests:
+        - "https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=2&orderBy=startTime&singleEvents=true&timeMax=2026-11-11T00%3A00%3A00%2B01%3A00&timeMin=2026-11-10T00%3A00%3A00%2B01%3A00"
+        - "https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=2&orderBy=startTime&pageToken=EjsKMWE%3D%3D&singleEvents=true&timeMax=2026-11-11T00%3A00%3A00%2B01%3A00&timeMin=2026-11-10T00%3A00%3A00%2B01%3A00"
+      result_contains:
+        ok: true
+        pages: 2
+        more: false
+        body:
+          items:
+            - id: e1
+              status: confirmed
+              summary: Standup
+              start: { dateTime: "2026-11-10T09:00:00+01:00" }
+              end: { dateTime: "2026-11-10T09:15:00+01:00" }
+            - id: e2
+              status: confirmed
+              summary: Plan review
+              start: { dateTime: "2026-11-10T11:00:00+01:00" }
+              end: { dateTime: "2026-11-10T12:00:00+01:00" }
+              attendees:
+                - { email: me@example.com, responseStatus: accepted }
+                - { email: colleague@example.com, responseStatus: needsAction }
+            - id: e3
+              status: confirmed
+              summary: Retro
+              location: Room 4
+              start: { dateTime: "2026-11-10T16:00:00+01:00" }
+              end: { dateTime: "2026-11-10T17:00:00+01:00" }
+              organizer: { email: colleague@example.com }
+
+  - function: get_event
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args: { calendar_id: primary, event_id: 0123456789abcdefghijklmn }
+    expect:
+      method: GET
+      url: https://www.googleapis.com/calendar/v3/calendars/primary/events/0123456789abcdefghijklmn
+
+  # Offline there is no token source: a 401 answer maps to `auth` like any
+  # other refused credential.
+  - function: get_event
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args: { calendar_id: primary, event_id: e1 }
+    expect:
+      method: GET
+      url: https://www.googleapis.com/calendar/v3/calendars/primary/events/e1
+      responses:
+        - status: 401
+          body:
+            error: { code: 401, message: "Request had invalid authentication credentials.", status: UNAUTHENTICATED }
+      error_code: auth
+
+  - function: query_free_busy
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args:
+      time_min: "2026-11-10T08:00:00Z"
+      time_max: "2026-11-10T17:00:00Z"
+      time_zone: Europe/Berlin
+      items: [ { id: primary }, { id: colleague@example.com } ]
+    expect:
+      method: POST
+      url: https://www.googleapis.com/calendar/v3/freeBusy
+      body_contains:
+        timeMin: "2026-11-10T08:00:00Z"
+        timeMax: "2026-11-10T17:00:00Z"
+        timeZone: Europe/Berlin
+        items: [ { id: primary }, { id: colleague@example.com } ]
+
+  # Two calendars: the result is their busy lists as the service sent them
+  # (a calendar the account may not read says so in `errors`); the free
+  # slots are left to the agent.
+  - function: query_free_busy
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args:
+      time_min: "2026-11-10T08:00:00Z"
+      time_max: "2026-11-10T17:00:00Z"
+      items: [ { id: primary }, { id: colleague@example.com }, { id: nobody@example.com } ]
+    expect:
+      method: POST
+      url: https://www.googleapis.com/calendar/v3/freeBusy
+      responses:
+        - body:
+            kind: "calendar#freeBusy"
+            timeMin: "2026-11-10T08:00:00.000Z"
+            timeMax: "2026-11-10T17:00:00.000Z"
+            calendars:
+              primary:
+                busy:
+                  - { start: "2026-11-10T09:00:00Z", end: "2026-11-10T10:00:00Z" }
+              colleague@example.com:
+                busy:
+                  - { start: "2026-11-10T09:30:00Z", end: "2026-11-10T11:00:00Z" }
+                  - { start: "2026-11-10T14:00:00Z", end: "2026-11-10T15:00:00Z" }
+              nobody@example.com:
+                errors: [ { domain: global, reason: notFound } ]
+                busy: []
+      result_contains:
+        ok: true
+        body:
+          calendars:
+            primary:
+              busy:
+                - { start: "2026-11-10T09:00:00Z", end: "2026-11-10T10:00:00Z" }
+            colleague@example.com:
+              busy:
+                - { start: "2026-11-10T09:30:00Z", end: "2026-11-10T11:00:00Z" }
+                - { start: "2026-11-10T14:00:00Z", end: "2026-11-10T15:00:00Z" }
+            nobody@example.com:
+              errors: [ { domain: global, reason: notFound } ]
+              busy: []
+
+  - function: create_event
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args:
+      calendar_id: primary
+      summary: "Release window 1.4.0"
+      description: "Deploy and smoke tests."
+      location: "Room 4"
+      start: { dateTime: "2026-11-12T10:00:00+01:00", timeZone: Europe/Berlin }
+      end: { dateTime: "2026-11-12T11:00:00+01:00", timeZone: Europe/Berlin }
+      attendees: [ { email: release-manager@example.com }, { email: qa@example.com, optional: true } ]
+      send_updates: all
+    expect:
+      method: POST
+      url: https://www.googleapis.com/calendar/v3/calendars/primary/events?sendUpdates=all
+      body_contains:
+        summary: "Release window 1.4.0"
+        description: "Deploy and smoke tests."
+        location: "Room 4"
+        start: { dateTime: "2026-11-12T10:00:00+01:00", timeZone: Europe/Berlin }
+        end: { dateTime: "2026-11-12T11:00:00+01:00", timeZone: Europe/Berlin }
+        attendees: [ { email: release-manager@example.com }, { email: qa@example.com, optional: true } ]
+
+  # An all-day event on a shared calendar, `send_updates` omitted: the pair
+  # is dropped and Google applies its own default.
+  - function: create_event
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args:
+      calendar_id: team@group.calendar.google.com
+      summary: Offsite
+      start: { date: "2026-12-01" }
+      end: { date: "2026-12-03" }
+    expect:
+      method: POST
+      url: https://www.googleapis.com/calendar/v3/calendars/team%40group.calendar.google.com/events
+      body_contains:
+        summary: Offsite
+        start: { date: "2026-12-01" }
+        end: { date: "2026-12-03" }
+
+  # A send of an intent carries the event id apb chose: the nonce written in
+  # the base32hex alphabet Google allows for ids, so a repeat of the same
+  # intent asks for the same event.
+  - function: create_event
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args:
+      calendar_id: primary
+      summary: "Release window 1.4.0"
+      start: { dateTime: "2026-11-12T10:00:00+01:00" }
+      end: { dateTime: "2026-11-12T11:00:00+01:00" }
+    intent: { run: r-1, node: plan, attempt: 1, nonce: abcdefghijklmnopqrstuvwx }
+    expect:
+      method: POST
+      url: https://www.googleapis.com/calendar/v3/calendars/primary/events
+      body_contains: { id: "0123456789abcdefghijklmn", summary: "Release window 1.4.0" }
+
+  # Every letter of the nonce alphabet lands inside Google's id alphabet.
+  - function: create_event
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args:
+      calendar_id: primary
+      summary: "Release window 1.4.0"
+      start: { dateTime: "2026-11-12T10:00:00+01:00" }
+      end: { dateTime: "2026-11-12T11:00:00+01:00" }
+    intent: { run: r-1, node: plan, nonce: abcdefghijklmnopqrstuvwxyz234567 }
+    expect:
+      method: POST
+      url: https://www.googleapis.com/calendar/v3/calendars/primary/events
+      body_contains: { id: "0123456789abcdefghijklmnopqrstuv" }
+
+  - function: update_event
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args:
+      calendar_id: primary
+      event_id: 0123456789abcdefghijklmn
+      start: { dateTime: "2026-11-12T14:00:00+01:00", timeZone: Europe/Berlin }
+      end: { dateTime: "2026-11-12T15:00:00+01:00", timeZone: Europe/Berlin }
+      send_updates: externalOnly
+    expect:
+      method: PATCH
+      url: https://www.googleapis.com/calendar/v3/calendars/primary/events/0123456789abcdefghijklmn?sendUpdates=externalOnly
+      body_contains:
+        start: { dateTime: "2026-11-12T14:00:00+01:00", timeZone: Europe/Berlin }
+        end: { dateTime: "2026-11-12T15:00:00+01:00", timeZone: Europe/Berlin }
+
+  - function: update_event
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args: { calendar_id: primary, event_id: e1, summary: "Plan review (moved)", description: "New room." }
+    expect:
+      method: PATCH
+      url: https://www.googleapis.com/calendar/v3/calendars/primary/events/e1
+      body_contains: { summary: "Plan review (moved)", description: "New room." }
+
+  - function: delete_event
+    account: { api_base: https://www.googleapis.com/calendar/v3 }
+    args: { calendar_id: primary, event_id: 0123456789abcdefghijklmn, send_updates: all }
+    expect:
+      method: DELETE
+      url: https://www.googleapis.com/calendar/v3/calendars/primary/events/0123456789abcdefghijklmn?sendUpdates=all

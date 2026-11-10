@@ -36,6 +36,23 @@ use super::marker::MarkerFormat;
 use super::template::{Namespace, is_whole_args_body, placeholders};
 use super::text_mode::TextMode;
 
+/// How the send-once key carries the nonce (D3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyEncoding {
+    /// Each nonce character maps to the same position of `0-9a-v`.
+    Base32hex,
+}
+
+/// What a 409 to a keyed send means (D3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyConflict {
+    /// The key is an id the client chose: a conflict proves the first
+    /// request created it.
+    Confirms,
+}
+
 /// A function's send-once declaration. The tag `mode` selects the variant.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
@@ -52,6 +69,16 @@ pub enum Idempotency {
         /// Dot path in the response to the created item's id or link.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result_ref: Option<String>,
+        /// How the nonce is written into the key (D3). `base32hex` maps
+        /// each nonce character to the same position of `0-9a-v`, for
+        /// services whose ids allow only that alphabet.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encoding: Option<KeyEncoding>,
+        /// What a 409 to a send with this key means (D3). `confirms`: the
+        /// key is an id the client chose, so a conflict proves the first
+        /// request created it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conflict: Option<KeyConflict>,
     },
     Marker {
         /// The string argument the marker is appended to.
@@ -528,5 +555,50 @@ mod tests {
             assert_eq!(IdempotencyMode::parse(m.as_str()), m);
         }
         assert_eq!(IdempotencyMode::parse("future"), IdempotencyMode::None);
+    }
+
+    #[test]
+    fn encoding_and_conflict_parse_on_key_and_are_refused_elsewhere() {
+        let key: Idempotency = yaml_serde::from_str(
+            "{ mode: key, field: nonce, window_sec: 120, encoding: base32hex, conflict: confirms }",
+        )
+        .unwrap();
+        match &key {
+            Idempotency::Key {
+                encoding, conflict, ..
+            } => {
+                assert_eq!(*encoding, Some(KeyEncoding::Base32hex));
+                assert_eq!(*conflict, Some(KeyConflict::Confirms));
+            }
+            other => panic!("expected a key declaration: {other:?}"),
+        }
+        // Without them nothing spills into the wire form.
+        let plain: Idempotency =
+            yaml_serde::from_str("{ mode: key, field: nonce, window_sec: 120 }").unwrap();
+        let text = yaml_serde::to_string(&plain).unwrap();
+        assert!(
+            !text.contains("encoding") && !text.contains("conflict"),
+            "{text}"
+        );
+
+        // An unknown encoding or conflict value is refused at parse.
+        assert!(
+            yaml_serde::from_str::<Idempotency>(
+                "{ mode: key, field: nonce, window_sec: 120, encoding: hex }"
+            )
+            .is_err()
+        );
+        assert!(
+            yaml_serde::from_str::<Idempotency>(
+                "{ mode: key, field: nonce, window_sec: 120, conflict: unknown }"
+            )
+            .is_err()
+        );
+        // The other modes refuse the fields at parse (denied unknown
+        // fields of a differently tagged variant).
+        assert!(
+            yaml_serde::from_str::<Idempotency>("{ mode: none, encoding: base32hex }").is_err()
+        );
+        assert!(yaml_serde::from_str::<Idempotency>("{ mode: none, conflict: confirms }").is_err());
     }
 }

@@ -55,3 +55,31 @@ cases:
         op: set_flags
         folder: INBOX
         params_contains: { uids: "[101,102]", seen: "false" }
+
+  - function: append_draft
+    account: { host: imap.example.com, port: "993", use_tls: "true", auth_method: password, username: user@example.com, from_email: writer@example.com }
+    args: { to: ops@example.com, subject: "Release notes draft", body_text: "Draft of the release notes for review." }
+    expect:
+      imap:
+        op: append_draft
+        message:
+          from: writer@example.com
+          to: [ops@example.com]
+          subject: Release notes draft
+
+  - function: append_draft
+    account: { host: imap.example.com, port: "993", use_tls: "true", auth_method: password, username: user@example.com, from_email: writer@example.com }
+    args: { to: ops@example.com, cc: review@example.com, subject: "Re: thread", body_text: "Adding the draft to the thread.", in_reply_to: "<orig@example.com>", folder: Drafts }
+    expect:
+      imap:
+        op: append_draft
+        folder: Drafts
+
+  - function: save_attachments
+    account: { host: imap.example.com, port: "993", use_tls: "true", auth_method: password, username: user@example.com }
+    args: { folder: INBOX, uid: 42 }
+    expect:
+      imap:
+        op: save_attachments
+        folder: INBOX
+        params_contains: { uid: "42" }

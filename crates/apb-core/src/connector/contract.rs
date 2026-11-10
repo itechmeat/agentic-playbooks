@@ -138,6 +138,41 @@ pub struct Expectation {
     pub inbox: Option<InboxExpect>,
     #[serde(default)]
     pub reconcile: Option<ReconcileExpect>,
+    /// Responses the offline runner answers the rendered request (and each
+    /// next page) with, in order.
+    #[serde(default)]
+    pub responses: Option<Vec<ScriptedResponse>>,
+    /// The URL of every request the call made, first one included.
+    #[serde(default)]
+    pub requests: Option<Vec<String>>,
+    /// Subset match over the result JSON (`ok`, `body`, `pages`, `more`).
+    #[serde(default)]
+    pub result_contains: Option<Value>,
+    /// The expected error code instead of a success.
+    #[serde(default)]
+    pub error_code: Option<String>,
+}
+
+/// One scripted answer of a `responses` list. `status` defaults to 200;
+/// the headers carry `Link` and `Content-Type`; the body is the answer's
+/// JSON (a string body is the text). The names `status` and `body` are NOT
+/// reused from the mock shape: a case with `responses` never resolves as a
+/// mock, because `resolve` checks `responses`... it does not: the mock
+/// discrimination reads `status`/`body` at the TOP level of the expect
+/// block, while these sit inside `responses` entries.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptedResponse {
+    #[serde(default = "ok_status")]
+    pub status: u16,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub body: Value,
+}
+
+fn ok_status() -> u16 {
+    200
 }
 
 /// The smtp envelope a case asserts. Every field is optional (cross-slice
@@ -165,6 +200,11 @@ pub struct ImapExpect {
     pub folder: Option<String>,
     #[serde(default)]
     pub params_contains: Option<BTreeMap<String, String>>,
+    /// The composed message a case asserts (D7): the `from`, `to` and
+    /// `subject` subset of the preview an `append_draft` dry-run renders.
+    /// Every field is optional; an absent field is not asserted.
+    #[serde(default)]
+    pub message: Option<Envelope>,
 }
 
 /// One inline event a case seeds into the fixture inbox before the op runs
@@ -219,6 +259,10 @@ pub enum ExpectKind<'a> {
         headers: Option<&'a BTreeMap<String, String>>,
         body_contains: Option<&'a Value>,
         body_form_contains: Option<&'a BTreeMap<String, String>>,
+        responses: Option<&'a Vec<ScriptedResponse>>,
+        requests: Option<&'a Vec<String>>,
+        result_contains: Option<&'a Value>,
+        error_code: Option<&'a str>,
     },
     Smtp(&'a Envelope),
     Mock {
@@ -271,6 +315,10 @@ impl Expectation {
             headers: self.headers.as_ref(),
             body_contains: self.body_contains.as_ref(),
             body_form_contains: self.body_form_contains.as_ref(),
+            responses: self.responses.as_ref(),
+            requests: self.requests.as_ref(),
+            result_contains: self.result_contains.as_ref(),
+            error_code: self.error_code.as_deref(),
         })
     }
 }
@@ -417,6 +465,28 @@ cases:
                     imap.params_contains.as_ref().unwrap().get("limit"),
                     Some(&"20".to_string())
                 );
+                assert!(imap.message.is_none());
+            }
+            _ => panic!("imap expectation must resolve to imap"),
+        }
+    }
+
+    #[test]
+    fn imap_expect_message_parses_an_append_draft_preview() {
+        let yaml = "cases:\n  - function: append_draft\n    expect:\n      imap:\n        op: append_draft\n        message:\n          from: me@example.com\n          to: [you@example.com]\n          subject: Draft note\n";
+        let doc = TestsDoc::from_yaml(yaml).unwrap();
+        match doc.cases[0].expect.resolve().unwrap() {
+            ExpectKind::Imap(imap) => {
+                let message = imap
+                    .message
+                    .as_ref()
+                    .expect("a message expectation must resolve");
+                assert_eq!(message.from.as_deref(), Some("me@example.com"));
+                assert_eq!(
+                    message.to.as_deref(),
+                    Some(&["you@example.com".to_string()][..])
+                );
+                assert_eq!(message.subject.as_deref(), Some("Draft note"));
             }
             _ => panic!("imap expectation must resolve to imap"),
         }
@@ -545,5 +615,55 @@ cases:
             doc.cases[0].expect.resolve().unwrap(),
             ExpectKind::Inbox(_)
         ));
+    }
+
+    #[test]
+    fn scripted_response_fields_parse() {
+        let yaml = "cases:\n  - function: f\n    expect:\n      method: GET\n      url: \"http://a\"\n      responses:\n        - status: 200\n          headers: { Link: \"<http://a/2>; rel=\\\"next\\\"\" }\n          body: { items: [1] }\n        - body: { items: [2] }\n      requests: [\"http://a\", \"http://a/2\"]\n      result_contains: { ok: true, pages: 2, more: false }\n";
+        let doc = TestsDoc::from_yaml(yaml).unwrap();
+        match doc.cases[0].expect.resolve().unwrap() {
+            ExpectKind::Http {
+                responses,
+                requests,
+                result_contains,
+                error_code,
+                ..
+            } => {
+                let responses = responses.expect("responses");
+                assert_eq!(responses.len(), 2);
+                assert_eq!(responses[0].status, 200);
+                assert_eq!(
+                    responses[0].headers.get("Link").map(String::as_str),
+                    Some("<http://a/2>; rel=\"next\"")
+                );
+                // A response without `status` reads 200.
+                assert_eq!(responses[1].status, 200);
+                assert_eq!(requests.map(|r| r.len()), Some(2));
+                assert_eq!(
+                    result_contains.map(|v| v["pages"].as_u64().unwrap()),
+                    Some(2)
+                );
+                assert!(error_code.is_none());
+            }
+            _ => panic!("expected an Http expectation"),
+        }
+    }
+
+    #[test]
+    fn an_error_code_expectation_parses() {
+        let yaml = "cases:\n  - function: f\n    expect:\n      method: GET\n      url: \"http://a\"\n      responses:\n        - status: 200\n          headers: { Content-Type: \"image/png\" }\n          body: {}\n      error_code: service\n";
+        let doc = TestsDoc::from_yaml(yaml).unwrap();
+        match doc.cases[0].expect.resolve().unwrap() {
+            ExpectKind::Http { error_code, .. } => {
+                assert_eq!(error_code, Some("service"));
+            }
+            _ => panic!("expected an Http expectation"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_key_in_a_scripted_response_is_refused() {
+        let yaml = "cases:\n  - function: f\n    expect:\n      method: GET\n      url: \"http://a\"\n      responses:\n        - status: 200\n          bogus: 1\n";
+        assert!(TestsDoc::from_yaml(yaml).is_err());
     }
 }

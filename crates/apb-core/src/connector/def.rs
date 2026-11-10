@@ -39,6 +39,35 @@ pub enum AuthSpec {
     Path {
         value_template: String,
     },
+    /// A bearer access token minted from a refresh token at call time
+    /// (RFC 6749 section 6). The access token lives in this process only.
+    Oauth2Refresh {
+        /// Token endpoint; `account.*` placeholders only.
+        token_url: String,
+        /// Authorization endpoint, read only by `apb connector oauth`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authorize_url: Option<String>,
+        /// `account.*` only (a client id is not a secret).
+        client_id_template: String,
+        /// Exactly one `{{secret.<field>}}` placeholder, nothing else.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_secret_template: Option<String>,
+        /// Exactly one `{{secret.<field>}}` placeholder, nothing else.
+        refresh_token_template: String,
+        /// Space-separated scopes the account says it granted; `account.*`
+        /// only, rendered leniently (an absent account field means "not said").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        granted_scopes_template: Option<String>,
+        /// Space-separated scopes `apb connector oauth` asks for by default;
+        /// `account.*` only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        consent_scopes: Option<String>,
+        /// Extra query pairs of the authorization URL (`access_type`,
+        /// `prompt`); values `account.*` only, a value that is exactly one
+        /// `{{account.x}}` with `x` absent drops the pair.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        authorize_params: BTreeMap<String, String>,
+    },
 }
 
 /// One field of the schema of an account for this connector (e.g.
@@ -111,10 +140,31 @@ pub struct SmtpMessage {
     #[serde(default)]
     pub bcc: Option<String>,
     pub subject: String,
+    /// The `Message-ID` this message replies to, threaded through by
+    /// providers that carry one (`In-Reply-To`). Optional, lenient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<String>,
+    /// The thread's accumulated ids (`References`). Optional, lenient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub references: Option<String>,
     #[serde(default)]
     pub body_text: Option<String>,
     #[serde(default)]
     pub body_html: Option<String>,
+}
+
+/// An RFC 5322 message composed by apb and placed, base64url encoded, at a
+/// dot path of the JSON body (D4). The body must be a JSON object whose
+/// template does not already set the path; the message templates follow
+/// body rules (`account.*`, `args.*`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MimeBody {
+    /// Dot path of the body field the base64url message lands at, for
+    /// example `message.raw`.
+    pub at: String,
+    /// The message to compose.
+    pub message: SmtpMessage,
 }
 
 /// The `smtp` function kind (spec 4.2). Exactly one of a connector's function
@@ -154,6 +204,8 @@ pub enum ImapOp {
     Search,
     Fetch,
     SetFlags,
+    AppendDraft,
+    SaveAttachments,
 }
 
 impl ImapOp {
@@ -165,6 +217,8 @@ impl ImapOp {
             ImapOp::Search => "search",
             ImapOp::Fetch => "fetch",
             ImapOp::SetFlags => "set_flags",
+            ImapOp::AppendDraft => "append_draft",
+            ImapOp::SaveAttachments => "save_attachments",
         }
     }
 }
@@ -179,6 +233,12 @@ pub struct ImapSpec {
     pub op: ImapOp,
     #[serde(default)]
     pub params: BTreeMap<String, String>,
+    /// The message an `append_draft` op composes and appends (D7); refused
+    /// for every other op. Templates follow the SMTP message rules
+    /// (`account.*` and `args.*`, never `secret.*`), rendered leniently at
+    /// call time like the SMTP path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<SmtpMessage>,
 }
 
 /// The challenge dialect a provider performs before it will deliver
@@ -348,6 +408,36 @@ pub struct FunctionSpec {
     /// The args people read and the recipient (see `super::people`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub people: Option<super::people::PeopleArgs>,
+    /// OAuth scopes this function needs; any one of them is enough (the
+    /// "one of the following scopes" lists of the provider's reference).
+    /// Only on HTTP functions of an `oauth2_refresh` connector.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// Declared, bounded paging for a read-only HTTP GET function (see
+    /// `super::paginate`). Refused everywhere else by `paginate::validate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paginate: Option<super::paginate::Paginate>,
+    /// The results of this function are text written by people outside the
+    /// run (mail, events, files, search results): the validator suggests
+    /// marking a binding that grants it `untrusted: true` (V187), and the
+    /// agent prompt says such text is data, never instructions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub untrusted_output: bool,
+    /// Compose an RFC 5322 message and put its base64url at a dot path of
+    /// the JSON body (D4). Only on HTTP functions with an object body and
+    /// no `body_form`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<MimeBody>,
+    /// Dot paths (with array mapping, like `response_pick`) of base64url
+    /// strings the engine decodes to text before the projection (D4). Only
+    /// on HTTP functions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decode_base64url: Vec<String>,
+    /// Media types a 2xx answer may have; an entry ending in `/` is a type
+    /// prefix (`text/`). Anything else fails `service` without the body
+    /// being read (D5). Only on HTTP functions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_types: Vec<String>,
 }
 
 impl FunctionSpec {
@@ -500,7 +590,22 @@ impl ConnectorDoc {
     /// 9. `idempotency` and `identity` follow the send-once rules
     ///    (`super::idempotency::validate`).
     /// 10. `people` sits only on a function that sends, and names string
-    ///     properties of `args_schema` (`super::people::validate`).
+    ///     properties of `args_schema` (`super::people::validate`). An imap
+    ///     `append_draft` counts as sending (D7: it composes a message a
+    ///     person reads); every other imap op counts as reading.
+    /// 11. `scopes` sits only on an HTTP function of an `oauth2_refresh`
+    ///     connector; each entry is non-empty, holds no whitespace, and no
+    ///     two entries repeat.
+    /// 12. `paginate` sits only on a read-only HTTP GET function that
+    ///     neither the connector's `identity` nor any function's `reconcile`
+    ///     names (`super::paginate::validate`).
+    /// 13. `mime` sits only on an HTTP function whose `body` is a JSON
+    ///     object template and which carries no `body_form`; its `at` is a
+    ///     dot path with non-empty segments the body does not already set,
+    ///     and the function's send-once mode is not `marker`.
+    /// 14. `decode_base64url` and `content_types` sit only on HTTP
+    ///     functions; every `content_types` entry is a non-empty
+    ///     lower-case media type without parameters.
     pub fn from_yaml(yaml: &str, expected_name: &str) -> Result<Self, ConnectorError> {
         let doc: ConnectorDoc =
             yaml_serde::from_str(yaml).map_err(|e| ConnectorError::Yaml(e.to_string()))?;
@@ -530,6 +635,7 @@ impl ConnectorDoc {
             }
 
             let is_http = f.method.is_some() || f.url.is_some();
+            let query_value_list: Vec<String> = f.query.values().cloned().collect();
             let is_mock = f.mock.is_some();
             let is_smtp = f.smtp.is_some();
             let is_imap = f.imap.is_some();
@@ -591,12 +697,148 @@ impl ConnectorDoc {
                 outside,
             )?;
             if let Some(people) = &f.people {
+                // D7: an imap `append_draft` composes a message a person
+                // reads (subject, body), so it counts as a sending function
+                // for the `people` rules; every other imap op only reads.
+                let imap_sends =
+                    is_imap && f.imap.as_ref().is_some_and(|i| i.op == ImapOp::AppendDraft);
                 super::people::validate(
                     &f.name,
                     people,
-                    !(f.read_only || is_inbox || is_imap),
+                    !(f.read_only || is_inbox || is_imap && !imap_sends),
                     f.args_schema.as_ref(),
                 )?;
+            }
+
+            // Rule 11: `scopes` names the OAuth scopes a call needs, so it
+            // only makes sense on an HTTP function of an `oauth2_refresh`
+            // connector.
+            if !f.scopes.is_empty() {
+                let oauth = matches!(doc.auth, Some(AuthSpec::Oauth2Refresh { .. }));
+                if !(is_http && oauth) {
+                    return Err(ConnectorError::Invalid(format!(
+                        "function `{}` declares `scopes`, which only an HTTP function of an `oauth2_refresh` connector can use",
+                        f.name
+                    )));
+                }
+                let mut seen_scopes = std::collections::HashSet::new();
+                for s in &f.scopes {
+                    if s.is_empty() || s.chars().any(char::is_whitespace) {
+                        return Err(ConnectorError::Invalid(format!(
+                            "function `{}` declares `scopes` entries that are empty or hold whitespace",
+                            f.name
+                        )));
+                    }
+                    if !seen_scopes.insert(s.as_str()) {
+                        return Err(ConnectorError::Invalid(format!(
+                            "function `{}` declares `scopes` entry `{s}` more than once",
+                            f.name
+                        )));
+                    }
+                }
+            }
+            if let Some(p) = &f.paginate {
+                let is_identity = doc.identity.as_ref().is_some_and(|i| i.function == f.name);
+                let is_reconcile = doc.functions.iter().any(|other| {
+                    matches!(
+                        other.send_once(),
+                        Some(super::idempotency::Idempotency::Marker { reconcile, .. })
+                            if reconcile.function == f.name
+                    )
+                });
+                let facts = super::paginate::FunctionFacts {
+                    function: &f.name,
+                    is_http,
+                    is_get: f
+                        .method
+                        .as_deref()
+                        .is_some_and(|m| m.eq_ignore_ascii_case("GET")),
+                    read_only: f.read_only,
+                    is_identity,
+                    is_reconcile,
+                    url_auth: matches!(
+                        doc.auth,
+                        Some(AuthSpec::Path { .. }) | Some(AuthSpec::Query { .. })
+                    ),
+                    args_schema: f.args_schema.as_ref(),
+                    query_values: &query_value_list,
+                };
+                super::paginate::validate(&facts, p)?;
+            }
+
+            // Rule 13: `mime` sits only on an HTTP function whose body is a
+            // JSON object template (and no `body_form`), at a dot path with
+            // non-empty segments the body does not already set, on a
+            // function whose send-once mode is not `marker`. Its message
+            // templates follow body rules, walked by validate_templates.
+            if let Some(m) = &f.mime {
+                if !is_http {
+                    return Err(ConnectorError::Invalid(format!(
+                        "function `{}` declares `mime`, which only an HTTP function can use",
+                        f.name
+                    )));
+                }
+                if f.body_form.contains_key(&m.at) || !f.body_form.is_empty() {
+                    return Err(ConnectorError::Invalid(format!(
+                        "function `{}` declares `mime`, which a `body_form` function cannot use",
+                        f.name
+                    )));
+                }
+                let Some(body) = &f.body else {
+                    return Err(ConnectorError::Invalid(format!(
+                        "function `{}` declares `mime` but its `body` is not a JSON object template",
+                        f.name
+                    )));
+                };
+                if !body.is_object() {
+                    return Err(ConnectorError::Invalid(format!(
+                        "function `{}` declares `mime` but its `body` is not a JSON object template",
+                        f.name
+                    )));
+                }
+                if m.at.is_empty() || m.at.split('.').any(str::is_empty) {
+                    return Err(ConnectorError::Invalid(format!(
+                        "function `{}` declares `mime` at `{}`, which is not a dot path with non-empty segments",
+                        f.name, m.at
+                    )));
+                }
+                if body_set_path(body, &m.at) {
+                    return Err(ConnectorError::Invalid(format!(
+                        "function `{}` declares `mime` at `{}`, which its `body` template already sets",
+                        f.name, m.at
+                    )));
+                }
+                if matches!(
+                    f.send_once(),
+                    Some(super::idempotency::Idempotency::Marker { .. })
+                ) {
+                    return Err(ConnectorError::Invalid(format!(
+                        "function `{}` declares `mime`, which a `marker` send cannot use (the marker would show inside the message)",
+                        f.name
+                    )));
+                }
+            }
+
+            // Rule 14: `decode_base64url` and `content_types` are HTTP-only.
+            if (!f.decode_base64url.is_empty() || !f.content_types.is_empty()) && !is_http {
+                return Err(ConnectorError::Invalid(format!(
+                    "function `{}` declares `decode_base64url` or `content_types`, which only an HTTP function can use",
+                    f.name
+                )));
+            }
+            for entry in &f.content_types {
+                let lower = entry.to_lowercase();
+                if entry.is_empty()
+                    || lower != *entry
+                    || lower.contains(';')
+                    || lower.split('/').next().is_none()
+                    || !lower.contains('/')
+                {
+                    return Err(ConnectorError::Invalid(format!(
+                        "function `{}` declares a `content_types` entry `{entry}`; entries are lower-case media types, no parameters",
+                        f.name
+                    )));
+                }
             }
 
             // response_pick projects a JSON document (spec 4.5). An HTTP
@@ -825,6 +1067,25 @@ fn validate_imap_shape(f: &FunctionSpec) -> Result<(), ConnectorError> {
             f.name
         )));
     }
+    // D7: only an `append_draft` op carries a message to compose, and it
+    // always needs one.
+    match (&imap.message, imap.op) {
+        (Some(_), ImapOp::AppendDraft) => {}
+        (Some(_), other) => {
+            return Err(ConnectorError::Invalid(format!(
+                "imap function `{}` op `{}` must not set `message`; only `append_draft` composes one",
+                f.name,
+                other.as_str()
+            )));
+        }
+        (None, ImapOp::AppendDraft) => {
+            return Err(ConnectorError::Invalid(format!(
+                "imap function `{}` op `append_draft` needs a `message` block to compose",
+                f.name
+            )));
+        }
+        (None, _) => {}
+    }
     validate_imap_params(&f.name, imap.op, &imap.params)
 }
 
@@ -854,8 +1115,10 @@ fn validate_inbox_shape(f: &FunctionSpec) -> Result<(), ConnectorError> {
 /// 3.3): `verify` and `list_folders` take no params; `search` requires
 /// `folder` and `limit` with optional `unread_only`, `from_contains`,
 /// `subject_contains`, `since_days`; `fetch` requires `folder` and `uid`;
-/// `set_flags` requires `folder`, `uids`, and `seen`. Any other key is an
-/// error, and any missing required key is an error.
+/// `set_flags` requires `folder`, `uids`, and `seen`; `append_draft` takes
+/// optional `folder` (D7: without one the server's `\Drafts` folder is
+/// used); `save_attachments` requires `folder` and `uid`. Any other key is
+/// an error, and any missing required key is an error.
 fn validate_imap_params(
     function_name: &str,
     op: ImapOp,
@@ -874,6 +1137,8 @@ fn validate_imap_params(
         ),
         ImapOp::Fetch => (&["folder", "uid"], &[]),
         ImapOp::SetFlags => (&["folder", "uids", "seen"], &[]),
+        ImapOp::AppendDraft => (&[], &["folder"]),
+        ImapOp::SaveAttachments => (&["folder", "uid"], &[]),
     };
 
     for key in params.keys() {
@@ -1050,6 +1315,15 @@ pub fn validate_templates(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
         if let Some(imap) = &f.imap {
             validate_imap_templates(imap, &f.name, &fields)?;
         }
+        // A `mime` message follows the SMTP message rules: it is mail the
+        // service delivers, so it never carries a secret or the auth marker.
+        if let Some(mime) = &f.mime {
+            validate_message_templates(
+                &mime.message,
+                &format!("function `{}` mime message", f.name),
+                &fields,
+            )?;
+        }
     }
 
     if let Some(hook) = &doc.webhook {
@@ -1057,6 +1331,65 @@ pub fn validate_templates(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
     }
 
     if let Some(auth) = &doc.auth {
+        if let AuthSpec::Oauth2Refresh {
+            token_url,
+            authorize_url,
+            client_id_template,
+            client_secret_template,
+            refresh_token_template,
+            granted_scopes_template,
+            consent_scopes,
+            authorize_params,
+        } = auth
+        {
+            // Rule 2 of the OAuth block: the two credential templates must
+            // each be exactly one sole secret placeholder. The refresh token
+            // is required, the client secret optional.
+            let creds: [(&str, Option<&str>); 2] = [
+                (
+                    "refresh_token_template",
+                    Some(refresh_token_template.as_str()),
+                ),
+                ("client_secret_template", client_secret_template.as_deref()),
+            ];
+            for (label, template) in creds {
+                let Some(template) = template else { continue };
+                let Some(name) = sole_secret(template) else {
+                    return Err(ConnectorError::Invalid(format!(
+                        "auth `{label}` must be exactly one `{{{{secret.<field>}}}}` placeholder naming a `secret: true` account field"
+                    )));
+                };
+                fields.check(crate::connector::template::Namespace::Secret, name)?;
+            }
+            // Rule 3: every other template of the block rejects secrets,
+            // whatever text the credential fields carry. Every entry names
+            // its field, so the error points at the offending template.
+            let mut others: Vec<(&str, &str)> = vec![
+                ("token_url", token_url.as_str()),
+                ("client_id_template", client_id_template.as_str()),
+            ];
+            if let Some(t) = authorize_url.as_deref() {
+                others.push(("authorize_url", t));
+            }
+            if let Some(t) = granted_scopes_template.as_deref() {
+                others.push(("granted_scopes_template", t));
+            }
+            if let Some(t) = consent_scopes.as_deref() {
+                others.push(("consent_scopes", t));
+            }
+            for (k, v) in authorize_params {
+                others.push((k.as_str(), v.as_str()));
+            }
+            for (field, template) in others {
+                for (ns, _name) in placeholders(template)? {
+                    if ns == crate::connector::template::Namespace::Secret {
+                        return Err(ConnectorError::Invalid(format!(
+                            "auth `{field}` must hold no `{{{{secret.*}}}}` placeholder; only `refresh_token_template` and `client_secret_template` carry a secret (found `{template}`)"
+                        )));
+                    }
+                }
+            }
+        }
         for template in auth_templates(auth) {
             for (ns, name) in placeholders(template)? {
                 reject_auth(ns, "auth template")?;
@@ -1122,22 +1455,42 @@ fn validate_smtp_templates(
 
     // Message: account/args only, secret rejected.
     if let Some(msg) = &smtp.message {
-        let strings: [Option<&str>; 8] = [
-            Some(msg.from_email.as_str()),
-            msg.from_name.as_deref(),
-            Some(msg.to.as_str()),
-            msg.cc.as_deref(),
-            msg.bcc.as_deref(),
-            Some(msg.subject.as_str()),
-            msg.body_text.as_deref(),
-            msg.body_html.as_deref(),
-        ];
-        for template in strings.into_iter().flatten() {
-            for (ns, name) in placeholders(template)? {
-                reject_auth(ns, &format!("function `{function_name}` smtp message"))?;
-                reject_secret(ns, &format!("function `{function_name}` smtp message"))?;
-                fields.check(ns, &name)?;
-            }
+        validate_message_templates(
+            msg,
+            &format!("function `{function_name}` smtp message"),
+            fields,
+        )?;
+    }
+    Ok(())
+}
+
+/// Validates the placeholders of a `SmtpMessage` (the SMTP path and the
+/// `append_draft` message share it): every template follows function-body
+/// rules, `account.*` and `args.*` are allowed, `secret.*` is rejected.
+fn validate_message_templates(
+    msg: &SmtpMessage,
+    label: &str,
+    fields: &FieldNames,
+) -> Result<(), ConnectorError> {
+    use crate::connector::template::placeholders;
+
+    let strings: [Option<&str>; 10] = [
+        Some(msg.from_email.as_str()),
+        msg.from_name.as_deref(),
+        Some(msg.to.as_str()),
+        msg.cc.as_deref(),
+        msg.bcc.as_deref(),
+        Some(msg.subject.as_str()),
+        msg.in_reply_to.as_deref(),
+        msg.references.as_deref(),
+        msg.body_text.as_deref(),
+        msg.body_html.as_deref(),
+    ];
+    for template in strings.into_iter().flatten() {
+        for (ns, name) in placeholders(template)? {
+            reject_auth(ns, label)?;
+            reject_secret(ns, label)?;
+            fields.check(ns, &name)?;
         }
     }
     Ok(())
@@ -1193,6 +1546,15 @@ fn validate_imap_templates(
             fields.check(ns, &name)?;
         }
     }
+
+    // D7: an `append_draft` message follows the SMTP message rules.
+    if let Some(msg) = &imap.message {
+        validate_message_templates(
+            msg,
+            &format!("function `{function_name}` imap message"),
+            fields,
+        )?;
+    }
     Ok(())
 }
 
@@ -1210,6 +1572,23 @@ fn validate_imap_templates(
 /// credentials while these guard an internet-facing accept decision. Every
 /// other field of the block is a literal the ingest listener compares byte for
 /// byte, so any placeholder in it is an authoring error.
+/// The one field name of `template` when the whole template is exactly one
+/// `{{secret.<field>}}` placeholder naming the field, with no surrounding
+/// text; `None` for a literal, several placeholders, or any other namespace.
+/// Shared by the webhook block and the `oauth2_refresh` credential fields.
+pub fn sole_secret(template: &str) -> Option<&str> {
+    use crate::connector::template::{Namespace, placeholders};
+    // Byte-exact first: the template must be exactly `{{secret.<field>}}`.
+    let inner = template.strip_prefix("{{secret.")?.strip_suffix("}}")?;
+    // The single placeholder must parse as a secret namespace naming `inner`
+    // (placeholders also validates the field name shape).
+    let found = placeholders(template).ok()?;
+    match found.as_slice() {
+        [(Namespace::Secret, name)] if name == inner => Some(inner),
+        _ => None,
+    }
+}
+
 fn validate_webhook_templates(
     hook: &WebhookSpec,
     connector: &str,
@@ -1223,21 +1602,11 @@ fn validate_webhook_templates(
     ];
     for (label, template) in secret_bearing {
         let Some(template) = template else { continue };
-        let found = placeholders(template)?;
-        let sole_secret = match found.as_slice() {
-            [(Namespace::Secret, name)] => Some(name.as_str()),
-            _ => None,
-        };
-        let Some(name) = sole_secret else {
+        let Some(name) = sole_secret(template) else {
             return Err(ConnectorError::Invalid(format!(
                 "connector `{connector}` webhook `{label}` must be exactly one `{{{{secret.<field>}}}}` placeholder naming a `secret: true` account field"
             )));
         };
-        if template != format!("{{{{secret.{name}}}}}") {
-            return Err(ConnectorError::Invalid(format!(
-                "connector `{connector}` webhook `{label}` must be exactly one `{{{{secret.<field>}}}}` placeholder with no surrounding text"
-            )));
-        }
         // Confirms the named field exists and is declared `secret: true`.
         fields.check(Namespace::Secret, name)?;
     }
@@ -1255,6 +1624,29 @@ fn validate_webhook_templates(
         }
     }
     Ok(())
+}
+
+/// Whether a `body` JSON template already sets the value at a dot path:
+/// every segment on the way must be an object key that is present (a
+/// template placeholder in place of an object does not count).
+fn body_set_path(body: &serde_json::Value, path: &str) -> bool {
+    let mut cur = body;
+    let segs: Vec<&str> = path.split('.').collect();
+    for (i, seg) in segs.iter().enumerate() {
+        let Some(map) = cur.as_object() else {
+            return false;
+        };
+        match map.get(*seg) {
+            Some(v) => {
+                if i == segs.len() - 1 {
+                    return true;
+                }
+                cur = v;
+            }
+            None => return false,
+        }
+    }
+    false
 }
 
 /// Validates that every function example's `args` conform to that function's
@@ -1364,6 +1756,22 @@ fn auth_templates(auth: &AuthSpec) -> Vec<&str> {
             password_template,
         } => vec![username_template.as_str(), password_template.as_str()],
         AuthSpec::Path { value_template } => vec![value_template.as_str()],
+        AuthSpec::Oauth2Refresh {
+            token_url,
+            authorize_url,
+            client_id_template,
+            granted_scopes_template,
+            consent_scopes,
+            authorize_params,
+            ..
+        } => {
+            let mut v = vec![token_url.as_str(), client_id_template.as_str()];
+            v.extend(authorize_url.as_deref());
+            v.extend(granted_scopes_template.as_deref());
+            v.extend(consent_scopes.as_deref());
+            v.extend(authorize_params.values().map(String::as_str));
+            v
+        }
     }
 }
 
@@ -1908,6 +2316,161 @@ functions:
         assert!(err.contains("secret"), "message was: {err}");
     }
 
+    // -- D7: append_draft and save_attachments --
+
+    const IMAP_APPEND_BASE: &str = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: password\n    secret: true\n  - name: from_email\nfunctions:\n  - name: f\n    description: d\n";
+
+    const IMAP_CONN: &str = "    imap:\n      connection: { host: h, port: \"993\", use_tls: \"true\", auth_method: password, username: u, password: \"{{secret.password}}\" }\n";
+
+    const IMAP_MESSAGE: &str = "      message:\n        from_email: \"{{account.from_email}}\"\n        to: \"{{args.to}}\"\n        subject: \"{{args.subject}}\"\n        body_text: \"{{args.body_text}}\"\n";
+
+    fn imap_doc(op_line: &str, rest: &str) -> String {
+        format!("{IMAP_APPEND_BASE}{IMAP_CONN}{op_line}\n{rest}")
+    }
+
+    #[test]
+    fn imap_append_draft_parses_with_message_and_optional_folder() {
+        let y = format!(
+            "{}{}",
+            imap_doc(
+                "      op: append_draft",
+                "      params:\n        folder: \"{{args.folder}}\"\n"
+            ),
+            IMAP_MESSAGE
+        );
+        let doc = ConnectorDoc::from_yaml(&y, "x").unwrap();
+        let f = doc.function("f").unwrap();
+        let imap = f.imap.as_ref().unwrap();
+        assert_eq!(imap.op, ImapOp::AppendDraft);
+        let msg = imap
+            .message
+            .as_ref()
+            .expect("append_draft carries a message");
+        assert_eq!(msg.from_email, "{{account.from_email}}");
+        assert_eq!(msg.subject, "{{args.subject}}");
+    }
+
+    #[test]
+    fn imap_append_draft_without_message_rejected() {
+        let y = imap_doc("      op: append_draft", "");
+        let err = ConnectorDoc::from_yaml(&y, "x").unwrap_err().to_string();
+        assert!(err.contains("message"), "message was: {err}");
+    }
+
+    #[test]
+    fn imap_message_on_other_ops_rejected() {
+        for op in [
+            "verify",
+            "list_folders",
+            "search",
+            "fetch",
+            "set_flags",
+            "save_attachments",
+        ] {
+            let rest = match op {
+                "search" => "      params: { folder: INBOX, limit: \"10\" }\n",
+                "fetch" | "save_attachments" => "      params: { folder: INBOX, uid: \"7\" }\n",
+                "set_flags" => "      params: { folder: INBOX, uids: \"1,2\", seen: \"true\" }\n",
+                _ => "",
+            };
+            let y = format!(
+                "{}{}",
+                imap_doc(&format!("      op: {op}"), rest),
+                IMAP_MESSAGE
+            );
+            let err = ConnectorDoc::from_yaml(&y, "x").unwrap_err().to_string();
+            assert!(err.contains("message"), "op {op}: message was: {err}");
+        }
+    }
+
+    #[test]
+    fn imap_append_draft_unknown_param_rejected() {
+        let y = format!(
+            "{}{}",
+            imap_doc(
+                "      op: append_draft",
+                "      params: { cc: \"{{args.cc}}\" }\n"
+            ),
+            IMAP_MESSAGE
+        );
+        let err = ConnectorDoc::from_yaml(&y, "x").unwrap_err().to_string();
+        assert!(err.contains("cc"), "message was: {err}");
+    }
+
+    #[test]
+    fn imap_save_attachments_params_checked() {
+        let ok = imap_doc(
+            "      op: save_attachments",
+            "      params: { folder: INBOX, uid: \"{{args.uid}}\" }\n",
+        );
+        assert!(ConnectorDoc::from_yaml(&ok, "x").is_ok());
+
+        let missing = imap_doc(
+            "      op: save_attachments",
+            "      params: { folder: INBOX }\n",
+        );
+        let err = ConnectorDoc::from_yaml(&missing, "x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("uid"), "message was: {err}");
+
+        let extra = imap_doc(
+            "      op: save_attachments",
+            "      params: { folder: INBOX, uid: \"7\", mark_seen: \"true\" }\n",
+        );
+        let err = ConnectorDoc::from_yaml(&extra, "x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mark_seen"), "message was: {err}");
+    }
+
+    #[test]
+    fn imap_message_secret_rejected() {
+        let y = format!(
+            "{}      message:\n        from_email: \"{{{{account.from_email}}}}\"\n        to: \"{{{{args.to}}}}\"\n        subject: \"{{{{secret.password}}}}\"\n        body_text: \"{{{{args.body_text}}}}\"\n",
+            imap_doc("      op: append_draft", "")
+        );
+        let err = ConnectorDoc::from_yaml(&y, "x").unwrap_err().to_string();
+        assert!(err.contains("secret"), "message was: {err}");
+    }
+
+    #[test]
+    fn people_on_append_draft_loads_and_on_get_message_refused() {
+        let schema = "    args_schema: { type: object, properties: { to: { type: string }, subject: { type: string }, body_text: { type: string } }, required: [to, subject, body_text] }\n";
+        let people = "    people: { subject: subject, text: body_text }\n";
+
+        let tail = format!("{schema}{people}");
+        let draft = format!(
+            "{}{}{}",
+            imap_doc(
+                "      op: append_draft",
+                "      params: { folder: \"{{args.folder}}\" }\n"
+            ),
+            IMAP_MESSAGE,
+            tail
+        );
+        assert!(
+            ConnectorDoc::from_yaml(&draft, "x").is_ok(),
+            "people on append_draft must load"
+        );
+
+        let fetch = format!(
+            "{}{}",
+            imap_doc(
+                "      op: fetch",
+                "      params: { folder: INBOX, uid: \"{{args.uid}}\" }\n"
+            ),
+            tail
+        );
+        let err = ConnectorDoc::from_yaml(&fetch, "x")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("people") || err.contains("send"),
+            "message was: {err}"
+        );
+    }
+
     // -- body_form (spec 2026-07-22-official-connectors-wave-3, section 4.1) --
 
     const FORM_YAML: &str = r#"
@@ -2410,5 +2973,342 @@ functions:
             err.contains("webhook") && err.contains("inbox"),
             "a webhook block with no inbox function must be refused: {err}"
         );
+    }
+
+    /// An `oauth2_refresh` auth block over the minimal account fields.
+    const OAUTH_YAML: &str = r#"
+name: goauth
+version: 0.1.0
+auth:
+  kind: oauth2_refresh
+  token_url: "{{account.token_url}}"
+  client_id_template: "{{account.client_id}}"
+  refresh_token_template: "{{secret.refresh_token}}"
+account_fields:
+  - name: token_url
+    required: true
+  - name: client_id
+    required: true
+  - name: client_secret
+    required: true
+    secret: true
+  - name: refresh_token
+    required: true
+    secret: true
+  - name: granted_scopes
+functions:
+  - name: ping
+    description: Fake reachability check
+    mock: { status: 200, body: { ok: true } }
+"#;
+
+    /// The full block, with every optional field set.
+    const OAUTH_FULL_YAML: &str = r#"
+name: goauth
+version: 0.1.0
+auth:
+  kind: oauth2_refresh
+  token_url: "{{account.token_url}}"
+  authorize_url: "https://accounts.example.com/o/oauth2/v2/auth"
+  client_id_template: "{{account.client_id}}"
+  client_secret_template: "{{secret.client_secret}}"
+  refresh_token_template: "{{secret.refresh_token}}"
+  granted_scopes_template: "{{account.granted_scopes}}"
+  consent_scopes: "https://www.example.com/auth/calendar.readonly"
+  authorize_params: { access_type: offline, prompt: consent }
+account_fields:
+  - name: token_url
+    required: true
+  - name: client_id
+    required: true
+  - name: client_secret
+    required: true
+    secret: true
+  - name: refresh_token
+    required: true
+    secret: true
+  - name: granted_scopes
+functions:
+  - name: ping
+    description: Fake reachability check
+    mock: { status: 200, body: { ok: true } }
+"#;
+
+    #[test]
+    fn an_oauth2_refresh_block_round_trips_with_and_without_the_optional_fields() {
+        for yaml in [OAUTH_YAML, OAUTH_FULL_YAML] {
+            let doc = ConnectorDoc::from_yaml(yaml, "goauth").unwrap();
+            let Some(AuthSpec::Oauth2Refresh { .. }) = &doc.auth else {
+                panic!("expected an Oauth2Refresh auth block");
+            };
+            let text = yaml_serde::to_string(&doc).unwrap();
+            let again = ConnectorDoc::from_yaml(&text, "goauth")
+                .unwrap_or_else(|e| panic!("round trip failed: {e}"));
+            assert_eq!(doc.auth, again.auth);
+            assert_eq!(doc, again);
+        }
+    }
+
+    /// A manifest without the optional fields serializes exactly the
+    /// fields it declares: an older apb reads the new auth block as
+    /// unknown only because of the `kind` tag, not because of spilled
+    /// defaults.
+    #[test]
+    fn an_oauth2_refresh_block_without_optional_fields_serializes_no_defaults() {
+        let doc = ConnectorDoc::from_yaml(OAUTH_YAML, "goauth").unwrap();
+        let text = yaml_serde::to_string(doc.auth.as_ref().unwrap()).unwrap();
+        for absent in [
+            "authorize_url",
+            "client_secret_template",
+            "granted_scopes_template",
+            "consent_scopes",
+            "authorize_params",
+        ] {
+            assert!(!text.contains(absent), "`{absent}` leaked into {text}");
+        }
+    }
+
+    #[test]
+    fn a_literal_refresh_token_template_is_refused() {
+        let y = OAUTH_YAML.replace("{{secret.refresh_token}}", "a-literal-token");
+        let err = ConnectorDoc::from_yaml(&y, "goauth")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("refresh_token_template"),
+            "the error must name the field: {err}"
+        );
+    }
+
+    #[test]
+    fn a_client_secret_template_with_surrounding_text_is_refused() {
+        let y = OAUTH_YAML
+            .replace("client_id_template: \"{{account.client_id}}\"",
+                "client_id_template: \"{{account.client_id}}\"\n  client_secret_template: \"x{{secret.client_secret}}\"");
+        let err = ConnectorDoc::from_yaml(&y, "goauth")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("client_secret_template"),
+            "the error must name the field: {err}"
+        );
+    }
+
+    #[test]
+    fn args_in_the_token_url_are_refused() {
+        let y = OAUTH_YAML.replace("{{account.token_url}}", "{{args.token_url}}");
+        let err = ConnectorDoc::from_yaml(&y, "goauth")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("args"), "was: {err}");
+    }
+
+    #[test]
+    fn a_secret_in_the_granted_scopes_template_is_refused() {
+        let y = OAUTH_YAML.replace(
+            "client_id_template: \"{{account.client_id}}\"",
+            "client_id_template: \"{{account.client_id}}\"\n  granted_scopes_template: \"{{secret.refresh_token}}\"",
+        );
+        let err = ConnectorDoc::from_yaml(&y, "goauth")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("granted_scopes"),
+            "the error must name the field: {err}"
+        );
+    }
+
+    #[test]
+    fn scopes_on_a_header_connector_function_is_refused() {
+        let y = r#"
+name: hdr
+version: 0.1.0
+auth:
+  kind: header
+  header: Authorization
+  value_template: "Bearer {{secret.token}}"
+account_fields:
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: list
+    description: d
+    read_only: true
+    method: GET
+    url: "http://a"
+    scopes: ["https://www.example.com/auth/x"]
+"#;
+        let err = ConnectorDoc::from_yaml(y, "hdr").unwrap_err().to_string();
+        assert!(
+            err.contains("scopes") && err.contains("oauth2_refresh"),
+            "was: {err}"
+        );
+    }
+
+    #[test]
+    fn scopes_with_whitespace_or_a_duplicate_are_refused() {
+        let whitespace = OAUTH_YAML
+            .replace("  - name: ping", "  - name: list\n    description: d\n    method: GET\n    url: \"http://a\"\n    scopes: [\"two words\"]\n  - name: ping");
+        let err = ConnectorDoc::from_yaml(&whitespace, "goauth")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("scopes"), "was: {err}");
+
+        let duplicate = OAUTH_YAML
+            .replace("  - name: ping", "  - name: list\n    description: d\n    method: GET\n    url: \"http://a\"\n    scopes: [\"https://a\", \"https://a\"]\n  - name: ping");
+        let err = ConnectorDoc::from_yaml(&duplicate, "goauth")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("scopes"), "was: {err}");
+    }
+
+    #[test]
+    fn scopes_on_an_oauth2_refresh_http_function_load() {
+        let y = OAUTH_YAML.replace(
+            "  - name: ping",
+            "  - name: list\n    description: d\n    read_only: true\n    method: GET\n    url: \"http://a\"\n    response_pick: [a]\n    scopes: [\"https://www.example.com/auth/x\"]\n  - name: ping",
+        );
+        let doc = ConnectorDoc::from_yaml(&y, "goauth").unwrap();
+        assert_eq!(
+            doc.function("list").unwrap().scopes,
+            vec!["https://www.example.com/auth/x".to_string()]
+        );
+        // A function without scopes serializes no `scopes` key.
+        let ping = yaml_serde::to_string(doc.function("ping").unwrap()).unwrap();
+        assert!(!ping.contains("scopes"), "{ping}");
+    }
+    /// A connector with one `mime` function over the same rendered body.
+    fn mime_fn(mime_block: &str) -> String {
+        let head = "name: mimed\nversion: 0.1.0\naccount_fields:\n  - { name: api_base, required: true }\nfunctions:\n  - name: create_draft\n    description: d\n    method: POST\n    url: \"{{account.api_base}}/drafts\"\n    body: { threadId: \"{{args.thread_id}}\" }\n    args_schema: { type: object, properties: { thread_id: { type: string } } }\n";
+        format!("{head}{mime_block}")
+    }
+
+    const MIME_OK: &str = "    mime:\n      at: message.raw\n      message:\n        from_email: \"agent@acme.example\"\n        to: \"{{args.to}}\"\n        subject: \"{{args.subject}}\"\n        body_text: \"{{args.body}}\"\n";
+
+    #[test]
+    fn a_mime_block_loads_and_round_trips() {
+        let y = mime_fn(MIME_OK);
+        let doc = ConnectorDoc::from_yaml(&y, "mimed").unwrap();
+        let f = doc.function("create_draft").unwrap();
+        let m = f.mime.as_ref().unwrap();
+        assert_eq!(m.at, "message.raw");
+        assert_eq!(m.message.from_email, "agent@acme.example");
+        // A function without mime serializes no `mime` key.
+        let plain = ConnectorDoc::from_yaml(
+            "name: mimed\nversion: 0.1.0\naccount_fields:\n  - { name: api_base, required: true }\nfunctions:\n  - name: create_draft\n    description: d\n    method: POST\n    url: \"http://a\"\n    body: { a: 1 }\n",
+            "mimed",
+        )
+        .unwrap();
+        let t = yaml_serde::to_string(plain.function("create_draft").unwrap()).unwrap();
+        assert!(!t.contains("mime"), "{t}");
+    }
+
+    #[test]
+    fn a_mime_block_is_refused_wherever_it_does_not_fit() {
+        // On a non-HTTP function.
+        let y = mime_fn(MIME_OK).replace(
+            "    method: POST\n    url: \"{{account.api_base}}/drafts\"\n    body: { threadId: \"{{args.thread_id}}\" }",
+            "    mock: { status: 200, body: {} }",
+        );
+        let err = ConnectorDoc::from_yaml(&y, "mimed")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mime"), "{err}");
+
+        // With a body_form instead of a body.
+        let y = mime_fn(MIME_OK).replace(
+            "    body: { threadId: \"{{args.thread_id}}\" }",
+            "    body_form: { t: \"{{args.thread_id}}\" }",
+        );
+        let err = ConnectorDoc::from_yaml(&y, "mimed")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mime"), "{err}");
+
+        // With an empty `at`.
+        let y = mime_fn(MIME_OK).replace("at: message.raw", "at: \"\"");
+        let err = ConnectorDoc::from_yaml(&y, "mimed")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mime"), "{err}");
+
+        // With `at` the body already sets.
+        let y = mime_fn(MIME_OK).replace(
+            "    body: { threadId: \"{{args.thread_id}}\" }",
+            "    body: { threadId: \"{{args.thread_id}}\", message: { raw: x } }",
+        );
+        let err = ConnectorDoc::from_yaml(&y, "mimed")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mime"), "{err}");
+
+        // On a marker send.
+        let extra = "    idempotency:\n      mode: marker\n      arg: body\n      format: { kind: text }\n      reconcile: { function: find, args_from_send: [], since_arg: since }\n";
+        let y = mime_fn(&format!("{MIME_OK}{extra}"));
+        assert!(
+            ConnectorDoc::from_yaml(&y, "mimed").is_err(),
+            "a marker mime must be refused"
+        );
+
+        // decode_base64url off an HTTP function.
+        let y = mime_fn("").replace(
+            "    method: POST\n    url: \"{{account.api_base}}/drafts\"\n    body: { threadId: \"{{args.thread_id}}\" }",
+            "    mock: { status: 200, body: {} }\n    decode_base64url: [a]",
+        );
+        let err = ConnectorDoc::from_yaml(&y, "mimed")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("decode_base64url"), "{err}");
+    }
+
+    #[test]
+    fn a_mime_message_follows_the_secret_placement_policy() {
+        let with_secret = |field: &str, value: &str| {
+            mime_fn(MIME_OK)
+                .replace(
+                    "  - { name: api_base, required: true }\n",
+                    "  - { name: api_base, required: true }\n  - { name: token, secret: true }\n",
+                )
+                .replace(field, value)
+        };
+        for (field, value) in [
+            (
+                "body_text: \"{{args.body}}\"",
+                "body_text: \"{{secret.token}}\"",
+            ),
+            ("to: \"{{args.to}}\"", "to: \"{{secret.token}}\""),
+            ("body_text: \"{{args.body}}\"", "body_text: \"{{auth}}\""),
+        ] {
+            let y = with_secret(field, value);
+            assert!(y.contains(value), "{y}");
+            let err = ConnectorDoc::from_yaml(&y, "mimed")
+                .expect_err(value)
+                .to_string();
+            assert!(err.contains("mime message"), "{err}");
+        }
+        // An unknown account field is refused there too.
+        let y = mime_fn(MIME_OK).replace("{{args.subject}}", "{{account.nope}}");
+        assert!(ConnectorDoc::from_yaml(&y, "mimed").is_err());
+    }
+
+    #[test]
+    fn a_content_types_entry_with_parameters_or_case_is_refused() {
+        let y = mime_fn(MIME_OK).replace(
+            "    body: { threadId: \"{{args.thread_id}}\" }",
+            "    body: { threadId: \"{{args.thread_id}}\" }\n    content_types: [text/plain; charset=utf-8]",
+        );
+        let err = ConnectorDoc::from_yaml(&y, "mimed")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("content_types"), "{err}");
+        let y = mime_fn(MIME_OK).replace(
+            "    body: { threadId: \"{{args.thread_id}}\" }",
+            "    body: { threadId: \"{{args.thread_id}}\" }\n    content_types: [text/Plain]",
+        );
+        let err = ConnectorDoc::from_yaml(&y, "mimed")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("content_types"), "{err}");
     }
 }

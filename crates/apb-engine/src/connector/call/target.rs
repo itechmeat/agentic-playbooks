@@ -13,7 +13,7 @@ use super::request::TargetPins;
 use super::*;
 
 /// A resolved call target.
-pub(super) struct Target {
+pub(crate) struct Target {
     pub doc: ConnectorDoc,
     pub function: FunctionSpec,
     pub account: String,
@@ -222,7 +222,7 @@ impl LiveTarget {
     /// The target, its account checked against the connector's fields and
     /// split into the fields a request may show and the secret references
     /// resolved at send time.
-    pub(super) fn into_target(self) -> Result<Target, CallError> {
+    pub(crate) fn into_target(self) -> Result<Target, CallError> {
         let LiveTarget {
             name,
             doc,

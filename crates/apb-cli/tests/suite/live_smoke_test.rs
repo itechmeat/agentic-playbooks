@@ -157,9 +157,7 @@ echo done
 fn run_live_probe(
     connector: &str,
     account_fields: &[(&str, &str)],
-    secret_field: &str,
-    secret_var: &str,
-    secret_value: &str,
+    secrets: &[(&str, &str, &str)],
     healthcheck_fn: &str,
     healthcheck_args: &str,
     call_fn: &str,
@@ -181,9 +179,9 @@ fn run_live_probe(
     for (k, v) in account_fields {
         account_yaml.push_str(&format!("    {k}: \"{v}\"\n"));
     }
-    account_yaml.push_str(&format!(
-        "    {secret_field}: \"{{{{env.{secret_var}}}}}\"\n"
-    ));
+    for (field, var, _) in secrets {
+        account_yaml.push_str(&format!("    {field}: \"{{{{env.{var}}}}}\"\n"));
+    }
     let cfg_path = root
         .join(".apb/connector-config")
         .join(format!("{connector}.yaml"));
@@ -198,7 +196,11 @@ fn run_live_probe(
 
     let secrets_path = root.join(".apb/secrets.env");
     fs::create_dir_all(secrets_path.parent().unwrap()).unwrap();
-    fs::write(&secrets_path, format!("{secret_var}={secret_value}\n")).unwrap();
+    let mut secrets_env = String::new();
+    for (_, var, value) in secrets {
+        secrets_env.push_str(&format!("{var}={value}\n"));
+    }
+    fs::write(&secrets_path, secrets_env).unwrap();
 
     seed_profile_main(root);
     register_probe_playbook(root, connector, &[healthcheck_fn, call_fn]);
@@ -290,9 +292,7 @@ fn live_github_healthcheck_and_list_issues() {
     run_live_probe(
         "github",
         &[("api_base", "https://api.github.com")],
-        "token",
-        "GITHUB_TOKEN",
-        token,
+        &[("token", "GITHUB_TOKEN", token)],
         "get_rate_limit",
         "{}",
         "list_issues",
@@ -318,9 +318,7 @@ fn live_telegram_healthcheck_and_get_chat() {
     run_live_probe(
         "telegram",
         &[("api_base", "https://api.telegram.org")],
-        "token",
-        "TELEGRAM_BOT_TOKEN",
-        token,
+        &[("token", "TELEGRAM_BOT_TOKEN", token)],
         "get_me",
         "{}",
         "get_chat",
@@ -361,9 +359,7 @@ fn live_smtp_verify_and_send() {
             ("from_name", "apb live smoke test"),
             ("use_tls", "true"),
         ],
-        "password",
-        "SMTP_TEST_PASSWORD",
-        password,
+        &[("password", "SMTP_TEST_PASSWORD", password)],
         "verify",
         "{}",
         "send_email",
@@ -392,9 +388,7 @@ fn live_sentry_healthcheck_and_list_issues() {
     run_live_probe(
         "sentry",
         &[("base_url", "https://sentry.io"), ("org", org)],
-        "token",
-        "SENTRY_TOKEN",
-        token,
+        &[("token", "SENTRY_TOKEN", token)],
         "list_projects",
         "{}",
         "list_issues",
@@ -420,9 +414,7 @@ fn live_asana_healthcheck_and_list_workspaces() {
     run_live_probe(
         "asana",
         &[("api_base", "https://app.asana.com/api/1.0")],
-        "token",
-        "ASANA_TOKEN",
-        token,
+        &[("token", "ASANA_TOKEN", token)],
         "get_me",
         "{}",
         "list_workspaces",
@@ -461,9 +453,7 @@ fn live_imap_verify_and_list_folders() {
             ("auth_method", auth_method),
             ("username", username),
         ],
-        "password",
-        "IMAP_TEST_PASSWORD",
-        password,
+        &[("password", "IMAP_TEST_PASSWORD", password)],
         "verify",
         "{}",
         "list_folders",
@@ -489,9 +479,7 @@ fn live_gitlab_healthcheck_and_list_pipelines() {
     run_live_probe(
         "gitlab",
         &[("api_base", "https://gitlab.com/api/v4")],
-        "token",
-        "GITLAB_TOKEN",
-        token,
+        &[("token", "GITLAB_TOKEN", token)],
         "get_user",
         "{}",
         "list_pipelines",
@@ -520,9 +508,7 @@ fn live_youtrack_healthcheck_and_list_projects() {
     run_live_probe(
         "youtrack",
         &[("api_base", api_base)],
-        "token",
-        "YOUTRACK_TOKEN",
-        token,
+        &[("token", "YOUTRACK_TOKEN", token)],
         "get_me",
         "{}",
         "list_projects",
@@ -550,9 +536,7 @@ fn live_zulip_healthcheck_and_list_streams() {
     run_live_probe(
         "zulip",
         &[("api_base", api_base), ("email", email)],
-        "api_key",
-        "ZULIP_API_KEY",
-        api_key,
+        &[("api_key", "ZULIP_API_KEY", api_key)],
         "get_me",
         "{}",
         "list_streams",
@@ -578,9 +562,7 @@ fn live_discord_healthcheck_and_list_channels() {
     run_live_probe(
         "discord",
         &[("api_base", "https://discord.com/api/v10")],
-        "token",
-        "DISCORD_BOT_TOKEN",
-        token,
+        &[("token", "DISCORD_BOT_TOKEN", token)],
         "get_me",
         "{}",
         "list_channels",
@@ -606,9 +588,7 @@ fn live_slack_healthcheck_and_list_channels() {
     run_live_probe(
         "slack",
         &[("api_base", "https://slack.com/api")],
-        "token",
-        "SLACK_BOT_TOKEN",
-        token,
+        &[("token", "SLACK_BOT_TOKEN", token)],
         "auth_test",
         "{}",
         "list_channels",
@@ -661,5 +641,167 @@ fn live_hermes_oneshot() {
     assert!(
         stdout.contains("APB_OK"),
         "hermes stdout did not contain APB_OK: stdout={stdout} stderr={stderr}"
+    );
+}
+// -- Google and Brave live probes (tier 3) -------------------------------
+//
+// The google connectors share one OAuth client shape: `client_id` is a
+// plain field, `client_secret` and `refresh_token` are secrets. One refresh
+// token can carry the scopes of all three when `apb connector oauth` was
+// given every --scope, so all three tests take the same credentials.
+
+/// The api_base and token_url of the google connector under test; the test
+/// sets `APB_LIVE_GOOGLE_CONNECTOR` before calling.
+fn google_account_fields(client_id: String) -> Vec<(&'static str, &'static str)> {
+    let connector = std::env::var("APB_LIVE_GOOGLE_CONNECTOR").unwrap_or_default();
+    let api_base: &'static str = match connector.as_str() {
+        "gmail" => "https://gmail.googleapis.com/gmail/v1",
+        "google-drive" => "https://www.googleapis.com/drive/v3",
+        _ => "https://www.googleapis.com/calendar/v3",
+    };
+    let id: &'static str = Box::leak(client_id.into_boxed_str());
+    vec![
+        ("api_base", api_base),
+        ("token_url", "https://oauth2.googleapis.com/token"),
+        ("client_id", id),
+    ]
+}
+
+#[test]
+#[ignore]
+fn live_google_calendar_healthcheck_and_list_calendars() {
+    if std::env::var("APB_LIVE_TEST_GOOGLE_CALENDAR")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        println!("skipping live test: APB_LIVE_TEST_GOOGLE_CALENDAR not set");
+        return;
+    }
+    let Some(vals) = require_env(&[
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET",
+        "GOOGLE_REFRESH_TOKEN",
+    ]) else {
+        return;
+    };
+    let (client_id, client_secret, refresh_token) = (&vals[0], &vals[1], &vals[2]);
+    unsafe {
+        std::env::set_var("APB_LIVE_GOOGLE_CONNECTOR", "google-calendar");
+    }
+    run_live_probe(
+        "google-calendar",
+        &google_account_fields(client_id.to_string()),
+        &[
+            ("client_secret", "GOOGLE_CLIENT_SECRET", client_secret),
+            ("refresh_token", "GOOGLE_REFRESH_TOKEN", refresh_token),
+        ],
+        "verify",
+        "{}",
+        "list_calendars",
+        "{}",
+    );
+    unsafe {
+        std::env::remove_var("APB_LIVE_GOOGLE_CONNECTOR");
+    }
+}
+
+#[test]
+#[ignore]
+fn live_gmail_healthcheck_and_list_labels() {
+    if std::env::var("APB_LIVE_TEST_GMAIL")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        println!("skipping live test: APB_LIVE_TEST_GMAIL not set");
+        return;
+    }
+    let Some(vals) = require_env(&[
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET",
+        "GOOGLE_REFRESH_TOKEN",
+    ]) else {
+        return;
+    };
+    let (client_id, client_secret, refresh_token) = (&vals[0], &vals[1], &vals[2]);
+    unsafe {
+        std::env::set_var("APB_LIVE_GOOGLE_CONNECTOR", "gmail");
+    }
+    run_live_probe(
+        "gmail",
+        &google_account_fields(client_id.to_string()),
+        &[
+            ("client_secret", "GOOGLE_CLIENT_SECRET", client_secret),
+            ("refresh_token", "GOOGLE_REFRESH_TOKEN", refresh_token),
+        ],
+        "verify",
+        "{}",
+        "list_labels",
+        "{}",
+    );
+    unsafe {
+        std::env::remove_var("APB_LIVE_GOOGLE_CONNECTOR");
+    }
+}
+
+#[test]
+#[ignore]
+fn live_google_drive_healthcheck_and_search_files() {
+    if std::env::var("APB_LIVE_TEST_GOOGLE_DRIVE")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        println!("skipping live test: APB_LIVE_TEST_GOOGLE_DRIVE not set");
+        return;
+    }
+    let Some(vals) = require_env(&[
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET",
+        "GOOGLE_REFRESH_TOKEN",
+    ]) else {
+        return;
+    };
+    let (client_id, client_secret, refresh_token) = (&vals[0], &vals[1], &vals[2]);
+    unsafe {
+        std::env::set_var("APB_LIVE_GOOGLE_CONNECTOR", "google-drive");
+    }
+    run_live_probe(
+        "google-drive",
+        &google_account_fields(client_id.to_string()),
+        &[
+            ("client_secret", "GOOGLE_CLIENT_SECRET", client_secret),
+            ("refresh_token", "GOOGLE_REFRESH_TOKEN", refresh_token),
+        ],
+        "verify",
+        "{}",
+        "search_files",
+        r#"{"q":"trashed = false","page_size":10}"#,
+    );
+    unsafe {
+        std::env::remove_var("APB_LIVE_GOOGLE_CONNECTOR");
+    }
+}
+
+#[test]
+#[ignore]
+fn live_web_search_healthcheck_and_search() {
+    if std::env::var("APB_LIVE_TEST_WEB_SEARCH")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        println!("skipping live test: APB_LIVE_TEST_WEB_SEARCH not set");
+        return;
+    }
+    let Some(vals) = require_env(&["BRAVE_API_KEY"]) else {
+        return;
+    };
+    let api_key = &vals[0];
+    run_live_probe(
+        "web-search",
+        &[("api_base", "https://api.search.brave.com/res/v1")],
+        &[("api_key", "BRAVE_API_KEY", api_key)],
+        "verify",
+        "{}",
+        "search",
+        r#"{"q":"agentic playbooks","count":5}"#,
     );
 }

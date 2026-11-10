@@ -1,6 +1,6 @@
 # imap: installation instructions for an agent
 
-You are setting up the apb `imap` connector for a user's mailbox. Work through the steps in order. The only thing you need from the user is an app password, and one confirmation about where the account should live. Everything else you determine yourself.
+You are setting up the apb `imap` connector for a user's mailbox. Work through the steps in order. The only thing you need from the user is an app password, and one confirmation about where the account should live. An `oauth2` account instead needs a client id and client secret plus the user's consent in a browser (step 4). Everything else you determine yourself.
 
 Report progress in the user's chat language. Do not print the app password back to them, and do not put it in a commit, a log, a summary, or any file other than the secrets dotenv named below.
 
@@ -40,12 +40,12 @@ For any other provider, ask the user for the IMAP host, or find it in the provid
 
 `use_tls` is `"true"` for every real provider. Set it explicitly; only a local plaintext test fixture ever uses `"false"`.
 
-Two cases do not use a password at all and need `auth_method: xoauth2` with an access token from an external token helper such as `oama` or `mutt_oauth2`, referenced as `{{cmd:...}}`:
+Two cases do not use a password at all:
 
 - Outlook and Microsoft 365, which have stopped accepting passwords.
 - A Google Workspace account whose administrator disabled app passwords by policy.
 
-apb implements no OAuth consent flow of its own. If the user lands in either case, explain that a token helper has to be installed and authorized first, and that this is a separate setup step you cannot complete for them. Do not attempt a password account as a workaround: it will fail at authentication and the failure will look like a bad password.
+For either case set `auth_method: oauth2`: apb mints the access token itself from a refresh token obtained once through `apb connector oauth imap`, its own loopback consent flow. Follow step 4 after the account config. If the user prefers an external token helper they already run, `auth_method: xoauth2` with a token such as `oama` or `mutt_oauth2` referenced as `{{cmd:...}}` still works, and installing and authorizing that helper is a separate setup step you cannot complete for them. Do not attempt a password account as a workaround: it will fail at authentication and the failure will look like a bad password.
 
 ## Step 3: decide the scope, then write the account config
 
@@ -76,7 +76,33 @@ The `password` field must hold exactly one reference, either `{{env.VAR}}` or `{
 
 If you are editing a file that already has accounts, add yours to the list and leave the others alone. At most one account in the merged list may carry `default: true`.
 
-## Step 4: prepare the secrets file, then ask for the password
+## Step 4: an OAuth2 account, when step 2 chose `auth_method: oauth2`
+
+A password account skips this step. An `oauth2` account authenticates with an access token apb mints at call time from a refresh token, over the connector's `oauth2_refresh` auth block. The token never sits in the account config; apb itself stores nothing.
+
+You need an OAuth client from the provider. Ask the user for the client id and client secret, and have them create one if they have none: a Google Cloud OAuth client of type desktop for Gmail and Google Workspace (desktop allows the loopback redirect apb binds, `http://127.0.0.1` on a port it picks), or an Azure app registration with a mobile-and-desktop redirect for Outlook and Microsoft 365. Note the IMAP scopes the provider documents; apb asks for the ones the account names in `oauth_scopes`, so take them from the provider's IMAP page rather than guessing.
+
+Extend the account config from step 3:
+
+```yaml
+    auth_method: oauth2
+    oauth_token_url: https://oauth2.googleapis.com/token
+    oauth_authorize_url: https://accounts.google.com/o/oauth2/v2/auth
+    oauth_client_id: <client id>
+    oauth_scopes: https://mail.google.com/
+```
+
+The URL and scope values above are the Gmail ones; use the provider's own endpoints and scopes for any other host. `oauth_client_secret` and `oauth_refresh_token` are secrets and belong in the secrets file, which the next step prepares.
+
+Then run the consent flow, in a terminal, with the user present:
+
+```sh
+apb connector oauth imap --account <name>
+```
+
+It prints a URL; the user opens it, approves the access, and the provider calls back to the loopback port apb is listening on. The command prints the refresh token once. Ask the user to paste it into the secrets file's `oauth_refresh_token=` themselves, or write it for them without echoing it back, and tell them plainly that the transcript now contains it and that rerunning the consent flow revokes and reissues it. After the flow, continue with step 5 to finish the secrets file and approve the account.
+
+## Step 5: prepare the secrets file, then ask for the password
 
 ```sh
 apb connector env imap --write
@@ -84,7 +110,7 @@ apb connector env imap --write
 
 Run this from the project root. It appends a `KEY=` template line for every unresolved env var to `<project>/.apb/secrets.env`, creates that file with owner-only permissions when it is absent, never duplicates a key that is already there, and makes sure `.gitignore` covers it. Values are left empty on purpose.
 
-Now ask the user for the app password, and tell them how to get one:
+Now ask the user for the app password, and tell them how to get one. An `oauth2` account needs no app password: `oauth_refresh_token` came from step 4's consent, and `oauth_client_secret` is the only value still missing, copied from the OAuth client the user created.
 
 - Gmail: 2-Step Verification has to be on before Google offers app passwords at all. Then Google Account, Security, App passwords. The result is 16 characters.
 - Yandex Mail: enable IMAP access in the Mail web settings first, then generate an app password.
@@ -96,7 +122,7 @@ A global alternative exists at `<config-dir>/secrets.env`, resolved after the pr
 
 The resolution order at call time is process environment, then the project dotenv, then the global dotenv.
 
-## Step 5: approve the account
+## Step 6: approve the account
 
 ```sh
 apb connector approve imap --account <name>
@@ -112,7 +138,7 @@ apb connector doctor
 
 It reports manifest, config, env resolution, and trust status for every connector and account. Every check for `imap` should be clean. This command makes no network call, so a clean report is necessary but not sufficient.
 
-## Step 6: verify against the real server
+## Step 7: verify against the real server
 
 The live probe is the `verify` function: it connects, negotiates TLS, authenticates, and opens no mailbox. It is the safest possible first call.
 
@@ -139,11 +165,11 @@ Common failures and what they actually mean:
 - `has no account <name>`: the account slug in the URL does not match the config, or you wrote the config into a scope this workspace does not see.
 - authentication failed: with Gmail this is nearly always an ordinary account password where an app password is required, or 2-Step Verification not being enabled. It is not a connector problem.
 - unresolved env var: the secrets file has the key but no value, or the key name in the config does not match the one in the dotenv.
-- trust refused: step 5 was skipped, or the account fields changed after approval, which drops it.
+- trust refused: step 6 was skipped, or the account fields changed after approval, which drops it.
 
 Do not paper over a failure. Report the exact message and what it points at.
 
-## Step 7: report
+## Step 8: report
 
 Tell the user, briefly:
 
@@ -151,6 +177,7 @@ Tell the user, briefly:
 - which file holds the secret and which key;
 - the healthcheck result;
 - that reading mail never marks it read, and that `mark_read` and `mark_unread` are separate functions a node has to be granted;
+- that `append_draft` files a message in the drafts folder and never sends it, and that `save_attachments` writes a message's attachments into the run's own directory only, capped, never overwriting a file;
 - that this connector cannot send mail, and that `smtp` is the companion connector if they want to reply from a playbook.
 
 Do not offer to run a playbook, and do not start one. Binding this connector to a node is a separate decision that belongs to the user.

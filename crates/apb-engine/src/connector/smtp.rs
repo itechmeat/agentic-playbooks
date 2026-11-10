@@ -14,8 +14,6 @@ use std::collections::BTreeMap;
 use apb_core::connector::def::{SmtpMessage, SmtpSpec};
 use apb_core::connector::template::{Namespace, RenderCtx, placeholders, render_raw};
 use apb_core::secret::{Redaction, Secret};
-use lettre::Address;
-use lettre::message::{Mailbox, Message, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::transport::smtp::client::{SmtpConnection, TlsParameters};
 use lettre::transport::smtp::extension::ClientId;
@@ -275,158 +273,26 @@ fn render_err(field: &str, err: impl std::fmt::Display) -> CallError {
 ///
 /// Required fields (`from_email`, `to`, `subject`) never use this path, so a
 /// missing required arg still fails.
-fn render_optional(
-    field: &str,
-    template: &str,
-    ctx: &RenderCtx,
-) -> Result<Option<String>, CallError> {
-    for (ns, name) in placeholders(template).map_err(|e| render_err(field, e))? {
-        let absent = match ns {
-            Namespace::Args => !name.is_empty() && ctx.args.get(name.as_str()).is_none(),
-            Namespace::Account => !ctx.account.contains_key(name.as_str()),
-            _ => false,
-        };
-        if absent {
-            return Ok(None);
-        }
-    }
-    let value = render_raw(template, ctx).map_err(|e| render_err(field, e))?;
-    Ok(if value.is_empty() { None } else { Some(value) })
-}
-
-/// Renders and parses a REQUIRED comma-separated address list into lettre
-/// mailboxes. Empty tokens are skipped; a token that is not a valid address is
-/// `invalid_args` naming the field.
-fn render_addresses(
-    field: &str,
-    template: &str,
-    ctx: &RenderCtx,
-) -> Result<Vec<Mailbox>, CallError> {
-    let rendered = render_raw(template, ctx).map_err(|e| render_err(field, e))?;
-    parse_addresses(field, &rendered)
-}
-
-/// Renders one OPTIONAL address list (cc/bcc) leniently; an absent arg yields
-/// an empty list.
-fn render_optional_addresses(
-    field: &str,
-    template: Option<&str>,
-    ctx: &RenderCtx,
-) -> Result<Vec<Mailbox>, CallError> {
-    match template {
-        Some(t) => match render_optional(field, t, ctx)? {
-            Some(rendered) => parse_addresses(field, &rendered),
-            None => Ok(Vec::new()),
-        },
-        None => Ok(Vec::new()),
-    }
-}
-
-/// Parses a comma-separated rendered address list into mailboxes.
-fn parse_addresses(field: &str, rendered: &str) -> Result<Vec<Mailbox>, CallError> {
-    let mut out = Vec::new();
-    for token in rendered.split(',') {
-        let token = token.trim();
-        if token.is_empty() {
-            continue;
-        }
-        let mb = token.parse::<Mailbox>().map_err(|_| {
-            CallError::new(
-                CallErrorCode::InvalidArgs,
-                format!("smtp {field} address is not valid: `{token}`"),
-            )
-        })?;
-        out.push(mb);
-    }
-    Ok(out)
-}
-
-/// Renders and builds the message: from mailbox, recipient mailboxes, subject,
-/// and the multipart/alternative-or-single body. At least one of `body_text`
-/// or `body_html` must resolve (`invalid_args` otherwise); an empty `to` list
-/// is `invalid_args`.
+///
+/// Renders and builds the message through the shared composer (D4). The
+/// SMTP path keeps its exact shape: lettre strips the Bcc header (the
+/// envelope still delivers to every bcc recipient), no forced Message-ID.
 fn render_message(msg: &SmtpMessage, ctx: &RenderCtx) -> Result<BuiltMessage, CallError> {
-    let from_email = render_raw(&msg.from_email, ctx).map_err(|e| render_err("from_email", e))?;
-    let from_name = match &msg.from_name {
-        Some(t) => render_optional("from_name", t, ctx)?,
-        None => None,
-    };
-    let from_addr = from_email.parse::<Address>().map_err(|_| {
-        CallError::new(
-            CallErrorCode::InvalidArgs,
-            format!("smtp from_email is not valid: `{from_email}`"),
-        )
-    })?;
-    let from_mb = Mailbox::new(from_name, from_addr);
-
-    let subject = render_raw(&msg.subject, ctx).map_err(|e| render_err("subject", e))?;
-    let to = render_addresses("to", &msg.to, ctx)?;
-    let cc = render_optional_addresses("cc", msg.cc.as_deref(), ctx)?;
-    let bcc = render_optional_addresses("bcc", msg.bcc.as_deref(), ctx)?;
-    if to.is_empty() {
-        return Err(CallError::new(
-            CallErrorCode::InvalidArgs,
-            "smtp `to` has no recipients",
-        ));
-    }
-
-    let body_text = match &msg.body_text {
-        Some(t) => render_optional("body_text", t, ctx)?,
-        None => None,
-    };
-    let body_html = match &msg.body_html {
-        Some(t) => render_optional("body_html", t, ctx)?,
-        None => None,
-    };
-
-    let mut builder = Message::builder().from(from_mb.clone()).subject(&subject);
-    for mb in &to {
-        builder = builder.to(mb.clone());
-    }
-    for mb in &cc {
-        builder = builder.cc(mb.clone());
-    }
-    for mb in &bcc {
-        builder = builder.bcc(mb.clone());
-    }
-
-    let email = match (body_text, body_html) {
-        (Some(t), Some(h)) => builder.multipart(MultiPart::alternative_plain_html(t, h)),
-        (Some(t), None) => builder.singlepart(SinglePart::plain(t)),
-        (None, Some(h)) => builder.singlepart(SinglePart::html(h)),
-        (None, None) => {
-            return Err(CallError::new(
-                CallErrorCode::InvalidArgs,
-                "smtp message needs body_text or body_html",
-            ));
-        }
-    }
-    .map_err(|e| {
-        CallError::new(
-            CallErrorCode::Config,
-            format!("smtp message build failed: {e}"),
-        )
-    })?;
-
-    let to_strings: Vec<String> = to.iter().map(|mb| mb.email.to_string()).collect();
-    let cc_strings: Vec<String> = cc.iter().map(|mb| mb.email.to_string()).collect();
-    let bcc_strings: Vec<String> = bcc.iter().map(|mb| mb.email.to_string()).collect();
-    let recipients: Vec<String> = to_strings
-        .iter()
-        .chain(cc_strings.iter())
-        .chain(bcc_strings.iter())
-        .cloned()
-        .collect();
-    let envelope = email.envelope().clone();
+    let composed = crate::connector::compose::compose(
+        "smtp",
+        msg,
+        ctx,
+        &crate::connector::compose::ComposeOpts::default(),
+    )?;
     Ok(BuiltMessage {
-        from: from_mb.email.to_string(),
-        subject,
-        to: to_strings,
-        cc: cc_strings,
-        bcc: bcc_strings,
-        recipients,
-        envelope,
-        formatted: email.formatted(),
+        from: composed.from,
+        subject: composed.subject,
+        to: composed.to,
+        cc: composed.cc,
+        bcc: composed.bcc,
+        recipients: composed.recipients,
+        envelope: composed.envelope,
+        formatted: composed.formatted,
     })
 }
 

@@ -1,6 +1,18 @@
 name: imap
-version: 0.1.0
+version: 0.2.0
 healthcheck: verify
+auth:
+  kind: oauth2_refresh
+  token_url: "{{account.oauth_token_url}}"
+  authorize_url: "{{account.oauth_authorize_url}}"
+  client_id_template: "{{account.oauth_client_id}}"
+  client_secret_template: "{{secret.oauth_client_secret}}"
+  refresh_token_template: "{{secret.oauth_refresh_token}}"
+  granted_scopes_template: "{{account.oauth_granted_scopes}}"
+  consent_scopes: "{{account.oauth_scopes}}"
+  authorize_params:
+    access_type: "{{account.oauth_access_type}}"
+    prompt: "{{account.oauth_prompt}}"
 account_fields:
   - name: host
     required: true
@@ -13,8 +25,32 @@ account_fields:
   - name: username
     required: true
   - name: password
-    required: true
+    required: false
     secret: true
+  - name: from_email
+    required: false
+  - name: from_name
+    required: false
+  - name: oauth_token_url
+    required: false
+  - name: oauth_authorize_url
+    required: false
+  - name: oauth_client_id
+    required: false
+  - name: oauth_client_secret
+    required: false
+    secret: true
+  - name: oauth_refresh_token
+    required: false
+    secret: true
+  - name: oauth_scopes
+    required: false
+  - name: oauth_access_type
+    required: false
+  - name: oauth_prompt
+    required: false
+  - name: oauth_granted_scopes
+    required: false
 functions:
   - name: verify
     description: Probe the IMAP connection (connect, TLS, authenticate) without touching any mailbox
@@ -47,6 +83,7 @@ functions:
   - name: search_messages
     description: Search a folder for messages, reading it without marking anything seen
     read_only: true
+    untrusted_output: true
     imap:
       connection:
         host: "{{account.host}}"
@@ -80,6 +117,7 @@ functions:
   - name: get_message
     description: Fetch one message by uid, reading it without marking it seen
     read_only: true
+    untrusted_output: true
     imap:
       connection:
         host: "{{account.host}}"
@@ -146,3 +184,72 @@ functions:
         folder: { type: string, description: "the mailbox folder the messages live in, for example INBOX" }
         uids: { type: string, description: "comma-separated uid list, for example \"101,102\"" }
       required: [folder, uids]
+
+  - name: append_draft
+    description: Compose an email message and file it as a draft in the mailbox (the message is never sent)
+    imap:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        auth_method: "{{account.auth_method}}"
+        username: "{{account.username}}"
+        password: "{{secret.password}}"
+      op: append_draft
+      message:
+        from_email: "{{account.from_email}}"
+        from_name: "{{account.from_name}}"
+        to: "{{args.to}}"
+        cc: "{{args.cc}}"
+        bcc: "{{args.bcc}}"
+        subject: "{{args.subject}}"
+        body_text: "{{args.body_text}}"
+        body_html: "{{args.body_html}}"
+        in_reply_to: "{{args.in_reply_to}}"
+        references: "{{args.references}}"
+      params:
+        folder: "{{args.folder}}"
+    args_schema:
+      type: object
+      properties:
+        to: { type: string, description: "comma-separated list of recipient addresses" }
+        cc: { type: string, description: "comma-separated list, optional" }
+        bcc: { type: string, description: "comma-separated list, optional" }
+        subject: { type: string }
+        body_text: { type: string }
+        body_html: { type: string, description: "optional; combines with body_text into a multipart message when both are present" }
+        in_reply_to: { type: string, description: "optional Message-ID this draft replies to, threaded by mail clients" }
+        references: { type: string, description: "optional space-separated Message-IDs of the thread" }
+        folder: { type: string, description: "optional drafts folder; without it the folder the server marks \\Drafts is used" }
+      required: [to, subject, body_text]
+    people: { subject: subject, text: body_text }
+    idempotency: { mode: none }
+    examples:
+      - args: { to: ops@example.com, subject: "Release notes draft", body_text: "Draft of the release notes for review." }
+        note: "The draft is filed with the \\Draft and \\Seen flags and never sent. Without a folder the folder the server marks \\Drafts is used; pass one to pick it."
+
+  - name: save_attachments
+    description: Save one message's attachments into this run's attachments directory, reading the mailbox without changing it
+    read_only: true
+    untrusted_output: true
+    imap:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        auth_method: "{{account.auth_method}}"
+        username: "{{account.username}}"
+        password: "{{secret.password}}"
+      op: save_attachments
+      params:
+        folder: "{{args.folder}}"
+        uid: "{{args.uid}}"
+    args_schema:
+      type: object
+      properties:
+        folder: { type: string, description: "the mailbox folder the message lives in, for example INBOX" }
+        uid: { type: integer, description: "the message's IMAP uid, from a prior search_messages or list result" }
+      required: [folder, uid]
+    examples:
+      - args: { folder: INBOX, uid: 42 }
+        note: "Files land under the run's attachments directory, at most 20 files, 10 MiB per file and 25 MiB per call; files left out are listed with a reason. Only works inside a run."

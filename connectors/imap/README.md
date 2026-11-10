@@ -20,9 +20,19 @@ The password is written to a local file with owner-only permissions, and the acc
 
 ## What this connector can and cannot do
 
-It lists mailbox folders, reads mail, and marks messages read or unread. That is the whole surface. It cannot delete a message, cannot move one between folders, and cannot send anything. Sending is the separate `smtp` connector.
+It lists mailbox folders, reads mail, marks messages read or unread, files a composed message as a draft, and saves one message's attachments into the run's own directory. It cannot delete a message, cannot move one between folders, and cannot send anything: `append_draft` files a message in the drafts folder with the `\Draft` flag and never delivers it, so sending stays the separate `smtp` connector.
 
-Reading is silent: opening a folder to search it, and fetching a message body, both leave the unread state alone. A playbook can read your inbox without any trace appearing in your mail client. The only functions that change something on the server are `mark_read` and `mark_unread`, and each has to be granted to a node explicitly.
+Reading is silent: opening a folder to search it, and fetching a message body, both leave the unread state alone. A playbook can read your inbox without any trace appearing in your mail client. The only functions that change something on the server are `mark_read`, `mark_unread`, and `append_draft` (which adds a message to your drafts folder, nothing else), and each has to be granted to a node explicitly.
+
+`save_attachments` writes a message's attachments under the run's `attachments/` directory: at most 20 files, 10 MiB per file and 25 MiB per call, each name sanitized and never overwriting an existing file. It reads the mailbox without changing it, works only inside a run, and what it returns is text written by people outside the run, so bindings that grant it should carry `untrusted: true`.
+
+## Passwords and tokens
+
+Three ways to authenticate, chosen by the account's `auth_method`:
+
+- `password`: an app password, the default and the simplest.
+- `xoauth2`: an access token minted by an external token helper you run yourself (`oama`, `mutt_oauth2`).
+- `oauth2`: apb mints the access token itself from a refresh token that the `apb connector oauth imap` consent flow (run by you in a terminal, in a browser) obtained once. Providers that refuse app passwords, such as Outlook and Microsoft 365, work through this without an external helper. `INSTALL.md` walks an agent through it.
 
 ## Doing it by hand
 

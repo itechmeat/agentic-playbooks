@@ -80,6 +80,12 @@ pub(super) struct Tracked {
     pub result_ref: Option<String>,
     pub attempt: Option<u32>,
     pub attempt_seq: Option<u64>,
+    /// The function declares `conflict: confirms` (D3): a 409 to this key
+    /// proves the first request created the item.
+    pub conflict_confirms: bool,
+    /// The encoded key the request carried, for the conflict settlement's
+    /// effect ref.
+    pub key: Option<String>,
 }
 
 impl Tracked {
@@ -262,6 +268,29 @@ fn tracked(
         attempt: binding.attempt,
         nonce: new.nonce.clone(),
     });
+    // D3: the conflict setting and the encoded key travel with the send.
+    let (conflict_confirms, encoded_key) = match idem {
+        Idempotency::Key {
+            conflict,
+            encoding,
+            field,
+            header,
+            ..
+        } => {
+            let stamp_nonce = new.nonce.clone();
+            let encoded = encoding
+                .map(|kind| crate::connector::intent::stamp::encode_key(&stamp_nonce, kind))
+                .unwrap_or_else(|| stamp_nonce.clone());
+            (
+                matches!(
+                    conflict,
+                    Some(apb_core::connector::idempotency::KeyConflict::Confirms)
+                ),
+                (!field.is_none() || !header.is_none()).then_some(encoded),
+            )
+        }
+        _ => (false, None),
+    };
     Tracked {
         id: new.id,
         label: key.label.clone(),
@@ -272,6 +301,8 @@ fn tracked(
         result_ref: idem.result_ref().map(str::to_string),
         attempt: binding.attempt,
         attempt_seq: binding.attempt_seq,
+        conflict_confirms,
+        key: encoded_key,
     }
 }
 
@@ -411,12 +442,16 @@ pub(super) fn finish(
     facts: CallFacts<'_>,
     result: Result<&CallOk, &CallError>,
     value: &mut Value,
-) {
+) -> bool {
     // A service that dedupes by key and answers a conflict says the key was
-    // seen, not what became of the first request.
+    // seen, not what became of the first request: unknown, unless the
+    // function declares `conflict: confirms` (D3) -- the key is an id the
+    // client chose, so a conflict proves the first request created it.
     let key_conflict = tracked.mode == IdempotencyMode::Key && facts.http_status == Some(409);
+    let conflict_proves = key_conflict && tracked.conflict_confirms;
     let detail = result.err().map(error_detail);
     let (outcome, detail) = match (classify(facts, false), key_conflict) {
+        (_, true) if conflict_proves => (ledger::CONFIRMED, None),
         (_, true) => (ledger::UNKNOWN, detail),
         (CallClass::WriteUnknown, false) => (ledger::UNKNOWN, detail),
         (CallClass::Failed, false) => (ledger::NOT_SENT, detail),
@@ -428,11 +463,19 @@ pub(super) fn finish(
             false,
         ) => (ledger::CONFIRMED, None),
     };
-    let effect_ref = match (result, &tracked.result_ref) {
-        (Ok(ok), Some(path)) if outcome == ledger::CONFIRMED => scalar_at_path(ok.body(), path),
-        _ => None,
+    // D3: the conflict settlement names the key itself, not a response
+    // field (the 409 answered nothing about the first request's body).
+    let effect_ref = if conflict_proves {
+        tracked.key.clone()
+    } else {
+        match (result, &tracked.result_ref) {
+            (Ok(ok), Some(path)) if outcome == ledger::CONFIRMED => scalar_at_path(ok.body(), path),
+            _ => None,
+        }
     };
-    let source = if outcome == ledger::CONFIRMED && tracked.replay {
+    let source = if outcome == ledger::CONFIRMED && conflict_proves {
+        "key_conflict"
+    } else if outcome == ledger::CONFIRMED && tracked.replay {
         "key_replay"
     } else {
         "response"
@@ -444,14 +487,27 @@ pub(super) fn finish(
             outcome,
             source,
             detail,
-            effect_ref,
+            effect_ref: effect_ref.clone(),
             by: None,
         },
     );
+    if conflict_proves {
+        // The call itself answered 409; the person-facing answer is the
+        // same already_sent shape a ledger replay gives (D3).
+        *value = json!({
+            "ok": true,
+            "already_sent": true,
+            "intent": { "id": tracked.id, "label": tracked.label },
+            "sent_in_attempt": tracked.attempt,
+            "ref": tracked.key,
+        });
+        return true;
+    }
     value["intent"] = json!({ "id": tracked.id, "label": tracked.label });
     if outcome == ledger::UNKNOWN {
         value["effect"] = json!("unknown");
     }
+    outcome == ledger::CONFIRMED
 }
 
 fn error_detail(err: &CallError) -> String {

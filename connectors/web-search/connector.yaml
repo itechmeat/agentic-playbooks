@@ -1,0 +1,62 @@
+name: web-search
+version: 0.1.0
+healthcheck: verify
+# Brave Search API: the subscription key travels in a dedicated header, so
+# it never appears in the URL or the journaled pre-auth URL.
+auth:
+  kind: header
+  header: X-Subscription-Token
+  value_template: "{{secret.api_key}}"
+account_fields:
+  - name: api_base
+    required: true
+  - name: api_key
+    required: true
+    secret: true
+functions:
+  # The healthcheck runs one real search, so each probe spends one query
+  # against the account's plan (see README.md).
+  - name: verify
+    description: Check the API key with a minimal web search (one paid query per probe)
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/web/search"
+    query:
+      q: apb
+      count: "1"
+    args_schema: { type: object, properties: {}, required: [] }
+    headers:
+      Accept: application/json
+    response_pick: [query.original]
+
+  # No paging block on purpose: `offset` is a page index the agent sets, and
+  # `query.more_results_available` in the result tells it whether another
+  # page exists.
+  - name: search
+    description: Search the web and return result titles, URLs, descriptions, ages, and whether more results exist
+    read_only: true
+    untrusted_output: true
+    method: GET
+    url: "{{account.api_base}}/web/search"
+    query:
+      q: "{{args.q}}"
+      count: "{{args.count}}"
+      offset: "{{args.offset}}"
+      freshness: "{{args.freshness}}"
+      country: "{{args.country}}"
+      search_lang: "{{args.search_lang}}"
+      safesearch: "{{args.safesearch}}"
+    args_schema:
+      type: object
+      properties:
+        q: { type: string, description: "the search query text" }
+        count: { type: integer, minimum: 1, maximum: 20, description: "results per page, 1 to 20" }
+        offset: { type: integer, minimum: 0, maximum: 9, description: "page index, 0 to 9; add one to fetch the next page while more_results_available holds" }
+        freshness: { type: string, description: "restrict results to fresh content: pd (last day), pw (last week), pm (last month), py (last year), or a range YYYY-MM-DDtoYYYY-MM-DD" }
+        country: { type: string, description: "2-letter country code to bias results toward, for example us or de" }
+        search_lang: { type: string, description: "search language code, for example en or de" }
+        safesearch: { type: string, enum: [off, moderate, strict], description: "adult content filter level" }
+      required: [q]
+    headers:
+      Accept: application/json
+    response_pick: [query.more_results_available, web.results.title, web.results.url, web.results.description, web.results.age]

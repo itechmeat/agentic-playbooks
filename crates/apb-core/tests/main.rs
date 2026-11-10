@@ -126,6 +126,8 @@ mod validate_audience_test;
 mod validate_baseline_test;
 #[path = "suite/validate_budget_test.rs"]
 mod validate_budget_test;
+#[path = "suite/validate_calendar_v73_test.rs"]
+mod validate_calendar_v73_test;
 #[path = "suite/validate_duration_test.rs"]
 mod validate_duration_test;
 #[path = "suite/validate_evidence_test.rs"]
@@ -170,6 +172,8 @@ mod validate_semantics_test;
 mod validate_stall_test;
 #[path = "suite/validate_structure_test.rs"]
 mod validate_structure_test;
+#[path = "suite/validate_untrusted_output_test.rs"]
+mod validate_untrusted_output_test;
 #[path = "suite/validate_untrusted_test.rs"]
 mod validate_untrusted_test;
 #[path = "suite/validate_write_scope_test.rs"]

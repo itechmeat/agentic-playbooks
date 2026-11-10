@@ -927,6 +927,7 @@ fn write_connector_call_event(
     log.append(apb_engine::event::EventPayload::ConnectorCall {
         item: None,
         response_complete: None,
+        pages: None,
         node_id: "a".into(),
         connector: connector.into(),
         function: function.into(),

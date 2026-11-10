@@ -1,0 +1,159 @@
+cases:
+  - function: verify
+    account: { api_base: https://www.googleapis.com/drive/v3 }
+    args: {}
+    expect:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,displayName)"
+
+  # The healthcheck keeps only the account's own identity.
+  - function: verify
+    account: { api_base: https://www.googleapis.com/drive/v3 }
+    args: {}
+    expect:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,displayName)"
+      responses:
+        - body:
+            kind: "drive#about"
+            user: { emailAddress: "ana@example.com", displayName: "Ana" }
+      result_contains:
+        ok: true
+        body:
+          user: { emailAddress: "ana@example.com", displayName: "Ana" }
+
+  - function: search_files
+    account: { api_base: https://www.googleapis.com/drive/v3 }
+    args: { q: "name contains 'plan' and trashed = false", page_size: 50 }
+    expect:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/files?fields=nextPageToken,files(id,name,mimeType,modifiedTime,size,webViewLink)&includeItemsFromAllDrives=true&pageSize=50&q=name%20contains%20%27plan%27%20and%20trashed%20%3D%20false&supportsAllDrives=true"
+
+  # Two pages: the second request carries the first page's nextPageToken,
+  # the items of both pages are merged, and the pick drops what it does
+  # not name.
+  - function: search_files
+    account: { api_base: https://www.googleapis.com/drive/v3 }
+    args: { q: "trashed = false", page_size: 2 }
+    expect:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/files?fields=nextPageToken,files(id,name,mimeType,modifiedTime,size,webViewLink)&includeItemsFromAllDrives=true&pageSize=2&q=trashed%20%3D%20false&supportsAllDrives=true"
+      responses:
+        - body:
+            nextPageToken: "tok-2"
+            files:
+              - { id: "f1", name: "notes.txt", mimeType: "text/plain", size: "12", thumbnailLink: "https://example.com/t1" }
+              - { id: "f2", name: "Plan", mimeType: "application/vnd.google-apps.document" }
+        - body:
+            files:
+              - { id: "f3", name: "data.csv", mimeType: "text/csv", size: "40" }
+      requests:
+        - "https://www.googleapis.com/drive/v3/files?fields=nextPageToken,files(id,name,mimeType,modifiedTime,size,webViewLink)&includeItemsFromAllDrives=true&pageSize=2&q=trashed%20%3D%20false&supportsAllDrives=true"
+        - "https://www.googleapis.com/drive/v3/files?fields=nextPageToken,files(id,name,mimeType,modifiedTime,size,webViewLink)&includeItemsFromAllDrives=true&pageSize=2&pageToken=tok-2&q=trashed%20%3D%20false&supportsAllDrives=true"
+      result_contains:
+        ok: true
+        pages: 2
+        more: false
+        body:
+          files:
+            - { id: "f1", name: "notes.txt", mimeType: "text/plain", size: "12" }
+            - { id: "f2", name: "Plan", mimeType: "application/vnd.google-apps.document" }
+            - { id: "f3", name: "data.csv", mimeType: "text/csv", size: "40" }
+
+  - function: get_file_metadata
+    account: { api_base: https://www.googleapis.com/drive/v3 }
+    args: { file_id: "1AbC_dEf-123" }
+    expect:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/files/1AbC_dEf-123?fields=id,name,mimeType,modifiedTime,size,webViewLink,description,owners(emailAddress)&supportsAllDrives=true"
+      responses:
+        - body:
+            id: "1AbC_dEf-123"
+            name: "Plan"
+            mimeType: "application/vnd.google-apps.document"
+            webViewLink: "https://docs.google.com/document/d/1AbC_dEf-123/edit"
+            owners: [ { emailAddress: "ana@example.com", displayName: "Ana", photoLink: "https://example.com/p" } ]
+      result_contains:
+        ok: true
+        body:
+          id: "1AbC_dEf-123"
+          name: "Plan"
+          owners: [ { emailAddress: "ana@example.com" } ]
+
+  # A document as Markdown: the result body is the document's text.
+  - function: export_text
+    account: { api_base: https://www.googleapis.com/drive/v3 }
+    args: { file_id: "doc-1", mime_type: text/markdown }
+    expect:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/files/doc-1/export?mimeType=text%2Fmarkdown"
+      responses:
+        - headers: { Content-Type: "text/markdown; charset=utf-8" }
+          body: "# Quarterly plan\n\nShip the beta in March.\n"
+      result_contains:
+        ok: true
+        body: "# Quarterly plan\n\nShip the beta in March.\n"
+
+  - function: export_text
+    account: { api_base: https://www.googleapis.com/drive/v3 }
+    args: { file_id: "doc-1", mime_type: text/plain }
+    expect:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/files/doc-1/export?mimeType=text%2Fplain"
+      responses:
+        - headers: { Content-Type: text/plain }
+          body: "Quarterly plan\n\nShip the beta in March.\n"
+      result_contains:
+        ok: true
+        body: "Quarterly plan\n\nShip the beta in March.\n"
+
+  # A binary answer fails `service` before its body is used, exactly as a
+  # live call does.
+  - function: export_text
+    account: { api_base: https://www.googleapis.com/drive/v3 }
+    args: { file_id: "img-1", mime_type: text/plain }
+    expect:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/files/img-1/export?mimeType=text%2Fplain"
+      responses:
+        - headers: { Content-Type: image/png }
+          body: "PNG image bytes"
+      error_code: service
+
+  - function: read_text_file
+    account: { api_base: https://www.googleapis.com/drive/v3 }
+    args: { file_id: "file-9" }
+    expect:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/files/file-9?alt=media&supportsAllDrives=true"
+      responses:
+        - headers: { Content-Type: "text/csv; charset=utf-8" }
+          body: "name,total\nana,3\n"
+      result_contains:
+        ok: true
+        body: "name,total\nana,3\n"
+
+  # A JSON file comes back whole, parsed, with no projection.
+  - function: read_text_file
+    account: { api_base: https://www.googleapis.com/drive/v3 }
+    args: { file_id: "file-10" }
+    expect:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/files/file-10?alt=media&supportsAllDrives=true"
+      responses:
+        - headers: { Content-Type: application/json }
+          body: { service: "billing", retries: 3, owners: [ "ana" ] }
+      result_contains:
+        ok: true
+        body: { service: "billing", retries: 3, owners: [ "ana" ] }
+
+  - function: read_text_file
+    account: { api_base: https://www.googleapis.com/drive/v3 }
+    args: { file_id: "file-11" }
+    expect:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/files/file-11?alt=media&supportsAllDrives=true"
+      responses:
+        - headers: { Content-Type: application/octet-stream }
+          body: "raw bytes"
+      error_code: service

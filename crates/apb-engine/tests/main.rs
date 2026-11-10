@@ -256,6 +256,8 @@ mod cloud_gate_test;
 mod connector_asana;
 #[path = "suite/connector_call.rs"]
 mod connector_call;
+#[path = "suite/connector_content_types.rs"]
+mod connector_content_types;
 #[path = "suite/connector_contract_inbox.rs"]
 mod connector_contract_inbox;
 #[path = "suite/connector_discord.rs"]
@@ -264,6 +266,12 @@ mod connector_discord;
 mod connector_e2e;
 #[path = "suite/connector_gitlab.rs"]
 mod connector_gitlab;
+#[path = "suite/connector_gmail.rs"]
+mod connector_gmail;
+#[path = "suite/connector_google_calendar.rs"]
+mod connector_google_calendar;
+#[path = "suite/connector_google_drive.rs"]
+mod connector_google_drive;
 #[path = "suite/connector_healthcheck.rs"]
 mod connector_healthcheck;
 #[path = "suite/connector_imap.rs"]
@@ -272,6 +280,10 @@ mod connector_imap;
 mod connector_inbox;
 #[path = "suite/connector_manifest.rs"]
 mod connector_manifest;
+#[path = "suite/connector_oauth.rs"]
+mod connector_oauth;
+#[path = "suite/connector_paginate.rs"]
+mod connector_paginate;
 #[path = "suite/connector_play_call.rs"]
 mod connector_play_call;
 #[path = "suite/connector_run.rs"]
@@ -280,6 +292,8 @@ mod connector_run;
 mod connector_slack;
 #[path = "suite/connector_smtp.rs"]
 mod connector_smtp;
+#[path = "suite/connector_web_search.rs"]
+mod connector_web_search;
 #[path = "suite/connector_youtrack.rs"]
 mod connector_youtrack;
 #[path = "suite/connector_zulip.rs"]

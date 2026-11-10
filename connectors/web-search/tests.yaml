@@ -1,0 +1,149 @@
+# Offline contract-test cases for the web-search connector. Every case
+# renders through the same path a `--dry-run` call uses: no network, no
+# secrets (the runner stubs every `{{secret.*}}` field to a fixed value it
+# never reads; the X-Subscription-Token header carries a secret, so it is
+# never asserted here, exactly as the other official connectors do). The
+# header-carrying and redaction behaviour is covered end to end by the
+# engine test `connector_web_search`.
+#
+# The scripted-response cases run the same walk, media-type guard, and
+# `response_pick` projection a live call applies, so `result_contains`
+# below asserts the projected result body, not the raw response.
+cases:
+  # -- verify (the healthcheck) --------------------------------------------
+
+  # Fixed q and count render as literal query text, alphabetical pair order.
+  - function: verify
+    account: { api_base: https://api.search.brave.com/res/v1 }
+    args: {}
+    expect:
+      method: GET
+      url: "https://api.search.brave.com/res/v1/web/search?count=1&q=apb"
+      headers:
+        Accept: application/json
+
+  # The pick projects the answer down to query.original; everything else the
+  # service sends is dropped before the result reaches the agent.
+  - function: verify
+    account: { api_base: https://api.search.brave.com/res/v1 }
+    args: {}
+    expect:
+      method: GET
+      url: "https://api.search.brave.com/res/v1/web/search?count=1&q=apb"
+      responses:
+        - body:
+            query: { original: apb, show_strict_warning: false, is_navigational: true }
+            web:
+              type: search
+              results:
+                - { title: "apb: agentic playbooks", url: "https://example.com/apb", description: "A local runner for agentic playbooks." }
+      result_contains:
+        ok: true
+        picked: true
+        pages: 1
+        more: false
+        body:
+          query: { original: apb }
+
+  # -- search ---------------------------------------------------------------
+
+  # Every optional parameter present: substituted values are percent-encoded
+  # (the space in q becomes %20) and pairs render in alphabetical order.
+  - function: search
+    account: { api_base: https://api.search.brave.com/res/v1 }
+    args:
+      q: "apb agentic playbooks"
+      count: 5
+      offset: 1
+      freshness: pw
+      country: us
+      search_lang: en
+      safesearch: moderate
+    expect:
+      method: GET
+      url: "https://api.search.brave.com/res/v1/web/search?count=5&country=us&freshness=pw&offset=1&q=apb%20agentic%20playbooks&safesearch=moderate&search_lang=en"
+      headers:
+        Accept: application/json
+
+  # Only q is required; every absent optional argument drops its query pair
+  # instead of rendering an empty value.
+  - function: search
+    account: { api_base: https://api.search.brave.com/res/v1 }
+    args: { q: brave }
+    expect:
+      method: GET
+      url: "https://api.search.brave.com/res/v1/web/search?q=brave"
+
+  # The spec's fresh-search scenario: freshness pw and count 5 reach the
+  # request, and the result is projected to the result list with the flag
+  # that says whether another page exists.
+  - function: search
+    account: { api_base: https://api.search.brave.com/res/v1 }
+    args: { q: "release notes", freshness: pw, count: 5 }
+    expect:
+      method: GET
+      url: "https://api.search.brave.com/res/v1/web/search?count=5&freshness=pw&q=release%20notes"
+      responses:
+        - body:
+            query: { original: "release notes", more_results_available: true }
+            web:
+              type: search
+              results:
+                - title: "Release notes 1.4"
+                  url: "https://example.com/releases/1.4"
+                  description: "What changed in 1.4."
+                  age: "2 days ago"
+                  profile: { name: "Example", long_name: "Example Corp" }
+                - title: "Changelog"
+                  url: "https://example.com/changelog"
+                  description: "The full changelog."
+                  age: "5 days ago"
+      result_contains:
+        ok: true
+        picked: true
+        pages: 1
+        more: false
+        body:
+          query: { more_results_available: true }
+          web:
+            results:
+              - title: "Release notes 1.4"
+                url: "https://example.com/releases/1.4"
+                description: "What changed in 1.4."
+                age: "2 days ago"
+              - title: "Changelog"
+                url: "https://example.com/changelog"
+                description: "The full changelog."
+                age: "5 days ago"
+
+  # No results: the projection keeps the empty list and the flag, so the
+  # agent can tell "no hits" from "hit the end of the results".
+  - function: search
+    account: { api_base: https://api.search.brave.com/res/v1 }
+    args: { q: zzqqxxyy }
+    expect:
+      method: GET
+      url: "https://api.search.brave.com/res/v1/web/search?q=zzqqxxyy"
+      responses:
+        - body:
+            query: { original: zzqqxxyy, more_results_available: false }
+            web: { type: search, results: [] }
+      result_contains:
+        ok: true
+        picked: true
+        body:
+          query: { more_results_available: false }
+          web: { results: [] }
+
+  # The free plan answers 429 past one request per second; the connector
+  # maps that to `rate_limited`.
+  - function: search
+    account: { api_base: https://api.search.brave.com/res/v1 }
+    args: { q: brave }
+    expect:
+      method: GET
+      url: "https://api.search.brave.com/res/v1/web/search?q=brave"
+      responses:
+        - status: 429
+          body: { error: "Requests too fast" }
+      error_code: rate_limited

@@ -34,6 +34,30 @@ cases:
       method: GET
       url: "https://app.asana.com/api/1.0/tasks?limit=25&opt_fields=name,completed,assignee.name,due_on,permalink_url&project=9000"
 
+  - function: list_tasks
+    account: { api_base: https://app.asana.com/api/1.0 }
+    args: { project: "9000", limit: 25 }
+    expect:
+      method: GET
+      url: "https://app.asana.com/api/1.0/tasks?limit=25&opt_fields=name,completed,assignee.name,due_on,permalink_url&project=9000"
+      responses:
+        - body:
+            data: [ { gid: "1" }, { gid: "2" } ]
+            next_page: { offset: "o9", path: "/tasks?limit=25&offset=o9" }
+        - body:
+            data: [ { gid: "3" } ]
+            next_page: null
+      requests:
+        - "https://app.asana.com/api/1.0/tasks?limit=25&opt_fields=name,completed,assignee.name,due_on,permalink_url&project=9000"
+        - "https://app.asana.com/api/1.0/tasks?limit=25&offset=o9&opt_fields=name,completed,assignee.name,due_on,permalink_url&project=9000"
+      result_contains:
+        ok: true
+        pages: 2
+        more: false
+        body:
+          data: [ { gid: "1" }, { gid: "2" }, { gid: "3" } ]
+          next_page: null
+
   - function: get_task
     account: { api_base: https://app.asana.com/api/1.0 }
     args: { task: "5000" }
