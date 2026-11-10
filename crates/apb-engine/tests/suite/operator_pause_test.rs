@@ -613,6 +613,7 @@ fn seed_journal(root: &Path, run_id: &str, extra: &[EventPayload]) -> PathBuf {
         playbook: "nowscript".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     for p in extra {
@@ -775,6 +776,7 @@ fn a_timed_pause_of_a_run_whose_driver_died_mid_attempt_is_resumed_by_its_waker(
         token: None,
         isolation: None,
         exec: None,
+        cloud: None,
     })
     .unwrap();
     drop(log);

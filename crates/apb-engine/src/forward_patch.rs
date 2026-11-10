@@ -14,6 +14,8 @@
 //! - `goal_changed`, `effects_changed`, `irreversible_added`,
 //!   `trust_fields_changed`, `quality_changed`, `approval_weakened`: the
 //!   definition guard ([`definition_guard`]);
+//! - `external_data_run`: the run processed external data
+//!   ([`crate::external_data`]);
 //! - the validator and the frozen flag, as for every patch version.
 //!
 //! Nothing is written to the run's journal (the drive loop is its only
@@ -90,6 +92,8 @@ pub fn create(
     if !run_dir.is_dir() {
         return Err(EngineError::NotFound(run_id.to_string()));
     }
+    // A run that processed external data teaches the next runs nothing.
+    crate::external_data::refuse_if_flagged(&run_dir, "a forward patch")?;
     let events = read_all(&run_dir)?;
     let driver_dead = crate::liveness::driver_alive(&run_dir, run_id) == Some(false);
     check_window(&events, driver_dead, apb_core::clock::now_ms())?;
@@ -458,6 +462,7 @@ mod tests {
                 playbook: "p".into(),
                 version: "1.0.0".into(),
                 definition: None,
+                external_data: false,
             },
         );
         let live = vec![started.clone()];

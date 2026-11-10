@@ -1,5 +1,5 @@
 import { parse } from 'yaml'
-import type { AgentInfo, ModelOption, ModelRow } from './api'
+import type { AgentInfo, CloudCatalog, CloudOption, ModelOption, ModelRow, PrivacyClass } from './api'
 import { AGENT_ALIASES } from './consts.gen'
 
 /**
@@ -208,6 +208,9 @@ export interface ProfileTier {
   name: string
   executor: string
   for: string
+  /** The tier's own executor; absent for `use: executor`. */
+  agent?: string
+  model?: string
 }
 
 /**
@@ -238,6 +241,118 @@ export function parseProfileDoc(yamlText: string): ParsedProfileDoc {
       executor:
         t?.use === 'executor' ? 'the profile executor' : [t?.agent, t?.model].filter(Boolean).join(' / '),
       for: t?.for ?? '',
+      ...(t?.use !== 'executor' && t?.agent && t?.model ? { agent: t.agent, model: t.model } : {}),
     })),
   }
+}
+
+/** The privacy classes, most private first (the server's order). */
+export const PRIVACY_ORDER: PrivacyClass[] = [
+  'confidential_tee',
+  'third_party_tee',
+  'incognito',
+  'unverified',
+]
+
+/** A model without its `@effort` suffix: the id the option list names. */
+function withoutEffort(model: string): string {
+  const m = model.trim()
+  const at = m.lastIndexOf('@')
+  return at > 0 ? m.slice(0, at) : m
+}
+
+/** The cloud catalog row behind `model` on `agent`, from the agent's option
+ * list; `null` for a model outside any catalog. */
+export function cloudOptionFor(
+  agent: string,
+  model: string,
+  optionsByAgent: Record<string, ModelOption[]>,
+): CloudOption | null {
+  const id = withoutEffort(model)
+  const opt = (optionsByAgent[normalizeAgentKey(agent)] ?? []).find((o) => o.id === id && o.cloud)
+  return opt?.cloud ?? null
+}
+
+/** The option hint of a model: `in use`, the class of a cloud row, or
+ * `detected`. */
+export function modelHint(o: ModelOption, taken: boolean): string | undefined {
+  if (taken) return 'in use'
+  if (o.cloud) return o.cloud.privacy_class.replace(/_/g, ' ')
+  return o.detected ? 'detected' : undefined
+}
+
+/** A note for a model on a cloud route the option list leaves out because an
+ * agent step cannot run on it: the catalog lists it without tool calling, or
+ * not as a chat model. `null` otherwise. */
+export function cloudModelNote(
+  agent: string,
+  model: string,
+  optionsByAgent: Record<string, ModelOption[]>,
+  catalogs: CloudCatalog[],
+): string | null {
+  const id = withoutEffort(model)
+  const opts = optionsByAgent[normalizeAgentKey(agent)] ?? []
+  const routes = new Set(opts.filter((o) => o.cloud).map((o) => `${o.id.split('/')[0]}/`))
+  const route = [...routes].find((r) => id.startsWith(r))
+  if (!route || opts.some((o) => o.id === id)) return null
+  const rowId = id.slice(route.length)
+  for (const c of catalogs) {
+    const row = c.models.find((m) => m.id === rowId)
+    if (!row) continue
+    const chat = row.input_modalities.includes('text') && row.output_modalities.includes('text')
+    if (!chat) return 'not a chat model: agent steps cannot run on it'
+    if (!row.features.tools) return 'no tools: agent steps need tool calling'
+    return null
+  }
+  return 'not in the catalog: check the id or refresh the catalog'
+}
+
+/** One entry of the resolved chain the editor shows. */
+export interface ChainEntry {
+  role: 'executor' | 'fallback' | 'tier'
+  label: string
+  agent: string
+  model: string
+  privacy: PrivacyClass | null
+}
+
+/** The resolved chain and its privacy summary, the server's rule
+ * (`apb_core::cloud_models::privacy`): uniform when every entry has the same
+ * class, the least private class only when every entry is classified, a
+ * warning when the chain is not uniform and any entry is classified. */
+export interface ChainPrivacy {
+  entries: ChainEntry[]
+  uniform: boolean
+  leastPrivate: PrivacyClass | null
+  warning: boolean
+}
+
+export function resolvedChain(
+  groups: ExecutorGroup[],
+  tiers: ProfileTier[],
+  optionsByAgent: Record<string, ModelOption[]>,
+): ChainPrivacy {
+  const entry = (role: ChainEntry['role'], label: string, agent: string, model: string): ChainEntry => ({
+    role,
+    label,
+    agent,
+    model,
+    privacy: cloudOptionFor(agent, model, optionsByAgent)?.privacy_class ?? null,
+  })
+  const entries: ChainEntry[] = groups.map((g, i) =>
+    i === 0 ? entry('executor', 'executor', g.agent, g.model) : entry('fallback', `fallback ${i}`, g.agent, g.model),
+  )
+  for (const t of tiers) {
+    if (t.agent && t.model) entries.push(entry('tier', `tier ${t.name}`, t.agent, t.model))
+  }
+  const classes = entries.map((e) => e.privacy)
+  const uniform = classes.every((c) => c === classes[0])
+  const leastPrivate = classes.some((c) => c === null)
+    ? null
+    : (classes as PrivacyClass[]).reduce<PrivacyClass | null>(
+        (worst, c) =>
+          worst === null || PRIVACY_ORDER.indexOf(c) > PRIVACY_ORDER.indexOf(worst) ? c : worst,
+        null,
+      )
+  return { entries, uniform, leastPrivate, warning: !uniform && classes.some((c) => c !== null) }
 }

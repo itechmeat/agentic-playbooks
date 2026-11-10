@@ -482,6 +482,12 @@ pub struct RunUsage {
     /// can say "5 attempts, 3 with usage" instead of passing the reporting
     /// ones off as all of them.
     pub finished_attempts: u32,
+    /// Where apb priced costs the agents did not print, one line per catalog
+    /// and fetch date (`priced from NEAR AI Cloud catalog 2026-11-09`);
+    /// empty when every cost was printed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<String>>", optional))]
+    pub priced_from: Vec<String>,
 }
 
 /// Reported costs split by their basis (`apb_core::agent_output::CostBasis`):
@@ -598,6 +604,17 @@ impl RunUsage {
                 total.cost_usd = Some(total.cost_usd.unwrap_or(0.0) + c);
                 total.cost_attempts = total.cost_attempts.saturating_add(1);
                 total.cost_by_basis.add(u.cost_basis, c);
+            }
+            if let Some(p) = &u.priced_from {
+                let display = apb_core::cloud_models::lookup(&p.catalog)
+                    .map_or(p.catalog.as_str(), |c| c.display);
+                let line = format!(
+                    "priced from {display} catalog {}",
+                    apb_core::cloud_models::date(&p.fetched_at)
+                );
+                if !total.priced_from.contains(&line) {
+                    total.priced_from.push(line);
+                }
             }
             total.estimated |= u.source == apb_core::agent_output::UsageSource::Estimated;
         }
@@ -976,6 +993,7 @@ mod decision_tests {
                 cached,
                 error: error.map(str::to_string),
                 edge_addresses: Default::default(),
+                privacy_class: None,
             },
         }
     }
@@ -993,6 +1011,7 @@ mod decision_tests {
                 playbook: "p".into(),
                 version: "1.0.0".into(),
                 definition: None,
+                external_data: false,
             },
         }];
         assert_eq!(json(&events), None);
@@ -1221,6 +1240,7 @@ mod tests {
                         playbook: "p".into(),
                         version: "1.0.0".into(),
                         definition: None,
+                        external_data: false,
                     },
                     EventPayload::RetryDeferred {
                         node: "work".into(),
@@ -1274,6 +1294,7 @@ mod tests {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
                 EventPayload::NodeStarted {
                     node: "script".into(),
@@ -1298,6 +1319,7 @@ mod tests {
                     token: None,
                     isolation: None,
                     exec: None,
+                    cloud: None,
                 },
             ],
             reaped_pid(),
@@ -1326,6 +1348,7 @@ mod tests {
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
                 EventPayload::RunFinished {
                     outcome: "succeeded".into(),

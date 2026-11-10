@@ -10,8 +10,12 @@ import {
   modelOptionsForAgent,
   nextFallbackPair,
   parseProfileDoc,
+  cloudModelNote,
+  cloudOptionFor,
+  modelHint,
+  resolvedChain,
 } from './profileedit'
-import type { AgentInfo, ModelOption, ModelRow } from './api'
+import type { AgentInfo, CloudCatalog, ModelOption, ModelRow, PrivacyClass } from './api'
 
 // `optionsByAgent` mirrors the server's `/api/models` `options_by_agent`
 // (issue #42 finding 9): the curated table drives the SET for each agent,
@@ -334,8 +338,98 @@ describe('parseProfileDoc tiers (read-only display)', () => {
     const yaml =
       'executor: { agent: claude, model: sonnet }\ntiers:\n  light: { agent: opencode, model: small, for: "Mechanical edits." }\n  standard: { use: executor, for: "Ordinary tasks." }\n'
     expect(parseProfileDoc(yaml).tiers).toEqual([
-      { name: 'light', executor: 'opencode / small', for: 'Mechanical edits.' },
+      { name: 'light', agent: 'opencode', model: 'small', executor: 'opencode / small', for: 'Mechanical edits.' },
       { name: 'standard', executor: 'the profile executor', for: 'Ordinary tasks.' },
     ])
+  })
+})
+
+describe('cloud catalog models', () => {
+  const near = (id: string, privacy_class: PrivacyClass): ModelOption => ({
+    id: `nearai/${id}`,
+    vendor: 'near-ai-cloud',
+    detected: false,
+    cloud: { provider: 'near-ai-cloud', privacy_class, tools: true, reasoning: true },
+  })
+  const optionsByAgent: Record<string, ModelOption[]> = {
+    dsh: [
+      { id: 'deepseek-flash', vendor: '', detected: false },
+      { id: 'deepseek-v4-pro', vendor: '', detected: false },
+      near('Qwen/Qwen3.8-27B', 'confidential_tee'),
+      near('anthropic/claude-sonnet-5-5', 'incognito'),
+    ],
+    claude: [{ id: 'claude-haiku-5-5', vendor: 'anthropic', detected: true }],
+  }
+
+  it('keeps the class of a cloud option, listed after the DeepSeek models', () => {
+    const opts = modelOptionsForAgent('dsh', optionsByAgent, [])
+    expect(opts.map((o) => o.id).slice(0, 2)).toEqual(['deepseek-flash', 'deepseek-v4-pro'])
+    const q = opts.find((o) => o.id === 'nearai/Qwen/Qwen3.8-27B')!
+    expect(modelHint(q, false)).toBe('confidential tee')
+    expect(modelHint(q, true)).toBe('in use')
+    expect(cloudOptionFor('dsh', 'nearai/Qwen/Qwen3.8-27B@high', optionsByAgent)?.privacy_class).toBe(
+      'confidential_tee',
+    )
+    expect(cloudOptionFor('dsh', 'deepseek-flash', optionsByAgent)).toBeNull()
+  })
+
+  it('notes a catalog model an agent step cannot run on', () => {
+    const catalogs: CloudCatalog[] = [
+      {
+        provider: 'near-ai-cloud',
+        display: 'NEAR AI Cloud',
+        base_url: 'https://cloud-api.near.ai/v1',
+        key_env: 'NEARAI_API_KEY',
+        key_present: false,
+        source: 'embedded',
+        fetched_at: '2026-11-09T00:00:00Z',
+        digest: 'sha256:x',
+        dropped: 0,
+        models: [
+          {
+            id: 'Qwen/Qwen3-VL-30B-A3B-Instruct',
+            owned_by: 'nearai',
+            privacy_class: 'confidential_tee',
+            features: { tools: false, structured_outputs: true, json_mode: false, reasoning: false },
+            input_modalities: ['text', 'image'],
+            output_modalities: ['text'],
+          },
+        ],
+      },
+    ]
+    expect(cloudModelNote('dsh', 'nearai/Qwen/Qwen3-VL-30B-A3B-Instruct', optionsByAgent, catalogs)).toMatch(
+      /no tools/,
+    )
+    expect(cloudModelNote('dsh', 'nearai/Qwen/Qwen3.8-27B', optionsByAgent, catalogs)).toBeNull()
+    expect(cloudModelNote('dsh', 'nearai/Qwen/Qwen3.8-72B', optionsByAgent, catalogs)).toMatch(
+      /not in the catalog/,
+    )
+    expect(cloudModelNote('claude', 'claude-haiku-5-5', optionsByAgent, catalogs)).toBeNull()
+  })
+
+  it('lists executor, fallbacks and tiers and warns on a mixed chain', () => {
+    const tiers = parseProfileDoc(
+      'executor: { agent: dsh, model: nearai/Qwen/Qwen3.8-27B }\ntiers:\n  quick: { agent: claude, model: claude-haiku-5-5, for: x }\n  same: { use: executor, for: y }\n',
+    ).tiers
+    const chain = resolvedChain(
+      [
+        { agent: 'dsh', model: 'nearai/Qwen/Qwen3.8-27B' },
+        { agent: 'dsh', model: 'nearai/anthropic/claude-sonnet-5-5' },
+      ],
+      tiers,
+      optionsByAgent,
+    )
+    expect(chain.entries.map((e) => [e.label, e.privacy])).toEqual([
+      ['executor', 'confidential_tee'],
+      ['fallback 1', 'incognito'],
+      ['tier quick', null],
+    ])
+    expect(chain.uniform).toBe(false)
+    expect(chain.leastPrivate).toBeNull()
+    expect(chain.warning).toBe(true)
+    const pure = resolvedChain([{ agent: 'dsh', model: 'nearai/Qwen/Qwen3.8-27B' }], [], optionsByAgent)
+    expect(pure).toMatchObject({ uniform: true, leastPrivate: 'confidential_tee', warning: false })
+    const plain = resolvedChain([{ agent: 'claude', model: 'claude-haiku-5-5' }], [], optionsByAgent)
+    expect(plain.warning).toBe(false)
   })
 })

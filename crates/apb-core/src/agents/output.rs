@@ -188,8 +188,9 @@ pub struct AgentUsage {
     pub cache_read_tokens: u64,
     #[serde(default)]
     pub cache_write_tokens: u64,
-    /// The attempt's cost in US dollars as the CLI printed it, whatever its
-    /// basis ([`Self::cost_basis`] says whether anybody is billed for it).
+    /// The attempt's cost in US dollars as the CLI printed it, or as apb
+    /// priced it from a catalog (`priced_from`), whatever its basis
+    /// ([`Self::cost_basis`] says whether anybody is billed for it).
     /// A printed `0` is no figure and is left out: some CLIs print it on a
     /// login they do not price, and a non-zero figure is no proof of money
     /// spent either, since a CLI may price work a subscription covers.
@@ -202,6 +203,35 @@ pub struct AgentUsage {
     /// wrote, and a value a newer apb wrote reads as unknown.
     #[serde(default)]
     pub cost_basis: CostBasis,
+    /// Where `cost_usd` came from when apb priced it from a cloud catalog
+    /// (`crate::cloud_models`), not the CLI. Absent for a printed cost and
+    /// in older journals; a shape a newer apb wrote reads as absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_priced_from"
+    )]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub priced_from: Option<PricedFrom>,
+}
+
+/// The catalog row a cost was priced from.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PricedFrom {
+    /// The provider id (`near-ai-cloud`).
+    pub catalog: String,
+    pub model: String,
+    /// The digest of the catalog the run snapshotted.
+    pub digest: String,
+    pub fetched_at: String,
+}
+
+fn lenient_priced_from<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<PricedFrom>, D::Error> {
+    let raw = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(raw).ok())
 }
 
 /// What a reported cost is. apb never guesses it: the agent's own module
@@ -346,4 +376,34 @@ pub fn json_string_field(raw: &str, fields: &[&str]) -> Option<String> {
         }
     }
     found
+}
+
+#[cfg(test)]
+mod priced_from_tests {
+    use super::*;
+
+    /// `priced_from` is optional and lenient: absent decodes, a shape a
+    /// newer apb wrote reads as absent, a priced usage round-trips.
+    #[test]
+    fn priced_from_decodes_leniently_and_round_trips() {
+        let base = r#"{"input_tokens":1,"output_tokens":2,"source":"reported"}"#;
+        let u: AgentUsage = serde_json::from_str(base).unwrap();
+        assert_eq!(u.priced_from, None);
+        let odd = r#"{"input_tokens":1,"output_tokens":2,"source":"reported","priced_from":[1,2]}"#;
+        let u: AgentUsage = serde_json::from_str(odd).unwrap();
+        assert_eq!(u.priced_from, None);
+        let priced = AgentUsage {
+            cost_usd: Some(0.175),
+            priced_from: Some(PricedFrom {
+                catalog: "near-ai-cloud".into(),
+                model: "Qwen/Qwen3.8-27B".into(),
+                digest: "sha256:ab".into(),
+                fetched_at: "2026-11-09T00:00:00Z".into(),
+            }),
+            ..u
+        };
+        let back: AgentUsage =
+            serde_json::from_str(&serde_json::to_string(&priced).unwrap()).unwrap();
+        assert_eq!(back, priced);
+    }
 }

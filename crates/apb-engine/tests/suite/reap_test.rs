@@ -237,6 +237,7 @@ fn attempt_started(node: &str, pid: Option<u32>) -> EventPayload {
         token: None,
         isolation: None,
         exec: None,
+        cloud: None,
     }
 }
 
@@ -338,6 +339,7 @@ fn a_fork_with_two_dead_attempts_reaps_both_and_finishes() {
                 playbook: "reapfork".into(),
                 version: "1.0.0".into(),
                 definition: None,
+                external_data: false,
             },
             EventPayload::node_finished("start", "succeeded", 1, String::new()),
             node_started("b"),

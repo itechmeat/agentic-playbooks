@@ -248,6 +248,17 @@ pub fn run_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
 /// scan bounded on a long history reads. Unverified directories never take
 /// a place under the cap; the scan stops at the `cap`-th verified one.
 pub fn newest_run_dirs(roots: &[PathBuf], cap: usize) -> Vec<PathBuf> {
+    newest_run_dirs_where(roots, cap, |_| true)
+}
+
+/// [`newest_run_dirs`] counting only the directories `keep` accepts: the
+/// filter runs before the cap, so the directories it drops never take a
+/// place in the window.
+pub(crate) fn newest_run_dirs_where(
+    roots: &[PathBuf],
+    cap: usize,
+    keep: impl Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
     let written = |d: &PathBuf| {
         std::fs::metadata(d.join("events.jsonl"))
             .and_then(|m| m.modified())
@@ -260,7 +271,7 @@ pub fn newest_run_dirs(roots: &[PathBuf], cap: usize) -> Vec<PathBuf> {
     dirs.sort_by_key(|a| std::cmp::Reverse(a.0));
     dirs.into_iter()
         .map(|(_, d)| d)
-        .filter(|d| created_here(d))
+        .filter(|d| created_here(d) && keep(d))
         .take(cap)
         .collect()
 }
@@ -319,6 +330,14 @@ pub struct DecisionsReport {
     /// [`NO_DECISIONS`] when no decision matched.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The runs left out because they processed external data
+    /// ([`crate::external_data`]): none of their decisions is read.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub skipped_external: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// One use with one `(provider, model)`.
@@ -333,6 +352,10 @@ pub struct GroupReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule: Option<String>,
     pub provider_kind: Option<String>,
+    /// The privacy class of a cloud catalog model (`decisions.yaml`
+    /// `catalog:`), shown next to the provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub privacy_class: Option<String>,
     pub calibrated: bool,
     /// An LLM emulation: its own group, never pooled with a decision model.
     pub emulation: bool,
@@ -657,6 +680,7 @@ fn group_report(
         model: key.model.clone(),
         rule: key.rule.clone(),
         provider_kind: key.provider_kind.clone(),
+        privacy_class: key.privacy_class.clone(),
         calibrated: key.calibrated,
         emulation: key.emulation,
         label_source: l.label_source().to_string(),
@@ -799,6 +823,7 @@ struct GroupKey {
     rule: Option<String>,
     calibrated: bool,
     provider_kind: Option<String>,
+    privacy_class: Option<String>,
 }
 
 impl GroupKey {
@@ -815,6 +840,7 @@ impl GroupKey {
             rule: rule.map(str::to_string),
             calibrated: r.calibrated,
             provider_kind: r.provider_kind.clone(),
+            privacy_class: r.privacy_class.clone(),
         }
     }
 }
@@ -900,6 +926,7 @@ pub fn build(
         median_attempt_ms,
         note: (decisions == 0).then(|| NO_DECISIONS.to_string()),
         groups,
+        skipped_external: 0,
     }
 }
 
@@ -909,11 +936,22 @@ pub fn report(
     filter: &ReportFilter,
     settings: &ReportSettings,
 ) -> DecisionsReport {
-    let journals: Vec<RunJournal> = run_dirs(roots)
-        .iter()
-        .filter_map(|d| RunJournal::load(d))
-        .collect();
-    build(&journals, filter, settings)
+    let (dirs, skipped_external) = report_dirs(roots);
+    let journals: Vec<RunJournal> = dirs.iter().filter_map(|d| RunJournal::load(d)).collect();
+    DecisionsReport {
+        skipped_external,
+        ..build(&journals, filter, settings)
+    }
+}
+
+/// The run directories the report and replay read ([`run_dirs`]) without
+/// the runs that processed external data, and how many those are: no
+/// label, rate, threshold or replay request ever reads one.
+pub fn report_dirs(roots: &[PathBuf]) -> (Vec<PathBuf>, usize) {
+    let (flagged, kept): (Vec<PathBuf>, Vec<PathBuf>) = run_dirs(roots)
+        .into_iter()
+        .partition(|d| crate::external_data::flag::is_flagged(d));
+    (kept, flagged.len())
 }
 
 /// Parses `--since`: a duration back from now (`7d`, `24h`, `90m`) or a

@@ -3,6 +3,9 @@
 //!
 //! The basis is decided in this order and never guessed:
 //!
+//! 0. a model on a cloud route (`crate::cloud_models`) whose key variable
+//!    reaches the spawned process is `billed`: the key is the provider's
+//!    account; without the key this step decides nothing;
 //! 1. the agent's own module ([`super::HostSetup::cost_basis`]) from facts
 //!    it reads locally, with no network and no secret value: which login
 //!    variables reach the spawned process (by name), the agent's config
@@ -32,6 +35,12 @@ pub fn resolve(
     declared: &dyn Fn(&str) -> bool,
 ) -> CostReading {
     let module = super::lookup(agent);
+    if let Some(r) = module.and_then(|a| a.models().cloud_model(model))
+        && let Some(p) = crate::cloud_models::lookup(r.provider)
+        && (facts.present)(p.key_env)
+    {
+        return CostReading::new(CostBasis::Billed, format!("cloud:{}:{}", p.id, p.key_env));
+    }
     if let Some(reading) = module.and_then(|a| a.setup().cost_basis(facts)) {
         return reading;
     }
@@ -49,6 +58,47 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn facts<'a>(present: &'a dyn Fn(&str) -> bool) -> CostFacts<'a> {
+        CostFacts {
+            present,
+            setting: &|_| None,
+            home: None,
+            workdir: None,
+            hermetic: false,
+            system_root: std::path::Path::new("/nonexistent"),
+        }
+    }
+
+    /// A keyed NEAR route is billed, before dsh's own reading; without the
+    /// key the step decides nothing; a DeepSeek model is unaffected.
+    #[test]
+    fn a_keyed_cloud_route_is_billed() {
+        let key = |n: &str| n == "NEARAI_API_KEY";
+        let none = |_: &str| false;
+        let no_decl = |_: &str| false;
+        let r = resolve("dsh", "nearai/Qwen/Qwen3.8-27B", &facts(&key), &no_decl);
+        assert_eq!(r.basis, CostBasis::Billed);
+        assert_eq!(
+            r,
+            CostReading::new(
+                CostBasis::Billed,
+                "cloud:near-ai-cloud:NEARAI_API_KEY".into()
+            )
+        );
+        let without = resolve("dsh", "nearai/Qwen/Qwen3.8-27B", &facts(&none), &no_decl);
+        assert_eq!(without.basis, CostBasis::Unknown);
+        let decl = |n: &str| n == "nearai";
+        assert_eq!(
+            resolve("dsh", "nearai/Qwen/Qwen3.8-27B", &facts(&none), &decl).basis,
+            CostBasis::SubscriptionEquivalent,
+            "without the key the declared subscription decides as before"
+        );
+        assert_eq!(
+            resolve("dsh", "deepseek-flash", &facts(&key), &no_decl).basis,
+            CostBasis::Unknown
+        );
+    }
 
     /// A custom agent is matched by the declared subscription alone, under
     /// its own name or the provider of its model.

@@ -197,6 +197,7 @@ mod tests {
             enforce_refused: None,
             join: Default::default(),
             edge_addresses: Default::default(),
+            privacy_class: None,
         }
     }
 }

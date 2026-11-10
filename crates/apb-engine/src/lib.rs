@@ -37,6 +37,7 @@ pub mod follow_up;
 pub mod eval;
 // --- end 0.24.0 eval suites ---
 pub mod evidence;
+pub mod external_data;
 pub mod failure_class;
 pub mod fit;
 // fork branch-failure policies and join refusals on the run surfaces (issue #195)

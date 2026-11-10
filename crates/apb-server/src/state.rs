@@ -321,3 +321,52 @@ where
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
+
+/// Headers a proxy, a load balancer or a tunnel service adds.
+pub(crate) const FORWARDING_HEADERS: [&str; 8] = [
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-real-ip",
+    "via",
+    "cf-connecting-ip",
+    "true-client-ip",
+];
+
+/// Whether an authority (`Host`, or an `Origin` without its scheme) names
+/// this machine's loopback interface: `localhost`, a loopback address, on
+/// any port.
+pub(crate) fn loopback_authority(authority: &str) -> bool {
+    let a = authority.trim().to_ascii_lowercase();
+    let name = match a.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => a.rsplit_once(':').map_or(a.as_str(), |(n, _)| n),
+    };
+    let name = name.trim_end_matches('.');
+    name == "localhost"
+        || name
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.to_canonical().is_loopback())
+}
+
+/// Whether the request came straight from this machine (the route layers
+/// of history discovery and the catalog refresh): a loopback peer
+/// that is not a trusted proxy, no forwarding header, and a loopback
+/// `Host` (and `Origin`, when sent).
+pub(crate) fn local_client(ctx: &crate::auth::ClientCtx, headers: &axum::http::HeaderMap) -> bool {
+    let text = |name| headers.get(name).and_then(|v| v.to_str().ok());
+    let origin_ok = match headers.get(axum::http::header::ORIGIN) {
+        None => true,
+        Some(v) => v
+            .to_str()
+            .ok()
+            .and_then(|o| o.split_once("://"))
+            .is_some_and(|(_, authority)| loopback_authority(authority)),
+    };
+    ctx.ip.to_canonical().is_loopback()
+        && !ctx.via_proxy
+        && !FORWARDING_HEADERS.iter().any(|h| headers.contains_key(*h))
+        && text(axum::http::header::HOST).is_some_and(loopback_authority)
+        && origin_ok
+}

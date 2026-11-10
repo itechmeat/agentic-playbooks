@@ -34,6 +34,9 @@ pub struct DecisionRecord {
     /// The provider's kind from the run manifest (`systemone`, `fake`, an
     /// emulation), when the manifest names it.
     pub provider_kind: Option<String>,
+    /// The privacy class of a cloud catalog model that answered
+    /// (`decision_made.privacy_class`).
+    pub privacy_class: Option<String>,
     pub calibrated: bool,
     pub mode: String,
     pub answers: BTreeMap<String, DecisionAnswer>,
@@ -67,6 +70,7 @@ impl DecisionRecord {
             cost_usd,
             cached,
             error,
+            privacy_class,
             ..
         } = &e.payload
         else {
@@ -83,6 +87,7 @@ impl DecisionRecord {
             provider: provider.clone(),
             model: model.clone(),
             provider_kind: None,
+            privacy_class: privacy_class.clone(),
             calibrated: *calibrated,
             mode: mode.clone(),
             answers: answers.clone(),
@@ -852,6 +857,7 @@ mod tests {
             provider: Some("main".into()),
             model: Some("m".into()),
             provider_kind: None,
+            privacy_class: None,
             calibrated: true,
             mode: "shadow".into(),
             answers: BTreeMap::new(),

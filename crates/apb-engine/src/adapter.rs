@@ -10,6 +10,7 @@ use serde::Deserialize;
 
 mod command;
 mod failure;
+mod key_scrub;
 mod output;
 mod spawn_env;
 mod stop;
@@ -690,6 +691,46 @@ pub fn cost_reading(
     apb_core::agents::cost_basis::resolve(agent, model, &facts, &declared)
 }
 
+/// Prices `usage` from the run's catalog row when the agent printed no cost
+/// (`apb_core::cloud_models`): input, cache reads at the cached price (else
+/// the input price), cache writes at the input price and output, per
+/// million tokens, rounded like `apb stats`; `priced_from` names the
+/// catalog. A printed cost is never replaced, and a row without an input
+/// and an output price leaves the cost absent.
+fn stamp_catalog_price(task: &AgentTask, usage: Option<&mut apb_core::agent_output::AgentUsage>) {
+    let (Some(u), Some(cloud)) = (usage, task.spawn_env.cloud.as_ref()) else {
+        return;
+    };
+    price_from_catalog(u, cloud);
+}
+
+/// The pricing rule of [`stamp_catalog_price`].
+pub(crate) fn price_from_catalog(
+    u: &mut apb_core::agent_output::AgentUsage,
+    cloud: &apb_core::cloud_models::CloudSnapshotRef,
+) {
+    if u.cost_usd.is_some() {
+        return;
+    }
+    let m = &cloud.model;
+    let (Some(input), Some(output)) = (m.price_in_usd_mtok, m.price_out_usd_mtok) else {
+        return;
+    };
+    let cached = m.price_cached_in_usd_mtok.unwrap_or(input);
+    let cost = (u.input_tokens as f64 * input
+        + u.cache_read_tokens as f64 * cached
+        + u.cache_write_tokens as f64 * input
+        + u.output_tokens as f64 * output)
+        / 1e6;
+    u.cost_usd = Some((cost * 1e8).round() / 1e8);
+    u.priced_from = Some(apb_core::agent_output::PricedFrom {
+        catalog: cloud.provider.clone(),
+        model: m.id.clone(),
+        digest: cloud.catalog_digest.clone(),
+        fetched_at: cloud.fetched_at.clone(),
+    });
+}
+
 /// Sets the basis of the cost in `usage`: what was read before the spawn
 /// (`before`) and is read again now, after the exit, when both agree, else
 /// unknown (`CostReading::across`).
@@ -1208,7 +1249,14 @@ impl ClaudeAdapter {
             on_spawn,
         )?;
         // Drain both streams from the start (see `crate::capture::Pipes`).
-        let pipes = Pipes::start(&mut child, task.transcript_dir, &task.output_limits);
+        let redact = key_scrub::KeyScrub::for_spawn(task.spawn_env, task.agent, task.model)
+            .map(|s| s.redact());
+        let pipes = Pipes::start(
+            &mut child,
+            task.transcript_dir,
+            &task.output_limits,
+            redact.as_ref(),
+        );
         if let Some(payload) = &stdin_payload
             && let Some(mut si) = child.stdin.take()
         {
@@ -1472,7 +1520,11 @@ impl ClaudeAdapter {
                 {
                     let _ = apb_core::fsutil::create_dir_under(run_dir, parent);
                 }
-                CappedFile::append(p, task.output_limits.stream_log_bytes)
+                // The key of a cloud model is replaced as the agent prints.
+                CappedFile::append(p, task.output_limits.stream_log_bytes).redacting(
+                    key_scrub::KeyScrub::for_spawn(task.spawn_env, task.agent, task.model)
+                        .map(|s| s.redact()),
+                )
             }
             None => CappedFile::none(),
         };
@@ -1836,13 +1888,43 @@ impl AgentAdapter for ClaudeAdapter {
         };
         // Every usage an attempt reports, succeeded or failed, says what
         // its cost is.
+        // The key of a cloud model never reaches what apb stores: the reply,
+        // the failure text, the stream log, the transcript files and the
+        // status file, whose outputs, findings and warnings the scheduler
+        // reads after this returns.
+        let scrub = key_scrub::KeyScrub::for_spawn(task.spawn_env, task.agent, task.model);
+        if let Some(s) = &scrub {
+            if let Some(p) = task.stream_log {
+                s.file(p);
+            }
+            if let Some(p) = &task.status_file {
+                s.file(p);
+            }
+            if let Some(d) = task.transcript_dir {
+                s.dir(d);
+            }
+        }
         match result {
             Ok(mut report) => {
                 stamp_cost_basis(task, &before, report.usage.as_mut());
+                stamp_catalog_price(task, report.usage.as_mut());
+                if let Some(s) = &scrub {
+                    s.in_place(&mut report.output);
+                    s.in_place(&mut report.summary);
+                    s.in_place(&mut report.raw);
+                    if let Some(q) = report.question.as_mut() {
+                        s.in_place(&mut q.question);
+                        q.options.iter_mut().for_each(|o| s.in_place(o));
+                    }
+                }
                 Ok(report)
             }
             Err(mut failure) => {
                 stamp_cost_basis(task, &before, failure.usage.as_deref_mut());
+                stamp_catalog_price(task, failure.usage.as_deref_mut());
+                if let Some(s) = &scrub {
+                    s.failure(&mut failure);
+                }
                 Err(failure)
             }
         }
@@ -2415,5 +2497,68 @@ mod tests {
         // Without extract the report body (block stripped) is the output, which
         // still carries the raw marker tags - the contract is what unwraps them.
         assert_eq!(report.output, "<node_output>headless product</node_output>");
+    }
+
+    fn near_row(id: &str) -> apb_core::cloud_models::CloudSnapshotRef {
+        apb_core::agents::cloud_snapshot(
+            "dsh",
+            &format!("nearai/{id}"),
+            &apb_core::cloud_models::catalog::load_all(),
+        )
+        .unwrap()
+    }
+
+    fn usage(
+        input: u64,
+        output: u64,
+        read: u64,
+        cost: Option<f64>,
+    ) -> apb_core::agent_output::AgentUsage {
+        apb_core::agent_output::AgentUsage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: read,
+            cache_write_tokens: 0,
+            cost_usd: cost,
+            source: apb_core::agent_output::UsageSource::Reported,
+            cost_basis: Default::default(),
+            priced_from: None,
+        }
+    }
+
+    /// The catalog price: input and output per million, cache reads at the
+    /// cached price, a printed cost kept, a row without an output price
+    /// leaving the cost absent.
+    #[test]
+    fn a_catalog_row_prices_an_unpriced_usage() {
+        let row = near_row("Qwen/Qwen3.8-27B");
+        let mut u = usage(1_000_000, 100_000, 0, None);
+        super::price_from_catalog(&mut u, &row);
+        assert_eq!(u.cost_usd, Some(0.175));
+        let from = u.priced_from.as_ref().unwrap();
+        assert_eq!(from.catalog, "near-ai-cloud");
+        assert_eq!(from.model, "Qwen/Qwen3.8-27B");
+        let mut cached = usage(0, 0, 1_000_000, None);
+        super::price_from_catalog(&mut cached, &row);
+        assert_eq!(cached.cost_usd, Some(0.018));
+        let mut no_cached_price = row.clone();
+        no_cached_price.model.price_cached_in_usd_mtok = None;
+        let mut read = usage(0, 0, 1_000_000, None);
+        super::price_from_catalog(&mut read, &no_cached_price);
+        assert_eq!(
+            read.cost_usd,
+            Some(0.04),
+            "cache reads fall back to the input price"
+        );
+        let mut printed = usage(1_000_000, 0, 0, Some(9.0));
+        super::price_from_catalog(&mut printed, &row);
+        assert_eq!(printed.cost_usd, Some(9.0));
+        assert_eq!(printed.priced_from, None);
+        let mut no_out = row.clone();
+        no_out.model.price_out_usd_mtok = None;
+        let mut u = usage(10, 10, 0, None);
+        super::price_from_catalog(&mut u, &no_out);
+        assert_eq!(u.cost_usd, None);
+        assert_eq!(u.priced_from, None);
     }
 }

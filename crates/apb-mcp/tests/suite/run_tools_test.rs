@@ -479,6 +479,7 @@ fn run_stop_finalizes_a_run_whose_driver_is_gone() {
         playbook: "noagent".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     log.append(EventPayload::NodeStarted {
@@ -534,6 +535,7 @@ fn pause_run_pauses_a_driverless_run_and_run_status_reports_it() {
         playbook: "noagent".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     drop(log);
@@ -587,6 +589,7 @@ fn pause_run_pauses_a_driverless_run_and_run_status_reports_it() {
         playbook: "noagent".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     log.append(EventPayload::RunFinished {
@@ -1123,6 +1126,7 @@ fn run_wait_answer_is_built_from_the_observation_the_wait_decided_on() {
         playbook: "gated".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     log.append(EventPayload::review_requested(
@@ -1518,6 +1522,7 @@ fn run_resume_refuses_a_busy_workdir() {
                 playbook: "scripted".into(),
                 version: "1.0.0".into(),
                 definition: None,
+                external_data: false,
             },
             EventPayload::NodeStarted {
                 node: "start".into(),
@@ -1751,6 +1756,7 @@ fn run_resume_from_a_node_past_an_undecided_person_only_gate_is_refused() {
             playbook: "gated".into(),
             version: "1.0.0".into(),
             definition: None,
+            external_data: false,
         },
         EventPayload::node_finished("start", "succeeded", 1, String::new()),
         EventPayload::ReviewRequested {

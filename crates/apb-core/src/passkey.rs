@@ -527,6 +527,8 @@ mod tests {
 
     #[test]
     fn count_and_try_load_over_the_config_dir() {
+        // The config dir is process-wide: other unit tests set it too.
+        let _lock = crate::env_test_lock();
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("apb");
         let prev = std::env::var_os("APB_CONFIG_DIR");

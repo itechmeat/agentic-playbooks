@@ -235,6 +235,7 @@ fn gated_run(root: &std::path::Path, id: &str, playbook: &str, person_only: bool
         playbook: "p".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     let mut req = EventPayload::review_requested(

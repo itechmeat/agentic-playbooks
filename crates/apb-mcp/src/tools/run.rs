@@ -45,6 +45,9 @@ pub struct StartArgs {
     pub launch: Option<apb_engine::gate::launch::LaunchGrant>,
     /// The run is unattended (checked first by `apb_engine::gate::check_unattended`).
     pub unattended: bool,
+    /// The run processes external data (the effective flag from
+    /// `apb_engine::external_data::for_start`).
+    pub external_data: bool,
 }
 
 /// The engine options of an MCP start in `mode`. Fail-fast on a busy
@@ -72,6 +75,7 @@ pub fn start_options(a: StartArgs, mode: RunMode) -> RunOptions {
         notify: a.notify,
         launch: a.launch,
         unattended: a.unattended,
+        external_data: a.external_data,
         ..RunOptions::default()
     }
 }
@@ -267,6 +271,10 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
     // an attended run.
     if apb_engine::run_view::run_unattended(&dir) {
         out["unattended"] = json!(true);
+    }
+    // The run processes external data (fixed at start): absent otherwise.
+    if apb_engine::external_data::is_flagged(&dir) {
+        out["external_data"] = json!(true);
     }
     // The limits the run recorded at start (`run_provenance.limits`):
     // absent for a run without any.

@@ -152,6 +152,12 @@ pub fn probe(
     let spawn_env = SpawnEnv {
         scrub: apb_core::connector::resolve::all_referenced_env_names(req.project),
         scoped_base: Some(home),
+        // Outside a run: the row comes from the catalog as it is now.
+        cloud: apb_core::agents::cloud_snapshot(
+            req.agent,
+            &model,
+            &apb_core::cloud_models::catalog::load_all(),
+        ),
         ..SpawnEnv::default()
     };
     let task = AgentTask {

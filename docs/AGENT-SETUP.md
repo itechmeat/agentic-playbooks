@@ -161,7 +161,14 @@ apb runs DeepSeek Harness (npm `@deepseek-ai/dsh`, verified against
   `deepseek-flash` and `deepseek-v4-pro` (efforts `off`, `low`, `high`,
   `max`). Any other route is a provider profile you configured for dsh's
   `llm-pi-ai` adapter, for example `zai/glm-5.3-flash@low` or
-  `openrouter/deepseek/deepseek-v4-pro`. dsh has no model flag, so apb
+  `openrouter/deepseek/deepseek-v4-pro`. apb owns one route itself:
+  `nearai/<catalog id>[@<effort>]` runs on NEAR AI Cloud with only
+  `NEARAI_API_KEY` set, no hand-written provider config (see
+  [CLOUD-MODELS.md](CLOUD-MODELS.md)). In a spawn on it the patch also
+  carries an `llm-pi-ai` row with the one `nearai` route; since a patch
+  replaces that entry's whole `config`, your own `llm-pi-ai` routes are not
+  mounted in that spawn (other spawns keep them), and your own `nearai`
+  route, if you had one, is replaced there. dsh has no model flag, so apb
   writes the model as the `agent-default-model` row of a patch file in the
   node's agent home (`agent-home/dsh/<node>/model-<digest>.patch.yml`, named
   after its content and never rewritten, so list items running at once on
@@ -170,7 +177,9 @@ apb runs DeepSeek Harness (npm `@deepseek-ai/dsh`, verified against
   profile's own default. Each route is its own billing account: a quota on
   one does not block a fallback to another.
 - **Output.** The `--json` event stream gives the reply (`final`), the
-  session id, the token usage of every step (no cost: dsh prints none), the
+  session id, the token usage of every step (no cost: dsh prints none; a
+  step on a `nearai/` model is priced from the run's catalog row and its
+  basis is `billed`), the
   tool calls the grader reads, and an error code apb classifies (a rate limit
   is a quota pause, a spent balance a budget stop, a credential problem an
   auth failure).
@@ -188,7 +197,8 @@ apb runs DeepSeek Harness (npm `@deepseek-ai/dsh`, verified against
   names no tools at start); an end-of-turn hook (dsh's hook rows are
   experimental); `environment: minimal`; a sandboxed run (never verified, so
   `isolation: full` refuses dsh and `best_effort` runs it without a
-  sandbox); a run budget's money limit (no cost is reported).
+  sandbox); a run budget's money limit on a route other than `nearai` (no
+  cost is reported there).
 
 ## Procedure
 

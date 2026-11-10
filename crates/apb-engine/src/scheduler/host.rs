@@ -627,6 +627,7 @@ mod tests {
             soul_delivery: apb_core::config::SoulDelivery::default(),
             canonical_executable: PathBuf::from("/bin/true"),
             executable_fingerprint: "0:0".into(),
+            cloud: None,
         }
     }
 

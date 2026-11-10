@@ -151,6 +151,7 @@ pub fn create_forward_patch(
             trial: None,
             imported: None,
             shipped_version: None,
+            external_data_run: None,
         },
     )?;
     let dir = playbook_dir(root, id);

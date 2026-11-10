@@ -421,6 +421,12 @@ impl Fold<'_> {
 /// The one entry point: builds the capture of the finished production run
 /// at `run_dir`, or names every gap that stops it.
 pub fn capture(root: &Path, run_dir: &Path, req: &CaptureRequest) -> Result<Capture, CaptureError> {
+    // A run that processed external data is never captured: nothing is
+    // kept from it. One whose manifest does not read is refused below as
+    // not production.
+    if crate::external_data::is_flagged(run_dir) {
+        crate::external_data::refuse_if_flagged(run_dir, "scenario capture")?;
+    }
     let mut gaps: Vec<Gap> = Vec::new();
 
     // The origin: only a production run is captured.

@@ -6,7 +6,6 @@ use std::path::Path;
 
 use super::run::{run_status, wait_timeout};
 use super::{ToolError, open};
-use apb_core::versioning::create_patch_version;
 use apb_engine::control::Control;
 use apb_engine::run_wait::{SupervisorWait, clip_tail, wait_supervisor_event};
 use apb_engine::{
@@ -294,7 +293,18 @@ pub fn playbook_patch(
         )));
     }
     let (id, base_version) = apb_engine::scheduler::run_playbook_ref(root, run_id)?;
-    let version = create_patch_version(root, &id, &base_version, yaml, run_id, classification)?;
+    // A flagged run's patch version records the run, which fences it off
+    // from `current`, candidates and other runs.
+    let external_data = apb_engine::external_data::is_flagged(&root.join(".apb/runs").join(run_id));
+    let version = apb_core::versioning::create_run_patch_version(
+        root,
+        &id,
+        &base_version,
+        yaml,
+        run_id,
+        classification,
+        external_data,
+    )?;
     let seq = post_supervisor_command(
         root,
         run_id,

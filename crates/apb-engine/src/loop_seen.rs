@@ -180,6 +180,7 @@ mod tests {
                 playbook: "p".into(),
                 version: "1.0.0".into(),
                 definition: None,
+                external_data: false,
             },
         })
         .chain(

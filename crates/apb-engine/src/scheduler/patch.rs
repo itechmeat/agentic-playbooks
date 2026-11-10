@@ -292,6 +292,11 @@ pub(crate) fn promote_applied_patch(
     playbook: &Playbook,
     applied: &AppliedPatch,
 ) -> Result<(), EngineError> {
+    // A run that processes external data keeps its patch versions to
+    // itself: they never become `current`.
+    if crate::external_data::is_flagged(run_dir) {
+        return Ok(());
+    }
     let state = RunState::fold(&read_all(run_dir)?);
     // An in-run patch is judged by this run alone: no earlier success counts
     // for it (`prior_successes` 0), so `after_n_successes` above 1 and a
@@ -497,6 +502,7 @@ mod tests {
             playbook: "g".into(),
             version: "1.0.0".into(),
             definition: None,
+            external_data: false,
         })
         .unwrap();
         if let Some(requires) = guard {
@@ -636,6 +642,7 @@ mod tests {
             playbook: "p".into(),
             version: "1.0.0".into(),
             definition: None,
+            external_data: false,
         })
         .unwrap();
         log.append(EventPayload::RunProvenance {

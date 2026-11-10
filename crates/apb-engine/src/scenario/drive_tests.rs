@@ -123,6 +123,7 @@ fn load_prep(root: &Path, id: &str, name: &str) -> ScenarioPrep {
         scenario_digest: loaded.digest,
         max_requests: 20,
         sent: Default::default(),
+        external_data: false,
     }
 }
 
@@ -495,12 +496,10 @@ fn an_unattended_run_fails_at_a_review_before_the_scripted_decision() {
     assert_eq!(extra, ["review"]);
 }
 
-/// A child playbook answered by a nested scenario run of the child: the
-/// child runs at the parent's level, lives next to its parent under
-/// `.apb/scenario-runs/` and carries a scenario origin. Nothing lands under
-/// `.apb/runs/`.
-#[test]
-fn a_nested_child_scenario_runs_next_to_its_parent() {
+/// A project with playbook `parent` whose node `sub` runs playbook `kid`,
+/// the kid's scenario `kid-green`, and the parent's scenario that answers
+/// `sub` with it.
+fn nested_project() -> (tempfile::TempDir, &'static str) {
     let kid = "schema: 2\nid: kid\nname: kid\nversion: 1.0.0\ndefaults: { profile: main }\nnodes:\n  - { id: start, type: start }\n  - { id: w, type: agent_task, prompt: w }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: w }\n  - { from: w, to: done }\n";
     let parent = "schema: 2\nid: parent\nname: parent\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: sub, type: playbook, playbook: kid }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: sub }\n  - { from: sub, to: done }\n";
     let dir = project(parent);
@@ -516,8 +515,11 @@ fn a_nested_child_scenario_runs_next_to_its_parent() {
     )
     .unwrap();
     let scenario = "schema: 1\nid: p\nanswers:\n  sub:\n    - { visit: 1, playbook: { scenario: kid-green } }\n";
-    let (r, events) = run(root, "parent", scenario);
-    assert_eq!(r.outcome, RunStatus::Succeeded, "{events:#?}");
+    (dir, scenario)
+}
+
+/// The child run of a nested scenario run: the one `ChildRunStarted` names.
+fn nested_child(r: &ScenarioRun, events: &[Event]) -> PathBuf {
     let child = events
         .iter()
         .find_map(|e| match &e.payload {
@@ -525,7 +527,20 @@ fn a_nested_child_scenario_runs_next_to_its_parent() {
             _ => None,
         })
         .unwrap();
-    let child_dir = r.run_dir.parent().unwrap().join(&child);
+    r.run_dir.parent().unwrap().join(&child)
+}
+
+/// A child playbook answered by a nested scenario run of the child: the
+/// child runs at the parent's level, lives next to its parent under
+/// `.apb/scenario-runs/` and carries a scenario origin. Nothing lands under
+/// `.apb/runs/`.
+#[test]
+fn a_nested_child_scenario_runs_next_to_its_parent() {
+    let (dir, scenario) = nested_project();
+    let root = dir.path();
+    let (r, events) = run(root, "parent", scenario);
+    assert_eq!(r.outcome, RunStatus::Succeeded, "{events:#?}");
+    let child_dir = nested_child(&r, &events);
     assert!(child_dir.is_dir(), "the child lives next to its parent");
     assert_eq!(
         std::fs::read_dir(root.join(".apb/runs")).unwrap().count(),
@@ -539,6 +554,33 @@ fn a_nested_child_scenario_runs_next_to_its_parent() {
     // A promptless finish answers nothing: the node succeeds with it.
     assert_eq!(finished(&events, "sub"), [("succeeded", "")]);
     assert!(r.answers.extra.is_empty());
+}
+
+/// A child of a scenario run that processes external data carries the
+/// flag too, and keeps its own scenario origin.
+#[test]
+fn a_child_of_a_flagged_scenario_run_is_flagged() {
+    let (dir, scenario) = nested_project();
+    let root = dir.path();
+    let mut p = prep(root, "parent", scenario);
+    p.external_data = true;
+    let (r, events) = run_prep(root, "parent", &p);
+    assert_eq!(r.outcome, RunStatus::Succeeded, "{events:#?}");
+    assert!(crate::external_data::is_flagged(&r.run_dir));
+    let child_dir = nested_child(&r, &events);
+    let m = crate::manifest::read(&child_dir).unwrap().unwrap();
+    assert!(m.external_data);
+    assert!(matches!(
+        m.origin,
+        Some(crate::manifest::RunOrigin::Scenario { ref scenario, .. }) if scenario == "kid-green"
+    ));
+    assert!(matches!(
+        read_all(&child_dir).unwrap()[0].payload,
+        EventPayload::RunStarted {
+            external_data: true,
+            ..
+        }
+    ));
 }
 
 /// A nested child's scenario is read by the one scenario loader: a file
@@ -1405,6 +1447,7 @@ fn a_guard_refusal_during_a_drive_makes_the_scenario_invalid() {
                 scenario: apb_core::scenario::load(&pdir, &name).unwrap(),
                 level: ScenarioLevel::Smoke,
                 max_decision_requests: Some(2),
+                external_data: false,
             };
             let out = crate::scenario::bind::drive(&req).unwrap();
             let invalid = out.invalid.expect("the refusal makes the scenario invalid");

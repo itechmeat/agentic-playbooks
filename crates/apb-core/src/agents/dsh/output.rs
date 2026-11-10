@@ -151,6 +151,7 @@ impl OutputFormat for DshOutput {
             cost_usd: None,
             source: UsageSource::Reported,
             cost_basis: Default::default(),
+            priced_from: None,
         })
     }
 

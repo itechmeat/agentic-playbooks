@@ -154,15 +154,19 @@ pub fn off_here() -> Option<&'static str> {
 
 /// The hook's whole run over the host's `stdin`, with the session state
 /// in `state_dir`: the text to print, or `None` to print nothing. `ask`
-/// gets the request and the session's working directory. The caller checks
-/// [`off_here`] first, before it reads stdin. Never fails: any error is
-/// `None`.
+/// gets the request and the session's working directory. `excluded` gives
+/// the markers of runs that processed external data for the session's
+/// working directory: a session that is one of them, or whose read part
+/// names one, gets no nudge, caches no answer and asks nothing. The caller
+/// checks [`off_here`] first, before it reads stdin. Never fails: any error
+/// is `None`.
 pub fn run_stop_hook(
     host: &dyn StopHookHost,
     stdin: &[u8],
     state_dir: &Path,
     thresholds: Thresholds,
     ask: &mut dyn FnMut(&str, Option<&Path>) -> Option<bool>,
+    excluded: &dyn Fn(Option<&Path>) -> crate::discover::Exclude,
 ) -> Option<String> {
     let event = host.read_event(stdin)?;
     if event.hook_active {
@@ -173,8 +177,12 @@ pub fn run_stop_hook(
         return None;
     }
     let bytes = task::tail(&event.transcript).ok()?;
-    let last = task::read(host.history(), &bytes);
     let cwd = event.cwd.as_deref();
+    let exclude = excluded(cwd);
+    if exclude.sessions.contains(&event.session_id) || exclude.names_run(&bytes) {
+        return None;
+    }
+    let last = task::read(host.history(), &bytes);
     let mut cached_ask = |request: &str| -> Option<bool> {
         let rkey = state::request_key(request);
         if let Some(a) = state::entry(state_dir, &key).ok()?.answers.get(&rkey) {

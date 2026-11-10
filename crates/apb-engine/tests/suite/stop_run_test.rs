@@ -311,6 +311,7 @@ fn seed_abandoned_run(root: &Path, run_id: &str) -> PathBuf {
         playbook: "stopflow".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     log.append(EventPayload::NodeStarted {
@@ -333,6 +334,7 @@ fn seed_abandoned_run(root: &Path, run_id: &str) -> PathBuf {
         token: None,
         isolation: None,
         exec: None,
+        cloud: None,
     })
     .unwrap();
     run_dir
@@ -1092,6 +1094,7 @@ fn a_note_the_crashed_driver_never_applied_survives_a_stop() {
             token: None,
             isolation: None,
             exec: None,
+            cloud: None,
         })
         .unwrap();
     }
@@ -1506,6 +1509,7 @@ fn a_note_posted_after_a_stop_survives_the_resume_that_applies_the_stop() {
             token: None,
             isolation: None,
             exec: None,
+            cloud: None,
         })
         .unwrap();
     }
@@ -1597,6 +1601,7 @@ fn stop_of_a_parent_driven_child_leaves_the_journal_to_the_live_parent_drive() {
             playbook: playbook.into(),
             version: "1.0.0".into(),
             definition: None,
+            external_data: false,
         })
         .unwrap();
     }

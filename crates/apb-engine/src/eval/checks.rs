@@ -630,7 +630,7 @@ mod tests {
 
     fn journal() -> Vec<Event> {
         vec![
-            ev(0, EventPayload::RunStarted { playbook: "p".into(), version: "1.0.0".into(), definition: None }),
+            ev(0, EventPayload::RunStarted { playbook: "p".into(), version: "1.0.0".into(), definition: None , external_data: false,}),
             ev(1, serde_json::from_value(serde_json::json!({"type":"node_finished","node":"s","status":"succeeded","attempt":1,"output":"","artifacts":[]})).unwrap()),
             ev(2, EventPayload::NodeStarted { node: "w".into(), attempt: 1 }),
             ev(3, serde_json::from_value(serde_json::json!({"type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"{\"verdict\":\"ok\",\"n\":3}","artifacts":[]})).unwrap()),

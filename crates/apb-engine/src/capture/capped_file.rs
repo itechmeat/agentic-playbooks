@@ -4,6 +4,11 @@
 //! more, while the caller keeps reading its source: a cap never blocks or
 //! kills the agent. A file that cannot be created or written only loses the
 //! copy, never the attempt, and a lost copy is not a truncation.
+//!
+//! A copy may carry a [`Redact`]: the value is replaced as the bytes arrive,
+//! before they reach the file, so a driver killed mid-attempt leaves no
+//! plain value behind. Only the longest tail of a write that could start the
+//! value is held back until the next write or the end of the stream.
 
 use std::fs::File;
 use std::io::Write as _;
@@ -21,9 +26,54 @@ fn private_mode(options: &mut std::fs::OpenOptions) {
     let _ = options;
 }
 
+/// A value replaced in a stream's file copy as it is written, and its
+/// marker (`adapter::key_scrub`).
+#[derive(Clone)]
+pub(crate) struct Redact {
+    key: apb_core::secret::Secret,
+    marker: String,
+}
+
+impl std::fmt::Debug for Redact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Redact")
+            .field("marker", &self.marker)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Redact {
+    pub(crate) fn new(key: apb_core::secret::Secret, marker: String) -> Self {
+        Self { key, marker }
+    }
+
+    /// `buf` with every whole occurrence of the key replaced, and the tail
+    /// held back: the longest suffix that is a proper prefix of the key.
+    fn apply(&self, buf: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let needle = self.key.expose_secret().as_bytes();
+        let mut out = Vec::with_capacity(buf.len());
+        let mut i = 0;
+        while let Some(pos) = buf[i..].windows(needle.len()).position(|w| w == needle) {
+            out.extend_from_slice(&buf[i..i + pos]);
+            out.extend_from_slice(self.marker.as_bytes());
+            i += pos + needle.len();
+        }
+        let rest = &buf[i..];
+        let hold = (1..needle.len().min(rest.len() + 1))
+            .rev()
+            .find(|&n| rest.ends_with(&needle[..n]))
+            .unwrap_or(0);
+        out.extend_from_slice(&rest[..rest.len() - hold]);
+        (out, rest[rest.len() - hold..].to_vec())
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct CappedFile {
     file: Option<File>,
+    redact: Option<Redact>,
+    /// Bytes held back by `redact` that may start the value.
+    carry: Vec<u8>,
     cap: u64,
     /// Bytes the file already held when it was opened for appending: the
     /// cap is on the file, so they count against it.
@@ -57,10 +107,9 @@ impl CappedFile {
             .as_ref()
             .and_then(|f| f.metadata().ok())
             .map_or(0, |m| m.len());
-        Self {
-            base,
-            ..Self::over(file, cap)
-        }
+        let mut out = Self::over(file, cap);
+        out.base = base;
+        out
     }
 
     /// No file: every write is a no-op and nothing is ever truncated.
@@ -71,10 +120,26 @@ impl CappedFile {
     fn over(file: Option<File>, cap: u64) -> Self {
         Self {
             file,
+            redact: None,
+            carry: Vec::new(),
             cap,
             base: 0,
             written: 0,
             dropped: 0,
+        }
+    }
+
+    /// The copy with `redact` applied to every write.
+    pub(crate) fn redacting(mut self, redact: Option<Redact>) -> Self {
+        self.redact = redact;
+        self
+    }
+
+    /// Writes what `redact` held back: the stream ended.
+    pub(crate) fn end(&mut self) {
+        let carry = std::mem::take(&mut self.carry);
+        if !carry.is_empty() {
+            self.write_raw(&carry);
         }
     }
 
@@ -85,6 +150,19 @@ impl CappedFile {
 
     /// Writes as much of `bytes` as the cap allows; the rest is counted.
     pub(crate) fn write(&mut self, bytes: &[u8]) {
+        match &self.redact {
+            Some(r) => {
+                let mut buf = std::mem::take(&mut self.carry);
+                buf.extend_from_slice(bytes);
+                let (out, carry) = r.apply(&buf);
+                self.carry = carry;
+                self.write_raw(&out);
+            }
+            None => self.write_raw(bytes),
+        }
+    }
+
+    fn write_raw(&mut self, bytes: &[u8]) {
         let Some(file) = self.file.as_mut() else {
             return;
         };
@@ -124,9 +202,48 @@ impl CappedFile {
     }
 }
 
+impl Drop for CappedFile {
+    fn drop(&mut self) {
+        self.end();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn redact() -> Redact {
+        Redact::new(
+            apb_core::secret::Secret::new("fake-key-1234567".to_string()),
+            "[redacted:NEARAI_API_KEY]".into(),
+        )
+    }
+
+    #[test]
+    fn a_key_split_across_writes_never_reaches_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stdout.log");
+        let mut f = CappedFile::create(&path, 1_000).redacting(Some(redact()));
+        f.write(b"one fake-key-12");
+        // Mid-stream, as a killed driver would leave the file: only the
+        // text before a possible key is there.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one ");
+        f.write(b"34567 two fake-key-1234567\nthree fake");
+        f.write(b"-ke\n");
+        let mid = std::fs::read_to_string(&path).unwrap();
+        assert!(!mid.contains("fake-key-1234567"), "{mid}");
+        assert_eq!(
+            mid,
+            "one [redacted:NEARAI_API_KEY] two [redacted:NEARAI_API_KEY]\nthree fake-ke\n"
+        );
+        f.write(b"tail fake");
+        drop(f);
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .ends_with("tail fake")
+        );
+    }
 
     /// A capture file an older apb left readable by others is narrowed when
     /// it is opened again, whether truncated or appended to.

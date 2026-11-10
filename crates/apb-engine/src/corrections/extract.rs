@@ -320,6 +320,7 @@ mod tests {
             playbook: "p".into(),
             version: "1.0.0".into(),
             definition: None,
+            external_data: false,
         }
     }
 
@@ -670,6 +671,7 @@ mod tests {
                     enforce_refused: None,
                     join: Default::default(),
                     edge_addresses: Default::default(),
+                    privacy_class: None,
                 },
             ),
         ];

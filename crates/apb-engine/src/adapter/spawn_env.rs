@@ -65,6 +65,10 @@ pub struct SpawnEnv {
     /// The attempt's evidence session (`APB_EVIDENCE_SESSION`), for a node
     /// with `evidence:`.
     pub evidence_session: Option<String>,
+    /// The catalog row of the cloud model the spawned agent runs, as the run
+    /// snapshotted it (`ResolvedInvocation::cloud`): the provider route in
+    /// its run-scoped patch, the catalog price and the key scrub read it.
+    pub cloud: Option<apb_core::cloud_models::CloudSnapshotRef>,
 }
 
 impl SpawnEnv {
@@ -115,6 +119,14 @@ impl SpawnEnv {
     pub fn with_evidence(&self, session: Option<String>) -> Self {
         SpawnEnv {
             evidence_session: session,
+            ..self.clone()
+        }
+    }
+
+    /// This env on the cloud catalog row `cloud` (`None`: no cloud model).
+    pub fn with_cloud(&self, cloud: Option<apb_core::cloud_models::CloudSnapshotRef>) -> Self {
+        SpawnEnv {
+            cloud,
             ..self.clone()
         }
     }
@@ -316,7 +328,11 @@ pub(crate) fn with_scoped_args(
     };
     let mut lead = agent
         .setup()
-        .scoped_args(task.model, scoped_dir(agent, task).as_deref())
+        .scoped_args(
+            task.model,
+            scoped_dir(agent, task).as_deref(),
+            task.env.cloud.as_ref(),
+        )
         .map_err(|e| (ErrorClass::ProcessExit, e.to_string()))?;
     lead.extend(argv.iter().cloned());
     Ok(lead)

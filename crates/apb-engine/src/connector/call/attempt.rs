@@ -314,6 +314,7 @@ mod tests {
                 token: Some(format!("tok-{seq}")),
                 isolation: None,
                 exec: None,
+                cloud: None,
             },
         )
     }

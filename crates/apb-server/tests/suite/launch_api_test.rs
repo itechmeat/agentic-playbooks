@@ -340,6 +340,7 @@ fn never_authorized_run(root: &Path, run_id: &str, decl: &str) {
             playbook: "scripted".into(),
             version: "1.0.0".into(),
             definition: None,
+            external_data: false,
         },
         EventPayload::NodeStarted {
             node: "start".into(),

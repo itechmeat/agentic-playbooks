@@ -711,6 +711,30 @@ pub fn create_patch_version(
     run_id: &str,
     classification: &str,
 ) -> Result<String, VersioningError> {
+    create_run_patch_version(
+        root,
+        id,
+        base_version,
+        new_yaml,
+        run_id,
+        classification,
+        false,
+    )
+}
+
+/// [`create_patch_version`] for a run that processes external data or not:
+/// a flagged run's version records the run in
+/// [`VersionProvenance::external_data_run`], which fences it off from
+/// `current`, candidates and other runs.
+pub fn create_run_patch_version(
+    root: &Path,
+    id: &str,
+    base_version: &str,
+    new_yaml: &str,
+    run_id: &str,
+    classification: &str,
+    external_data: bool,
+) -> Result<String, VersioningError> {
     create_patch_version_with(
         root,
         id,
@@ -720,6 +744,7 @@ pub fn create_patch_version(
             created_by: "supervisor".to_string(),
             run_id: Some(run_id.to_string()),
             classification: Some(classification.to_string()),
+            external_data_run: external_data.then(|| run_id.to_string()),
             ..Default::default()
         },
     )

@@ -248,6 +248,83 @@ fn valid_patch_migrates_run_and_promotes_improvement() {
     assert_eq!(h.entries[0].by, Some(MovedBy::PatchPromotion { run_id }));
 }
 
+/// An in-run improvement patch of a run that processes external data is
+/// applied and the run succeeds, yet `current` stays where it was: the
+/// version records the run, no `version_promoted` is journaled, and a
+/// person's move of `current` to it is refused.
+#[test]
+fn a_flagged_runs_patch_is_applied_but_never_promoted() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), WF_PROMPTS);
+    let prepared = prepare_supervised_background(
+        dir.path(),
+        "migrate",
+        None,
+        RunOptions {
+            mode: RunMode::Supervised,
+            external_data: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let run_id = prepared.run_id().to_string();
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let version = apb_core::versioning::create_run_patch_version(
+        dir.path(),
+        "migrate",
+        "1.0.0",
+        PATCH_IMPROVEMENT,
+        &run_id,
+        "improvement",
+        true,
+    )
+    .unwrap();
+    post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::Patch {
+            version: version.clone(),
+            classification: "improvement".into(),
+            continue_from: "p1".into(),
+        },
+    )
+    .unwrap();
+
+    let result = wait_result(&drive_in_background(dir.path().to_path_buf(), prepared));
+    assert_eq!(result.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir).unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        EventPayload::PatchApplied { version: applied, .. } if applied == &version
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.payload, EventPayload::VersionPromoted { .. }))
+    );
+    let pb = dir.path().join(".apb/playbooks/migrate");
+    assert_eq!(
+        fs::read_to_string(pb.join("current")).unwrap().trim(),
+        "1.0.0"
+    );
+    let prov = apb_core::versioning::read_provenance(dir.path(), "migrate", &version)
+        .unwrap()
+        .unwrap();
+    assert_eq!(prov.external_data_run.as_deref(), Some(run_id.as_str()));
+    use apb_core::versioning::current::{MoveCurrent, MovedBy, Surface, move_current};
+    let moved = move_current(
+        &pb,
+        &MoveCurrent::new(
+            &version,
+            MovedBy::Person {
+                surface: Surface::Cli,
+            },
+        ),
+    )
+    .unwrap_err();
+    assert_eq!(moved.code(), apb_engine::external_data::RUN);
+}
+
 #[test]
 fn invalid_patch_rejects_change_to_executed_node() {
     let dir = tempfile::tempdir().unwrap();

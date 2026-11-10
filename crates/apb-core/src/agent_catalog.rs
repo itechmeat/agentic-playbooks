@@ -21,8 +21,9 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+use crate::cloud_models::catalog::{self, CatalogSnapshot};
 use crate::detect::{self, AgentInfo, Authority, ModelsInventory};
-use crate::models_table::{self, ModelOption, ModelsError, ModelsTable};
+use crate::models_table::{self, CloudOption, ModelOption, ModelsError, ModelsTable};
 
 /// Agents and their model lists, as every consumer sees them.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -34,6 +35,8 @@ pub struct Catalog {
     pub agents: Vec<AgentInfo>,
     /// Per-agent model options for profile authoring, keyed by agent id.
     pub options_by_agent: BTreeMap<String, Vec<ModelOption>>,
+    /// The cloud catalogs as this machine has them (`crate::cloud_models`).
+    pub cloud: Vec<CatalogSnapshot>,
 }
 
 /// Combines the models table with raw probe results. Pure: the same table and
@@ -44,7 +47,15 @@ pub struct Catalog {
 /// `Static` inventory; an agent that is not installed claims no list. Every
 /// agent then gets its option list from
 /// [`models_table::model_options_for_agent`], annotated by its inventory.
-pub fn assemble(table: ModelsTable, probed: Vec<AgentInfo>) -> Catalog {
+/// An agent whose model rules declare cloud routes then gets one option per
+/// catalog row that runs agent steps, `<prefix>/<row id>`, in catalog order,
+/// even after a closed list: the closed list is the vendor's own, a cloud
+/// route is apb's declared extension of it.
+pub fn assemble(
+    table: ModelsTable,
+    probed: Vec<AgentInfo>,
+    cloud: Vec<CatalogSnapshot>,
+) -> Catalog {
     let agents: Vec<AgentInfo> = probed
         .into_iter()
         .map(|mut a| {
@@ -67,24 +78,46 @@ pub fn assemble(table: ModelsTable, probed: Vec<AgentInfo>) -> Catalog {
                 .as_ref()
                 .map(|m| m.items.clone())
                 .unwrap_or_default();
-            (
-                a.agent.clone(),
-                models_table::model_options_for_agent(&a.agent, &detected, &table),
-            )
+            let mut options = models_table::model_options_for_agent(&a.agent, &detected, &table);
+            options.extend(cloud_options(&a.agent, &cloud));
+            (a.agent.clone(), options)
         })
         .collect();
     Catalog {
         table,
         agents,
         options_by_agent,
+        cloud,
     }
+}
+
+/// The options `agent`'s cloud routes add.
+fn cloud_options(agent: &str, cloud: &[CatalogSnapshot]) -> Vec<ModelOption> {
+    let Some(rules) = crate::agents::lookup(agent).map(|a| a.models()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for route in rules.cloud_routes() {
+        let Some(snap) = cloud.iter().find(|s| s.provider == route.provider) else {
+            continue;
+        };
+        for row in snap.models.iter().filter(|m| m.runs_agent_steps()) {
+            out.push(ModelOption {
+                id: format!("{}/{}", route.prefix, row.id),
+                vendor: route.provider.to_string(),
+                detected: false,
+                cloud: Some(CloudOption::of(route.provider, row)),
+            });
+        }
+    }
+    out
 }
 
 /// The catalog for this machine. `refresh` re-probes the agents instead of
 /// using the detection memo. Fails only when the user overlay is broken.
 pub fn load(refresh: bool) -> Result<Catalog, ModelsError> {
     let table = models_table::load_merged()?;
-    Ok(assemble(table, detect::probe(refresh)))
+    Ok(assemble(table, detect::probe(refresh), catalog::load_all()))
 }
 
 /// Just the agents, for callers that must keep working when the user overlay
@@ -92,7 +125,7 @@ pub fn load(refresh: bool) -> Result<Catalog, ModelsError> {
 /// table. Otherwise identical to `load(refresh)?.agents`.
 pub fn agents(refresh: bool) -> Vec<AgentInfo> {
     let table = models_table::load_merged().unwrap_or_else(|_| models_table::builtin());
-    assemble(table, detect::probe(refresh)).agents
+    assemble(table, detect::probe(refresh), catalog::load_all()).agents
 }
 
 #[cfg(test)]
@@ -137,6 +170,7 @@ mod tests {
                 probed("codex", true, None),
                 probed("zcode", true, None),
             ],
+            Vec::new(),
         );
         for (agent, want) in [
             ("claude", table.claude_static_models.clone()),
@@ -160,7 +194,7 @@ mod tests {
         table
             .claude_static_models
             .push("claude-dummy-test".to_string());
-        let c = assemble(table, vec![probed("claude", true, None)]);
+        let c = assemble(table, vec![probed("claude", true, None)], Vec::new());
         assert!(ids(&c, "claude").contains(&"claude-dummy-test".to_string()));
         assert!(
             c.agents[0]
@@ -180,6 +214,7 @@ mod tests {
         let c = assemble(
             table.clone(),
             vec![probed("claude", true, Some(vec!["claude-opus-5"]))],
+            Vec::new(),
         );
         assert_eq!(ids(&c, "claude"), table.claude_static_models);
         assert_eq!(
@@ -193,7 +228,11 @@ mod tests {
     #[test]
     fn an_absent_agent_claims_no_inventory_but_keeps_its_options() {
         let table = models_table::builtin();
-        let c = assemble(table.clone(), vec![probed("codex", false, None)]);
+        let c = assemble(
+            table.clone(),
+            vec![probed("codex", false, None)],
+            Vec::new(),
+        );
         assert!(c.agents[0].models.is_none());
         assert_eq!(ids(&c, "codex"), table.codex_static_models);
         assert!(c.options_by_agent["codex"].iter().all(|o| !o.detected));
@@ -207,6 +246,7 @@ mod tests {
         let c = assemble(
             table.clone(),
             vec![probed("opencode", true, Some(vec!["opencode/big-pickle"]))],
+            Vec::new(),
         );
         let got = ids(&c, "opencode");
         assert_eq!(got.len(), table.models.len() + 1);
@@ -215,5 +255,41 @@ mod tests {
             c.agents[0].models.as_ref().unwrap().items,
             vec!["opencode/big-pickle".to_string()]
         );
+    }
+
+    /// dsh keeps the DeepSeek list first, then every catalog row that runs
+    /// agent steps as `nearai/<id>` with its class; claude and codex do not
+    /// change.
+    #[test]
+    fn a_cloud_route_appends_its_agent_step_rows() {
+        use crate::cloud_models::{PrivacyClass, near_ai::NEAR_AI};
+        let table = models_table::builtin();
+        let probes = || {
+            vec![
+                probed("dsh", false, None),
+                probed("claude", true, None),
+                probed("codex", true, None),
+            ]
+        };
+        let bare = assemble(table.clone(), probes(), Vec::new());
+        let c = assemble(table, probes(), vec![catalog::embedded(&NEAR_AI)]);
+        let dsh = ids(&c, "dsh");
+        assert_eq!(&dsh[..2], ["deepseek-flash", "deepseek-v4-pro"]);
+        assert_eq!(ids(&bare, "dsh"), ["deepseek-flash", "deepseek-v4-pro"]);
+        assert!(dsh.contains(&"nearai/Qwen/Qwen3.8-27B".to_string()));
+        assert!(!dsh.contains(&"nearai/Qwen/Qwen3-VL-30B-A3B-Instruct".to_string()));
+        assert!(!dsh.contains(&"nearai/Qwen/Qwen3-Embedding-0.6B".to_string()));
+        assert!(!dsh.contains(&"nearai/typesafe/jev-1.13".to_string()));
+        let q = c.options_by_agent["dsh"]
+            .iter()
+            .find(|o| o.id == "nearai/Qwen/Qwen3.8-27B")
+            .unwrap();
+        let cloud = q.cloud.as_ref().unwrap();
+        assert_eq!(cloud.privacy_class, PrivacyClass::ConfidentialTee);
+        assert_eq!(cloud.price_out_usd_mtok, Some(1.35));
+        assert_eq!(q.vendor, "near-ai-cloud");
+        for agent in ["claude", "codex"] {
+            assert_eq!(ids(&c, agent), ids(&bare, agent), "{agent}");
+        }
     }
 }

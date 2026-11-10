@@ -66,6 +66,7 @@ fn compute_bundle_pairs(
 pub fn profile_list(root: &Path) -> Result<Value, ToolError> {
     let mut out = Vec::new();
     let store = TrustStore::load();
+    let snaps = apb_core::cloud_models::catalog::load_all();
     for scope in [ProfileScope::Project, ProfileScope::Global] {
         let Ok(dir) = scope_dir(root, scope) else {
             continue;
@@ -90,6 +91,7 @@ pub fn profile_list(root: &Path) -> Result<Value, ToolError> {
             let trusted = compute_bundle_for(root, scope, &name)
                 .map(|b| store.is_approved(&b))
                 .unwrap_or(false);
+            let privacy = apb_core::agents::chain_privacy(loaded.doc.executor_pairs(), &snaps);
             out.push(json!({
                 "name": name,
                 "scope": profile_store::scope_str(scope),
@@ -99,6 +101,10 @@ pub fn profile_list(root: &Path) -> Result<Value, ToolError> {
                 "agent": loaded.doc.executor.agent,
                 "model": loaded.doc.executor.model,
                 "skills": loaded.doc.skills.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+                "privacy": {
+                    "least_private": privacy.least_private,
+                    "uniform": privacy.uniform,
+                },
             }));
         }
     }
@@ -124,7 +130,68 @@ pub fn profile_get(root: &Path, name: &str, scope: &str) -> Result<Value, ToolEr
         "soul_md": loaded.soul,
         "profile_digest": loaded.profile_digest,
         "bundle_digest": bundle,
+        "resolved": resolved_chain(&loaded.doc, &apb_core::cloud_models::catalog::load_all()),
     }))
+}
+
+/// The `resolved` block of a profile: the executor, every fallback and every
+/// tier with its own executor, each with its cloud catalog row or `null`,
+/// and the privacy summary of the chain (`apb_core::cloud_models::privacy`).
+pub fn resolved_chain(
+    doc: &ProfileDoc,
+    snaps: &[apb_core::cloud_models::catalog::CatalogSnapshot],
+) -> Value {
+    use apb_core::agents::cloud_model as model_ref;
+    use apb_core::cloud_models::catalog;
+    let cloud = |agent: &str, model: &str| -> Value {
+        let Some(r) = model_ref(agent, model) else {
+            return Value::Null;
+        };
+        let row = snaps
+            .iter()
+            .find(|s| s.provider == r.provider)
+            .and_then(|s| catalog::find(&r.id, s));
+        match row {
+            Some(m) => json!({
+                "provider": r.provider,
+                "id": m.id,
+                "privacy_class": m.privacy_class,
+                "tools": m.features.tools,
+                "price_in_usd_mtok": m.price_in_usd_mtok,
+                "price_out_usd_mtok": m.price_out_usd_mtok,
+            }),
+            None => Value::Null,
+        }
+    };
+    let ex = &doc.executor;
+    let mut chain = vec![json!({
+        "role": "executor",
+        "agent": ex.agent,
+        "model": ex.model,
+        "cloud": cloud(&ex.agent, &ex.model),
+    })];
+    for (i, f) in ex.fallbacks.iter().enumerate() {
+        chain.push(json!({
+            "role": "fallback",
+            "index": i,
+            "agent": f.agent,
+            "model": f.model,
+            "cloud": cloud(&f.agent, &f.model),
+        }));
+    }
+    for (name, t) in doc.tiers.iter() {
+        if let Some((agent, model)) = t.executor() {
+            chain.push(json!({
+                "role": "tier",
+                "name": name,
+                "agent": agent,
+                "model": model,
+                "cloud": cloud(agent, model),
+            }));
+        }
+    }
+    let summary = apb_core::agents::chain_privacy(doc.executor_pairs(), snaps);
+    json!({ "chain": chain, "privacy": summary })
 }
 
 #[derive(Default)]
@@ -200,6 +267,43 @@ impl ProfileOptions {
     }
 }
 
+/// The cloud findings of `doc` (`apb_core::cloud_models::check`): `Err`
+/// with the code and its sentence for a model an agent step cannot run on,
+/// else the warnings (an id the catalog lacks, a chain that spans privacy
+/// classes).
+pub(crate) fn cloud_findings(
+    doc: &ProfileDoc,
+    snaps: &[apb_core::cloud_models::catalog::CatalogSnapshot],
+) -> Result<Vec<String>, ToolError> {
+    use apb_core::agents::cloud_model as model_ref;
+    use apb_core::cloud_models::{check, privacy};
+    let mut warnings = Vec::new();
+    for (agent, model) in doc.executor_pairs() {
+        let Some(r) = model_ref(agent, model) else {
+            continue;
+        };
+        if let Some(issue) = check::check(&r, snaps) {
+            let line = format!(
+                "{}: {agent} model `{model}`: {}",
+                issue.code(),
+                issue.describe(&r)
+            );
+            if issue.is_blocking() {
+                return Err(ToolError::Engine(line));
+            }
+            warnings.push(line);
+        }
+    }
+    let summary = apb_core::agents::chain_privacy(doc.executor_pairs(), snaps);
+    for w in &summary.warnings {
+        warnings.push(format!(
+            "{w}: the executor chain spans privacy classes ({})",
+            privacy::describe(&summary.classes)
+        ));
+    }
+    Ok(warnings)
+}
+
 /// Create/update a profile (CAS under a per-profile lock, spec 9.1).
 pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError> {
     let ProfileWrite {
@@ -262,7 +366,7 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
     // `no known invocation`. We return the load error to the caller before writing.
     let global = apb_core::config::GlobalConfig::load()
         .map_err(|e| ToolError::Engine(format!("global config is invalid: {e}")))?;
-    let warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
     let mut agents = vec![&doc.executor.agent];
     agents.extend(doc.executor.fallbacks.iter().map(|f| &f.agent));
     for agent in agents {
@@ -325,6 +429,13 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
     // The structural checks a run start makes, refused here before anything
     // is written.
     doc.check().map_err(ToolError::Engine)?;
+    // A model on a cloud route, in every chain position: one an agent step
+    // cannot run on is refused, one the catalog lacks is a warning, and a
+    // chain that spans privacy classes is a warning.
+    warnings.extend(cloud_findings(
+        &doc,
+        &apb_core::cloud_models::catalog::load_all(),
+    )?);
     let yaml = yaml_serde::to_string(&doc).map_err(|e| ToolError::Engine(e.to_string()))?;
     // The bundle as it stands before this write (old profile, live skills),
     // read under the lock: whether its skill content was approved decides

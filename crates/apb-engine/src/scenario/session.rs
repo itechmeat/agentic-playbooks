@@ -53,6 +53,10 @@ pub struct ScenarioPrep {
     /// The requests the scenario tree sent so far: a nested child's prep
     /// shares its parent's, so the cap holds for the whole scenario.
     pub sent: SentRequests,
+    /// The scenario run processes external data ([`crate::external_data`]):
+    /// it keeps its scenario origin and carries the flag. A nested child
+    /// takes it from its parent's run directory, whatever this says.
+    pub external_data: bool,
 }
 
 /// The decision requests one smoke scenario sent, shared by its run and
@@ -570,6 +574,7 @@ pub fn child_prep(
         scenario_digest: loaded.digest,
         max_requests: parent.max_requests,
         sent: parent.sent.clone(),
+        external_data: false,
     })
 }
 

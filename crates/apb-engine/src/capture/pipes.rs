@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use apb_core::output_limits::{OutputLimits, as_usize};
 
-use super::capped_file::CappedFile;
+use super::capped_file::{CappedFile, Redact};
 use super::head_tail::{HeadTail, Kept};
 use crate::event::OutputLoss;
 
@@ -96,6 +96,7 @@ pub(crate) fn drain_stream(
                 }
             }
         }
+        file.end();
         let _ = tx.send(StreamCapture {
             kept: kept.finish(),
             file: file.counts(),
@@ -131,9 +132,16 @@ pub(crate) enum PipesError {
 }
 
 impl Pipes {
-    pub(crate) fn start(child: &mut Child, tee: Option<&Path>, limits: &OutputLimits) -> Self {
+    /// `redact` is applied to the file copies as they are written.
+    pub(crate) fn start(
+        child: &mut Child,
+        tee: Option<&Path>,
+        limits: &OutputLimits,
+        redact: Option<&Redact>,
+    ) -> Self {
         let file = |name: &str| match tee {
-            Some(dir) => CappedFile::create(&dir.join(name), limits.log_file_bytes),
+            Some(dir) => CappedFile::create(&dir.join(name), limits.log_file_bytes)
+                .redacting(redact.cloned()),
             None => CappedFile::none(),
         };
         Pipes {
@@ -425,6 +433,10 @@ fn read_lines(
             }
         }
     }
+    log.end();
+    if let Ok(mut c) = counts.lock() {
+        *c = log.counts();
+    }
     if !line.is_empty() || too_long.is_some() {
         emit(&mut line, &mut too_long, false);
     }
@@ -521,5 +533,38 @@ mod tests {
         let c = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(c.kept.dropped_bytes(), 6);
         assert_eq!(c.loss("stdout"), None);
+    }
+
+    #[test]
+    fn a_running_agents_log_never_holds_the_key() {
+        // What a driver killed mid-attempt leaves: the log as the agent is
+        // still running, after it printed the key.
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "printf 'a fake-key-1234567 b\\n'; sleep 5"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let redact = Redact::new(
+            apb_core::secret::Secret::new("fake-key-1234567".to_string()),
+            "[redacted:NEARAI_API_KEY]".into(),
+        );
+        let _pipes = Pipes::start(
+            &mut child,
+            Some(dir.path()),
+            &OutputLimits::default(),
+            Some(&redact),
+        );
+        let path = dir.path().join("stdout.log");
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut text = String::new();
+        while Instant::now() < deadline && !text.contains(" b") {
+            std::thread::sleep(Duration::from_millis(20));
+            text = std::fs::read_to_string(&path).unwrap_or_default();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(text, "a [redacted:NEARAI_API_KEY] b\n");
     }
 }

@@ -1197,6 +1197,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -1218,6 +1219,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -1246,6 +1248,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -1295,6 +1298,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -1319,6 +1323,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -1344,6 +1349,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -1409,6 +1415,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -1459,6 +1466,7 @@ edges:
                         playbook: "p".into(),
                         version: "1.0.0".into(),
                         definition: None,
+                        external_data: false,
                     },
                 ),
                 ev(
@@ -1496,6 +1504,7 @@ edges:
                 playbook: "p".into(),
                 version: "1.0.0".into(),
                 definition: None,
+                external_data: false,
             },
             requested("r1"),
             requested("r2"),
@@ -1539,6 +1548,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -1565,6 +1575,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -1621,6 +1632,7 @@ edges:
                 playbook: "p".into(),
                 version: "1.0.0".into(),
                 definition: None,
+                external_data: false,
             },
         )];
         let p = from_run_dir(&run_dir, &events).expect("run dir must yield progress");
@@ -1659,6 +1671,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             Event {
@@ -1698,6 +1711,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -1737,6 +1751,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -1790,6 +1805,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -1846,6 +1862,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -1886,6 +1903,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -1910,6 +1928,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             )];
             events.extend(extra);
@@ -2017,6 +2036,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -2107,6 +2127,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -2184,6 +2205,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(
@@ -2307,6 +2329,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(1, EventPayload::node_finished("work", "failed", 1, "boom")),
@@ -2343,6 +2366,7 @@ edges:
                     playbook: "p".into(),
                     version: "1.0.0".into(),
                     definition: None,
+                    external_data: false,
                 },
             ),
             ev(

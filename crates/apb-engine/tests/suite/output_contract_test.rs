@@ -273,6 +273,7 @@ answers:
         scenario_digest: "sha256:oc".into(),
         max_requests: 20,
         sent: Default::default(),
+        external_data: false,
     };
     let quick = run_scenario(dir.path(), "oc", None, &prep).unwrap();
     let events = read_all(&quick.run_dir).unwrap();

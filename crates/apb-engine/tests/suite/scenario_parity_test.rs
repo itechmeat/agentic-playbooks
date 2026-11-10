@@ -181,6 +181,7 @@ fn a_quick_scenario_run_journals_what_a_real_run_journals() {
         scenario_digest: "sha256:parity".into(),
         max_requests: 20,
         sent: Default::default(),
+        external_data: false,
     };
     let quick = run_scenario(quick_root.path(), "parity", None, &prep).unwrap();
     let quick_events = read_all(&quick.run_dir).unwrap();

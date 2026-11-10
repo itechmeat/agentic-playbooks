@@ -583,6 +583,24 @@ without launch policies ignores `policy.yaml`, and one with them refuses
 agent launches on a machine whose file has a `billing:` section (an unknown
 section, see "Fail closed" above) until it is upgraded.
 
+## External data runs
+
+A run started with `external_data: true` (`apb run --external-data`, MCP
+and HTTP `external_data`, the Run dialog's "External data" box) processes
+data from outside the operator and keeps nothing for learning; see
+[EXTERNAL-DATA.md](EXTERNAL-DATA.md). It adds no check to a start beyond
+these three refusals, each answered before anything is written:
+
+| Code | When |
+|---|---|
+| `external_data_remember_refused` | the start asks to remember its input (`remember: true`, `--remember`), also when it inherits the flag from a `continued_from` predecessor (HTTP 409) |
+| `external_data_immutable` | a resume asks for another value than the run's own, or a `continued_from` successor of a flagged run passes `external_data: false` (HTTP 409) |
+| `external_data_run` | a tool that learns from one run is pointed at a flagged run: a scenario capture, a judge example or the judge's run values, a forward patch, run memory from a step of the run; or `current`, `apb version use` or an unflagged start names a version a flagged run's patch made |
+
+The flag is a record of where the data came from, not a sandbox: it never
+weakens trust, consent, the launch policy or billing, and it does not reach
+what an agent CLI keeps by itself.
+
 ## Choosing where a rule goes
 
 - The rule is about the result of a step ("the tests pass", "the report has a

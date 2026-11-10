@@ -100,10 +100,13 @@ pub trait HostSetup: Send + Sync {
     /// front of every form's own (start and resume alike): a file prepared
     /// in `scoped_dir` (as for [`Self::scoped_env`]) that the agent only
     /// takes as an argument. dsh's model patch (`--patch <file>`) is one.
+    /// `cloud` is the catalog row of a cloud model the step runs on, as the
+    /// run snapshotted it (decision record 0014).
     fn scoped_args(
         &self,
         _model: &str,
         _scoped_dir: Option<&Path>,
+        _cloud: Option<&crate::cloud_models::CloudSnapshotRef>,
     ) -> Result<Vec<String>, ScopedEnvError> {
         Ok(Vec::new())
     }

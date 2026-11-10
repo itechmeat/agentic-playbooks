@@ -923,3 +923,53 @@ fn a_list_judge_check_without_agent_nodes_asks_the_provider() {
         decisions(&events)
     );
 }
+
+/// A decisions provider on the NEAR catalog (`catalog: near-ai-cloud`):
+/// the answer is priced from the catalog row the run snapshotted, marked
+/// estimated, and classed in `decision_made.privacy_class`.
+#[test]
+fn a_near_catalog_provider_prices_and_classes_its_decision() {
+    let completion = json!({
+        "model": "Qwen/Qwen3.8-27B",
+        "choices": [{"message": {"content": "{\"q1\": 0.2, \"q2\": {\"clean\": 0.9, \"needs_fix\": 0.05, \"unclear\": 0.05}}"}}],
+        "usage": {"prompt_tokens": 2000, "completion_tokens": 50}
+    })
+    .to_string();
+    let endpoint = StubServer::start(vec![StubResponse::json(200, completion)]);
+    let p = Project::new(&small("    on_unavailable: emulate\n", ""));
+    p.decisions(&format!(
+        "version: 1\nmode: enforce\ntimeout_ms: 2000\nproviders:\n  - {{ id: near, kind: llm_emulation, via: openai_compatible, catalog: near-ai-cloud, base_url: \"{}/v1\", model: Qwen/Qwen3.8-27B }}\nuses:\n  judge_node: {{ mode: enforce }}\n",
+        endpoint.base_url
+    ));
+    let _lock = common::env_lock();
+    let _env = p.env();
+    let _key = Env::set(&[("NEARAI_API_KEY", "fake-key-1234567")]);
+    let (_, _, events) = p.run("small");
+    let made = events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::DecisionMade {
+                cost_usd,
+                cost_estimated,
+                privacy_class,
+                provider,
+                ..
+            } if provider.as_deref() == Some("near") => Some((
+                *cost_usd,
+                *cost_estimated,
+                privacy_class.clone(),
+                provider.clone(),
+            )),
+            _ => None,
+        })
+        .expect("a decision");
+    let all: Vec<String> = events
+        .iter()
+        .filter(|e| matches!(e.payload, EventPayload::DecisionMade { .. }))
+        .map(|e| serde_json::to_string(&e.payload).unwrap())
+        .collect();
+    assert_eq!(made.3.as_deref(), Some("near"), "{all:#?}");
+    assert_eq!(made.0, Some(0.0001475));
+    assert!(made.1, "a list price is an estimate");
+    assert_eq!(made.2.as_deref(), Some("confidential_tee"));
+}

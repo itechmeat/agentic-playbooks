@@ -286,9 +286,29 @@ pub struct ProviderSpec {
     /// `kind: llm_emulation` only: how structured output is asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<EmulationOutput>,
+    /// `kind: llm_emulation` only: the cloud catalog the model comes from
+    /// (`crate::cloud_models`, `near-ai-cloud`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
+    /// The catalog row of the model, as the file loaded: its prices, class,
+    /// catalog digest and fetch time. A run's snapshot of the decisions
+    /// keeps it, so a decision asked after a refresh is priced and classed
+    /// from the row the run started with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<crate::cloud_models::CloudSnapshotRef>,
 }
 
 impl ProviderSpec {
+    /// Whether `other` is this provider, its catalog row aside: kind, URL,
+    /// key reference, model and every other setting equal.
+    pub fn same_route(&self, other: &ProviderSpec) -> bool {
+        let strip = |p: &ProviderSpec| ProviderSpec {
+            cloud: None,
+            ..p.clone()
+        };
+        strip(self) == strip(other)
+    }
+
     /// The URL's host (and port), for display: never a path or query.
     pub fn host(&self) -> Option<String> {
         self.base_url
@@ -492,6 +512,90 @@ struct ProviderDoc {
     via: Option<String>,
     #[serde(default)]
     structured_output: Option<EmulationOutput>,
+    /// `kind: llm_emulation` only: a cloud catalog the model comes from.
+    #[serde(default)]
+    catalog: Option<String>,
+}
+
+/// The catalog part of an `llm_emulation` provider (`catalog:`): the
+/// defaults it fills (base URL, key reference, structured output) and the
+/// row it snapshots, or the refusal naming the provider.
+fn catalog_provider(
+    at: &str,
+    p: &mut ProviderDoc,
+) -> Result<Option<crate::cloud_models::CloudSnapshotRef>, String> {
+    let Some(name) = p.catalog.clone() else {
+        return Ok(None);
+    };
+    if p.kind != ProviderKind::LlmEmulation {
+        return Err(format!(
+            "{at} (`{}`): `catalog` is only for kind llm_emulation",
+            p.id
+        ));
+    }
+    let Some(provider) = crate::cloud_models::lookup(&name) else {
+        let known: Vec<&str> = crate::cloud_models::all().iter().map(|c| c.id).collect();
+        return Err(format!(
+            "{at} (`{}`): unknown catalog `{name}`; known: {}",
+            p.id,
+            known.join(", ")
+        ));
+    };
+    let model = p.model.clone().unwrap_or_default();
+    if model.is_empty() {
+        return Err(format!(
+            "{at} (`{}`).model is required with a catalog",
+            p.id
+        ));
+    }
+    let snap = crate::cloud_models::catalog::load(provider);
+    let Some(row) = crate::cloud_models::catalog::find(&model, &snap) else {
+        return Err(format!(
+            "{at} (`{}`): `{model}` is not in the {} catalog fetched {}; run `apb models --refresh`",
+            p.id,
+            provider.display,
+            crate::cloud_models::date(&snap.fetched_at)
+        ));
+    };
+    if !row.is_chat() {
+        return Err(format!(
+            "{at} (`{}`): `{model}` is not a chat model (text in and text out)",
+            p.id
+        ));
+    }
+    match p.structured_output {
+        Some(EmulationOutput::JsonSchema) if !row.features.structured_outputs => {
+            return Err(format!(
+                "{at} (`{}`): `{model}` has no structured outputs, so structured_output json_schema cannot work; use prompt_only",
+                p.id
+            ));
+        }
+        None => {
+            p.structured_output = Some(if row.features.structured_outputs {
+                EmulationOutput::JsonSchema
+            } else {
+                EmulationOutput::PromptOnly
+            });
+        }
+        _ => {}
+    }
+    if p.base_url.is_none() {
+        p.base_url = Some(provider.base_url.to_string());
+    }
+    if p.api_key.is_none() {
+        p.api_key = Some(yaml_serde::Value::String(format!(
+            "{{{{env.{}}}}}",
+            provider.key_env
+        )));
+    }
+    Ok(Some(crate::cloud_models::CloudSnapshotRef {
+        provider: provider.id.to_string(),
+        route: provider.id.to_string(),
+        model: row.clone(),
+        effort: None,
+        catalog_digest: snap.digest.clone(),
+        fetched_at: snap.fetched_at.clone(),
+    }))
 }
 
 /// A URL's parts that matter here.
@@ -611,11 +715,12 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
         ));
     }
     let mut providers = Vec::new();
-    for (i, p) in doc.providers.into_iter().enumerate() {
+    for (i, mut p) in doc.providers.into_iter().enumerate() {
         let at = format!("providers[{i}]");
         if !valid_id(&p.id) {
             return Err(format!("{at}.id must match [a-z0-9][a-z0-9_-]*"));
         }
+        let cloud = catalog_provider(&at, &mut p)?;
         if providers.iter().any(|q: &ProviderSpec| q.id == p.id) {
             return Err(format!("{at}.id `{}` is used twice", p.id));
         }
@@ -726,6 +831,8 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
                 ProviderKind::LlmEmulation => Some(p.structured_output.unwrap_or_default()),
                 _ => None,
             },
+            catalog: p.catalog,
+            cloud,
         });
     }
     if providers.is_empty() {
@@ -818,7 +925,10 @@ impl EffectiveDecisions {
         };
         self.mode = self.mode.min(live.mode);
         self.timeout_ms = self.timeout_ms.min(live.timeout_ms);
-        self.providers.retain(|p| live.providers.contains(p));
+        // The catalog row is what the run started with, not a permission: a
+        // refresh that changed the live row keeps the snapshot's.
+        self.providers
+            .retain(|p| live.providers.iter().any(|l| l.same_route(p)));
         self.budget.max_requests_per_run = self
             .budget
             .max_requests_per_run
@@ -1069,6 +1179,16 @@ fn probe(
     timeout: std::time::Duration,
 ) -> Option<crate::decision_probe::ProbeResult> {
     use crate::decision_probe::{ProbeKey, ProbeResult, probe_request, send};
+    // A catalog provider's listing is public: a plain GET with no key,
+    // whether the variable is set or not.
+    if spec.catalog.is_some() {
+        return probe_request(
+            spec.base_url.as_deref(),
+            spec.kind.free_endpoint(),
+            ProbeKey::None,
+        )
+        .map(|req| send(&req, timeout));
+    }
     let key = match &spec.key {
         None => ProbeKey::None,
         Some(KeyRef::Env(var)) => {
@@ -1141,6 +1261,13 @@ pub fn doctor_line(root: &Path) -> (bool, String) {
                     if p.model.as_deref().is_some_and(is_model_alias) {
                         parts.push("model is an alias, pin a version".into());
                     }
+                    if let Some(c) = &p.cloud {
+                        parts.push(format!(
+                            "{} catalog, {}",
+                            c.provider,
+                            c.model.privacy_class.as_str()
+                        ));
+                    }
                     format!("{} ({})", p.id, parts.join(", "))
                 })
                 .collect();
@@ -1181,6 +1308,143 @@ uses:
   judge_node: { mode: off }
 privacy: { send: [prompts, outputs], redact: true, max_state_bytes: 20000, debug_state: true }
 "#;
+
+    fn near(provider: &str) -> Result<Option<EffectiveDecisions>, String> {
+        let cfg = tempfile::tempdir().unwrap();
+        write(
+            cfg.path(),
+            &format!("version: 1\nmode: advise\nproviders:\n  - {provider}\n"),
+        );
+        load_file(cfg.path())
+    }
+
+    #[test]
+    fn a_minimal_near_provider_takes_the_catalogs_defaults() {
+        let d = near("{ id: near, kind: llm_emulation, via: openai_compatible, catalog: near-ai-cloud, model: Qwen/Qwen3.8-27B }")
+            .unwrap()
+            .unwrap();
+        let p = &d.providers[0];
+        assert_eq!(p.base_url.as_deref(), Some("https://cloud-api.near.ai/v1"));
+        assert_eq!(p.key, Some(KeyRef::Env("NEARAI_API_KEY".into())));
+        assert_eq!(p.structured_output, Some(EmulationOutput::JsonSchema));
+        let row = p.cloud.as_ref().unwrap();
+        assert_eq!(
+            row.model.privacy_class,
+            crate::cloud_models::PrivacyClass::ConfidentialTee
+        );
+        assert_eq!(row.model.price_in_usd_mtok, Some(0.04));
+        // A row without structured outputs defaults to prompt_only.
+        let d = near("{ id: near, kind: llm_emulation, via: openai_compatible, catalog: near-ai-cloud, model: z-ai/glm-5.3 }")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            d.providers[0].structured_output,
+            Some(EmulationOutput::PromptOnly)
+        );
+    }
+
+    /// A refresh that changed the live row keeps the run's provider, with
+    /// the row the run started with.
+    #[test]
+    fn a_changed_catalog_row_keeps_the_snapshot_provider() {
+        let snap = near("{ id: near, kind: llm_emulation, via: openai_compatible, catalog: near-ai-cloud, model: Qwen/Qwen3.8-27B }")
+            .unwrap()
+            .unwrap();
+        let mut live = snap.clone();
+        live.providers[0]
+            .cloud
+            .as_mut()
+            .unwrap()
+            .model
+            .price_in_usd_mtok = Some(9.0);
+        let capped = snap.clone().capped_by(Some(&live));
+        assert_eq!(capped.providers.len(), 1);
+        assert_eq!(
+            capped.providers[0]
+                .cloud
+                .as_ref()
+                .unwrap()
+                .model
+                .price_in_usd_mtok,
+            Some(0.04)
+        );
+        live.providers[0].model = Some("z-ai/glm-5.3-flash".into());
+        assert!(snap.capped_by(Some(&live)).providers.is_empty());
+    }
+
+    /// The doctor's check of a catalog provider is a keyless GET, even with
+    /// the key variable set.
+    #[test]
+    fn the_probe_of_a_catalog_provider_sends_no_key() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = s.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+            }
+            let _ = tx.send(String::from_utf8_lossy(&head).into_owned());
+            let _ =
+                s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}");
+        });
+        let _lock = crate::env_test_lock();
+        // SAFETY: env mutation under the shared lock.
+        unsafe { std::env::set_var("NEARAI_API_KEY", "fake-key-1234567") };
+        let d = near(&format!(
+            "{{ id: near, kind: llm_emulation, via: openai_compatible, catalog: near-ai-cloud, base_url: \"{base}\", model: Qwen/Qwen3.8-27B }}"
+        ))
+        .unwrap()
+        .unwrap();
+        let r = probe(&d.providers[0], std::time::Duration::from_secs(5)).unwrap();
+        // SAFETY: still under the lock.
+        unsafe { std::env::remove_var("NEARAI_API_KEY") };
+        assert!(r.ok(), "{}", r.describe());
+        let head = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(
+            !head.to_ascii_lowercase().contains("authorization"),
+            "{head}"
+        );
+        assert!(head.starts_with("GET /v1/models"), "{head}");
+    }
+
+    #[test]
+    fn a_catalog_provider_is_checked_when_it_loads() {
+        let err = |p: &str| near(p).unwrap_err();
+        let e = err(
+            "{ id: near, kind: systemone, base_url: \"https://x.test\", model: m, catalog: near-ai-cloud }",
+        );
+        assert!(
+            e.contains("`catalog` is only for kind llm_emulation"),
+            "{e}"
+        );
+        let e = err(
+            "{ id: near, kind: llm_emulation, via: openai_compatible, catalog: other-cloud, model: m }",
+        );
+        assert!(e.contains("`near`") && e.contains("unknown catalog"), "{e}");
+        let e = err(
+            "{ id: near, kind: llm_emulation, via: openai_compatible, catalog: near-ai-cloud, model: Qwen/Qwen3.8-72B }",
+        );
+        assert!(e.contains("`near`") && e.contains("2026-11-09"), "{e}");
+        let e = err(
+            "{ id: near, kind: llm_emulation, via: openai_compatible, catalog: near-ai-cloud, model: typesafe/jev-1.13 }",
+        );
+        assert!(
+            e.contains("`near`") && e.contains("not a chat model"),
+            "{e}"
+        );
+        let e = err(
+            "{ id: near, kind: llm_emulation, via: openai_compatible, catalog: near-ai-cloud, model: z-ai/glm-5.3, structured_output: json_schema }",
+        );
+        assert!(e.contains("no structured outputs"), "{e}");
+    }
 
     #[test]
     fn each_kind_names_its_free_doctor_endpoint() {
@@ -1546,6 +1810,8 @@ uses: { catalog_rank: { mode: advise, max_requests_per_day: 10 } }
             account_id: None,
             zero_data_retention: false,
             structured_output: None,
+            catalog: None,
+            cloud: None,
         };
         let yaml = yaml_serde::to_string(&spec).unwrap();
         assert!(

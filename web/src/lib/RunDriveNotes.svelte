@@ -3,7 +3,8 @@
   // run's `run.previous_success` record, the line of a released run (its
   // driver let go while a deferred retry waits, and a waker resumes it;
   // not a dead driver, so amber, no alarm) and the apb binaries that
-  // drove it, from the versions its journal recorded.
+  // drove it, from the versions its journal recorded. A run that processes
+  // external data says so: it keeps nothing for learning.
   import type { Released, PreviousSuccessView, UntrustedNode } from './api.gen'
   import { releasedLine } from './retrywait'
   import { previousSuccessLine, untrustedLine } from './previoussuccess'
@@ -13,16 +14,23 @@
     drivenBy,
     previousSuccess,
     untrusted,
+    externalData = false,
     fmt,
   }: {
     released?: Released | null
     drivenBy?: string | null
     previousSuccess?: PreviousSuccessView | null
     untrusted?: UntrustedNode[]
+    externalData?: boolean
     fmt?: (ms: number) => string
   } = $props()
 </script>
 
+{#if externalData}
+  <p class="previous-success" data-testid="run-external-data">
+    External data: this run keeps nothing for learning.
+  </p>
+{/if}
 {#if previousSuccess}
   <p class="previous-success" data-testid="run-previous-success">
     {previousSuccessLine(previousSuccess)}

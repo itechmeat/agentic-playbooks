@@ -136,6 +136,12 @@ pub enum EventPayload {
             deserialize_with = "lenient_option"
         )]
         definition: Option<String>,
+        /// The run processes external data and keeps nothing for learning
+        /// (see [`crate::external_data`]); the manifest is the authority,
+        /// this is the journal's own record of the start. Absent (false)
+        /// for every other run, so their journals read and write as before.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        external_data: bool,
     },
     /// Origin and execution location of the run (spec 3). Written right
     /// after `RunStarted`. A separate event (rather than fields on
@@ -269,6 +275,16 @@ pub enum EventPayload {
             deserialize_with = "lenient_option"
         )]
         exec: Option<crate::execution_identity::ExecStep>,
+        /// The cloud catalog model the attempt ran on, with its privacy
+        /// class, from the run's catalog row (`apb_core::cloud_models`).
+        /// `None` for any other model and old logs; a shape a newer apb
+        /// wrote reads as absent.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        cloud: Option<AttemptCloud>,
     },
     /// The attempt's agent process has exited and the drive is finishing the
     /// attempt: reading its status file, capturing its session, running the
@@ -923,6 +939,12 @@ pub enum EventPayload {
             deserialize_with = "lenient_default"
         )]
         edge_addresses: std::collections::BTreeMap<String, String>,
+        /// The privacy class of the cloud catalog model that answered, from
+        /// the provider's catalog row the run snapshotted
+        /// (`decisions.yaml` `catalog:`). Absent for any other provider and
+        /// in older journals.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        privacy_class: Option<String>,
     },
     /// An explicit cycle-progress report (spec 2026-07-17): the current
     /// iteration `done` of `total` for the cycle group anchored at `node_id`.
@@ -3216,6 +3238,28 @@ where
 /// At most this many view entries an attempt's isolation record keeps.
 pub const ISOLATION_VIEW_CAP: usize = 64;
 
+/// The cloud catalog model an attempt ran on (`attempt_started.cloud`).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptCloud {
+    /// The provider id (`near-ai-cloud`).
+    pub provider: String,
+    /// The catalog id.
+    pub model: String,
+    pub privacy_class: apb_core::cloud_models::PrivacyClass,
+}
+
+impl AttemptCloud {
+    /// The record of an attempt on the catalog row `c`.
+    pub fn of(c: &apb_core::cloud_models::CloudSnapshotRef) -> Self {
+        AttemptCloud {
+            provider: c.provider.clone(),
+            model: c.model.id.clone(),
+            privacy_class: c.model.privacy_class,
+        }
+    }
+}
+
 /// What one attempt's isolation held (`holds`) and did not (`limits`), by
 /// the code ids of `apb_core::isolation::contract`, and the paths it saw
 /// beyond the system.
@@ -3916,6 +3960,42 @@ mod tests {
 
     use super::*;
 
+    /// `run_started.external_data` is absent from an unflagged start (its
+    /// line reads and writes as before) and an older line decodes as
+    /// unflagged; a flagged start round trips.
+    #[test]
+    fn run_started_external_data_is_left_out_unless_set() {
+        let old: EventPayload = serde_json::from_value(
+            serde_json::json!({"type": "run_started", "playbook": "p", "version": "1.0.0"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            old,
+            EventPayload::RunStarted {
+                external_data: false,
+                ..
+            }
+        ));
+        let line = serde_json::to_string(&old).unwrap();
+        assert!(!line.contains("external_data"), "{line}");
+        let flagged = EventPayload::RunStarted {
+            playbook: "p".into(),
+            version: "1.0.0".into(),
+            definition: None,
+            external_data: true,
+        };
+        let line = serde_json::to_string(&flagged).unwrap();
+        assert!(line.contains("\"external_data\":true"), "{line}");
+        let back: EventPayload = serde_json::from_str(&line).unwrap();
+        assert!(matches!(
+            back,
+            EventPayload::RunStarted {
+                external_data: true,
+                ..
+            }
+        ));
+    }
+
     /// Writers on separate handles (as separate processes would be) never
     /// share a seq and never tear a line, however their appends interleave.
     #[test]
@@ -4062,6 +4142,46 @@ mod tests {
         }
     }
 
+    /// `decision_made.privacy_class` is additive: an old line decodes.
+    #[test]
+    fn decision_made_without_a_privacy_class_decodes() {
+        let old = r#"{"type":"decision_made","use_site":"completion_check","calibrated":true,"mode":"shadow","questions_digest":"q","state_digest":"s","state_bytes":1,"answers":{},"applied":false}"#;
+        match serde_json::from_str::<EventPayload>(old).unwrap() {
+            EventPayload::DecisionMade { privacy_class, .. } => assert_eq!(privacy_class, None),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `attempt_started.cloud` is additive: an old line decodes without it,
+    /// a shape a newer apb wrote reads as absent, and a record round-trips.
+    #[test]
+    fn attempt_started_cloud_is_additive_and_lenient() {
+        let old = r#"{"type":"attempt_started","node":"w","attempt":1,"agent":"dsh"}"#;
+        match serde_json::from_str::<EventPayload>(old).unwrap() {
+            EventPayload::AttemptStarted { cloud, .. } => assert_eq!(cloud, None),
+            other => panic!("{other:?}"),
+        }
+        let odd = r#"{"type":"attempt_started","node":"w","attempt":1,"agent":"dsh","cloud":7}"#;
+        match serde_json::from_str::<EventPayload>(odd).unwrap() {
+            EventPayload::AttemptStarted { cloud, .. } => assert_eq!(cloud, None),
+            other => panic!("{other:?}"),
+        }
+        let new = r#"{"type":"attempt_started","node":"w","attempt":1,"agent":"dsh","cloud":{"provider":"near-ai-cloud","model":"Qwen/Qwen3.8-27B","privacy_class":"confidential_tee"}}"#;
+        let p: EventPayload = serde_json::from_str(new).unwrap();
+        let EventPayload::AttemptStarted { cloud: Some(c), .. } = &p else {
+            panic!("{p:?}");
+        };
+        assert_eq!(
+            c.privacy_class,
+            apb_core::cloud_models::PrivacyClass::ConfidentialTee
+        );
+        let back: EventPayload = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&back).unwrap(),
+            serde_json::to_value(&p).unwrap()
+        );
+    }
+
     /// Additive per the workspace rule: an old log line has no `spawn_ms` and
     /// must deserialize, not fail.
     #[test]
@@ -4092,6 +4212,7 @@ mod tests {
             token: None,
             isolation: None,
             exec: None,
+            cloud: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"spawn_ms\":37"), "got {s}");

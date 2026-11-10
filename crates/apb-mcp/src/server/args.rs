@@ -188,6 +188,17 @@ pub struct PlaybookRunArgs {
     /// does at that wait.
     #[serde(default)]
     pub unattended: Option<bool>,
+    /// external_data - true when the run processes data from outside the
+    /// operator (a third party's documents, messages or records): apb keeps
+    /// everything the run produces in its run directory and nothing for
+    /// learning (no remembered input applied or stored, no node cache
+    /// write, no known problems, corrections, candidates or history). Fixed
+    /// for the run's lifetime; a child or a successor of such a run has it
+    /// too. Refused with external_data_remember_refused together with
+    /// remember: true, and with external_data_immutable when it is false
+    /// for a successor of a flagged run.
+    #[serde(default)]
+    pub external_data: Option<bool>,
 }
 
 /// A run's budget argument. A predictive stop, not a security control: the
@@ -553,6 +564,11 @@ pub struct RunResumeArgs {
     /// `current` or `explicit`), passed back with confirm_launch.
     #[serde(default)]
     pub launch_choice: Option<String>,
+    /// external_data - checked only: the value the run was started with.
+    /// A different value is refused with external_data_immutable; the flag
+    /// never changes after the start.
+    #[serde(default)]
+    pub external_data: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -829,6 +845,10 @@ pub struct PlaybookTrialArgs {
     /// `current` or `explicit`), passed back with confirm_launch.
     #[serde(default)]
     pub launch_choice: Option<String>,
+    /// external_data - true when the run processes data from outside the
+    /// operator and keeps nothing for learning (see playbook_run).
+    #[serde(default)]
+    pub external_data: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1081,6 +1101,10 @@ pub struct PlaybookExecutePlanArgs {
     /// `current` or `explicit`), passed back with confirm_launch.
     #[serde(default)]
     pub launch_choice: Option<String>,
+    /// external_data - true when the run processes data from outside the
+    /// operator and keeps nothing for learning (see playbook_run).
+    #[serde(default)]
+    pub external_data: Option<bool>,
 }
 
 /// `confirm_irreversible`: the refusal's `consent_nonce` (a string), or a

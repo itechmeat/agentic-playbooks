@@ -27,7 +27,6 @@
 //! is refused (409, `busy`). All the work, the choice of the project a
 //! save lands in included, runs off the async runtime.
 
-use std::net::IpAddr;
 use std::path::PathBuf;
 
 use apb_core::step_env::StepCaller;
@@ -37,7 +36,7 @@ use apb_mcp::tools::discover::{
 };
 use axum::Router;
 use axum::extract::{Path as AxPath, Query, Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -96,54 +95,6 @@ pub(crate) fn router() -> Router<AppState> {
         .route_layer(axum::middleware::from_fn(local_gate))
 }
 
-/// Headers a proxy, a load balancer or a tunnel service adds.
-const FORWARDING_HEADERS: [&str; 8] = [
-    "forwarded",
-    "x-forwarded-for",
-    "x-forwarded-host",
-    "x-forwarded-proto",
-    "x-real-ip",
-    "via",
-    "cf-connecting-ip",
-    "true-client-ip",
-];
-
-/// Whether an authority (`Host`, or an `Origin` without its scheme) names
-/// this machine's loopback interface: `localhost`, a loopback address, on
-/// any port.
-fn loopback_authority(authority: &str) -> bool {
-    let a = authority.trim().to_ascii_lowercase();
-    let name = match a.strip_prefix('[') {
-        Some(v6) => v6.split(']').next().unwrap_or_default(),
-        None => a.rsplit_once(':').map_or(a.as_str(), |(n, _)| n),
-    };
-    let name = name.trim_end_matches('.');
-    name == "localhost"
-        || name
-            .parse::<IpAddr>()
-            .is_ok_and(|ip| ip.to_canonical().is_loopback())
-}
-
-/// Whether the request came straight from this machine: a loopback peer
-/// that is not a trusted proxy, no forwarding header, and a loopback
-/// `Host` (and `Origin`, when sent).
-fn local(ctx: &ClientCtx, headers: &HeaderMap) -> bool {
-    let text = |name| headers.get(name).and_then(|v| v.to_str().ok());
-    let origin_ok = match headers.get(header::ORIGIN) {
-        None => true,
-        Some(v) => v
-            .to_str()
-            .ok()
-            .and_then(|o| o.split_once("://"))
-            .is_some_and(|(_, authority)| loopback_authority(authority)),
-    };
-    ctx.ip.to_canonical().is_loopback()
-        && !ctx.via_proxy
-        && !FORWARDING_HEADERS.iter().any(|h| headers.contains_key(*h))
-        && text(header::HOST).is_some_and(loopback_authority)
-        && origin_ok
-}
-
 fn local_only() -> Response {
     (
         StatusCode::FORBIDDEN,
@@ -162,7 +113,7 @@ pub(crate) async fn local_gate(req: Request, next: Next) -> Response {
     let local = req
         .extensions()
         .get::<ClientCtx>()
-        .is_some_and(|ctx| local(ctx, req.headers()));
+        .is_some_and(|ctx| local_client(ctx, req.headers()));
     if !local {
         return local_only();
     }
@@ -297,8 +248,8 @@ pub(crate) async fn post_dismiss_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::{local, loopback_authority};
     use crate::auth::ClientCtx;
+    use crate::state::{local_client as local, loopback_authority};
     use axum::http::HeaderMap;
 
     #[test]

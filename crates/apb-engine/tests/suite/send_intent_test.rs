@@ -139,6 +139,7 @@ impl Run {
             token: Some(token.clone()),
             isolation: None,
             exec: None,
+            cloud: None,
         });
         *self.current.lock().unwrap() = AttemptClaim {
             item: None,
@@ -1243,6 +1244,7 @@ impl Run {
             token: Some(token.clone()),
             isolation: None,
             exec: None,
+            cloud: None,
         });
         *self.current.lock().unwrap() = AttemptClaim {
             item: Some(item.into()),

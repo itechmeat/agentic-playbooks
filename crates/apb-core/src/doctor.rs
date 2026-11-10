@@ -107,6 +107,17 @@ pub fn diagnose(root: &Path) -> DoctorReport {
         execution_detail,
     );
 
+    // The cloud model catalogs: source and age, a cache that did not read,
+    // and the key variable by name.
+    for (warn, name, detail) in crate::cloud_models::catalog::doctor_lines() {
+        let status = if warn {
+            CheckStatus::Warn
+        } else {
+            CheckStatus::Ok
+        };
+        r.push(status, name, detail);
+    }
+
     // `policy.yaml` (machine and project): strict, so a key the reader does
     // not know is named here rather than discovered by a missing notice.
     let (policy_ok, policy_detail) = crate::policy_file::doctor_line(root);
@@ -306,6 +317,7 @@ pub fn diagnose(root: &Path) -> DoctorReport {
                     let status = match issue {
                         _ if issue.is_blocking() => CheckStatus::Fail,
                         ModelIssue::Unknown(_) | ModelIssue::NotAvailable => CheckStatus::Warn,
+                        ModelIssue::Cloud(_) => CheckStatus::Warn,
                         ModelIssue::NewInFamily => CheckStatus::Ok,
                         _ => continue,
                     };

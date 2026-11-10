@@ -238,6 +238,7 @@ mod tests {
                 token: None,
                 isolation: None,
                 exec: None,
+                cloud: None,
             },
         };
         let mut done = committed(

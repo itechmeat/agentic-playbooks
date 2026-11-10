@@ -43,8 +43,8 @@ pub use forms::{Forms, FreshForm, FreshSession, SessionListing};
 pub use hook_host::{HookRegistration, StopEvent, StopHookHost};
 pub use mcp_host::{McpHost, McpMethod, McpRegistration, McpServer};
 pub use output::{
-    AgentUsage, Conformance, CostBasis, OutputFormat, PlainText, Promises, Reply, UsageSource,
-    json_string_field,
+    AgentUsage, Conformance, CostBasis, OutputFormat, PlainText, PricedFrom, Promises, Reply,
+    UsageSource, json_string_field,
 };
 pub use policy::{ClosedList, ModelPolicy, OpenModels};
 pub use sandbox::{Access, HomeBind, HomeCopy, SandboxNeeds};
@@ -70,6 +70,46 @@ static ALL: &[&dyn Agent] = &[
 /// Every built-in agent, in detection order.
 pub fn all() -> &'static [&'static dyn Agent] {
     ALL
+}
+
+/// The cloud catalog model `model` names when `agent` runs it, if any: the
+/// one question every surface asks the agent's model rules
+/// (`ModelPolicy::cloud_model`, decision record 0014).
+pub fn cloud_model(agent: &str, model: &str) -> Option<crate::cloud_models::CloudModelRef> {
+    lookup(agent)?.models().cloud_model(model)
+}
+
+/// The key variable of the cloud provider `model` routes to when `agent`
+/// runs it, read from the agent's routes alone: it holds without a catalog
+/// snapshot, as for an executor an older apb resolved before it recorded
+/// one, so the key is still scrubbed from what such an attempt prints.
+pub fn cloud_key_env(agent: &str, model: &str) -> Option<&'static str> {
+    crate::cloud_models::lookup(cloud_model(agent, model)?.provider).map(|p| p.key_env)
+}
+
+/// The snapshot of the catalog row `model` names when `agent` runs it, when
+/// the catalog lists it.
+pub fn cloud_snapshot(
+    agent: &str,
+    model: &str,
+    snaps: &[crate::cloud_models::catalog::CatalogSnapshot],
+) -> Option<crate::cloud_models::CloudSnapshotRef> {
+    crate::cloud_models::CloudSnapshotRef::of(&cloud_model(agent, model)?, snaps)
+}
+
+/// The privacy summary of a chain's `(agent, model)` pairs
+/// (`crate::cloud_models::privacy`): each pair's class from the catalog, or
+/// none for a model outside any catalog.
+pub fn chain_privacy<'a>(
+    pairs: impl IntoIterator<Item = (&'a str, &'a str)>,
+    snaps: &[crate::cloud_models::catalog::CatalogSnapshot],
+) -> crate::cloud_models::privacy::PrivacySummary {
+    crate::cloud_models::privacy::summarize(
+        pairs
+            .into_iter()
+            .map(|(a, m)| cloud_snapshot(a, m, snaps).map(|c| c.model.privacy_class))
+            .collect(),
+    )
 }
 
 /// The built-in agent `id` names, aliases included; `None` for any other id.

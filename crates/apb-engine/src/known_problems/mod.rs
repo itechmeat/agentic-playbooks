@@ -90,6 +90,11 @@ pub fn observe(root: &Path, run_dir: &Path) -> Result<usize, EngineError> {
     let Some((playbook, scope)) = started(&events) else {
         return Ok(0);
     };
+    // A run that processed external data adds nothing to the store, nor
+    // does one whose manifest does not read (it cannot be told apart).
+    if crate::external_data::refuse_if_flagged(run_dir, "known problems").is_err() {
+        return Ok(0);
+    }
     let run_id = run_dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

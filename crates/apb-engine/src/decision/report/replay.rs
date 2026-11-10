@@ -27,7 +27,7 @@ use serde_json::Value;
 
 use super::labels::{DecisionRecord, Label, labeller_for};
 use super::stats::rate;
-use super::{ReportFilter, RunJournal, run_dirs};
+use super::{ReportFilter, RunJournal, report_dirs};
 use crate::decision::{DecisionRunner, compact_answers};
 use crate::event::DecisionAnswer;
 
@@ -78,6 +78,8 @@ pub struct ReplaySummary {
     pub replay_accuracy: Option<f64>,
     /// Where the results were written.
     pub results: Option<PathBuf>,
+    /// The runs left out because they processed external data.
+    pub skipped_external: usize,
     pub items: Vec<ReplayItem>,
 }
 
@@ -165,9 +167,12 @@ pub fn replay(
         original_accuracy: None,
         replay_accuracy: None,
         results: None,
+        skipped_external: 0,
         items: Vec::new(),
     };
-    for run_dir in run_dirs(roots) {
+    let (dirs, skipped_external) = report_dirs(roots);
+    summary.skipped_external = skipped_external;
+    for run_dir in dirs {
         let Some(journal) = RunJournal::load(&run_dir) else {
             continue;
         };

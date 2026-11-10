@@ -121,6 +121,7 @@ apb trust           list approvals (trust.json), revoke by digest or id, approve
 apb profile         manage agent profiles
 apb connector       list or manage connectors
 apb detect          detect installed coding agents (--json)
+apb models          the cloud model catalogs (NEAR AI Cloud): rows, privacy classes, prices (--refresh, --json)
 apb adopt           will it fit here: adoption readiness report for a playbook (--scope project|global)
 apb memory          show or clear the remembered run input of a playbook in this project
 apb make-global     make a project playbook available in every project (--variant trash|retire|keep, --dry-run)

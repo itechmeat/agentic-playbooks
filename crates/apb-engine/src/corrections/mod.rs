@@ -31,9 +31,8 @@ pub fn observe(root: &Path, run_dir: &Path) -> Result<(), EngineError> {
     let Ok(scrubber) = redactor.scrubber() else {
         return Ok(());
     };
-    // Only a production run is counted.
-    let origin = crate::manifest::RunOrigin::of_read(&crate::manifest::read(run_dir));
-    if !origin.is_production() {
+    // Only a production run that did not process external data is counted.
+    if !crate::external_data::learns_from(run_dir) {
         return Ok(());
     }
     let run_id = run_dir

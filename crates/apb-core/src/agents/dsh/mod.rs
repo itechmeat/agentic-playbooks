@@ -32,7 +32,8 @@
 //! hook for `apb setup` (dsh's hook rows are experimental), the hermetic
 //! minimal environment and desktop history (nothing to point dsh at), a
 //! sandboxed run (never verified: `isolation: full` refuses dsh), and a
-//! reported cost (dsh prints none).
+//! reported cost (dsh prints none; apb prices a step on a cloud catalog
+//! model from the run's catalog row, `crate::cloud_models`).
 
 pub mod actions;
 pub mod mcp;
@@ -171,6 +172,10 @@ impl ModelPolicy for DshModels {
     fn billing_account(&self, m: &str) -> Option<String> {
         model::parse(m).ok().flatten().map(|s| s.account_key())
     }
+
+    fn cloud_routes(&self) -> &'static [crate::cloud_models::CloudRoute] {
+        model::CLOUD_ROUTES
+    }
 }
 
 /// dsh's home: `$DSH_HOME`, else `.dsh` under `home`.
@@ -302,10 +307,14 @@ impl HostSetup for DshSetup {
     // The variables a route of dsh's `llm-pi-ai` provider catalog reads by
     // default, when the route is named after its provider.
     fn model_env(&self, m: &str) -> &'static [&'static str] {
-        model::parse(m)
-            .ok()
-            .flatten()
-            .map_or(&[], |s| providers::provider_env(&s.route))
+        model::parse(m).ok().flatten().map_or(&[], |s| {
+            let cloud = model::cloud_key_env(&s.route);
+            if cloud.is_empty() {
+                providers::provider_env(&s.route)
+            } else {
+                cloud
+            }
+        })
     }
 
     // Every `apiKeyEnv` the person's patch layers name (names only).
@@ -327,8 +336,9 @@ impl HostSetup for DshSetup {
         &self,
         m: &str,
         scoped_dir: Option<&Path>,
+        cloud: Option<&crate::cloud_models::CloudSnapshotRef>,
     ) -> Result<Vec<String>, ScopedEnvError> {
-        model::patch_args(m, scoped_dir).map_err(|source| ScopedEnvError {
+        model::patch_args(m, scoped_dir, cloud).map_err(|source| ScopedEnvError {
             what: format!("{ID} model patch"),
             source,
         })
@@ -363,6 +373,13 @@ mod tests {
         );
         assert!(m.on_closed_list("deepseek-flash", &list));
         assert!(m.on_closed_list("zai/glm-5.3", &list));
+        let near = m.cloud_model("nearai/Qwen/Qwen3.8-27B@high").unwrap();
+        assert_eq!(
+            (near.provider, near.id.as_str(), near.effort.as_deref()),
+            ("near-ai-cloud", "Qwen/Qwen3.8-27B", Some("high"))
+        );
+        assert!(m.cloud_model("deepseek-flash").is_none());
+        assert!(m.cloud_model("zai/glm-5.3").is_none());
         assert!(!m.on_closed_list("gpt-6-sol", &list));
         assert!(m.newer_in_family("deepseek-v5"));
         assert_eq!(
@@ -404,6 +421,10 @@ mod tests {
             ["QWEN_TOKEN_PLAN_CN_API_KEY"]
         );
         assert!(s.model_env("deepseek-flash").is_empty());
+        assert_eq!(
+            s.model_env("nearai/Qwen/Qwen3.8-27B@high"),
+            ["NEARAI_API_KEY"]
+        );
         assert!(s.model_env("my-own-route/m").is_empty());
     }
 

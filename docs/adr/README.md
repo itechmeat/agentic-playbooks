@@ -52,3 +52,4 @@ followed by the rule as the title and three sections:
 | [0011](0011-an-agent-launches-only-what-the-launch-policy-allows.md) | An agent launches a playbook only as its launch policy allows, decided once in the run gate, and no agent channel loosens that policy |
 | [0012](0012-billed-agent-work-starts-only-on-a-persons-command.md) | Billed agent work starts only as the billing settings allow, decided once in the run gate and checked again at every spawn |
 | [0013](0013-run-scoped-files-an-agent-takes-only-as-arguments-lead-its-argv.md) | A run-scoped file an agent takes only as an argument leads its argv, put there by the one spawn path for every form |
+| [0014](0014-cloud-provider-knowledge-lives-in-its-catalog-module.md) | Facts about a cloud model gateway live only in its module under `apb_core::cloud_models`; an agent declares the routes it serves on its model rules |

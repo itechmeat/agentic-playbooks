@@ -354,6 +354,40 @@ pub struct ModelOption {
     pub id: String,
     pub vendor: String,
     pub detected: bool,
+    /// The catalog row behind an option on a cloud route
+    /// (`crate::cloud_models`); absent for every other option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<CloudOption>,
+}
+
+/// What the model list shows of a cloud catalog row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CloudOption {
+    pub provider: String,
+    pub privacy_class: crate::cloud_models::PrivacyClass,
+    pub tools: bool,
+    pub reasoning: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_in_usd_mtok: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_out_usd_mtok: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+}
+
+impl CloudOption {
+    /// The option of `row` from `provider`'s catalog.
+    pub fn of(provider: &str, row: &crate::cloud_models::CloudModel) -> Self {
+        CloudOption {
+            provider: provider.to_string(),
+            privacy_class: row.privacy_class,
+            tools: row.features.tools,
+            reasoning: row.features.reasoning,
+            price_in_usd_mtok: row.price_in_usd_mtok,
+            price_out_usd_mtok: row.price_out_usd_mtok,
+            context_tokens: row.context_tokens,
+        }
+    }
 }
 
 /// Builds `agent`'s model option list.
@@ -402,6 +436,7 @@ pub fn model_options_for_agent(
         .into_iter()
         .map(|(id, vendor)| ModelOption {
             detected: detected_set.contains(id.as_str()),
+            cloud: None,
             id,
             vendor,
         })
@@ -413,6 +448,7 @@ pub fn model_options_for_agent(
                     id: item.clone(),
                     vendor: agent_vendor_str.clone(),
                     detected: true,
+                    cloud: None,
                 });
             }
         }
@@ -641,12 +677,14 @@ mod tests {
                 ModelOption {
                     id: "gpt-5.6-sol".into(),
                     vendor: "openai".into(),
-                    detected: false
+                    detected: false,
+                    cloud: None,
                 },
                 ModelOption {
                     id: "gpt-5.6-terra".into(),
                     vendor: "openai".into(),
-                    detected: false
+                    detected: false,
+                    cloud: None,
                 },
             ]
         );
@@ -686,6 +724,7 @@ mod tests {
                 id: "gpt-5-codex-preview".into(),
                 vendor: "openai".into(),
                 detected: true,
+                cloud: None,
             }
         );
     }
@@ -718,12 +757,14 @@ mod tests {
                 ModelOption {
                     id: "GLM-5.3".into(),
                     vendor: "zhipu".into(),
-                    detected: true
+                    detected: true,
+                    cloud: None,
                 },
                 ModelOption {
                     id: "GLM-5.3-Flash".into(),
                     vendor: "zhipu".into(),
-                    detected: true
+                    detected: true,
+                    cloud: None,
                 },
             ]
         );

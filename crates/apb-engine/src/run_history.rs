@@ -18,21 +18,20 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::event::{Event, EventPayload};
-use crate::manifest::RunOrigin;
 
 /// How many leading journal lines the prefilter reads for `run_started`.
 const HEAD_LINES: usize = 8;
 
-/// Whether `run` counts as history: only a production run does. The one
-/// filter every reader of earlier runs applies.
+/// Whether `run` counts as history: only a production run that did not
+/// process external data does ([`crate::external_data::learns_from`]). The
+/// one filter every reader of earlier runs applies.
 pub fn counts_as_history(run: &crate::run_stats::StatsRun) -> bool {
-    run.origin.is_production()
+    run.learns
 }
 
-/// [`counts_as_history`] for a run directory not read as a whole: its
-/// manifest's origin only.
-fn production_dir(run_dir: &Path) -> bool {
-    RunOrigin::of_read(&crate::manifest::read(run_dir)).is_production()
+/// [`counts_as_history`] for a run directory not read as a whole.
+pub(crate) fn production_dir(run_dir: &Path) -> bool {
+    crate::external_data::learns_from(run_dir)
 }
 
 /// What a run's journal opens with.
@@ -123,14 +122,15 @@ pub(crate) fn started_checked(run_dir: &Path) -> Result<Option<RunHead>, &'stati
 /// The production runs of playbook `id` (of `version` when given) among
 /// the newest `cap` run directories under `roots`, newest start first.
 pub fn runs_of(roots: &[PathBuf], id: &str, version: Option<&str>, cap: usize) -> Vec<PathBuf> {
-    let mut matched: Vec<(u128, PathBuf)> = crate::decision::report::newest_run_dirs(roots, cap)
+    // The learning filter runs before the cap, so flagged runs never crowd
+    // earlier history out of the window.
+    let mut matched: Vec<(u128, PathBuf)> = crate::external_data::learnable_run_dirs(roots, cap)
         .into_iter()
         .filter_map(|d| {
             let head = started(&d)?;
             (head.playbook == id && version.is_none_or(|v| v == head.version))
                 .then_some((head.ts, d))
         })
-        .filter(|(_, d)| production_dir(d))
         .collect();
     matched.sort_by_key(|a| std::cmp::Reverse(a.0));
     matched.into_iter().map(|(_, d)| d).collect()

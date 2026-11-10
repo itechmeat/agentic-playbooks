@@ -15,7 +15,10 @@
   // that answer, so a start never uses remembered input the dialog did not
   // show. "Notify me" appears when the machine has a notify target; it
   // starts checked when runs here notify by default, and a start sends the
-  // choice only when it differs from that. Run hands the budget and the
+  // choice only when it differs from that. "External data" marks a run whose
+  // input comes from outside the operator: it keeps nothing for learning, so
+  // while it is checked "Remember for this project" is off and disabled, and
+  // remembered values the person did not edit are cleared. Run hands the budget and the
   // input to `onrun`; the page starts the run (and its irreversible-consent
   // dialog, when needed). When the playbook's launch policy holds agents
   // back (`ask` or `deny`), the dialog says so: the click is a person's
@@ -33,6 +36,7 @@
     missingValues,
     paramFields,
     runInputFrom,
+    withoutRemembered,
     type ParamField,
   } from './runinput'
   import {
@@ -76,6 +80,7 @@
   let instruction = $state('')
   let initialInstruction = ''
   let remember = $state(false)
+  let externalData = $state(false)
   let memoryNote = $state<string | null>(null)
   let memoryLoading = $state(false)
   let machineNotify = $state<MachineNotify | null>(null)
@@ -115,6 +120,7 @@
         instruction = ''
         initialInstruction = ''
         remember = false
+        externalData = false
         memoryNote = null
         machineNotify = null
         notifyMe = false
@@ -148,6 +154,7 @@
           initialInstruction = instructionFrom(recall)
           if (untrack(() => instruction) === '') instruction = initialInstruction
           memoryNote = memoryNoteFrom(recall)
+          if (untrack(() => externalData)) forgetRemembered()
         })
         .catch(() => {
           if (live) memoryNote = 'The remembered input could not be read.'
@@ -185,6 +192,15 @@
     }
   })
 
+  // External data: nothing remembered is kept or used. The remember box goes
+  // off, and the values and instruction memory filled in that the person did
+  // not edit are cleared.
+  function forgetRemembered() {
+    remember = false
+    fields = withoutRemembered(fields)
+    if (initialInstruction !== '' && instruction === initialInstruction) instruction = ''
+  }
+
   function submit() {
     // Until memory answered, a start could pick up remembered input the
     // dialog never showed.
@@ -206,9 +222,10 @@
     }
     formError = null
     open = false
-    const input = runInputFrom(fields, instruction, remember, initialInstruction)
+    const input = runInputFrom(fields, instruction, remember && !externalData, initialInstruction)
     const notify = startNotify(machineNotify, notifyMe)
     if (notify !== undefined) input.notify = notify
+    if (externalData) input.external_data = true
     onrun(budget, input)
   }
 </script>
@@ -297,11 +314,31 @@
           <Textarea rows={3} data-testid="run-start-instruction" bind:value={instruction} />
         </label>
         <label class="check">
-          <input type="checkbox" data-testid="run-start-remember" bind:checked={remember} />
+          <input
+            type="checkbox"
+            data-testid="run-start-remember"
+            disabled={externalData}
+            bind:checked={remember}
+          />
           Remember for this project
         </label>
         <p class="muted hint">
           Secret params and values that look like credentials are never remembered.
+        </p>
+        <label class="check">
+          <input
+            type="checkbox"
+            data-testid="run-start-external-data"
+            bind:checked={externalData}
+            onchange={() => {
+              if (externalData) forgetRemembered()
+            }}
+          />
+          External data: keep nothing for learning
+        </label>
+        <p class="muted hint">
+          For input from outside your own work, such as a third party's documents or messages:
+          nothing remembered is used or stored, and the run adds nothing to later runs.
         </p>
       </fieldset>
       {#if machineNotify?.target}

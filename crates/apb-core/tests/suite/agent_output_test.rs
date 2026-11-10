@@ -43,6 +43,7 @@ fn claude_is_error_and_usage_without_a_model_breakdown() {
             cost_usd: None,
             source: UsageSource::Reported,
             cost_basis: Default::default(),
+            priced_from: None,
         }
     );
 }
@@ -191,6 +192,7 @@ fn dsh_json_events_read_reply_session_and_usage() {
             cost_usd: None,
             source: UsageSource::Reported,
             cost_basis: Default::default(),
+            priced_from: None,
         }
     );
     let resumed = usage("dsh", DSH_RESUME).unwrap();

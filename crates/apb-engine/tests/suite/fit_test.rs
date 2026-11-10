@@ -285,3 +285,44 @@ fn a_reviewer_on_the_main_agent_is_a_note() {
     seed_profile(root.path(), "apb-reviewer", "codex", "gpt-5.5", &[]);
     assert!(notes("both").is_empty(), "two agents, no note");
 }
+
+/// A model on a cloud route in any chain position, tiers included: an agent
+/// step that cannot run on it blocks, an id the catalog lacks is a warning.
+#[test]
+fn a_cloud_tier_that_cannot_run_steps_blocks_and_an_unknown_id_does_not() {
+    let _env = env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let _cfg = EnvVar::set("APB_CONFIG_DIR", cfg.path());
+    let root = tempfile::tempdir().unwrap();
+    init_project(root.path()).unwrap();
+    let dir = root.path().join(".apb/profiles/vision");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("profile.yaml"),
+        "name: vision\ndescription: t\nexecutor:\n  agent: claude\n  model: claude-sonnet-5-5\ntiers:\n  quick: { agent: dsh, model: nearai/Qwen/Qwen3-VL-30B-A3B-Instruct, for: \"Quick looks.\" }\n",
+    )
+    .unwrap();
+    fs::write(dir.join("SOUL.md"), "").unwrap();
+    crate::common::seed_profile(root.path(), "typo", "dsh", "nearai/Qwen/Qwen3.8-72B", &[]);
+    let node = "  - { id: a, type: agent_task, prompt: hi, profile: vision }\n  - { id: b, type: agent_task, prompt: hi, profile: typo }\n";
+    let yaml = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n"
+        .to_string()
+        + node
+        + "  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: b, to: done }\n";
+    write_playbook(&root.path().join(".apb"), "p", &yaml);
+
+    let fit = assess(root.path(), &wref(project(), "p")).unwrap();
+    let no_tools = fit
+        .setup
+        .iter()
+        .find(|i| i.code == "cloud_model_no_tools")
+        .unwrap_or_else(|| panic!("{:?}", fit.setup));
+    assert_eq!(no_tools.severity, FitSeverity::Blocking);
+    let unknown = fit
+        .setup
+        .iter()
+        .find(|i| i.code == "cloud_model_unknown")
+        .unwrap_or_else(|| panic!("{:?}", fit.setup));
+    assert_ne!(unknown.severity, FitSeverity::Blocking);
+    assert!(!fit.ready);
+}

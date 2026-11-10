@@ -2,6 +2,8 @@
 //! offers for it, how a model id is spelled and checked, and which billing
 //! account a model spends.
 
+use crate::cloud_models::{CloudModelRef, CloudRoute};
+
 /// One agent's model rules. Every hook defaults to "no rule".
 pub trait ModelPolicy: Send + Sync {
     /// The vendor a single-vendor agent is tied to (issue #42 finding 9),
@@ -45,6 +47,18 @@ pub trait ModelPolicy: Send + Sync {
     /// blocks for the rest of the fallback chain.
     fn billing_account(&self, _model: &str) -> Option<String> {
         None
+    }
+
+    /// The cloud catalogs this agent reaches, each under a model prefix
+    /// (decision record 0014).
+    fn cloud_routes(&self) -> &'static [CloudRoute] {
+        &[]
+    }
+
+    /// The catalog model a profile model names, if any: the default reads
+    /// `<prefix>/<id>[@<effort>]` for each of [`Self::cloud_routes`].
+    fn cloud_model(&self, model: &str) -> Option<CloudModelRef> {
+        CloudModelRef::read(model, self.cloud_routes())
     }
 }
 

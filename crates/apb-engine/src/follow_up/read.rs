@@ -39,7 +39,7 @@ fn pending_seq(run_dir: &Path) -> Result<Option<u64>, EngineError> {
     let events = crate::event::read_all(run_dir)?;
     let snapshot = crate::legacy_snapshot::load_run_playbook(run_dir);
     let production =
-        crate::manifest::RunOrigin::of_read(&crate::manifest::read(run_dir)).is_production();
+        crate::manifest::RunOrigin::of_read(&crate::manifest::read(run_dir)).runs_follow_up();
     Ok(
         match crate::follow_up::state(snapshot.as_ref(), &events, production) {
             crate::follow_up::FollowUpState::Pending { finished_seq, .. } => Some(finished_seq),
@@ -61,7 +61,7 @@ fn observe_due_leased(
     let events = crate::event::read_all(run_dir)?;
     let snapshot = crate::legacy_snapshot::load_run_playbook(run_dir);
     let production =
-        crate::manifest::RunOrigin::of_read(&crate::manifest::read(run_dir)).is_production();
+        crate::manifest::RunOrigin::of_read(&crate::manifest::read(run_dir)).runs_follow_up();
     let crate::follow_up::FollowUpState::Pending {
         finished_seq,
         due_at_ms,

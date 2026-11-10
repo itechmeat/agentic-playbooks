@@ -2084,12 +2084,17 @@ fn execute_node_kind(
                             }
                             None => adapter_for(&step.agent)?,
                         };
-                        // Desktop-history sync (`agents.zcode.ui_sync`).
-                        crate::zcode_ui_sync::wrap_step(
-                            adapter,
-                            &step.agent,
-                            base_spec.as_ref().map(|(spec, _)| spec),
-                        )
+                        // Desktop-history sync (`agents.zcode.ui_sync`); a run
+                        // that processes external data leaves no row there.
+                        if crate::external_data::is_flagged(run_dir) {
+                            adapter
+                        } else {
+                            crate::zcode_ui_sync::wrap_step(
+                                adapter,
+                                &step.agent,
+                                base_spec.as_ref().map(|(spec, _)| spec),
+                            )
+                        }
                     };
                     // Where to stream the attempt's NDJSON events (acp transport); one
                     // file per attempt. The headless field ignores it.
@@ -2217,7 +2222,8 @@ fn execute_node_kind(
                         .with_attempt(attempt)
                         .with_process(step_env.process.clone())
                         .with_sandbox(place.sandbox.clone())
-                        .with_evidence(evidence_session.clone());
+                        .with_evidence(evidence_session.clone())
+                        .with_cloud(step.invocation.as_ref().and_then(|i| i.cloud.clone()));
                     let task = AgentTask {
                         prompt: attempt_prompt.as_ref(),
                         untrusted_section,
@@ -2323,6 +2329,10 @@ fn execute_node_kind(
                             token: attempt_policy.attempt_token.clone(),
                             isolation: place.record.clone(),
                             exec: attempt_exec.clone(),
+                            cloud: attempt_policy
+                                .cloud
+                                .as_ref()
+                                .map(crate::event::AttemptCloud::of),
                         }) {
                             Ok(seq) => {
                                 started_seq.set(seq);
@@ -2845,22 +2855,28 @@ fn execute_node_kind(
                     // a started (pid unknown) so every attempt_finished is preceded
                     // by an attempt_started.
                     if spawn_instant.is_none() {
-                        started_seq.set(journal.append_seq(EventPayload::AttemptStarted {
-                            item: None,
-                            node: node_id.into(),
-                            attempt,
-                            agent: step.agent.clone(),
-                            soul_delivery: step.soul_delivery.clone(),
-                            skills_mode: Some(skills_mode.to_string()),
-                            pid: None,
-                            spawn_ms: None,
-                            model: attempt_model.clone(),
-                            workdir: attempt_dir.clone(),
-                            transcript: attempt_transcript.clone(),
-                            token: attempt_policy.attempt_token.clone(),
-                            isolation: place.record.clone(),
-                            exec: attempt_exec.clone(),
-                        })?);
+                        started_seq.set(
+                            journal.append_seq(EventPayload::AttemptStarted {
+                                item: None,
+                                node: node_id.into(),
+                                attempt,
+                                agent: step.agent.clone(),
+                                soul_delivery: step.soul_delivery.clone(),
+                                skills_mode: Some(skills_mode.to_string()),
+                                pid: None,
+                                spawn_ms: None,
+                                model: attempt_model.clone(),
+                                workdir: attempt_dir.clone(),
+                                transcript: attempt_transcript.clone(),
+                                token: attempt_policy.attempt_token.clone(),
+                                isolation: place.record.clone(),
+                                exec: attempt_exec.clone(),
+                                cloud: attempt_policy
+                                    .cloud
+                                    .as_ref()
+                                    .map(crate::event::AttemptCloud::of),
+                            })?,
+                        );
                         super::provenance::attempt_started(run_dir, node_id, started_seq.get());
                         read_only::journal_check(
                             journal,
@@ -4421,7 +4437,8 @@ pub(crate) fn execute_finish_answer(
                 .join(format!("{node_id}-{attempt}.jsonl"));
             let attempt_policy = spawn_env
                 .with_attempt(attempt)
-                .with_process(step_env.process.clone());
+                .with_process(step_env.process.clone())
+                .with_cloud(ri.cloud.clone());
             let task = AgentTask {
                 prompt: &text,
                 untrusted_section: None,
@@ -4477,6 +4494,10 @@ pub(crate) fn execute_finish_answer(
                     token: attempt_policy.attempt_token.clone(),
                     isolation: None,
                     exec: attempt_exec.clone(),
+                    cloud: attempt_policy
+                        .cloud
+                        .as_ref()
+                        .map(crate::event::AttemptCloud::of),
                 }) {
                     Ok(seq) => started_seq.set(Some(seq)),
                     Err(e) => *spawn_err.borrow_mut() = Some(e),
@@ -4530,22 +4551,28 @@ pub(crate) fn execute_finish_answer(
             // Spawn failed before the callback ran: still journal a started
             // (pid unknown) so every attempt_finished is preceded by a started.
             if spawn_instant.is_none() {
-                started_seq.set(Some(journal.append_seq(EventPayload::AttemptStarted {
-                    item: None,
-                    node: node_id.into(),
-                    attempt,
-                    agent: agent_label.clone(),
-                    soul_delivery: Some(soul_delivery_str(ri.soul_delivery)),
-                    skills_mode: None,
-                    pid: None,
-                    spawn_ms: None,
-                    model: attempt_model.clone(),
-                    workdir: None,
-                    transcript: None,
-                    token: attempt_policy.attempt_token.clone(),
-                    isolation: None,
-                    exec: attempt_exec.clone(),
-                })?));
+                started_seq.set(Some(
+                    journal.append_seq(EventPayload::AttemptStarted {
+                        item: None,
+                        node: node_id.into(),
+                        attempt,
+                        agent: agent_label.clone(),
+                        soul_delivery: Some(soul_delivery_str(ri.soul_delivery)),
+                        skills_mode: None,
+                        pid: None,
+                        spawn_ms: None,
+                        model: attempt_model.clone(),
+                        workdir: None,
+                        transcript: None,
+                        token: attempt_policy.attempt_token.clone(),
+                        isolation: None,
+                        exec: attempt_exec.clone(),
+                        cloud: attempt_policy
+                            .cloud
+                            .as_ref()
+                            .map(crate::event::AttemptCloud::of),
+                    })?,
+                ));
             }
             last_close_seq = started_seq.get().unwrap_or(0);
             let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
@@ -4969,6 +4996,10 @@ pub(crate) fn run_playbook_node(
     // A child of an unattended run is unattended (from the parent's
     // manifest, here, so it never hangs on where the child's prepare looks).
     opts.unattended = super::unattended::mode(run_dir, cfg);
+    // A child of a run that processes external data does too, whatever its
+    // start asked (a scenario run's child included: read from the parent's
+    // own directory).
+    opts.external_data = crate::external_data::is_flagged(run_dir);
     // The launch authorization: a child spawned under its verified pin
     // records its parent's, so a later resume of the child alone needs no
     // check of its own. A child resolved live inherits nothing.

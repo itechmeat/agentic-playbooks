@@ -989,6 +989,7 @@ mod tests {
                 soul_delivery: apb_core::config::SoulDelivery::Prefix,
                 canonical_executable: std::path::PathBuf::from("/bin/true"),
                 executable_fingerprint: "0:0".into(),
+                cloud: None,
             })
             .collect();
         let manifest = crate::manifest::RunExecutionManifest {
@@ -1022,6 +1023,7 @@ mod tests {
             launch: None,
             unattended: false,
             origin: None,
+            external_data: false,
         };
         crate::manifest::write(run_dir, &manifest).unwrap();
     }

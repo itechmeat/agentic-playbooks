@@ -41,6 +41,8 @@ pub struct DriveRequest {
     pub level: ScenarioLevel,
     /// The smoke cap on decision requests; `None` at quick.
     pub max_decision_requests: Option<u32>,
+    /// The scenario run processes external data ([`crate::external_data`]).
+    pub external_data: bool,
 }
 
 /// The scenario drive: prepares a run under `.apb/scenario-runs/` with
@@ -60,6 +62,7 @@ pub fn drive(req: &DriveRequest) -> Result<DriveOutcome, String> {
             .max_decision_requests
             .unwrap_or(session::SMOKE_DEFAULT_REQUESTS),
         sent: Default::default(),
+        external_data: req.external_data,
     };
     let before = apb_core::process_mode::scenario_refusals().len();
     let run = crate::scheduler::run_scenario_of(
@@ -337,6 +340,7 @@ mod tests {
                 scenario_digest: "sha256:x".into(),
                 max_requests: 1,
                 sent: Default::default(),
+                external_data: false,
             };
             let s = Arc::new(session::ScenarioSession::new(&prep, &playbook, dir.path()));
             for kind in BoundaryKind::ALL {

@@ -28,6 +28,7 @@ pub mod cache;
 pub mod candidate;
 pub mod candidate_pointer;
 pub mod clock;
+pub mod cloud_models;
 pub mod config;
 pub mod connector;
 pub mod content;

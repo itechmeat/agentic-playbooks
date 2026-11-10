@@ -43,6 +43,7 @@ fn summary_is_built_from_wakes_and_interventions_when_no_report_submitted() {
         playbook: "w".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     log.append(EventPayload::WakeRaised {
@@ -91,6 +92,7 @@ fn summary_omits_empty_sections_when_no_wakes_or_interventions() {
         playbook: "w".into(),
         version: "1.0.0".into(),
         definition: None,
+        external_data: false,
     })
     .unwrap();
     log.append(EventPayload::RunFinished {

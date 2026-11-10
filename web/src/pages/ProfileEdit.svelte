@@ -4,16 +4,21 @@
     fetchProfile,
     fetchProjects,
     fetchSkills,
+    refreshModelCatalog,
     writeProfile,
     type AgentInfo,
+    type CloudCatalog,
     type ModelRow,
     type ModelOption,
     type AvailableSkill,
   } from '../lib/api'
   import {
     defaultPrimaryPair,
+    cloudModelNote,
     disabledModelIds,
     findDuplicatePair,
+    modelHint,
+    resolvedChain,
     firstSelectableModelForAgent,
     modelOptionsForAgent,
     nextFallbackPair,
@@ -60,6 +65,9 @@
   // combined.
   let modelsTable = $state<ModelRow[]>([])
   let optionsByAgent = $state<Record<string, ModelOption[]>>({})
+  // The cloud model catalogs (NEAR AI Cloud) as the server has them.
+  let cloudCatalogs = $state<CloudCatalog[]>([])
+  let refreshing = $state(false)
   let availableSkills = $state<AvailableSkill[]>([])
 
   const DESC_MAX = 200
@@ -112,8 +120,27 @@
     const taken = new Set(disabledModelIds(i, groups))
     return modelOptionsForAgent(groups[i].agent, optionsByAgent, modelsTable).map((o) => ({
       value: o.id,
-      hint: taken.has(o.id) ? 'in use' : o.detected ? 'detected' : undefined,
+      hint: modelHint(o, taken.has(o.id)),
     }))
+  }
+
+  // The executor chain with the privacy class of each entry, recomputed as
+  // the form changes (the server's rule; the saved profile's resolved block
+  // says the same).
+  const chain = $derived(resolvedChain(groups, tiers, optionsByAgent))
+  const usesCloud = $derived(chain.entries.some((e) => e.privacy !== null))
+
+  async function refreshCatalog() {
+    refreshing = true
+    try {
+      await refreshModelCatalog()
+      await loadMeta()
+      toast.success('Model catalog refreshed')
+    } catch (e) {
+      toast.error('Catalog refresh failed', { description: String(e) })
+    } finally {
+      refreshing = false
+    }
   }
 
   // Fired only when the user actually picks an agent in the combobox (see
@@ -176,6 +203,7 @@
       agents = md.agents
       modelsTable = md.models
       optionsByAgent = md.options_by_agent
+      cloudCatalogs = md.cloud ?? []
       if (isNew && !workspaceInput && projects.length) workspaceInput = nestProjects(projects)[0].row.workspace_id
     } catch (e) {
       toast.error('Failed to load form data', { description: String(e) })
@@ -309,6 +337,7 @@
         },
         ws,
       )
+      for (const w of saved.warnings ?? []) toast.warning(w)
       const changed = saved.skills_unapproved ?? []
       if (changed.length > 0) {
         toast.warning(`Saved profile "${nm}", but it is not trusted`, {
@@ -499,6 +528,11 @@
                         placeholder="Select a model"
                         emptyText="No models for this agent"
                       />
+                      {#if cloudModelNote(groups[i].agent, groups[i].model, optionsByAgent, cloudCatalogs)}
+                        <p class="cloud-note" data-testid="cloud-model-note">
+                          {cloudModelNote(groups[i].agent, groups[i].model, optionsByAgent, cloudCatalogs)}
+                        </p>
+                      {/if}
                     </Field.Field>
                   </Field.FieldGroup>
                 </div>
@@ -526,6 +560,44 @@
         </Field.FieldSet>
       </Field.FieldGroup>
     </section>
+
+    {#if usesCloud || cloudCatalogs.length}
+      <section class="box privacy-box" data-testid="profile-privacy">
+        <h2 class="box-cap">Privacy</h2>
+        <p class="privacy-lead">
+          Where each entry of the chain runs. A fallback or tier on another class runs the step
+          there when it takes over.
+        </p>
+        <ul class="privacy-chain">
+          {#each chain.entries as e, i (i)}
+            <li>
+              <span class="privacy-role">{e.label}</span>
+              <span class="privacy-model">{e.agent} / {e.model || '?'}</span>
+              <span class="privacy-class" data-class={e.privacy ?? 'none'}>
+                {e.privacy ? e.privacy.replace(/_/g, ' ') : 'outside any catalog'}
+              </span>
+            </li>
+          {/each}
+        </ul>
+        {#if chain.warning}
+          <p class="privacy-warning" data-testid="privacy-warning">
+            profile_privacy_class_changes: the chain spans privacy classes, so a fallback or tier
+            may run a step on a less private class.
+          </p>
+        {/if}
+        {#each cloudCatalogs as c (c.provider)}
+          <div class="privacy-catalog">
+            <span>
+              {c.display}: {c.source} catalog of {c.fetched_at.slice(0, 10)}, {c.models.length} models;
+              {c.key_env} {c.key_present ? 'is set' : 'is not set'}
+            </span>
+            <Button variant="outline" size="sm" onclick={refreshCatalog} disabled={refreshing}>
+              {refreshing ? 'Refreshing...' : 'Refresh catalog'}
+            </Button>
+          </div>
+        {/each}
+      </section>
+    {/if}
 
     {#if tiers.length}
       <section class="box px-4 pt-5 pb-4">
@@ -590,3 +662,71 @@
 </PageScroll>
 
 <StatusBar items={statusItems} />
+
+<style>
+  .cloud-note {
+    margin: 0.25rem 0 0;
+    color: var(--warning);
+    font-size: 0.75rem;
+  }
+  .privacy-box {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 1.25rem 1rem 1rem;
+  }
+  .privacy-lead {
+    margin: 0;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+  }
+  .privacy-chain {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font-size: 0.875rem;
+  }
+  .privacy-chain li {
+    display: grid;
+    grid-template-columns: minmax(6rem, auto) 1fr auto;
+    gap: 0.75rem;
+    align-items: baseline;
+    padding: 0.375rem 0.75rem;
+    border: 1px solid var(--c-line);
+    background: var(--c-panel-2);
+  }
+  .privacy-role {
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+  }
+  .privacy-model {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    overflow-wrap: anywhere;
+  }
+  .privacy-class {
+    font-size: 0.75rem;
+    white-space: nowrap;
+  }
+  .privacy-class[data-class='incognito'],
+  .privacy-class[data-class='unverified'],
+  .privacy-class[data-class='none'] {
+    color: var(--warning);
+  }
+  .privacy-warning {
+    margin: 0;
+    color: var(--warning);
+    font-size: 0.75rem;
+  }
+  .privacy-catalog {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+  }
+</style>

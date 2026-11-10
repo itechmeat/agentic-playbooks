@@ -86,6 +86,46 @@ pub struct GlobalConfig {
     /// binary and extra read-only paths every sandbox binds. Absent: bwrap
     /// from `/usr/bin` or PATH, no extra paths.
     pub isolation: crate::isolation::IsolationSettings,
+    /// The cloud model catalogs (`crate::cloud_models`). Absent: the
+    /// dashboard refreshes each catalog once a day.
+    pub cloud_models: CloudModelsConfig,
+}
+
+/// The `cloud_models:` section of the global config.
+///
+/// ```yaml
+/// cloud_models:
+///   near_ai_cloud: { auto_refresh: false }
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CloudModelsConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub near_ai_cloud: Option<CloudProviderConfig>,
+}
+
+/// One cloud provider's settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CloudProviderConfig {
+    /// Whether the dashboard refreshes the catalog once a day. Absent: true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_refresh: Option<bool>,
+}
+
+impl CloudModelsConfig {
+    /// The settings of the provider `id` names.
+    pub fn provider(&self, id: &str) -> Option<&CloudProviderConfig> {
+        match id {
+            "near-ai-cloud" => self.near_ai_cloud.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Whether the dashboard refreshes the provider's catalog on its own.
+    pub fn auto_refresh(&self, id: &str) -> bool {
+        self.provider(id).and_then(|p| p.auto_refresh) != Some(false)
+    }
 }
 
 /// The agent kinds a history root may hold.
@@ -1365,5 +1405,25 @@ mod isolation_tests {
             target.exists(),
             "a sandbox-named symlink was followed into a removal"
         );
+    }
+
+    #[test]
+    fn the_cloud_models_section_is_strict_and_defaults_to_refreshing() {
+        let none: super::GlobalConfig = yaml_serde::from_str("port: 1\n").unwrap();
+        assert_eq!(none.cloud_models, super::CloudModelsConfig::default());
+        assert!(none.cloud_models.auto_refresh("near-ai-cloud"));
+        let off: super::GlobalConfig =
+            yaml_serde::from_str("cloud_models:\n  near_ai_cloud: { auto_refresh: false }\n")
+                .unwrap();
+        assert!(!off.cloud_models.auto_refresh("near-ai-cloud"));
+        for bad in [
+            "cloud_models:\n  near_ai_cloud: { key_env: X }\n",
+            "cloud_models:\n  other_cloud: {}\n",
+        ] {
+            assert!(
+                yaml_serde::from_str::<super::GlobalConfig>(bad).is_err(),
+                "{bad}"
+            );
+        }
     }
 }

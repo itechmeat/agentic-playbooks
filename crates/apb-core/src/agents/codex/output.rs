@@ -65,6 +65,7 @@ impl OutputFormat for CodexOutput {
             cost_usd: None,
             source: UsageSource::Reported,
             cost_basis: Default::default(),
+            priced_from: None,
         })
     }
 

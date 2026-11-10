@@ -406,7 +406,8 @@ impl ProfileEmulation<'_, '_> {
             &ri.agent_id,
             &ri.model,
             self.env_scrub,
-        ));
+        ))
+        .with_cloud(ri.cloud.clone());
         let stream_log = self
             .run_dir
             .join("agent-stream")
@@ -466,6 +467,7 @@ impl ProfileEmulation<'_, '_> {
             isolation: None,
             // A judge's ask is no step of an executor chain.
             exec: None,
+            cloud: spawn_env.cloud.as_ref().map(crate::event::AttemptCloud::of),
         };
         let on_spawn = |pid: u32, spawn_ms: u64| {
             spawn_at.set(Some(std::time::Instant::now()));

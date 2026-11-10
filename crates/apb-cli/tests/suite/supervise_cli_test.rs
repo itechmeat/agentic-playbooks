@@ -382,3 +382,30 @@ fn supervise_of_an_irreversible_playbook_needs_the_consent_nonce() {
     assert_eq!(consent.by, "cli_flag");
     drop(_env);
 }
+
+/// `apb run --supervise --external-data`: the detached supervised drive
+/// prepares the run itself, and its manifest carries the flag.
+#[test]
+fn a_supervised_external_data_start_is_flagged() {
+    let dir = seeded();
+    let marker_file = dir.path().join("agent_calls.txt");
+    let stub = agent_stub(dir.path(), &marker_file);
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let assert = playbook()
+        .args(["run", "svnoagent", "--supervise", "--external-data"])
+        .current_dir(dir.path())
+        .env("APB_AGENT_CMD", &stub)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("supervised run started:"));
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let runs_dir = dir.path().join(".apb/runs");
+    let run_id = extract_run_id(&stdout, &runs_dir);
+    let run_dir = runs_dir.join(&run_id);
+    let manifest = apb_engine::manifest::read(&run_dir).unwrap().unwrap();
+    assert!(manifest.external_data);
+    poll_until("the supervised run to finish", || {
+        let text = fs::read_to_string(run_dir.join("events.jsonl")).ok()?;
+        text.contains("\"type\":\"run_finished\"").then_some(())
+    });
+}

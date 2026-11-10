@@ -60,6 +60,11 @@ pub struct ScenarioRunRequest {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub max_decision_requests: Option<u32>,
+    /// The scenario run processes external data and keeps nothing for
+    /// learning (`apb_engine::external_data`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub external_data: bool,
 }
 
 /// One scenario of the version, with its latest result per level.
@@ -270,6 +275,9 @@ pub struct ScenarioChild {
     /// The digests the parent checked: anything else is not played.
     pub scenario_digest: String,
     pub playbook_digest: String,
+    /// The scenario run processes external data (`--external-data`): the
+    /// child prepares the run, so the flag crosses on its argv.
+    pub external_data: bool,
 }
 
 impl ScenarioChild {
@@ -293,7 +301,15 @@ impl ScenarioChild {
             max_decision_requests,
             scenario_digest: s.digest.clone(),
             playbook_digest: v.digest.clone(),
+            external_data: false,
         }
+    }
+
+    /// The same child for a scenario run that processes external data or
+    /// not.
+    pub fn with_external_data(mut self, external_data: bool) -> Self {
+        self.external_data = external_data;
+        self
     }
 
     /// The arguments of `apb __scenario-run`.
@@ -319,6 +335,9 @@ impl ScenarioChild {
         ];
         if let Some(n) = self.max_decision_requests {
             argv.extend(["--max-decision-requests".into(), n.to_string()]);
+        }
+        if self.external_data {
+            argv.push("--external-data".into());
         }
         argv
     }
@@ -660,7 +679,8 @@ pub fn run_scenario(
             ToolError::NotFound(format!("scenario `{}`: {e}", req.scenario))
         }
     })?;
-    let child = ScenarioChild::of(root, scope, id, &v, &s, req.level, cap);
+    let child = ScenarioChild::of(root, scope, id, &v, &s, req.level, cap)
+        .with_external_data(req.external_data);
     if let Some(why) = apb_core::scenario::staleness(&s.scenario, &v.version, &v.digest) {
         let report = ScenarioReport::not_run(&child.subject(), Verdict::Stale, why);
         return Ok(ScenarioRunView {

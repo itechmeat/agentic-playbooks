@@ -99,17 +99,11 @@ pub(crate) fn find(
                     what: "manifest",
                 });
             }
-            Ok(None) => {}
-            Ok(Some(m)) => {
-                // An absent origin reads as production, as
-                // `RunOrigin::of_read` does for every reader of earlier
-                // runs.
-                if !m
-                    .origin
-                    .as_ref()
-                    .map(crate::manifest::RunOrigin::is_production)
-                    .unwrap_or(true)
-                {
+            // A manifest that reads: the run is a source only when a
+            // reader may learn from it (production, not external data),
+            // the one rule of `external_data::learns_from`.
+            Ok(_) => {
+                if !crate::external_data::learns_from(&d) {
                     continue;
                 }
             }

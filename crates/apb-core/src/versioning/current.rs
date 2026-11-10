@@ -141,6 +141,12 @@ pub enum MoveError {
         "{version} is the candidate on trial: decide the candidate instead (apb candidate --promote, or the candidate card of the dashboard)"
     )]
     IsCandidate { version: String },
+    /// The version a current-run patch of a run that processed external
+    /// data created: it stays with that run.
+    #[error(
+        "external_data_run: {version} was made by a patch of run {run}, which processed external data; it never becomes current"
+    )]
+    ExternalDataRun { version: String, run: String },
     #[error("{}", crate::process_mode::READ_ONLY_REFUSAL)]
     ReadOnly,
     /// A trial record the move must update does not read: fix or remove
@@ -159,6 +165,7 @@ impl MoveError {
             MoveError::NotFound(_) => "not_found",
             MoveError::Stale { .. } => "stale",
             MoveError::IsCandidate { .. } => "is_candidate",
+            MoveError::ExternalDataRun { .. } => "external_data_run",
             MoveError::ReadOnly => "read_only",
             MoveError::Record(_) => "record_unreadable",
             MoveError::Io(_) => "io",
@@ -183,9 +190,9 @@ impl MoveError {
             MoveError::ReadOnly => VersioningError::Io(crate::process_mode::refusal()),
             MoveError::Io(e) => VersioningError::Io(e),
             MoveError::Record(why) => VersioningError::Schema(why),
-            e @ (MoveError::Stale { .. } | MoveError::IsCandidate { .. }) => {
-                VersioningError::Conflict(e.to_string())
-            }
+            e @ (MoveError::Stale { .. }
+            | MoveError::IsCandidate { .. }
+            | MoveError::ExternalDataRun { .. }) => VersioningError::Conflict(e.to_string()),
         }
     }
 }
@@ -478,6 +485,14 @@ fn plan(
     }
     if !writes_target && !target.join("playbook.yaml").is_file() {
         return Err(MoveError::NotFound(format!("{id}@{}", req.to)));
+    }
+    if let Some(run) = crate::versioning::sidecar::read_provenance_in(playbook_dir, req.to)
+        .and_then(|p| p.external_data_run)
+    {
+        return Err(MoveError::ExternalDataRun {
+            version: req.to.to_string(),
+            run,
+        });
     }
     let from = read_current_pointer(playbook_dir);
     if let Some(expected) = req.expected_from

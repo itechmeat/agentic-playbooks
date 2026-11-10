@@ -50,6 +50,8 @@ pub(crate) struct ScenarioArgs {
     pub allow_stale: bool,
     pub yes: bool,
     pub json: bool,
+    /// The scenario runs process external data (`--external-data`).
+    pub external_data: bool,
 }
 
 fn refuse(json_out: bool, code: &str, message: String) -> ExitCode {
@@ -159,6 +161,7 @@ pub(crate) fn eval_entry(root: &Path, args: crate::eval::EvalArgs) -> ExitCode {
             allow_stale: args.allow_stale,
             yes: args.yes,
             json: args.json,
+            external_data: args.external_data,
         },
     )
 }
@@ -240,7 +243,8 @@ pub(crate) fn scenario_cmd(root: &Path, args: ScenarioArgs) -> ExitCode {
     };
     for s in &to_run {
         let subject = Subject::of(args.level, s, &args.id, &v.version, &v.digest);
-        let child = ChildArgs::of(root, args.scope, &args.id, &v, s, args.level, cap);
+        let child = ChildArgs::of(root, args.scope, &args.id, &v, s, args.level, cap)
+            .with_external_data(args.external_data);
         let mut cmd = Command::new(&exe);
         cmd.args(child.argv());
         reports.push(play(
@@ -467,6 +471,7 @@ fn child_request(root: &Path, a: &ChildArgs) -> Result<DriveRequest, Box<Scenari
         scenario: s,
         level: a.level,
         max_decision_requests: a.max_decision_requests,
+        external_data: a.external_data,
     })
 }
 
@@ -507,6 +512,7 @@ mod tests {
             allow_stale: false,
             yes: false,
             json: true,
+            external_data: false,
         }
     }
 
@@ -682,6 +688,7 @@ mod tests {
             max_decision_requests: None,
             scenario_digest: s.digest.clone(),
             playbook_digest: v.digest.clone(),
+            external_data: false,
         };
         let req = child_request(root, &child).unwrap();
         assert_eq!(req.scenario.digest, s.digest);

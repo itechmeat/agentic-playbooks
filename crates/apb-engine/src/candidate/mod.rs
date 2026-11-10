@@ -133,7 +133,9 @@ fn settle_inner(log: &mut EventLog, run_dir: &Path, succeeded: bool) -> Result<(
         .ok()
         .flatten()
         .is_some_and(|m| m.candidate_trial);
-    if !trial {
+    // A run that processed external data never settles a candidate (its
+    // manifest never marks a trial; this is the backstop).
+    if !trial || !crate::external_data::learns_from(run_dir) {
         return Ok(());
     }
     let events = read_all(run_dir)?;

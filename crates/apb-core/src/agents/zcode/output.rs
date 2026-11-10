@@ -40,6 +40,7 @@ impl OutputFormat for ZcodeOutput {
             // label says (see the module docs).
             source: UsageSource::Reported,
             cost_basis: Default::default(),
+            priced_from: None,
         })
     }
 
