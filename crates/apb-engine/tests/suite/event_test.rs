@@ -58,6 +58,7 @@ fn connector_call_smtp_fields_round_trip() {
     let p = EventPayload::ConnectorCall {
         item: None,
         response_complete: None,
+        pages: None,
         node_id: "n".into(),
         connector: "smtp".into(),
         function: "send_email".into(),

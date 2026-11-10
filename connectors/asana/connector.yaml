@@ -1,5 +1,5 @@
 name: asana
-version: 0.1.0
+version: 0.2.0
 healthcheck: get_me
 auth:
   kind: header
@@ -70,7 +70,7 @@ functions:
     response_pick: [data.gid, data.name]
 
   - name: list_tasks
-    description: List tasks in a project
+    description: List tasks in a project, following next_page.offset pages up to the limit
     read_only: true
     method: GET
     url: "{{account.api_base}}/tasks"
@@ -88,6 +88,10 @@ functions:
         offset: { type: string, description: "pagination offset from a previous response's next_page.offset" }
         completed_since: { type: string, description: "now for open tasks only, or an ISO 8601 timestamp" }
       required: [project, limit]
+    paginate:
+      items: data
+      next: { token_path: next_page.offset, token_arg: offset }
+      max_pages: 5
     response_pick: [data.gid, data.name, data.completed, data.assignee.name, data.due_on, data.permalink_url, next_page.offset]
 
   - name: get_task

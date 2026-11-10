@@ -445,6 +445,9 @@ pub struct ConnectorFacts {
     /// account no provider could ever reach, which is the opposite of what
     /// the rule is for.
     pub accounts: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// Names of its functions flagged `untrusted_output: true`, in manifest
+    /// order (V187 suggests marking a binding that grants one).
+    pub untrusted_output_functions: Vec<String>,
     /// Set when the connector is installed on disk but its manifest no longer
     /// loads (`ConnectorDoc::from_yaml` rejected it). The other fields are then
     /// empty defaults: nothing could be extracted. The real case this catches
@@ -479,6 +482,7 @@ impl ConnectorFacts {
                 .filter_map(|f| Some((f.name.clone(), f.send_once()?.mode()?)))
                 .collect(),
             repeatable_functions: names(&|f| f.is_repeatable()),
+            untrusted_output_functions: names(&|f| f.untrusted_output),
             ..Self::default()
         }
     }

@@ -33,32 +33,34 @@ pub(crate) fn redact_value(value: Value, redactions: &[Redaction]) -> Value {
 /// can carry request details (a `query`-kind auth secret among them).
 pub(crate) fn read_body(
     mut response: ureq::http::Response<ureq::Body>,
-) -> (Value, Option<BodyIncomplete>) {
+    cap: usize,
+) -> (Value, Option<BodyIncomplete>, usize) {
     let is_json = response.body().mime_type() == Some("application/json");
     let mut buf = Vec::new();
     // The read outcome is surfaced explicitly instead of dropped: a body that
     // stopped early must not pass as a complete response. `as_reader()` is not
-    // capped by ureq itself, so the `.take(BODY_CAP + 1)` below is what bounds
+    // capped by ureq itself, so the `.take(cap + 1)` below is what bounds
     // memory (same as before).
     let read = response
         .body_mut()
         .as_reader()
-        .take(BODY_CAP as u64 + 1)
+        .take(cap as u64 + 1)
         .read_to_end(&mut buf);
     // An over-cap read (or an error that arrived only after the cap window
-    // filled) is a cut at the cap; the window holds at most BODY_CAP + 1
+    // filled) is a cut at the cap; the window holds at most cap + 1
     // bytes, so a shorter buffer with an error is a genuine partial read.
     let incomplete = match read {
-        Err(_) if buf.len() > BODY_CAP => Some(BodyIncomplete::cut_at_cap(BODY_CAP)),
+        Err(_) if buf.len() > cap => Some(BodyIncomplete::cut_at_cap(cap)),
         Err(e) => Some(BodyIncomplete::read_error(e.kind())),
-        Ok(_) if buf.len() > BODY_CAP => Some(BodyIncomplete::cut_at_cap(BODY_CAP)),
+        Ok(_) if buf.len() > cap => Some(BodyIncomplete::cut_at_cap(cap)),
         Ok(_) => None,
     };
+    let bytes = buf.len();
     if incomplete
         .as_ref()
         .is_some_and(|b| b.reason == IncompleteReason::BodyCap)
     {
-        buf.truncate(BODY_CAP);
+        buf.truncate(cap);
     }
     let body = if is_json {
         serde_json::from_slice(&buf)
@@ -66,7 +68,7 @@ pub(crate) fn read_body(
     } else {
         Value::String(String::from_utf8_lossy(&buf).into_owned())
     };
-    (body, incomplete)
+    (body, incomplete, bytes)
 }
 
 /// The HTTP-status -> result mapping (spec section 8). 2xx is success; 3xx is a
@@ -96,6 +98,7 @@ pub(crate) fn map_status(
             incomplete,
             link: None,
             picked: false,
+            pages: None,
         });
     }
     let mut err = match status {

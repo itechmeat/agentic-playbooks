@@ -17,9 +17,12 @@ use apb_core::connector::inbox::InboxEvent;
 use apb_core::secret::Secret;
 use serde_json::Value;
 
-use crate::connector::call::render_http;
+use crate::connector::call::paginate::{Walked, walk};
+use crate::connector::call::render::render_http;
+use crate::connector::call::shape::{RawResponse, ShapeRules, check_content_type, shape};
 use crate::connector::intent::reconcile::{self, Listing, Match};
 use crate::connector::intent::stamp::Stamp;
+use crate::connector::result::{CallError, CallErrorCode, CallOk};
 
 /// The fixed value every secret account field resolves to in the offline
 /// runner. A real secret is never read (spec 4.6).
@@ -90,6 +93,10 @@ fn evaluate(doc: &ConnectorDoc, case: &TestCase) -> Result<(), String> {
             headers,
             body_contains,
             body_form_contains,
+            responses,
+            requests,
+            result_contains,
+            error_code,
         } => {
             let fields = case.intent.as_ref().map(IntentCase::marker_fields);
             let stamp = case.intent.as_ref().map(|i| Stamp::Send {
@@ -107,6 +114,10 @@ fn evaluate(doc: &ConnectorDoc, case: &TestCase) -> Result<(), String> {
                 headers,
                 body_contains,
                 body_form_contains,
+                responses,
+                requests,
+                result_contains,
+                error_code,
             };
             eval_http(doc, function, &input, &expect)
         }
@@ -154,6 +165,10 @@ struct HttpExpect<'a> {
     headers: Option<&'a BTreeMap<String, String>>,
     body_contains: Option<&'a Value>,
     body_form_contains: Option<&'a BTreeMap<String, String>>,
+    responses: Option<&'a Vec<apb_core::connector::contract::ScriptedResponse>>,
+    requests: Option<&'a Vec<String>>,
+    result_contains: Option<&'a Value>,
+    error_code: Option<&'a str>,
 }
 
 fn eval_http(
@@ -168,6 +183,10 @@ fn eval_http(
         headers,
         body_contains,
         body_form_contains,
+        responses,
+        requests,
+        result_contains,
+        error_code,
     } = expect;
     if function.mock.is_some() {
         return Err(format!(
@@ -251,6 +270,171 @@ fn eval_http(
                 }
             }
         }
+    }
+
+    // The scripted walk (D2): the same walk/shape path a live call takes,
+    // over scripted answers, then the projection exactly as the live path
+    // applies it. `error_code` expects a failure instead.
+    if let Some(responses) = responses {
+        let rules = ShapeRules {
+            read_only: function.read_only,
+            error_when: doc.error_when.as_ref(),
+            decode_paths: &function.decode_base64url,
+        };
+        let mut queue: std::collections::VecDeque<apb_core::connector::contract::ScriptedResponse> =
+            responses.iter().cloned().collect();
+        let mut made: Vec<String> = Vec::new();
+        let content_types = &function.content_types;
+        let mut fetch = |url: &str, _allowance: usize| -> Result<RawResponse, CallError> {
+            let resp = queue.pop_front().ok_or_else(|| {
+                // A case-authoring error, not a service answer: it must
+                // never match an `error_code` expectation.
+                CallError::new(
+                    CallErrorCode::Config,
+                    "the call made more requests than the case scripted responses for".to_string(),
+                )
+            })?;
+            let content_type = resp
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("Content-Type"))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| "application/json".to_string());
+            // The same media-type guard the live path applies before the
+            // body is used, and only on a 2xx, so a scripted 401 on a
+            // content_types function keeps its auth verdict.
+            if (200..300).contains(&resp.status) && !content_types.is_empty() {
+                check_content_type(function.name.as_str(), Some(&content_type), content_types)?;
+            }
+            let text = match &resp.body {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let body = if content_type.trim().starts_with("application/json") {
+                serde_json::from_str(&text).unwrap_or(Value::String(text.clone()))
+            } else {
+                Value::String(text.clone())
+            };
+            let link = resp
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("Link"))
+                .map(|(_, v)| v.clone());
+            made.push(url.to_string());
+            Ok(RawResponse {
+                status: resp.status,
+                content_type: Some(content_type),
+                link,
+                retry_after: None,
+                body,
+                incomplete: None,
+                bytes: text.len(),
+            })
+        };
+        let mut next_url = |token: &str| -> Result<String, CallError> {
+            let Some(spec) = &function.paginate else {
+                return Err(CallError::new(
+                    CallErrorCode::Config,
+                    "the case scripted a token page but the function declares no paginate block"
+                        .to_string(),
+                ));
+            };
+            let Some(arg) = &spec.next.token_arg else {
+                return Err(CallError::new(
+                    CallErrorCode::Config,
+                    "the paginate block names no token_arg".to_string(),
+                ));
+            };
+            let mut args = input.args.clone();
+            if let Some(map) = args.as_object_mut() {
+                map.insert(arg.clone(), Value::String(token.to_string()));
+            }
+            let rendered = render_http(function, input.account, &args, &secrets, input.stamp)
+                .map_err(|e| CallError::new(CallErrorCode::Config, e.message))?;
+            Ok(rendered.pre_auth_url)
+        };
+        let (result, stats) = match &function.paginate {
+            Some(spec) => walk(
+                &rendered.pre_auth_url,
+                spec,
+                &rules,
+                &mut fetch,
+                &mut next_url,
+            ),
+            None => {
+                let stats_default = crate::connector::call::paginate::WalkStats {
+                    pages: 1,
+                    last_status: None,
+                };
+                match fetch(&rendered.pre_auth_url, 1024 * 1024) {
+                    Ok(raw) => match shape(raw, &rules) {
+                        Ok(ok) => (Ok(Walked { ok, more: false }), stats_default),
+                        Err(e) => (Err(e), stats_default),
+                    },
+                    Err(e) => (Err(e), stats_default),
+                }
+            }
+        };
+        if !queue.is_empty() {
+            return Err(format!(
+                "the case scripted {} response(s) the call never used",
+                queue.len()
+            ));
+        }
+        if let Some(want_urls) = requests
+            && want_urls != &made
+        {
+            return Err(format!(
+                "requests mismatch: expected {want_urls:?}, the call made {made:?}"
+            ));
+        }
+        let failed_code = match &result {
+            Err(err) => Some(err.code.as_str()),
+            Ok(_) => None,
+        };
+        if let (Some(want), Some(got)) = (error_code, failed_code) {
+            if want != got {
+                return Err(format!(
+                    "error_code mismatch: expected `{want}`, got `{got}`"
+                ));
+            }
+            // The assertion holds; nothing else about the error is checked
+            // offline.
+            return Ok(());
+        }
+        if let (Some(want), true) = (error_code, result.is_ok()) {
+            return Err(format!(
+                "the case expects error_code `{want}` but the scripted call succeeded"
+            ));
+        }
+        let value = match result {
+            Ok(mut walked) => {
+                if let CallOk::Http {
+                    body,
+                    picked,
+                    pages,
+                    ..
+                } = &mut walked.ok
+                {
+                    if !function.response_pick.is_empty() {
+                        *body =
+                            crate::connector::call::encode::project(body, &function.response_pick);
+                        *picked = true;
+                    }
+                    *pages = Some((stats.pages, walked.more));
+                }
+                walked.ok.to_success_json()
+            }
+            Err(err) => err.to_json(),
+        };
+        if let Some(subset) = result_contains
+            && !json_subset(subset, &value)
+        {
+            return Err(format!(
+                "result_contains mismatch: `{subset}` is not a subset of `{value}`"
+            ));
+        }
+        return Ok(());
     }
     Ok(())
 }
@@ -421,6 +605,7 @@ fn eval_imap(
         Vec::new(),
         true,
         function.timeout_sec,
+        &crate::connector::imap::ImapExtras::default(),
     )
     .map_err(|e| format!("render failed: {}", e.message))?;
     let json = match built {
@@ -470,10 +655,62 @@ fn eval_imap(
             }
         }
     }
+    if let Some(message) = &expected.message {
+        // An `append_draft` case asserts the composed message through the
+        // preview the dry-run renders; every field is optional.
+        let preview = params.get("preview").cloned().unwrap_or(Value::Null);
+        if message.from.is_none()
+            && message.to.is_none()
+            && message.subject.is_none()
+            && preview.is_null()
+        {
+            return Err(
+                "expected an imap message preview but the function rendered none (only \
+                 append_draft composes one)"
+                    .to_string(),
+            );
+        }
+        if let Some(from) = &message.from {
+            let got = preview
+                .get("from")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if got != from {
+                return Err(format!(
+                    "message from mismatch: expected `{from}`, rendered `{got}`"
+                ));
+            }
+        }
+        if let Some(to) = &message.to {
+            let got: Vec<String> = preview
+                .get("to")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if &got != to {
+                return Err(format!(
+                    "message to mismatch: expected {to:?}, rendered {got:?}"
+                ));
+            }
+        }
+        if let Some(subject) = &message.subject {
+            let got = preview
+                .get("subject")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if got != subject {
+                return Err(format!(
+                    "message subject mismatch: expected `{subject}`, rendered `{got}`"
+                ));
+            }
+        }
+    }
     Ok(())
 }
-
-/// Renders an imap param value to the text a `params_contains` expectation
 /// compares against: a JSON string's own text (no surrounding quotes), or the
 /// JSON text of any other value (so a rendered number like `20` matches the
 /// case's string `"20"`).
@@ -1049,5 +1286,215 @@ functions:
             .filter(|r| !r.passed)
             .map(|r| format!("{}: {}", r.function, r.detail))
             .collect()
+    }
+
+    /// A connector with one paginated read, for the scripted-response
+    /// assertions.
+    const PAGED_YAML: &str = r#"
+name: example
+version: 0.1.0
+account_fields:
+  - name: api_base
+    required: true
+functions:
+  - name: list_things
+    description: d
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/things"
+    response_pick: [items]
+    paginate:
+      items: items
+      next: { link_header: true }
+      max_pages: 3
+  - name: get_one
+    description: d
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/one"
+    response_pick: [items]
+"#;
+
+    fn run(yaml: &str, doc_yaml: &str, case_yaml_case: usize) -> CaseResult {
+        let tests = TestsDoc::from_yaml(yaml).unwrap();
+        let doc = ConnectorDoc::from_yaml(doc_yaml, "example").unwrap();
+        run_case(&doc, &tests.cases[case_yaml_case])
+    }
+
+    #[test]
+    fn a_scripted_two_page_case_checks_requests_and_the_merge() {
+        let y = r#"cases:
+  - function: list_things
+    account: { api_base: "http://api.example" }
+    args: {}
+    expect:
+      method: GET
+      url: "http://api.example/things"
+      responses:
+        - headers: { Link: "<http://api.example/things?page=2>; rel=\"next\"" }
+          body: { items: [1] }
+        - headers: { Link: "<http://api.example/things?page=3>; rel=\"next\"" }
+          body: { items: [2] }
+        - body: { items: [3] }
+      requests:
+        - "http://api.example/things"
+        - "http://api.example/things?page=2"
+        - "http://api.example/things?page=3"
+      result_contains: { ok: true, pages: 3, more: false, body: { items: [1, 2, 3] } }
+"#;
+        let result = run(y, PAGED_YAML, 0);
+        assert!(result.passed, "{}", result.detail);
+    }
+
+    #[test]
+    fn a_leftover_response_fails_the_case() {
+        let y = r#"cases:
+  - function: list_things
+    account: { api_base: "http://api.example" }
+    args: {}
+    expect:
+      method: GET
+      url: "http://api.example/things"
+      responses:
+        - body: { items: [1], nextPageToken: t }
+        - body: { items: [2] }
+      result_contains: { ok: true, pages: 1, more: false }
+"#;
+        let result = run(y, PAGED_YAML, 0);
+        assert!(!result.passed);
+        assert!(result.detail.contains("never used"), "{}", result.detail);
+    }
+
+    #[test]
+    fn a_missing_response_fails_the_case() {
+        let y = r#"cases:
+  - function: list_things
+    account: { api_base: "http://api.example" }
+    args: {}
+    expect:
+      method: GET
+      url: "http://api.example/things"
+      responses:
+        - headers: { Link: "<http://api.example/things?page=2>; rel=\"next\"" }
+          body: { items: [1] }
+      error_code: service
+"#;
+        let result = run(y, PAGED_YAML, 0);
+        assert!(!result.passed, "an under-scripted case must fail");
+    }
+
+    #[test]
+    fn a_requests_mismatch_fails_the_case() {
+        let y = r#"cases:
+  - function: list_things
+    account: { api_base: "http://api.example" }
+    args: {}
+    expect:
+      method: GET
+      url: "http://api.example/things"
+      responses:
+        - body: { items: [1] }
+      requests:
+        - "http://api.example/things"
+        - "http://api.example/things?page=2"
+"#;
+        let result = run(y, PAGED_YAML, 0);
+        assert!(!result.passed);
+        assert!(
+            result.detail.contains("requests mismatch"),
+            "{}",
+            result.detail
+        );
+    }
+
+    #[test]
+    fn a_result_contains_mismatch_fails_the_case() {
+        let y = r#"cases:
+  - function: get_one
+    account: { api_base: "http://api.example" }
+    args: {}
+    expect:
+      method: GET
+      url: "http://api.example/one"
+      responses:
+        - body: { items: [1] }
+      result_contains: { ok: true, body: { items: [9] } }
+"#;
+        let result = run(y, PAGED_YAML, 0);
+        assert!(!result.passed);
+        assert!(
+            result.detail.contains("result_contains mismatch"),
+            "{}",
+            result.detail
+        );
+    }
+
+    #[test]
+    fn an_error_code_expectation_matches_the_scripted_failure() {
+        let y = r#"cases:
+  - function: get_one
+    account: { api_base: "http://api.example" }
+    args: {}
+    expect:
+      method: GET
+      url: "http://api.example/one"
+      responses:
+        - status: 500
+          body: { boom: true }
+      error_code: service
+"#;
+        let result = run(y, PAGED_YAML, 0);
+        assert!(result.passed, "{}", result.detail);
+
+        let y2 = r#"cases:
+  - function: get_one
+    account: { api_base: "http://api.example" }
+    args: {}
+    expect:
+      method: GET
+      url: "http://api.example/one"
+      responses:
+        - status: 429
+          body: {}
+      error_code: service
+"#;
+        let result = run(y2, PAGED_YAML, 0);
+        assert!(!result.passed);
+        assert!(
+            result.detail.contains("error_code mismatch"),
+            "{}",
+            result.detail
+        );
+    }
+
+    #[test]
+    fn a_scripted_content_type_gets_the_same_guard_verdict() {
+        // The same three headers a live call sees, through the offline
+        // runner: text passes, binary fails `service`.
+        for (ctype, expect_pass) in [("text/plain", true), ("image/png", false)] {
+            let y = format!(
+                r#"cases:
+  - function: get_one
+    account: {{ api_base: "http://api.example" }}
+    args: {{}}
+    expect:
+      method: GET
+      url: "http://api.example/one"
+      responses:
+        - status: 200
+          headers: {{ Content-Type: "{ctype}" }}
+          body: {{}}
+      {expect}
+"#,
+                ctype = ctype,
+                expect = if expect_pass {
+                    "result_contains: { ok: true }".to_string()
+                } else {
+                    "error_code: service".to_string()
+                },
+            );
+            let result = run(&y, PAGED_YAML, 0);
+            assert_eq!(result.passed, expect_pass, "{}: {}", ctype, result.detail);
+        }
     }
 }

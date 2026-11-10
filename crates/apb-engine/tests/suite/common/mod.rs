@@ -347,6 +347,9 @@ fn http_stub_consumes_chunked_request_body() {
 /// Makes an answer's status and body from the requests served so far.
 pub type ReplyFn = Box<dyn FnOnce(&[String]) -> (u16, String) + Send>;
 
+/// The same, with extra headers (a Link header naming a next page).
+pub type FromHeadersFn = Box<dyn FnOnce(&[String]) -> (u16, Vec<(String, String)>, String) + Send>;
+
 /// One answer of a [`ScriptedHttpServer`].
 pub enum Reply {
     /// Answer with this status and JSON body.
@@ -354,6 +357,14 @@ pub enum Reply {
     /// Answer with a status and a body computed from every request served
     /// so far, this one last (to echo what an earlier request sent).
     From(ReplyFn),
+    /// The same, with extra headers (a Link header naming a next page that
+    /// must carry this server's own address).
+    /// The scripted answer with headers: (status, headers, body).
+    FromHeaders(FromHeadersFn),
+    /// Answer with this status, these extra headers (Link, Content-Type,
+    /// Retry-After) and body. Without a Content-Type of its own the answer
+    /// carries `application/json`, like `spawn_http`.
+    RespondWith(u16, Vec<(String, String)>, String),
     /// Read the request, then close the connection without an answer: the
     /// client sees a network failure, so it cannot know what happened.
     Cut,
@@ -436,9 +447,14 @@ pub fn spawn_script(script: Vec<Reply>) -> ScriptedHttpServer {
             };
             let captured = read_http_request(&mut stream);
             seen.lock().unwrap().push(captured);
-            let (status, body) = match reply {
-                Reply::Respond(status, body) => (status, body),
-                Reply::From(make) => make(&seen.lock().unwrap()),
+            let (status, extra_headers, body) = match reply {
+                Reply::Respond(status, body) => (status, Vec::new(), body),
+                Reply::RespondWith(status, headers, body) => (status, headers, body),
+                Reply::From(make) => {
+                    let (status, body) = make(&seen.lock().unwrap());
+                    (status, Vec::new(), body)
+                }
+                Reply::FromHeaders(make) => make(&seen.lock().unwrap()),
                 Reply::Cut => continue,
                 Reply::Held {
                     body,
@@ -450,13 +466,21 @@ pub fn spawn_script(script: Vec<Reply>) -> ScriptedHttpServer {
                     // request fails instead of hanging its client and this
                     // server's join.
                     let _ = release.recv_timeout(std::time::Duration::from_secs(60));
-                    (200, body)
+                    (200, Vec::new(), body)
                 }
             };
-            let head = format!(
-                "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
+            let mut head = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\n", body.len());
+            let mut has_ctype = false;
+            for (k, v) in &extra_headers {
+                if k.eq_ignore_ascii_case("content-type") {
+                    has_ctype = true;
+                }
+                head.push_str(&format!("{k}: {v}\r\n"));
+            }
+            if !has_ctype {
+                head.push_str("Content-Type: application/json\r\n");
+            }
+            head.push_str("Connection: close\r\n\r\n");
             let _ = stream.write_all(head.as_bytes());
             let _ = stream.write_all(body.as_bytes());
             let _ = stream.flush();

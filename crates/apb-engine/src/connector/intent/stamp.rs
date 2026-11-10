@@ -11,7 +11,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use apb_core::connector::def::FunctionSpec;
-use apb_core::connector::idempotency::Idempotency;
+use apb_core::connector::idempotency::{Idempotency, KeyEncoding};
 use apb_core::connector::marker::{self, MarkerFields};
 use apb_core::connector::text_mode::apply_text_args;
 use serde_json::Value;
@@ -75,6 +75,28 @@ pub fn prepare_body_args<'a>(
     Cow::Owned(out)
 }
 
+/// Writes the send nonce into the key encoding the function declared (D3).
+/// Identity without an encoding; with `base32hex` each character at index
+/// `i` of the nonce alphabet `abcdefghijklmnopqrstuvwxyz234567` becomes the
+/// character at `i` of the base32hex alphabet `0123456789abcdefghijklmnopqrstuv`,
+/// for services whose client-chosen ids allow only that alphabet. A nonce
+/// character outside the alphabet passes through unchanged.
+pub(crate) fn encode_key(nonce: &str, encoding: KeyEncoding) -> String {
+    match encoding {
+        KeyEncoding::Base32hex => {
+            let from = "abcdefghijklmnopqrstuvwxyz234567";
+            let to = "0123456789abcdefghijklmnopqrstuv";
+            nonce
+                .chars()
+                .map(|c| match from.chars().position(|f| f == c) {
+                    Some(i) => to.chars().nth(i).unwrap_or(c),
+                    None => c,
+                })
+                .collect()
+        }
+    }
+}
+
 /// Sets the key of a `key` function on the rendered request: the header, or
 /// the top-level body field. Does nothing for the other modes or without a
 /// stamp. A body that did not render as a JSON object has no field to carry
@@ -85,13 +107,23 @@ pub fn apply_key(
     body: &mut Option<Value>,
     headers: &mut BTreeMap<String, String>,
 ) -> Result<(), String> {
-    let (Some(Idempotency::Key { header, field, .. }), Some(stamp)) = (function.send_once(), stamp)
+    let (
+        Some(Idempotency::Key {
+            header,
+            field,
+            encoding,
+            ..
+        }),
+        Some(stamp),
+    ) = (function.send_once(), stamp)
     else {
         return Ok(());
     };
-    let value = match stamp {
-        Stamp::Send { nonce, .. } => nonce.to_string(),
-        Stamp::Preview => KEY_PREVIEW.to_string(),
+    let value = match (stamp, encoding) {
+        // The preview stays readable: it never carries a real nonce.
+        (Stamp::Preview, _) => KEY_PREVIEW.to_string(),
+        (Stamp::Send { nonce, .. }, None) => nonce.to_string(),
+        (Stamp::Send { nonce, .. }, Some(kind)) => encode_key(nonce, *kind),
     };
     match (header, field, body) {
         (Some(name), _, _) => {
@@ -274,5 +306,54 @@ functions:
         assert_eq!(out["content"], "x apb-quoted-intent");
         let read = prepare_body_args(&function("read"), &args, None);
         assert!(matches!(read, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn the_key_encoding_maps_the_nonce_alphabet() {
+        // The two vectors of design D3.
+        assert_eq!(
+            encode_key("abcdefghijklmnopqrstuvwx", KeyEncoding::Base32hex),
+            "0123456789abcdefghijklmn"
+        );
+        assert_eq!(encode_key("yz234567", KeyEncoding::Base32hex), "opqrstuv");
+        // Characters outside the alphabet pass through; `b` maps to `1`.
+        assert_eq!(encode_key("a-b", KeyEncoding::Base32hex), "0-1");
+    }
+
+    #[test]
+    fn the_preview_is_never_encoded() {
+        let doc = ConnectorDoc::from_yaml(
+            r#"
+name: enc
+version: 0.1.0
+functions:
+  - name: send
+    description: d
+    method: POST
+    url: "https://api.example.com/send"
+    body: { key: x }
+    args_schema: { type: object }
+    idempotency:
+      mode: key
+      field: key
+      window_sec: 3600
+      encoding: base32hex
+"#,
+            "enc",
+        )
+        .unwrap();
+        let f = doc.function("send").unwrap();
+        let mut body = Some(json!({ "key": x_marker_placeholder() }));
+        let mut headers = BTreeMap::new();
+        apply_key(f, Some(&Stamp::Preview), &mut body, &mut headers).unwrap();
+        assert_eq!(
+            body.as_ref().unwrap()["key"],
+            json!(KEY_PREVIEW),
+            "the preview stays readable"
+        );
+    }
+
+    fn x_marker_placeholder() -> String {
+        String::new()
     }
 }

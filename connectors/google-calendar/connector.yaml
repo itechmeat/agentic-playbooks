@@ -1,0 +1,351 @@
+name: google-calendar
+version: 0.1.0
+healthcheck: verify
+auth:
+  kind: oauth2_refresh
+  token_url: "{{account.token_url}}"
+  authorize_url: "https://accounts.google.com/o/oauth2/v2/auth"
+  client_id_template: "{{account.client_id}}"
+  client_secret_template: "{{secret.client_secret}}"
+  refresh_token_template: "{{secret.refresh_token}}"
+  granted_scopes_template: "{{account.granted_scopes}}"
+  consent_scopes: "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.readonly"
+  authorize_params: { access_type: offline, prompt: consent }
+account_fields:
+  - name: api_base
+    required: true
+  - name: token_url
+    required: true
+  - name: client_id
+    required: true
+  - name: client_secret
+    required: true
+    secret: true
+  - name: refresh_token
+    required: true
+    secret: true
+  # Space-separated scopes the refresh token was granted. Optional: without
+  # it apb checks the scope list the token endpoint answers with.
+  - name: granted_scopes
+functions:
+  - name: verify
+    description: Read the account's primary calendar entry, to check that the token works
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/users/me/calendarList/primary"
+    args_schema: { type: object, properties: {}, required: [] }
+    response_pick: [id, summary, timeZone, accessRole]
+    scopes:
+      - https://www.googleapis.com/auth/calendar.readonly
+      - https://www.googleapis.com/auth/calendar
+      - https://www.googleapis.com/auth/calendar.calendarlist.readonly
+      - https://www.googleapis.com/auth/calendar.calendarlist
+    examples:
+      - args: {}
+        note: "healthcheck; the id of the primary calendar is the account's e-mail address."
+
+  - name: list_calendars
+    description: List the calendars on the account's calendar list, following nextPageToken pages up to the limit
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/users/me/calendarList"
+    query:
+      maxResults: "{{args.max_results}}"
+      pageToken: "{{args.page_token}}"
+    args_schema:
+      type: object
+      properties:
+        max_results: { type: integer, minimum: 1, maximum: 250, description: "page size; omit for the service default of 100" }
+        page_token: { type: string, description: "nextPageToken of an earlier result that said more: true; omit on the first call" }
+      required: []
+    paginate:
+      items: items
+      next: { token_path: nextPageToken, token_arg: page_token }
+      max_pages: 5
+    timeout_sec: 60
+    response_pick: [items.id, items.summary, items.primary, items.accessRole, items.timeZone, nextPageToken]
+    scopes:
+      - https://www.googleapis.com/auth/calendar.readonly
+      - https://www.googleapis.com/auth/calendar
+      - https://www.googleapis.com/auth/calendar.calendarlist.readonly
+      - https://www.googleapis.com/auth/calendar.calendarlist
+    examples:
+      - args: {}
+        note: "the entry with primary: true is the account's own calendar; its id also works as calendar_id: primary."
+
+  - name: list_events
+    description: List the events of one calendar that overlap a time window, recurring events expanded into single occurrences and ordered by start time, following nextPageToken pages up to the limit
+    read_only: true
+    untrusted_output: true
+    method: GET
+    url: "{{account.api_base}}/calendars/{{args.calendar_id}}/events"
+    query:
+      timeMin: "{{args.time_min}}"
+      timeMax: "{{args.time_max}}"
+      q: "{{args.q}}"
+      maxResults: "{{args.max_results}}"
+      pageToken: "{{args.page_token}}"
+      singleEvents: "true"
+      orderBy: startTime
+    args_schema:
+      type: object
+      properties:
+        calendar_id: { type: string, description: "primary, or a calendar id from list_calendars" }
+        time_min: { type: string, description: "RFC 3339 time with an offset, e.g. 2026-11-10T00:00:00+01:00: events that end after it" }
+        time_max: { type: string, description: "RFC 3339 time with an offset: events that start before it" }
+        q: { type: string, description: "free text the events must match (summary, description, location, guests)" }
+        max_results: { type: integer, minimum: 1, maximum: 250, description: "page size; omit for the service default of 250" }
+        page_token: { type: string, description: "nextPageToken of an earlier result that said more: true; omit on the first call" }
+      required: [calendar_id, time_min, time_max]
+    paginate:
+      items: items
+      next: { token_path: nextPageToken, token_arg: page_token }
+      max_pages: 5
+    timeout_sec: 60
+    response_pick: [items.id, items.status, items.summary, items.description, items.location, items.start, items.end, items.attendees.email, items.attendees.responseStatus, items.organizer.email, items.htmlLink, nextPageToken]
+    scopes:
+      - https://www.googleapis.com/auth/calendar.readonly
+      - https://www.googleapis.com/auth/calendar
+      - https://www.googleapis.com/auth/calendar.events
+      - https://www.googleapis.com/auth/calendar.events.readonly
+      - https://www.googleapis.com/auth/calendar.events.owned
+      - https://www.googleapis.com/auth/calendar.events.owned.readonly
+    examples:
+      - args: { calendar_id: primary, time_min: "2026-11-10T00:00:00+01:00", time_max: "2026-11-11T00:00:00+01:00" }
+        note: "one day; an all-day event has start.date instead of start.dateTime. A result with more: true ends with nextPageToken: pass it back as page_token for the rest."
+
+  - name: get_event
+    description: Get one event by id
+    read_only: true
+    untrusted_output: true
+    method: GET
+    url: "{{account.api_base}}/calendars/{{args.calendar_id}}/events/{{args.event_id}}"
+    args_schema:
+      type: object
+      properties:
+        calendar_id: { type: string, description: "primary, or a calendar id from list_calendars" }
+        event_id: { type: string, description: "an event id from list_events or create_event" }
+      required: [calendar_id, event_id]
+    response_pick: [id, status, summary, description, location, start, end, attendees.email, attendees.responseStatus, organizer.email, htmlLink, recurringEventId]
+    scopes:
+      - https://www.googleapis.com/auth/calendar.readonly
+      - https://www.googleapis.com/auth/calendar
+      - https://www.googleapis.com/auth/calendar.events
+      - https://www.googleapis.com/auth/calendar.events.readonly
+      - https://www.googleapis.com/auth/calendar.events.owned
+      - https://www.googleapis.com/auth/calendar.events.owned.readonly
+
+  - name: query_free_busy
+    description: Get the busy intervals of up to 50 calendars in a time window. The free slots are the gaps between them; compute them yourself with the task's own rules (working hours, buffers, time zones)
+    read_only: true
+    method: POST
+    url: "{{account.api_base}}/freeBusy"
+    body:
+      timeMin: "{{args.time_min}}"
+      timeMax: "{{args.time_max}}"
+      timeZone: "{{args.time_zone}}"
+      items: "{{args.items}}"
+    args_schema:
+      type: object
+      properties:
+        time_min: { type: string, description: "RFC 3339 time with an offset: the start of the window" }
+        time_max: { type: string, description: "RFC 3339 time with an offset: the end of the window" }
+        time_zone: { type: string, description: "IANA time zone of the answer, e.g. Europe/Berlin; omit for UTC" }
+        items:
+          type: array
+          minItems: 1
+          maxItems: 50
+          description: "the calendars to read: primary, a calendar id, or a person's e-mail address"
+          items:
+            type: object
+            properties: { id: { type: string } }
+            required: [id]
+            additionalProperties: false
+      required: [time_min, time_max, items]
+    response_pick: [calendars]
+    scopes:
+      - https://www.googleapis.com/auth/calendar.readonly
+      - https://www.googleapis.com/auth/calendar
+      - https://www.googleapis.com/auth/calendar.freebusy
+      - https://www.googleapis.com/auth/calendar.events.freebusy
+    examples:
+      - args:
+          time_min: "2026-11-10T08:00:00Z"
+          time_max: "2026-11-10T17:00:00Z"
+          items: [ { id: primary }, { id: colleague@example.com } ]
+        note: "calendars.<id>.busy lists the busy intervals; a calendar the account may not read has errors instead. An empty busy list means free for the whole window."
+
+  - name: create_event
+    description: Create an event. Sent once per intent; a repeat of the same intent is answered already_sent instead of creating a second event. Guests are e-mailed per send_updates, and a sent invitation cannot be called back
+    irreversible: true
+    method: POST
+    url: "{{account.api_base}}/calendars/{{args.calendar_id}}/events"
+    query:
+      sendUpdates: "{{args.send_updates}}"
+    body:
+      summary: "{{args.summary}}"
+      description: "{{args.description}}"
+      location: "{{args.location}}"
+      start: "{{args.start}}"
+      end: "{{args.end}}"
+      attendees: "{{args.attendees}}"
+    args_schema:
+      type: object
+      properties:
+        calendar_id: { type: string, description: "primary, or a calendar id from list_calendars" }
+        summary: { type: string, description: "the event title" }
+        description: { type: string, description: "the event text" }
+        location: { type: string }
+        start:
+          type: object
+          description: "{dateTime, timeZone} for a timed event, or {date: YYYY-MM-DD} for an all-day one"
+          properties:
+            dateTime: { type: string, description: "RFC 3339 time with an offset" }
+            date: { type: string, description: "YYYY-MM-DD" }
+            timeZone: { type: string, description: "IANA time zone, e.g. Europe/Berlin" }
+          oneOf: [ { required: [dateTime] }, { required: [date] } ]
+          additionalProperties: false
+        end:
+          type: object
+          description: "like start; exclusive, so an all-day event ends on the day after its last day"
+          properties:
+            dateTime: { type: string, description: "RFC 3339 time with an offset" }
+            date: { type: string, description: "YYYY-MM-DD" }
+            timeZone: { type: string, description: "IANA time zone, e.g. Europe/Berlin" }
+          oneOf: [ { required: [dateTime] }, { required: [date] } ]
+          additionalProperties: false
+        attendees:
+          type: array
+          description: "the guests"
+          items:
+            type: object
+            properties:
+              email: { type: string }
+              optional: { type: boolean }
+            required: [email]
+            additionalProperties: false
+        send_updates:
+          type: string
+          enum: [all, externalOnly, none]
+          description: "who Google e-mails about the new event: all, externalOnly (guests outside Google Calendar) or none. Omitted, Google applies its own default, which can still send some mail; none can keep the event from reaching some guests"
+      required: [calendar_id, summary, start, end]
+    idempotency:
+      mode: key
+      field: id
+      encoding: base32hex
+      conflict: confirms
+      window_sec: 2592000
+      result_ref: id
+    people: { subject: summary, text: description }
+    response_pick: [id, status, summary, start, end, attendees.email, htmlLink]
+    scopes:
+      - https://www.googleapis.com/auth/calendar
+      - https://www.googleapis.com/auth/calendar.events
+      - https://www.googleapis.com/auth/calendar.events.owned
+      - https://www.googleapis.com/auth/calendar.app.created
+    examples:
+      - args:
+          calendar_id: primary
+          summary: "Release window 1.4.0"
+          description: "Deploy and smoke tests."
+          start: { dateTime: "2026-11-12T10:00:00+01:00", timeZone: Europe/Berlin }
+          end: { dateTime: "2026-11-12T11:00:00+01:00", timeZone: Europe/Berlin }
+          attendees: [ { email: release-manager@example.com } ]
+          send_updates: all
+        note: "apb sets the event id itself; the result's id is what update_event and delete_event take."
+
+  - name: update_event
+    description: Change the fields you pass on an existing event and keep the others; attendees replaces the whole guest list. Guests are e-mailed per send_updates, and a sent change cannot be called back. A repeat whose first answer was lost is refused until a person decides
+    irreversible: true
+    method: PATCH
+    url: "{{account.api_base}}/calendars/{{args.calendar_id}}/events/{{args.event_id}}"
+    query:
+      sendUpdates: "{{args.send_updates}}"
+    body:
+      summary: "{{args.summary}}"
+      description: "{{args.description}}"
+      location: "{{args.location}}"
+      start: "{{args.start}}"
+      end: "{{args.end}}"
+      attendees: "{{args.attendees}}"
+    args_schema:
+      type: object
+      properties:
+        calendar_id: { type: string, description: "primary, or a calendar id from list_calendars" }
+        event_id: { type: string, description: "the event's id" }
+        summary: { type: string, description: "the new title" }
+        description: { type: string, description: "the new event text" }
+        location: { type: string }
+        start:
+          type: object
+          description: "{dateTime, timeZone} for a timed event, or {date: YYYY-MM-DD} for an all-day one"
+          properties:
+            dateTime: { type: string, description: "RFC 3339 time with an offset" }
+            date: { type: string, description: "YYYY-MM-DD" }
+            timeZone: { type: string, description: "IANA time zone, e.g. Europe/Berlin" }
+          oneOf: [ { required: [dateTime] }, { required: [date] } ]
+          additionalProperties: false
+        end:
+          type: object
+          description: "like start; exclusive, so an all-day event ends on the day after its last day"
+          properties:
+            dateTime: { type: string, description: "RFC 3339 time with an offset" }
+            date: { type: string, description: "YYYY-MM-DD" }
+            timeZone: { type: string, description: "IANA time zone, e.g. Europe/Berlin" }
+          oneOf: [ { required: [dateTime] }, { required: [date] } ]
+          additionalProperties: false
+        attendees:
+          type: array
+          description: "the whole new guest list: everyone who should stay invited"
+          items:
+            type: object
+            properties:
+              email: { type: string }
+              optional: { type: boolean }
+            required: [email]
+            additionalProperties: false
+        send_updates:
+          type: string
+          enum: [all, externalOnly, none]
+          description: "who Google e-mails about the change: all, externalOnly (guests outside Google Calendar) or none. Omitted, Google applies its own default, which can still send some mail; none can keep the change from reaching some guests"
+      required: [calendar_id, event_id]
+    idempotency: { mode: none, result_ref: id }
+    people: { subject: summary, text: description }
+    response_pick: [id, status, summary, start, end, attendees.email, htmlLink]
+    scopes:
+      - https://www.googleapis.com/auth/calendar
+      - https://www.googleapis.com/auth/calendar.events
+      - https://www.googleapis.com/auth/calendar.events.owned
+      - https://www.googleapis.com/auth/calendar.app.created
+    examples:
+      - args:
+          calendar_id: primary
+          event_id: 0123456789abcdefghijklmn
+          start: { dateTime: "2026-11-12T14:00:00+01:00", timeZone: Europe/Berlin }
+          end: { dateTime: "2026-11-12T15:00:00+01:00", timeZone: Europe/Berlin }
+          send_updates: all
+        note: "moves the event; fields you leave out keep their values."
+
+  - name: delete_event
+    description: Delete an event. It cannot be restored through this connector; guests are e-mailed the cancellation per send_updates. A repeat whose first answer was lost is refused until a person decides
+    irreversible: true
+    method: DELETE
+    url: "{{account.api_base}}/calendars/{{args.calendar_id}}/events/{{args.event_id}}"
+    query:
+      sendUpdates: "{{args.send_updates}}"
+    args_schema:
+      type: object
+      properties:
+        calendar_id: { type: string, description: "primary, or a calendar id from list_calendars" }
+        event_id: { type: string, description: "the event's id" }
+        send_updates:
+          type: string
+          enum: [all, externalOnly, none]
+          description: "who Google e-mails about the cancellation: all, externalOnly (guests outside Google Calendar) or none. Omitted, Google applies its own default, which can still send some mail; none can keep the cancellation from reaching some guests"
+      required: [calendar_id, event_id]
+    idempotency: { mode: none }
+    scopes:
+      - https://www.googleapis.com/auth/calendar
+      - https://www.googleapis.com/auth/calendar.events
+      - https://www.googleapis.com/auth/calendar.events.owned
+      - https://www.googleapis.com/auth/calendar.app.created

@@ -59,6 +59,17 @@ impl CallErrorCode {
     }
 }
 
+/// What one dispatched call produced, on success and on failure alike: the
+/// mapped result, the last service status when one arrived, the pages a
+/// paginated read attempted (`None` for every other call), and the warnings
+/// minting or the walk added.
+pub(crate) struct Dispatched {
+    pub result: Result<CallOk, CallError>,
+    pub http_status: Option<u16>,
+    pub pages: Option<u32>,
+    pub warnings: Vec<String>,
+}
+
 /// A structured call error (spec section 8).
 #[derive(Debug, Clone)]
 pub struct CallError {
@@ -94,6 +105,7 @@ impl CallError {
                 incomplete.cap_bytes.unwrap_or_default()
             ),
             IncompleteReason::ReadError => "the response body read failed partway".to_string(),
+            IncompleteReason::ContentType => "the response body was not read".to_string(),
         };
         let mut err = CallError::new(
             CallErrorCode::IncompleteResponse,
@@ -146,6 +158,9 @@ pub enum CallOk {
         /// True when the function's `response_pick` projection was applied to
         /// `body` (spec 4.5), so the caller knows it holds a subset.
         picked: bool,
+        /// Pages a paginated read fetched and whether more exist; `None`
+        /// for every other call.
+        pages: Option<(u32, bool)>,
     },
     Smtp {
         body: Value,
@@ -189,6 +204,7 @@ impl CallOk {
                 incomplete,
                 link,
                 picked,
+                pages,
             } => {
                 let truncated = incomplete
                     .as_ref()
@@ -204,6 +220,10 @@ impl CallOk {
                 }
                 if *picked {
                     value["picked"] = json!(true);
+                }
+                if let Some((pages, more)) = pages {
+                    value["pages"] = json!(pages);
+                    value["more"] = json!(more);
                 }
                 value
             }

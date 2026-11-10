@@ -99,6 +99,13 @@ credential echoed back as the base64 of `user:password` becomes
 `[redacted:basic]`. Other transformations (a hash, a different encoding) are
 not recognized.
 
+With an `oauth2_refresh` connector (see [OAuth accounts](#oauth-accounts))
+the credential the service sees is an access token minted from the
+account's refresh token at call time. The access token lives in process
+memory only: it is never written to a file, the journal or a prompt, and
+it is redacted from everything a call returns like any other resolved
+value.
+
 A connector call from a node runs as a child of the node's agent, so it
 inherits the agent's environment. Under a profile's `process_env: allowlist`
 (PROFILES.md "Process environment") that environment holds only the allowed
@@ -123,6 +130,81 @@ when it does not exist, preserving anything already there, and never duplicating
 key the file already lists; it then makes sure `.gitignore` covers
 `.apb/secrets.env`. Either way the values stay empty for you to fill in by hand;
 `apb` never writes a secret value.
+
+## OAuth accounts
+
+Four official connectors authenticate with OAuth2 refresh (`oauth2_refresh`
+in the manifest): `gmail`, `google-calendar`, `google-drive` and `imap`.
+Their auth block names the token endpoint and where each piece of the
+refresh request comes from:
+
+```yaml
+auth:
+  kind: oauth2_refresh
+  token_url: "{{account.token_url}}"
+  client_id_template: "{{account.client_id}}"
+  client_secret_template: "{{secret.client_secret}}"
+  refresh_token_template: "{{secret.refresh_token}}"
+```
+
+`client_id` is not a secret and is a plain account field;
+`client_secret` and `refresh_token` are `secret: true` account fields, so
+each is one `{{env.VAR}}` or `{{cmd:...}}` reference like any other
+secret. At call time apb sends `grant_type=refresh_token` to the token
+endpoint, keeps the access token it gets back in process memory until
+shortly before it expires, and mints a fresh one after that. Nothing
+about the token reaches a file, the journal or a prompt.
+
+Scopes: every function of such a connector declares the OAuth scopes it
+needs, and a call goes out only when the token grants any one of them.
+The account's `granted_scopes` field (the scopes the refresh token was
+consented for, when your account records them) decides first; without it
+the `scope` the token endpoint answers with does; with neither there is
+no check. A missing scope fails the call as `auth` before any request
+reaches the service, with the command to consent again.
+
+A token that has gone stale is refreshed before the request. A 401 from
+the service refreshes the token once and retries once: a 401 means the
+service did not act on the attempt, so the retry cannot repeat an
+effect. The whole exchange stays one call: one `connector_call` event,
+one `max_calls` unit, and the call's single `timeout_sec` covers both
+requests.
+
+Some providers hand out a new refresh token together with a new access
+token and retire the old one soon after. apb stores no tokens, so it
+cannot keep the new one for you: the result carries a `warnings` entry
+when this happens, and the fix is to keep the newest refresh token
+yourself, usually by making the account's `refresh_token` field a
+`{{cmd:...}}` helper that reads it from your password manager and is
+rotated there. Until the store holds the newest one, the previous value
+keeps working only as long as the provider keeps it.
+
+The refresh token itself comes from a one-time consent flow a person
+runs:
+
+```text
+apb connector oauth <connector> [--account <a>] [--scope <s>]...
+```
+
+apb binds a short listener on 127.0.0.1, prints the provider's
+authorization URL (PKCE, the connector's default scopes unless `--scope`
+says otherwise) and waits for the browser to call back. It exchanges the
+code at the token endpoint and prints the refresh token once, alone on
+one line, with the granted scopes and where to store it. Nothing is
+written to disk. The command is refused from inside a run (only a person
+grants access to an account) and without a terminal, for the same
+reason.
+
+Google's limits: while your project's OAuth consent screen is in Testing
+status, the refresh tokens it issues expire after 7 days, and the
+account stops working a week after each consent until you publish the
+app (an unverified app shows a warning screen you can continue past when
+it is your own). Google also keeps at most 100 live refresh tokens per
+account and client pair and retires the oldest one without warning when
+the limit is hit. On the `imap` connector the same machinery arrives as
+`auth_method: oauth2`: its account's `oauth_*` fields form the same kind
+of auth block, so a provider that refuses app passwords needs no external
+token helper.
 
 ## Approving trust
 
@@ -201,6 +283,15 @@ call fails at account selection. The connectors block in the agent's prompt
 marks such a binding as not callable (no accounts configured, calls will fail
 until an account is added, use the fallback path) while still listing its
 functions, so the agent routes around it instead of retrying doomed calls.
+
+Some functions are marked `untrusted_output` in the manifest: their results
+are text written by people outside the run (mail, events, files, search
+results), which is a prompt-injection surface like any other outside text.
+Mark such a binding `untrusted: true` so the untrusted-input checks (V179 to
+V182) see that text for what it is; a binding that grants a marked function
+without the mark draws validator warning V187. With the mark, the node's
+prompt also says that such text is data, never instructions (see the
+authoring guide, "Untrusted input").
 
 ### Baseline reads (the `@baseline` site)
 
@@ -372,7 +463,12 @@ the cap, `truncated` is `true`, and the result says the response was not
 complete. When the function declares a `response_pick` projection, `picked`
 is `true` and `body` holds only the projected fields; `--full` skips the
 projection and returns the raw body. A paging `Link` header from the service
-surfaces verbatim as `link`.
+surfaces verbatim as `link`. A paginated read (see
+[Paging](#paging)) adds `pages` (how many pages it fetched) and `more`
+(whether the listing went on) at the top level. A call whose token endpoint
+returned a new refresh token adds `warnings` (an array of one-line strings)
+at the top level, on success and on failure alike; see
+[OAuth accounts](#oauth-accounts).
 
 On failure it carries `ok: false` and an `error` object with a `code`, a
 human-readable `message`, and, when they apply, `http_status` and
@@ -411,6 +507,57 @@ cut body is not always `truncated`: one whose read failed partway is
 `response_complete`. The run journal records `response_complete` for every
 HTTP call that answered 2xx (and for an `incomplete_response` failure), so a
 playbook report can tell a whole response from a cut one.
+
+A function that declares `content_types` fails `service` on a 2xx whose
+media type matches no entry, without reading the body. The error keeps the
+2xx `http_status`; on a function that is not read-only it also carries
+`reason: content_type` and the journal records `response_complete: false`,
+because the service accepted the write: a send of such a function is
+settled as sent and is not repeated.
+
+## Paging
+
+A list function can follow a service's own pagination within one call, so
+the agent does not re-issue the call per page and track the cursor itself.
+The manifest declares it per function:
+
+```yaml
+    paginate:
+      items: messages                # dot path of the item array in each page; "" is the body itself
+      next: { token_path: nextPageToken, token_arg: page_token }
+      max_pages: 5                   # default 5, at most 20
+      items_optional: true           # an absent item array reads as an empty page (a search with no hits)
+```
+
+Two ways to find the next page: a body token (`token_path` is where the
+page carries it, `token_arg` the string argument it is passed back in,
+with the request re-rendered exactly like the first one so every other
+query pair stays the same), or the `Link` header's `rel="next"` URL
+(`next: { link_header: true }`). A Link URL is followed only within the
+scheme, host and port of the first request; a Link that points elsewhere
+fails the call instead of being sent there.
+
+A failed page fails the whole call, with a `page {n} of the listing`
+prefix on the message from page 2 on: a partial list is never returned as
+success. The bounds are declared: `max_pages` pages (default 5, at most
+20) and 4 MiB of response bodies across the pages of one call. Past
+either bound the call returns what it has and `more: true` says the
+listing went on.
+
+The result is one document: the pages' items concatenated in order, with
+`pages` and `more` at the top level next to `ok`. The body around the
+items is the last page's, so a cursor the service put there (a
+`nextPageToken`, an `offset`) is the one that continues the listing:
+pass it back in the function's page-token argument when `more` is `true`.
+
+The walk is one call: one `connector_call` event whose `pages` field
+records how many were fetched (the failed page included), one `max_calls`
+unit whatever the page count, and one `timeout_sec` that has to cover
+every page, which is why the paging functions of `google-calendar` and
+`google-drive` declare 60.
+
+Paginated reads are contract-tested offline with scripted responses; see
+"Contract tests" under [Sending once](#sending-once).
 
 ## Sending once
 
@@ -470,6 +617,8 @@ offers, declared per function:
       field: nonce              # or `header: Idempotency-Key`, exactly one
       window_sec: 120           # how long the service honours the key
       result_ref: id            # optional: the created item's id or link
+      encoding: base32hex       # optional: map the key onto 0-9/a-v, see below
+      conflict: confirms        # optional: a 409 to a repeat proves the first send, see below
 ```
 
 - `key`: the service deduplicates by a key apb puts into a header or a
@@ -500,6 +649,17 @@ offers, declared per function:
   nothing waits for a person. Unlike an undeclared write, a list step may be
   granted it (V88). Declare it only when a second call really leaves the
   same state as the first; a message or a comment is never repeatable.
+
+Two `key` options exist for services that need them, and both are refused
+on any other mode. `encoding: base32hex` maps the key (the intent's nonce,
+24 characters of `a-z` and `2-7`) character for character onto `0-9a-v`,
+for a service whose ids allow only that alphabet. `conflict: confirms`
+says the key is an id the client chose (an event id apb generates, a mail
+message apb composes): a 409 to a repeat then proves the first request
+created that id, the send settles `confirmed` with source `key_conflict`,
+and the repeat is answered `already_sent` with the key as its `ref`.
+Without `conflict`, a 409 stays unknown, like any other outcome nobody
+can tell.
 
 `idempotency` is allowed only on HTTP, mock, smtp and imap functions that
 are not `read_only` (an smtp or imap function may declare only `mode:
@@ -635,6 +795,40 @@ the item is `found`, `absent` from a listing read whole, or the lookup is
 `inconclusive` (no item list where the connector says it is, or a further
 page), and the found item's reference.
 
+A case can also script the HTTP answers a call reads offline, which is
+how the paging functions are tested. Four fields in `expect` cover it:
+
+- `responses`: the answers the runner gives the rendered request and each
+  next page, in order (`status`, default 200, `headers`, `body`; the
+  content type is `application/json` unless a header says otherwise);
+- `requests`: every URL the call requested, first page included;
+- `result_contains`: a subset match over the result JSON (`ok`, `body`,
+  `pages`, `more`);
+- `error_code`: the expected error code instead of a success.
+
+```yaml
+  - function: list_issues
+    args: { owner: acme, repo: site, state: open, labels: "", page: 1, per_page: 50 }
+    expect:
+      responses:
+        - headers: { Link: '<https://api.github.com/repos/acme/site/issues?page=2&per_page=50>; rel="next"' }
+          body: [ { number: 1 }, { number: 2 } ]
+        - body: [ { number: 3 } ]
+      requests:
+        - "https://api.github.com/repos/acme/site/issues?labels=&page=1&per_page=50&state=open"
+        - "https://api.github.com/repos/acme/site/issues?labels=&page=2&per_page=50&state=open"
+      result_contains:
+        ok: true
+        pages: 2
+        more: false
+        body: [ { number: 1 }, { number: 2 }, { number: 3 } ]
+```
+
+A response left unused or missing, a request that differs, a result that
+does not contain the expected subset, or a differing `error_code` fails
+the case. The same content-type guard the live path applies runs over each
+scripted response too, so a case and a live call refuse the same headers.
+
 ## The `apb connector` CLI
 
 ```text
@@ -642,6 +836,7 @@ apb connector list              installed connectors, trust and config status
 apb connector show <name>       manifest summary and per-account status
 apb connector call <name> <fn>  the agent-facing call channel (--account, --args, --dry-run, --intent)
 apb connector approve <name>    approve a connector or (--account) an account digest
+apb connector oauth <name>      one-time OAuth consent for an account; a person at a terminal; prints the refresh token once
 apb connector doctor            check every connector: manifest, config, env, trust, healthcheck
 apb connector env [<name>]      unresolved env var names as ready-to-paste KEY= lines
 apb connector init <name>       scaffold a new connector folder from a template
@@ -737,10 +932,11 @@ The official connectors declare it on `telegram.send_message`,
 
 ## Official connectors
 
-Fifteen official connectors ship inside the `apb` binary and install with
-`apb connector install <name>`: `github`, `telegram`, `smtp`, `sentry`,
-`asana`, `imap`, `gitlab`, `youtrack`, `zulip`, `discord`, `slack`, `atrip`,
-`twenty`, `whatsapp`, `amocrm`. Installing
+Nineteen official connectors ship inside the `apb` binary and install with
+`apb connector install <name>`: `amocrm`, `asana`, `atrip`, `discord`,
+`github`, `gitlab`, `gmail`, `google-calendar`, `google-drive`, `imap`,
+`sentry`, `slack`, `smtp`, `telegram`, `twenty`, `web-search`, `whatsapp`,
+`youtrack`, `zulip`. Installing
 from the binary records trust for the
 connector's tree digest in the same action, since the bytes are already
 part of the binary you are running; `apb connector install --from-dir
@@ -773,6 +969,15 @@ skips the connector instead of restoring its own copy. After going back to
 such a binary, put its copy back with `apb connector install github --force`
 (run with that older binary); this apb reads both the 0.2.0 and the 0.2.1
 manifest.
+
+`list_issues` and `list_pulls` follow GitHub's `Link` pages within one
+call, up to 5 pages of up to 100 items each (the optional `per_page`
+argument): the result concatenates the pages and carries `pages` and
+`more` (see [Paging](#paging)). Paging arrived with github 0.3.0. An apb
+older than this change cannot read the new manifest (its parser denies
+the `paginate` key), and it skips the connector instead of restoring its
+own copy; after going back to such a binary, put its copy back with
+`apb connector install github --force` (run with that older binary).
 
 ### telegram
 
@@ -817,7 +1022,14 @@ with that user's full permissions, and there is no separate scope to
 select. `list_workspaces`, `list_projects`, and `list_tasks` take an
 optional `offset` argument: read the next page's offset from the call
 result's `next_page.offset` field and pass it back on the following
-call, omitting it on the first call. `search_tasks` is a fuzzy typeahead
+call, omitting it on the first call. `list_tasks` also follows
+`next_page.offset` pages within one call, up to 5 pages: the result
+concatenates the pages and carries `pages` and `more` (see
+[Paging](#paging)), and its `next_page` is the last page's. That, and
+the manifest key it needs, arrived with asana 0.2.0: an apb older than
+this change cannot read the new manifest, and after going back you
+reinstall with that binary (`apb connector install asana --force`).
+`search_tasks` is a fuzzy typeahead
 match against task names, not a full-text search; use `list_tasks` with
 a project filter when a complete, predictable result set matters more.
 `create_task` declares `idempotency: { mode: none, result_ref: data.gid }`:
@@ -828,16 +1040,22 @@ as its reference. Healthcheck: `get_me`.
 
 ### imap
 
-Account fields: `host`, `port`, `auth_method` (`password` or `xoauth2`),
-`username` (all required), `password` (secret), and `use_tls` (optional,
-default `true`). One connector serves any IMAP provider, since the
-protocol is identical everywhere and only the connection settings
-differ. `search_messages` and `get_message` open the folder read-only
-with `EXAMINE` and fetch content with `BODY.PEEK[]`, so reading a
-message never marks it seen; only `mark_read` and `mark_unread` change
-anything on the server, and each is a separate, independently grantable
-function. `mark_read` declares `idempotency: { mode: none }` (`mark_unread`
-declares no `idempotency`), so a list step may be granted it (V88); a `mark_read`
+Account fields: `host`, `port`, `auth_method` (`password`, `xoauth2` or
+`oauth2`), `username` (all required), `password` (secret, required only
+for `auth_method: password`), `use_tls` (optional, default `true`),
+`from_email` and `from_name` (optional, the From address and name of a
+composed draft), and the optional `oauth_*` fields that
+`auth_method: oauth2` reads (see [OAuth accounts](#oauth-accounts): apb
+mints the access token itself from a refresh token obtained once through
+`apb connector oauth imap`). One connector serves any IMAP provider,
+since the protocol is identical everywhere and only the connection
+settings differ. `search_messages`, `get_message` and
+`save_attachments` open the folder read-only with `EXAMINE` and fetch
+content with `BODY.PEEK[]`, so reading a message never marks it seen;
+only `mark_read` and `mark_unread` change anything on the server, and
+each is a separate, independently grantable function. `mark_read`
+declares `idempotency: { mode: none }` (`mark_unread` declares no
+`idempotency`), so a list step may be granted it (V88); a `mark_read`
 whose answer was lost is refused on a repeat until a person decides, or
 sent again under `on_unknown: resend`, which suits it since marking a
 message read twice does no harm. `use_tls` defaults to `true` when omitted; only set it to
@@ -845,19 +1063,28 @@ message read twice does no harm. `use_tls` defaults to `true` when omitted; only
 Gmail (`imap.gmail.com`, port `993`) needs 2-Step Verification enabled
 before an app password can be generated; a Google Workspace account
 with app passwords disabled by policy instead uses `auth_method:
-xoauth2` with an access token sourced via `{{cmd:...}}`. Outlook and
-Microsoft 365 (`outlook.office365.com`, port `993`) only accept
-`auth_method: xoauth2`, sourced from an external token helper such as
-`oama` or `mutt_oauth2` with the same `{{cmd:...}}` mechanism; `apb`
-does not implement an OAuth consent flow itself. Yandex Mail
+oauth2`. Outlook and Microsoft 365 (`outlook.office365.com`, port `993`)
+do not accept passwords at all: use `auth_method: oauth2`, or an
+external token helper such as `oama` or `mutt_oauth2` with
+`auth_method: xoauth2`. Yandex Mail
 (`imap.yandex.com`, port `993`) needs IMAP access enabled in the Yandex
 Mail web settings before an app password can be generated. iCloud
 (`imap.mail.me.com`, port `993`) uses an app-specific password from the
 Apple ID account page. No message deletion, no move between folders,
-and no sending: this connector only reads and marks read/unread, and is
-meant to be installed alongside `smtp` for a read-and-reply workflow.
-Healthcheck: `verify` (connects, negotiates TLS, authenticates, without
-opening or reading any mailbox).
+and no sending: this connector reads, marks read/unread, files drafts
+(`append_draft` composes a message from `from_email` and the usual
+address and body arguments and appends it to the drafts folder, marked
+`\Draft`, never sent), and saves a message's attachments into the run's
+attachments directory (`save_attachments`: at most 20 files, 10 MiB per
+file and 25 MiB per call, inside a run only, never overwriting). Its
+results are text people wrote, so `search_messages`, `get_message` and
+`save_attachments` are marked `untrusted_output`. It is still meant to
+be installed alongside `smtp` (or `gmail`) for a read-and-reply
+workflow. Healthcheck: `verify` (connects, negotiates TLS,
+authenticates, without opening or reading any mailbox). Drafts,
+attachments and `oauth2` arrived with imap 0.2.0: an apb older than this
+change cannot read the new manifest, and after going back you reinstall
+with that binary (`apb connector install imap --force`).
 
 ### gitlab
 
@@ -1141,6 +1368,87 @@ verified against the amoCRM API v4 documentation and the offline contract
 tests, not yet against a live account. The `healthcheck` is `get_account`,
 which renders with zero arguments and succeeds against any token the account
 has issued.
+
+### gmail
+
+Account fields: `api_base` (`https://gmail.googleapis.com/gmail/v1`),
+`token_url` (`https://oauth2.googleapis.com/token`), `client_id`,
+`client_secret` (secret), `refresh_token` (secret), `email` (required,
+the From address of composed drafts), and `granted_scopes` (optional).
+Authenticate with OAuth2: `apb connector oauth gmail` runs the consent in
+a person's terminal and prints the refresh token once (see
+[OAuth accounts](#oauth-accounts)). Reads: `verify` (the healthcheck),
+`list_labels`, `search_messages` (Gmail's query language in `q`; follows
+`nextPageToken` pages, and a search with no hits reads as an empty page),
+`get_message` (headers and body parts, text parts decoded; a binary part
+is marked instead of decoded) and `get_thread`; message content is text
+people wrote, so `get_message` and `get_thread` are marked
+`untrusted_output`. Writes: `create_draft` (apb composes the RFC 5322
+message itself and the dry-run shows the composed header preview; a reply
+in a thread needs `thread_id`, `in_reply_to`, `references` and the same
+subject), `send_draft` (the one irreversible function: the message leaves
+the mailbox and cannot be recalled), and `add_labels`, `remove_labels`
+and `archive` (`repeatable`). Grant presets (`read`, `draft`, `triage`,
+`send`) with measured prompt sizes are in `connectors/gmail/README.md`;
+`connectors/gmail/INSTALL.md` is the setup runbook.
+
+### google-calendar
+
+Account fields: `api_base` (`https://www.googleapis.com/calendar/v3`),
+`token_url` (`https://oauth2.googleapis.com/token`), `client_id`,
+`client_secret` (secret), `refresh_token` (secret), and `granted_scopes`
+(optional). Authenticate with OAuth2 like `gmail` above
+(`apb connector oauth google-calendar`). Reads: `verify` (the
+healthcheck), `list_calendars` and `list_events` (both follow
+`nextPageToken` pages), `get_event`, and `query_free_busy` (busy
+intervals of up to 50 calendars; the free slots are the gaps between
+them, which the agent computes with the task's own rules). Writes:
+`create_event` (sent once in `key` mode: apb sets the event id itself,
+and a 409 to a repeat proves the first request created it),
+`update_event` and `delete_event` (both `mode: none`, since a repeat can
+mail every guest again); all three are `irreversible` because a mailed
+invitation, change or cancellation cannot be called back. Guests are
+e-mailed per the `send_updates` argument; an omitted one does not
+guarantee that no mail goes out, and `none` can keep the event from
+reaching some guests. Setup is in `connectors/google-calendar/README.md`
+and `connectors/google-calendar/INSTALL.md`.
+
+### google-drive
+
+Account fields: `api_base` (`https://www.googleapis.com/drive/v3`),
+`token_url` (`https://oauth2.googleapis.com/token`), `client_id`,
+`client_secret` (secret), `refresh_token` (secret), and `granted_scopes`
+(optional). Authenticate with OAuth2 like `gmail` above
+(`apb connector oauth google-drive`). Reads, all marked
+`untrusted_output` (file contents and names are text people wrote):
+`verify` (the healthcheck), `search_files` (Drive's query language in
+`q`; follows `nextPageToken` pages), `get_file_metadata`, `export_text`
+(Docs, Sheets and Slides to text: Docs as `text/plain` or
+`text/markdown`, Sheets as `text/csv`, first sheet only, Slides as
+`text/plain`) and `read_text_file` (a stored text file, JSON parsed; a
+Google Docs file has no stored content and fails here, use
+`export_text`). apb reads at most 1 MiB of one answer, so a longer file
+or export fails `incomplete_response`; Google's own export limit is
+10 MB. Upload is out of scope (no binary request body). `drive.readonly`
+is a restricted scope: an app you use for your own account works
+unverified, past Google's warning screen. Setup is in
+`connectors/google-drive/README.md` and `connectors/google-drive/INSTALL.md`.
+
+### web-search
+
+Account fields: `api_base` (`https://api.search.brave.com/res/v1`) and
+`api_key` (secret), the Brave Search API subscription key, sent in its
+dedicated header so it never appears in a URL. One function, `search`:
+titles, URLs, descriptions and ages, with `count` (1 to 20), `offset` (a
+page index, 0 to 9), `freshness` (`pd`, `pw`, `pm`, `py`, or a date
+range), `country`, `search_lang` and `safesearch`;
+`query.more_results_available` in the result says whether another page
+exists, and the agent fetches it by raising `offset` (there is no paging
+block). Nothing fetches a result page. The free plan allows one request
+per second and answers 429 past it (`rate_limited` with the service's
+`retry_after_sec`); every search spends one query against the plan's
+quota, the healthcheck `verify` included. Setup is in
+`connectors/web-search/README.md` and `connectors/web-search/INSTALL.md`.
 
 ### Demo playbooks
 

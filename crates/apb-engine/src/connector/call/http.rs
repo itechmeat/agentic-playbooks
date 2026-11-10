@@ -5,18 +5,28 @@
 //! the interim literal secret redaction of everything that comes back.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::Instant;
 
-use apb_core::connector::def::{AuthSpec, ErrorWhen};
+use apb_core::connector::def::{AuthSpec, ErrorWhen, FunctionSpec};
 use apb_core::connector::template::{RenderCtx, render_encoded, render_raw};
 use apb_core::secret::{Redaction, Secret};
 use serde_json::Value;
 
-use super::encode::{
-    assemble_url, base64_encode, encode_component, encode_form_body, encode_path_segment, project,
+use crate::connector::call::encode::{
+    base64_encode, encode_form_body, encode_path_segment, project,
 };
-use super::response::{map_status, read_body, reclassify_error_when, redact_value};
-use crate::connector::result::{CallError, CallErrorCode, CallOk, redact_message};
+use crate::connector::call::paginate::{WalkStats, Walked, walk as walk_pages};
+use crate::connector::call::response::{map_status, read_body, redact_value};
+use crate::connector::call::shape::{RawResponse, ShapeRules, check_content_type, shape};
+use crate::connector::call::url_encode::{assemble_url, encode_component};
+use crate::connector::call::wire::BODY_CAP;
+use crate::connector::oauth::{ROTATION_WARNING, TokenSource};
+use crate::connector::result::{
+    BodyIncomplete, CallError, CallErrorCode, CallOk, Dispatched, redact_message,
+};
+
+use crate::connector::call::render::{render_http, validate_url};
 
 /// An HTTP call ready to send.
 pub(super) struct HttpCall {
@@ -42,6 +52,27 @@ pub(super) struct HttpCall {
     /// function declares none or `--full` bypasses it.
     pub(super) response_pick: Vec<String>,
     pub(super) auth: Option<AuthSpec>,
+    /// The minted access token of an `oauth2_refresh` call, in process
+    /// memory only.
+    pub(super) access: Option<Secret>,
+    /// The token source a 401 refreshes through. `None` for every other
+    /// auth kind.
+    pub(super) token_source: Option<TokenSource>,
+    /// The one deadline of the whole call: minting, the service request,
+    /// the refresh and retry after a 401, and every page share it.
+    pub(super) deadline: Instant,
+    /// Warnings minting already produced (a rotated refresh token).
+    pub(super) warnings: Vec<String>,
+    /// The declared paging plan; `None` for a single-page read.
+    pub(super) paginate: Option<PagePlan>,
+    /// The function's `decode_base64url` paths, decoded after
+    /// `error_when` on a 2xx.
+    pub(super) decode_base64url: Vec<String>,
+    /// The function's `content_types` media-type guard (D5): checked on a
+    /// 2xx before the body is read.
+    pub(super) content_types: Vec<String>,
+    /// The function's name, for the guard's error message.
+    pub(super) function_name: String,
     /// The connector-level false-success predicate (spec
     /// 2026-07-22-official-connectors-wave-3, section 4.2), applied by
     /// `send_raw` after a 2xx maps Ok and after body redaction, BEFORE the
@@ -49,9 +80,32 @@ pub(super) struct HttpCall {
     pub(super) error_when: Option<ErrorWhen>,
     pub(super) secrets: BTreeMap<String, Secret>,
     pub(super) account_fields: BTreeMap<String, String>,
-    pub(super) timeout_sec: u64,
     /// The resolved secrets, each with its label, for interim redaction.
-    pub(super) redactions: Vec<Redaction>,
+    /// Grown in place when a refresh mints further credentials, hence the
+    /// mutex.
+    pub(super) redactions: Mutex<Vec<Redaction>>,
+}
+
+impl HttpCall {
+    /// The redaction list, tolerant of a poisoned lock (a redaction list is
+    /// never structurally invalid).
+    pub(super) fn redactions(&self) -> std::sync::MutexGuard<'_, Vec<Redaction>> {
+        self.redactions.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Registers one more credential for the interim redaction.
+    pub(super) fn register_redaction(&self, value: Secret, label: &str) {
+        let mut list = self.redactions();
+        list.push(Redaction::new(value, label.to_string()));
+    }
+}
+
+/// What a token-mode next page needs to re-render the request: the spec,
+/// the function (its query template included), and the original args.
+pub(crate) struct PagePlan {
+    pub spec: apb_core::connector::paginate::Paginate,
+    pub function: FunctionSpec,
+    pub args: Value,
 }
 
 /// The rendered user and password of a Basic auth spec: what the
@@ -102,109 +156,223 @@ impl HttpCall {
     /// which for `query`-kind auth carries the resolved secret): every error
     /// produced after secrets are resolved is scrubbed before it can be
     /// printed or logged (spec 6.2).
-    pub(super) fn send(&self) -> (Result<CallOk, CallError>, Option<u16>) {
-        let (result, status) = self.send_raw();
-        (result.map_err(|e| self.redact_error(e)), status)
-    }
+    pub(super) fn send(&self) -> Dispatched {
+        let mut warnings = self.warnings.clone();
+        // The access token every page sends; a refresh after a 401
+        // replaces it for the rest of the walk.
+        let mut access = self.access.clone();
+        let rules = ShapeRules {
+            read_only: self.read_only,
+            error_when: self.error_when.as_ref(),
+            decode_paths: &self.decode_base64url,
+        };
+        // The live fetch of one page. The 401 refresh and its single retry
+        // happen here, so the walk stays pure over its closures.
+        let mut fetch = |url: &str, allowance: usize| -> Result<RawResponse, CallError> {
+            let mut raw = self.send_raw(url, access.as_ref(), allowance)?;
+            if raw.status == 401
+                && let Some(source) = &self.token_source
+            {
+                let minted = {
+                    let list = self.redactions();
+                    source.refresh_now(self.deadline, &list)
+                };
+                match minted {
+                    Ok(minted) => {
+                        if minted.rotated {
+                            warnings.push(ROTATION_WARNING.to_string());
+                        }
+                        self.register_redaction(minted.access.clone(), "oauth:access_token");
+                        if let Some(new) = &minted.new_refresh {
+                            self.register_redaction(new.clone(), "oauth:refresh_token");
+                        }
+                        // The retry's answer is final: a second 401
+                        // maps to auth as today, any other status is
+                        // taken as it comes.
+                        access = Some(minted.access.clone());
+                        raw = self.send_raw(url, access.as_ref(), allowance)?;
+                    }
+                    Err(token_err) => {
+                        // The service's 401 stands; only the message
+                        // grows, so the send ledger reads a refused
+                        // send (http_status stays 401).
+                        let err = map_status(401, Value::Null, None, None, self.read_only)
+                            .expect_err("a 401 maps to an error");
+                        let mut err = err;
+                        err.message = format!(
+                            "{}; renewing the token failed: {}",
+                            err.message, token_err.message
+                        );
+                        return Err(self.redact_error(err));
+                    }
+                }
+            }
+            Ok(raw)
+        };
 
-    /// Sends the request with redirects disabled and the per-function timeout,
-    /// injecting auth after the pre-auth URL is fixed, then maps the response
-    /// (or transport error) into the result taxonomy. Returns the mapped
-    /// result and the observed HTTP status when one exists.
-    ///
-    /// ureq 3 notes: `http_status_as_error(false)` keeps every status (2xx
-    /// through 5xx) coming back as `Ok(response)` exactly like ureq 2's
-    /// `Error::Status(_, resp)` did, so the taxonomy below is still driven
-    /// entirely by `map_status` reading the real response, never by ureq's own
-    /// status-to-error translation. `allow_non_standard_methods(true)` keeps
-    /// an unusual/lowercased connector `method` string sendable, matching
-    /// ureq 2's untyped `&str` method (ureq 3's methods are typed
-    /// `http::Method`, which rejects nothing byte-valid but does gate
-    /// non-standard tokens behind this flag).
-    fn send_raw(&self) -> (Result<CallOk, CallError>, Option<u16>) {
-        let method = match ureq::http::Method::from_bytes(self.method.as_bytes()) {
-            Ok(m) => m,
-            Err(e) => {
-                return (
-                    Err(CallError::new(
-                        CallErrorCode::Config,
-                        format!("invalid HTTP method `{}`: {e}", self.method),
-                    )),
-                    None,
-                );
+        let (result, stats) = match &self.paginate {
+            None => {
+                let mut stats = WalkStats {
+                    pages: 1,
+                    last_status: None,
+                };
+                match fetch(&self.pre_auth_url, BODY_CAP) {
+                    Ok(raw) => {
+                        stats.last_status = Some(raw.status);
+                        match shape(raw, &rules) {
+                            Ok(ok) => (Ok(Walked { ok, more: false }), stats),
+                            Err(e) => (Err(e), stats),
+                        }
+                    }
+                    Err(e) => (Err(e), stats),
+                }
+            }
+            Some(plan) => {
+                let mut next_url = |token: &str| -> Result<String, CallError> {
+                    let mut args = plan.args.clone();
+                    if let Some(arg) = &plan.spec.next.token_arg
+                        && let Some(map) = args.as_object_mut()
+                    {
+                        map.insert(arg.clone(), Value::String(token.to_string()));
+                    }
+                    let rendered = render_http(
+                        &plan.function,
+                        &self.account_fields,
+                        &args,
+                        &self.secrets,
+                        None,
+                    )?;
+                    Ok(rendered.pre_auth_url)
+                };
+                walk_pages(
+                    &self.pre_auth_url,
+                    &plan.spec,
+                    &rules,
+                    &mut fetch,
+                    &mut next_url,
+                )
             }
         };
+
+        // After shaping: the whole envelope is scrubbed (body and link),
+        // then the projection. Errors are scrubbed through the same
+        // redactions.
+        let result = match result {
+            Ok(walked) => {
+                let more = walked.more;
+                let pages = stats.pages;
+                let ok = match walked.ok {
+                    CallOk::Http {
+                        status,
+                        body,
+                        incomplete,
+                        link,
+                        picked,
+                        pages: ok_pages,
+                    } => {
+                        let body = self.redact(body);
+                        let link = link.map(|l| redact_message(l, &self.redactions()));
+                        let (body, picked) = if self.response_pick.is_empty() {
+                            (body, picked)
+                        } else {
+                            (project(&body, &self.response_pick), true)
+                        };
+                        let _ = ok_pages;
+                        CallOk::Http {
+                            status,
+                            body,
+                            incomplete,
+                            link,
+                            picked,
+                            pages: Some((pages, more)),
+                        }
+                    }
+                    other => other,
+                };
+                Ok(ok)
+            }
+            Err(err) => Err(self.redact_error(err)),
+        };
+        Dispatched {
+            result,
+            http_status: stats.last_status,
+            pages: Some(stats.pages),
+            warnings,
+        }
+    }
+
+    /// Sends one request of the call and reads its answer into a
+    /// [`RawResponse`]: no mapping, no redaction. `url` is the pre-auth
+    /// form (auth injected here), `allowance` caps the body read. Any
+    /// transport error carries no status.
+    fn send_raw(
+        &self,
+        url: &str,
+        access: Option<&Secret>,
+        allowance: usize,
+    ) -> Result<RawResponse, CallError> {
+        if self.deadline <= Instant::now() {
+            return Err(CallError::new(
+                CallErrorCode::Timeout,
+                "the call's deadline passed before the request",
+            ));
+        }
+        let method = ureq::http::Method::from_bytes(self.method.as_bytes()).map_err(|e| {
+            CallError::new(
+                CallErrorCode::Config,
+                format!("invalid HTTP method `{}`: {e}", self.method),
+            )
+        })?;
         let config = ureq::Agent::config_builder()
             .max_redirects(0)
-            .timeout_global(Some(Duration::from_secs(self.timeout_sec)))
+            .timeout_global(Some(
+                self.deadline.saturating_duration_since(Instant::now()),
+            ))
             .allow_non_standard_methods(true)
             .http_status_as_error(false)
             .build();
         let agent = ureq::Agent::new_with_config(config);
 
-        // Build the request URL: the pre-auth URL plus a `query`-kind auth
-        // param, if any. Only this final URL is sent; the pre-auth URL is what
-        // the event log records.
+        // Auth injection on the pre-auth URL, as before: a path segment
+        // replaces `{{auth}}`, a query kind appends its pair.
         let ctx = RenderCtx {
             account: &self.account_fields,
             args: &Value::Null,
             secrets: &self.secrets,
         };
         let request_url = match &self.auth {
-            Some(AuthSpec::Path { value_template }) => match render_raw(value_template, &ctx) {
-                Ok(seg) => self
-                    .pre_auth_url
-                    .replacen("{{auth}}", &encode_path_segment(&seg), 1),
-                Err(e) => {
-                    return (
-                        Err(CallError::new(
-                            CallErrorCode::Config,
-                            format!("auth render failed: {e}"),
-                        )),
-                        None,
-                    );
-                }
-            },
-            _ => match self.auth_query(&ctx) {
-                Ok(Some((param, value))) => {
-                    assemble_url(&self.pre_auth_url, &format!("{param}={value}"))
-                }
-                Ok(None) => self.pre_auth_url.clone(),
-                Err(e) => return (Err(e), None),
+            Some(AuthSpec::Path { value_template }) => {
+                let seg = render_raw(value_template, &ctx).map_err(|e| {
+                    CallError::new(CallErrorCode::Config, format!("auth render failed: {e}"))
+                })?;
+                url.replacen("{{auth}}", &encode_path_segment(&seg), 1)
+            }
+            _ => match self.auth_query(&ctx)? {
+                Some((param, value)) => assemble_url(url, &format!("{param}={value}")),
+                None => url.to_string(),
             },
         };
+        validate_url(&request_url)?;
 
         let mut builder = ureq::http::Request::builder()
             .method(method)
             .uri(&request_url);
-        // Headers were fully assembled by `render_http` (function headers plus
-        // the default User-Agent unless overridden, spec 4.4), so send them
-        // verbatim.
         for (name, value) in &self.headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
-        // Header / Basic auth injection.
-        match self.auth_header(&ctx) {
-            Ok(Some((name, value))) => builder = builder.header(name, value),
-            Ok(None) => {}
-            Err(e) => return (Err(e), None),
+        if let Some((name, value)) = self.auth_header(&ctx, access)? {
+            builder = builder.header(name, value);
         }
 
-        // The outgoing body payload: a JSON body serializes with the JSON
-        // content type, a form body (spec 2026-07-22-official-connectors-wave-3,
-        // section 4.1) percent-encodes its pairs with the urlencoded content
-        // type. The two are mutually exclusive by validation.
+        // The outgoing body payload, as before.
         let payload = match &self.rendered_body {
             Some(body) => match serde_json::to_vec(body) {
                 Ok(bytes) => Some((bytes, "application/json")),
                 Err(e) => {
-                    return (
-                        Err(CallError::new(
-                            CallErrorCode::Config,
-                            format!("body serialize failed: {e}"),
-                        )),
-                        None,
-                    );
+                    return Err(CallError::new(
+                        CallErrorCode::Config,
+                        format!("body serialize failed: {e}"),
+                    ));
                 }
             },
             None => self.rendered_form.as_ref().map(|pairs| {
@@ -216,8 +384,6 @@ impl HttpCall {
         };
         let response = match payload {
             Some((bytes, content_type)) => {
-                // Mirrors ureq 2's `send_json`: only add the default content
-                // type when the function's own headers did not already set one.
                 let has_content_type = self
                     .headers
                     .keys()
@@ -228,96 +394,84 @@ impl HttpCall {
                 match builder.body(bytes) {
                     Ok(request) => agent.run(request),
                     Err(e) => {
-                        return (
-                            Err(CallError::new(
-                                CallErrorCode::Config,
-                                format!("request could not be built: {e}"),
-                            )),
-                            None,
-                        );
+                        return Err(CallError::new(
+                            CallErrorCode::Config,
+                            format!("request could not be built: {e}"),
+                        ));
                     }
                 }
             }
             None => match builder.body(()) {
                 Ok(request) => agent.run(request),
                 Err(e) => {
-                    return (
-                        Err(CallError::new(
-                            CallErrorCode::Config,
-                            format!("request could not be built: {e}"),
-                        )),
-                        None,
-                    );
+                    return Err(CallError::new(
+                        CallErrorCode::Config,
+                        format!("request could not be built: {e}"),
+                    ));
                 }
             },
         };
-
         let response = match response {
             Ok(resp) => resp,
             Err(e) => {
-                // ureq 3 gives timeouts their own variant (no more sniffing
-                // "timed out" out of a generic transport error's Display).
                 let code = if matches!(e, ureq::Error::Timeout(_)) {
                     CallErrorCode::Timeout
                 } else {
                     CallErrorCode::Network
                 };
-                return (Err(CallError::new(code, e.to_string())), None);
+                return Err(CallError::new(code, e.to_string()));
             }
         };
-
         let status = response.status().as_u16();
-        // Parse `Retry-After` before the response is consumed by the reader;
-        // only used to populate `retry_after_sec` on a 429 (spec section 8).
+        // The media-type guard (D5) runs BEFORE the body is read: a
+        // mismatched 2xx fails `service` no matter how big the body is.
+        if (200..300).contains(&status) && !self.content_types.is_empty() {
+            let content_type = response
+                .headers()
+                .get("Content-Type")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            check_content_type(
+                &self.function_name,
+                content_type.as_deref(),
+                &self.content_types,
+            )
+            .map_err(|mut err| {
+                // The service answered 2xx: a write it accepted went
+                // through even though its answer is not read, so the send
+                // ledger must not take it for a send that never left.
+                err.http_status = Some(status);
+                if !self.read_only {
+                    err.incomplete = Some(BodyIncomplete::refused_content_type());
+                }
+                err
+            })?;
+        }
         let retry_after = response
             .headers()
             .get("Retry-After")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<u64>().ok());
-        // The `Link` header must be read before the response is consumed by the
-        // body reader; surfaced verbatim in the result (spec 4.4).
         let link = response
             .headers()
             .get("Link")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let (body, incomplete) = read_body(response);
-        // 12. Interim literal secret redaction (see the TODO below).
-        let body = self.redact(body);
-        let mut mapped = map_status(status, body, incomplete, retry_after, self.read_only);
-        // error_when reclassification (spec
-        // 2026-07-22-official-connectors-wave-3, section 4.2): a 2xx body
-        // matching the connector's predicate maps to a `service` error
-        // instead of a false success. Runs on the already-redacted body, so
-        // an extracted message is scrubbed like any other body text, and
-        // BEFORE the `response_pick` projection below (a reclassified
-        // response is never projected; the error envelope carries the
-        // extracted message instead). Non-2xx statuses arrive here as Err
-        // and keep the status-table mapping untouched. Ordering with the
-        // incompleteness rule: a read-only cut body already failed in
-        // `map_status`, so only a non-read-only call reaches this match; when
-        // it does, the reclassification wins and the error carries no
-        // completeness keys (a reclassified response is an error).
-        if let Ok(CallOk::Http { body, .. }) = &mapped
-            && let Some(rule) = &self.error_when
-            && let Some(err) = reclassify_error_when(rule, body, status)
-        {
-            mapped = Err(err);
-        }
-        if let Ok(CallOk::Http {
-            link: link_slot,
-            body: body_slot,
-            picked,
-            ..
-        }) = &mut mapped
-        {
-            *link_slot = link;
-            if !self.response_pick.is_empty() {
-                *body_slot = project(body_slot, &self.response_pick);
-                *picked = true;
-            }
-        }
-        (mapped, Some(status))
+        let content_type = response
+            .headers()
+            .get("Content-Type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let (body, incomplete, bytes) = read_body(response, allowance);
+        Ok(RawResponse {
+            status,
+            content_type,
+            link,
+            retry_after,
+            body,
+            incomplete,
+            bytes,
+        })
     }
 
     /// The `query`-kind auth param, already percent-encoded, if auth is a
@@ -338,7 +492,11 @@ impl HttpCall {
     }
 
     /// The auth header name/value, if auth is a `Header` or `Basic` variant.
-    fn auth_header(&self, ctx: &RenderCtx) -> Result<Option<(String, String)>, CallError> {
+    fn auth_header(
+        &self,
+        ctx: &RenderCtx,
+        access: Option<&Secret>,
+    ) -> Result<Option<(String, String)>, CallError> {
         match &self.auth {
             Some(AuthSpec::Header {
                 header,
@@ -360,6 +518,18 @@ impl HttpCall {
                     format!("Basic {token}"),
                 )))
             }
+            Some(AuthSpec::Oauth2Refresh { .. }) => {
+                let token = access.ok_or_else(|| {
+                    CallError::new(
+                        CallErrorCode::Config,
+                        "the OAuth access token was not minted before the request",
+                    )
+                })?;
+                Ok(Some((
+                    "Authorization".to_string(),
+                    format!("Bearer {}", token.expose_secret()),
+                )))
+            }
             _ => Ok(None),
         }
     }
@@ -369,17 +539,18 @@ impl HttpCall {
     /// body's string leaves with `[redacted:<ENV_NAME>]`. Only exact literal
     /// matches are caught (spec 6.2, accepted interim limit).
     fn redact(&self, body: Value) -> Value {
-        if self.redactions.is_empty() {
+        let list = self.redactions();
+        if list.is_empty() {
             return body;
         }
-        redact_value(body, &self.redactions)
+        redact_value(body, &list)
     }
 
     /// Scrubs an error message with the same interim literal redaction as the
     /// body. A transport error's URL (and thus a `query`-kind auth secret) can
     /// otherwise leak into `error.message`.
     fn redact_error(&self, mut err: CallError) -> CallError {
-        err.message = redact_message(err.message, &self.redactions);
+        err.message = redact_message(err.message, &self.redactions());
         err
     }
 }

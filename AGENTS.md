@@ -76,7 +76,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   a notification (`connector/people.rs`), a
   function's send-once declaration and the connector's `identity`
   (`connector/idempotency.rs`) and the hidden send marker
-  (`connector/marker.rs`), profiles
+  (`connector/marker.rs`), the OAuth pure helpers (the token response,
+  scopes, PKCE, the authorization URL, the callback;
+  `connector/oauth.rs`) and the paging block with its manifest rules
+  (`connector/paginate.rs`), profiles
   (`profile.rs` types incl. `ProfileError` and `ProfileDoc::problems`, the one
   structural check of a run start, `apb validate` and every profile write,
   `profile_store.rs` scope resolution and bundle trust, `skills.rs`), a
@@ -610,11 +613,16 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `scheduler/prepare.rs` writes it after `run_provenance`, `scheduler/patch.rs`
   before and after `patch_applied`, and a feature this binary does not know
   reads as an unknown event, so resume refuses and stop goes through),
-  connector execution (`connector/`, with `call/` split into
-  account selection, auth, encoding and response mapping, `attempt` the
-  call's attempt binding, `target` the snapshot grant or the live
-  trust-gated target a call resolves first, and `send_once` the send-once
-  flow; `intent/` the
+  connector execution (`connector/`, with `oauth/` (`token` the in-memory
+  token source and its refresh, `consent` the loopback consent of
+  `apb connector oauth`), `compose.rs` (the e-mail composer the SMTP path,
+  IMAP drafts and `mime` bodies share), `mime_read.rs` (a raw message as
+  JSON), `files.rs` (safe file names of saved attachments), and `call/`
+  split into account selection, auth, encoding and response mapping,
+  `attempt` the call's attempt binding, `target` the snapshot grant or the
+  live trust-gated target a call resolves first, `paginate.rs` (the bounded
+  page walk), `shape.rs` (one response shaped: status, error_when, decoded
+  text), and `send_once` the send-once flow; `intent/` the
   send ledger: `identity` what makes two sends the same, `ledger` the fold
   and the admission table, `stamp` the key and the marker, `reconcile` the
   lookup of a marker send; `effect` what a call says about its effect), background
@@ -756,7 +764,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   actions and start actions (`apb runs <id>`, `apb wait`, `--follow-auto`),
   `launch.rs` the `--confirm-launch` flags of `apb run`, `apb resume` and
   `apb eval`, the terminal question and `apb launch floor`,
-  `pipe.rs` the panic hook that ends the binary quietly on a closed stdout.
+  `pipe.rs` the panic hook that ends the binary quietly on a closed stdout,
+  `connector_oauth.rs` is `apb connector oauth` (a person's terminal runs
+  the loopback consent of one connector account and prints the refresh
+  token once; refused inside a run step and without a terminal).
   `passkey.rs` is `apb passkey enroll|list|remove` (person only, refused
   inside a run step, at an interactive terminal; the enrollment code is
   stored only after the person typed it back, and every removal needs a
@@ -1270,6 +1281,18 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `review_decide`). The retry briefing
   (`scheduler/attempt_memory`) tells the next attempt what the ledger holds,
   outside the node cache key.
+- **OAuth connector accounts** (spec
+  `docs/superpowers/specs/2026-11-09-google-connectors-design.md`): a
+  connector's `oauth2_refresh` block makes the engine mint a bearer access
+  token from the account's refresh token at call time; the access token
+  lives in process memory only (a cache keyed by token_url, client id and
+  refresh token), is refreshed before expiry and once after a 401 (a 401
+  means the service did not act, so the retry stays one call, one event and
+  one `max_calls` unit), a function's `scopes` are any-of checked before
+  the request leaves, a rotated refresh token is never stored (the result
+  carries a warning instead), and the consent that mints a refresh token
+  runs only from a person's terminal (`apb connector oauth`; refused inside
+  a run step and without a terminal).
 - **List mode**: `list:` on an `agent_task` or `script` node runs its step
   once per item (from an earlier node's declared field, a list node's
   `items`, or inline), in batches on the list's own pool capped by

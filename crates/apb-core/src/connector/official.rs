@@ -124,7 +124,7 @@ mod tests {
             .iter()
             .find(|c| c.name == "github")
             .expect("embedded `github` connector must be present");
-        assert_eq!(github.version, "0.2.1");
+        assert_eq!(github.version, "0.3.0");
         assert!(github.files.contains_key("connector.yaml"));
         assert!(github.files.contains_key("tests.yaml"));
         assert!(github.files.contains_key("PUBLIC.md"));
@@ -147,8 +147,25 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "amocrm", "asana", "atrip", "discord", "github", "gitlab", "imap", "sentry",
-                "slack", "smtp", "telegram", "twenty", "whatsapp", "youtrack", "zulip",
+                "amocrm",
+                "asana",
+                "atrip",
+                "discord",
+                "github",
+                "gitlab",
+                "gmail",
+                "google-calendar",
+                "google-drive",
+                "imap",
+                "sentry",
+                "slack",
+                "smtp",
+                "telegram",
+                "twenty",
+                "web-search",
+                "whatsapp",
+                "youtrack",
+                "zulip",
             ],
             "the embedded official connector set changed; update this list deliberately"
         );
@@ -206,7 +223,7 @@ mod tests {
         let c = get("github").expect("github present");
         let yaml = std::str::from_utf8(c.files.get("connector.yaml").unwrap()).unwrap();
         let doc = crate::connector::def::ConnectorDoc::from_yaml(yaml, "github").unwrap();
-        assert_eq!(doc.version, "0.2.1");
+        assert_eq!(doc.version, "0.3.0");
     }
 
     #[test]

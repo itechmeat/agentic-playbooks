@@ -113,6 +113,23 @@ pub(crate) enum ConnectorAction {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// Run the OAuth consent loop for one connector account: the person
+    /// opens the authorization URL in a browser, the provider calls back on
+    /// 127.0.0.1, and the printed refresh token is stored by the person. A
+    /// person's terminal only.
+    Oauth {
+        name: String,
+        /// Explicit account name; omit to use the single or default one
+        #[arg(long)]
+        account: Option<String>,
+        /// The scopes to ask for; omit to use the connector's
+        /// `consent_scopes`
+        #[arg(long = "scope")]
+        scopes: Vec<String>,
+        /// Seconds the whole flow may take
+        #[arg(long, default_value_t = 300)]
+        timeout_sec: u64,
+    },
 }
 
 pub(crate) fn connector_cmd(root: &Path, action: ConnectorAction) -> ExitCode {
@@ -149,6 +166,14 @@ pub(crate) fn connector_cmd(root: &Path, action: ConnectorAction) -> ExitCode {
             force,
         } => install_cmd(name, from_dir, force),
         ConnectorAction::Test { name, dir } => test_cmd(name, dir),
+        ConnectorAction::Oauth {
+            name,
+            account,
+            scopes,
+            timeout_sec,
+        } => {
+            crate::connector_oauth::oauth_cmd(root, &name, account.as_deref(), &scopes, timeout_sec)
+        }
     }
 }
 
@@ -248,6 +273,7 @@ fn show_cmd(root: &Path, name: &str) -> ExitCode {
                 "description": f.description,
                 "read_only": f.read_only,
                 "deprecated": f.deprecated,
+                "scopes": f.scopes,
             })
         })
         .collect();
@@ -299,6 +325,7 @@ fn show_cmd(root: &Path, name: &str) -> ExitCode {
         "name": loaded.name,
         "version": loaded.doc.version,
         "healthcheck": loaded.doc.healthcheck,
+        "auth": crate::connector_oauth::auth_kind(&loaded.doc),
         "functions": functions,
         "account_fields": account_fields,
         "accounts": accounts_json,

@@ -1031,6 +1031,10 @@ pub enum EventPayload {
         /// `incomplete_response`. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         response_complete: Option<bool>,
+        /// Pages a paginated read fetched; absent for every other call.
+        /// Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pages: Option<u32>,
         /// The attempt the call ran in, by number and by the seq of its
         /// `attempt_started` (attempt numbers restart with every execution
         /// of a node; the seq does not). `None` for old events and for a
@@ -3823,7 +3827,65 @@ fn parse_journal(bytes: &[u8], tolerate_torn_tail: bool) -> Result<JournalRead, 
 
 #[cfg(test)]
 mod tests {
-    /// A `follow_up_observed` line round-trips every field, and the event
+    /// An old `connector_call` line without `pages` reads as `None`, and a
+    /// call without paging serializes no `pages` key (D2, additive field).
+    #[test]
+    fn connector_call_pages_is_additive() {
+        let old = r#"{"type":"connector_call","node_id":"n","connector":"c","function":"f","account":"a","url":"http://x","outcome":"ok","duration_ms":3}"#;
+        let back: EventPayload = serde_json::from_str(old).unwrap();
+        match back {
+            EventPayload::ConnectorCall { pages, .. } => assert!(pages.is_none()),
+            other => panic!("unexpected payload: {other:?}"),
+        }
+
+        let p = EventPayload::ConnectorCall {
+            item: None,
+            node_id: "n".into(),
+            connector: "c".into(),
+            function: "f".into(),
+            account: "a".into(),
+            url: "http://x".into(),
+            outcome: "ok".into(),
+            http_status: Some(200),
+            duration_ms: 3,
+            smtp_subject: None,
+            smtp_recipients: None,
+            response_complete: Some(true),
+            pages: None,
+            attempt: None,
+            attempt_seq: None,
+            intent: None,
+            origin: None,
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(!s.contains("pages"), "{s}");
+
+        let mk = |pages: Option<u32>| EventPayload::ConnectorCall {
+            item: None,
+            node_id: "n".into(),
+            connector: "c".into(),
+            function: "f".into(),
+            account: "a".into(),
+            url: "http://x".into(),
+            outcome: "ok".into(),
+            http_status: Some(200),
+            duration_ms: 3,
+            smtp_subject: None,
+            smtp_recipients: None,
+            response_complete: Some(true),
+            pages,
+            attempt: None,
+            attempt_seq: None,
+            intent: None,
+            origin: None,
+        };
+        let s = serde_json::to_string(&mk(None)).unwrap();
+        assert!(!s.contains("pages"), "{s}");
+        let s = serde_json::to_string(&mk(Some(3))).unwrap();
+        assert!(s.contains("\"pages\":3"), "{s}");
+    }
+
+    /// A `follow_up_observed` line round-trips    /// A `follow_up_observed` line round-trips every field, and the event
     /// is a checkpoint.
     #[test]
     fn follow_up_observed_round_trips_and_is_a_checkpoint() {

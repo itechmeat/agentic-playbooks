@@ -1,0 +1,262 @@
+name: gmail
+version: 0.1.0
+healthcheck: verify
+auth:
+  kind: oauth2_refresh
+  token_url: "{{account.token_url}}"
+  authorize_url: "https://accounts.google.com/o/oauth2/v2/auth"
+  client_id_template: "{{account.client_id}}"
+  client_secret_template: "{{secret.client_secret}}"
+  refresh_token_template: "{{secret.refresh_token}}"
+  granted_scopes_template: "{{account.granted_scopes}}"
+  # Reads, drafts, labels and send in one scope; the narrower presets in the
+  # README ask for gmail.readonly or gmail.compose instead.
+  consent_scopes: "https://www.googleapis.com/auth/gmail.modify"
+  authorize_params: { access_type: offline, prompt: consent }
+account_fields:
+  - name: api_base
+    required: true
+  - name: token_url
+    required: true
+  - name: client_id
+    required: true
+  - name: client_secret
+    required: true
+    secret: true
+  - name: refresh_token
+    required: true
+    secret: true
+  - name: granted_scopes
+  - name: email
+    required: true
+functions:
+  - name: verify
+    description: Read this Gmail account's profile (address and message count)
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/users/me/profile"
+    args_schema: { type: object, properties: {}, required: [] }
+    response_pick: [emailAddress, messagesTotal]
+    scopes:
+      - https://mail.google.com/
+      - https://www.googleapis.com/auth/gmail.modify
+      - https://www.googleapis.com/auth/gmail.readonly
+      - https://www.googleapis.com/auth/gmail.compose
+      - https://www.googleapis.com/auth/gmail.metadata
+
+  - name: list_labels
+    description: List the labels (system and user) of this Gmail account
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/users/me/labels"
+    args_schema: { type: object, properties: {}, required: [] }
+    response_pick: [labels.id, labels.name, labels.type]
+    scopes:
+      - https://mail.google.com/
+      - https://www.googleapis.com/auth/gmail.modify
+      - https://www.googleapis.com/auth/gmail.readonly
+      - https://www.googleapis.com/auth/gmail.labels
+      - https://www.googleapis.com/auth/gmail.metadata
+
+  - name: search_messages
+    description: Search messages with a Gmail query, following pages up to the limit
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/users/me/messages"
+    query:
+      q: "{{args.q}}"
+      labelIds: "{{args.label_id}}"
+      maxResults: "{{args.max_results}}"
+      pageToken: "{{args.page_token}}"
+    args_schema:
+      type: object
+      properties:
+        q: { type: string, description: "Gmail search query, for example is:unread or from:news@example.com" }
+        label_id: { type: string, description: "optional; one label id to filter by, for example INBOX; several labels go into q as label:a label:b" }
+        max_results: { type: integer, minimum: 1, maximum: 500, description: "page size, up to 500" }
+        page_token: { type: string, description: "the nextPageToken of the previous call, when more: true" }
+      required: [q]
+    paginate:
+      items: messages
+      next: { token_path: nextPageToken, token_arg: page_token }
+      max_pages: 5
+      items_optional: true
+    response_pick: [messages.id, messages.threadId, resultSizeEstimate, nextPageToken]
+    scopes:
+      - https://mail.google.com/
+      - https://www.googleapis.com/auth/gmail.modify
+      - https://www.googleapis.com/auth/gmail.readonly
+    examples:
+      - args: { q: "is:unread", label_id: INBOX, max_results: 50 }
+        note: "label_id takes exactly one label id; to filter by several labels put them into q as label:a label:b instead."
+      - args: { q: "from:news@example.com newer_than:7d" }
+        note: "the result lists message ids with a threadId each; fetch the content of one with get_message."
+
+  - name: get_message
+    description: Read one message with its headers and body parts; message text arrives decoded
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/users/me/messages/{{args.id}}"
+    query:
+      format: full
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "message id, from search_messages or list_labels triage" }
+      required: [id]
+    decode_base64url:
+      - payload.body.data
+      - payload.parts.body.data
+      - payload.parts.parts.body.data
+      - payload.parts.parts.parts.body.data
+    response_pick:
+      - id
+      - threadId
+      - labelIds
+      - snippet
+      - payload.headers
+      - payload.mimeType
+      - payload.body
+      - payload.parts.mimeType
+      - payload.parts.filename
+      - payload.parts.body
+      - payload.parts.parts.mimeType
+      - payload.parts.parts.filename
+      - payload.parts.parts.body
+      - payload.parts.parts.parts.mimeType
+      - payload.parts.parts.parts.body
+    untrusted_output: true
+    scopes:
+      - https://mail.google.com/
+      - https://www.googleapis.com/auth/gmail.modify
+      - https://www.googleapis.com/auth/gmail.readonly
+
+  - name: get_thread
+    description: Read a thread's messages as metadata (ids, snippets, labels, headers)
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/users/me/threads/{{args.id}}"
+    query:
+      format: metadata
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "thread id, from search_messages or get_message" }
+      required: [id]
+    response_pick: [id, messages.id, messages.snippet, messages.labelIds, messages.payload.headers]
+    untrusted_output: true
+    scopes:
+      - https://mail.google.com/
+      - https://www.googleapis.com/auth/gmail.modify
+      - https://www.googleapis.com/auth/gmail.readonly
+
+  - name: create_draft
+    description: >
+      Create a draft in this mailbox without sending it. To reply inside a
+      thread, pass thread_id, in_reply_to (the original Message-ID header),
+      references (the thread's accumulated ids) and the same subject, so
+      mail clients group the reply with the conversation.
+    method: POST
+    url: "{{account.api_base}}/users/me/drafts"
+    body: { message: { threadId: "{{args.thread_id}}" } }
+    mime:
+      at: message.raw
+      message:
+        from_email: "{{account.email}}"
+        to: "{{args.to}}"
+        cc: "{{args.cc}}"
+        bcc: "{{args.bcc}}"
+        subject: "{{args.subject}}"
+        body_text: "{{args.body_text}}"
+        body_html: "{{args.body_html}}"
+        in_reply_to: "{{args.in_reply_to}}"
+        references: "{{args.references}}"
+    args_schema:
+      type: object
+      properties:
+        to: { type: string, description: "comma-separated list of recipient addresses" }
+        cc: { type: string, description: "comma-separated list, optional" }
+        bcc: { type: string, description: "comma-separated list, optional; kept as a header on the draft" }
+        subject: { type: string }
+        body_text: { type: string }
+        body_html: { type: string, description: "optional; combines with body_text into a multipart message when both are present" }
+        thread_id: { type: string, description: "optional; the Gmail thread the draft belongs to" }
+        in_reply_to: { type: string, description: "optional; the Message-ID header of the message this draft replies to" }
+        references: { type: string, description: "optional; the thread's accumulated message ids, space separated" }
+      required: [to, subject, body_text]
+    people: { subject: subject, text: body_text }
+    idempotency: { mode: none, result_ref: id }
+    scopes:
+      - https://mail.google.com/
+      - https://www.googleapis.com/auth/gmail.modify
+      - https://www.googleapis.com/auth/gmail.compose
+    examples:
+      - args: { to: ops@example.com, subject: "Re: Release plan", body_text: "Draft for review: the plan moves the cutover to Thursday.", in_reply_to: "<cab-1@example.com>", references: "<cab-0@example.com> <cab-1@example.com>", thread_id: t18f }
+        note: "a reply in a thread needs thread_id, in_reply_to, references and the same subject as the conversation; the draft is created, nothing is sent."
+
+  - name: send_draft
+    description: Send an existing draft; the message leaves the mailbox and cannot be recalled
+    method: POST
+    url: "{{account.api_base}}/users/me/drafts/send"
+    body: { id: "{{args.draft_id}}" }
+    args_schema:
+      type: object
+      properties:
+        draft_id: { type: string, description: "draft id, from create_draft" }
+      required: [draft_id]
+    irreversible: true
+    idempotency: { mode: none, result_ref: id }
+    scopes:
+      - https://mail.google.com/
+      - https://www.googleapis.com/auth/gmail.modify
+      - https://www.googleapis.com/auth/gmail.compose
+
+  - name: add_labels
+    description: Add labels to a message; adding one already present changes nothing
+    method: POST
+    url: "{{account.api_base}}/users/me/messages/{{args.id}}/modify"
+    body: { addLabelIds: "{{args.label_ids}}" }
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "message id" }
+        label_ids: { type: array, items: { type: string }, description: "label ids to add, for example [STARRED, todo]" }
+      required: [id, label_ids]
+    idempotency: { mode: repeatable }
+    scopes:
+      - https://mail.google.com/
+      - https://www.googleapis.com/auth/gmail.modify
+    examples:
+      - args: { id: 18f2c9a1b7d4e0f2, label_ids: [STARRED, todo] }
+        note: "user labels must exist already; create them in Gmail or through its UI first."
+
+  - name: remove_labels
+    description: Remove labels from a message; removing one already gone changes nothing
+    method: POST
+    url: "{{account.api_base}}/users/me/messages/{{args.id}}/modify"
+    body: { removeLabelIds: "{{args.label_ids}}" }
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "message id" }
+        label_ids: { type: array, items: { type: string }, description: "label ids to remove" }
+      required: [id, label_ids]
+    idempotency: { mode: repeatable }
+    scopes:
+      - https://mail.google.com/
+      - https://www.googleapis.com/auth/gmail.modify
+
+  - name: archive
+    description: Archive a message by removing the INBOX label; a repeat changes nothing
+    method: POST
+    url: "{{account.api_base}}/users/me/messages/{{args.id}}/modify"
+    body: { removeLabelIds: [INBOX] }
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "message id" }
+      required: [id]
+    idempotency: { mode: repeatable }
+    scopes:
+      - https://mail.google.com/
+      - https://www.googleapis.com/auth/gmail.modify

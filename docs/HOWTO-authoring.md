@@ -453,6 +453,11 @@ The rules:
   300 characters.
 - **V182** (warning): `accept_untrusted` on a node that renders no
   untrusted text it could send outward (nothing to accept; remove it).
+- **V187** (warning): the binding grants a function the connector marks
+  `untrusted_output` (its results are text written by people outside the
+  run: mail, events, files, search results) without `untrusted: true`.
+  Mark the binding so the checks above see that text; only fires when the
+  connector is installed and its manifest loads.
 
 At run time, every attempt of a node that renders untrusted text ends its
 prompt with a fixed `## untrusted input` section naming the sources, after

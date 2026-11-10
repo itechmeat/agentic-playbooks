@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -29,11 +30,62 @@ use apb_core::secret::{Redaction, Secret};
 use mail_parser::MessageParser;
 use serde_json::{Map, Value, json};
 
+use crate::connector::call::response::redact_value;
+use crate::connector::compose::{ComposeOpts, Composed, compose};
+use crate::connector::files::safe_file_name;
 use crate::connector::result::{CallError, CallErrorCode, CallOk, redact_message};
 
-/// The per-part cap for a fetched message's `text`/`html` body (spec 3.3): a
-/// larger part is cut to this many bytes and the result marked `truncated`.
-const BODY_PART_CAP: usize = 262144;
+/// The largest message `save_attachments` accepts, whatever the server
+/// advertised (D7): the partial fetch asks for one byte more, so a server
+/// that honours the range is bounded and one that ignores it is still caught
+/// by this check after receipt.
+const MESSAGE_CAP: usize = 50 * 1024 * 1024;
+/// The one file a save writes at most (D7), checked before the write.
+const ATTACH_FILE_CAP: usize = 10 * 1024 * 1024;
+/// All the files one save writes at most (D7), checked before each write:
+/// a file goes out only while `written + size` stays within the cap.
+const ATTACH_CALL_CAP: usize = 25 * 1024 * 1024;
+/// The most files one save writes (D7); the rest are skipped `file_cap`.
+const ATTACH_FILE_COUNT: usize = 20;
+/// The partial fetch window apb asks for: the whole message cap plus one
+/// byte, so an honest server cannot push more through the read than the
+/// received-bytes check allows.
+const FETCH_WINDOW: usize = MESSAGE_CAP + 1;
+
+/// The first folder the server marks `\Drafts` in a plain LIST (D7); `None`
+/// when there is none, which the caller turns into an `invalid_args` error
+/// asking for `folder`.
+fn drafts_folder(session: &mut Session) -> Result<Option<String>, imap::Error> {
+    let names = session.list(Some(""), Some("*"))?;
+    for name in names.iter() {
+        let marked = name.attributes().iter().any(|a| {
+            matches!(
+                a,
+                imap::types::NameAttribute::Custom(s) if s.eq_ignore_ascii_case("\\Drafts")
+            )
+        });
+        if marked {
+            return Ok(Some(name.name().to_string()));
+        }
+    }
+    Ok(None)
+}
+
+/// Maps an attachment-write I/O failure into the call taxonomy: a refused
+/// path (a link on the way, a read-only process) is `permission`, anything
+/// else `service`.
+fn file_err(e: std::io::Error) -> CallError {
+    let code = match e.kind() {
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::PermissionDenied => {
+            CallErrorCode::Permission
+        }
+        _ => CallErrorCode::Service,
+    };
+    CallError::new(
+        code,
+        format!("save_attachments could not write into the run: {e}"),
+    )
+}
 
 /// The outcome of preparing an imap call: a terminal dry-run render, or a
 /// ready-to-run call. Public so the offline envelope render (`build` with
@@ -48,14 +100,54 @@ pub enum ImapBuild {
 /// How a function authenticates to the IMAP server (spec 3.2): `LOGIN` with a
 /// password, or `AUTHENTICATE XOAUTH2` with a bearer token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What an imap call needs beyond the spec itself: the connector's auth
+/// block (for `auth_method: oauth2`), the run directory files may be
+/// written under (D7), and the names the OAuth failure messages name.
+#[derive(Default)]
+pub struct ImapExtras<'a> {
+    pub auth: Option<&'a apb_core::connector::def::AuthSpec>,
+    /// The run directory attachment writes anchor at (D7): opened once
+    /// without following a link, every write walking beneath it
+    /// descriptor-relatively. `None` outside a run; `save_attachments` is
+    /// then refused before anything connects.
+    pub files: Option<&'a std::path::Path>,
+    /// The attachments directory beneath `files` this call writes into:
+    /// `attachments/<node>[/<item>]`, every segment already through the
+    /// file name sanitizer; the op appends the uid. Set only with `files`.
+    pub attachments_dir: Option<&'a str>,
+    pub connector: &'a str,
+    pub account: &'a str,
+    /// The caller's absolute deadline for the whole call, already lowered
+    /// by any bound it was given. Minting and the session share it; `None`
+    /// starts one from `timeout_sec`.
+    pub deadline: Option<Instant>,
+}
+
+/// The credential an imap call authenticates with.
+#[derive(Debug)]
+enum ImapSecret {
+    /// A resolved password (`password`) or bearer token (`xoauth2`).
+    Fixed(Secret),
+    /// The connector's `oauth2_refresh` token source (`oauth2`). The mint
+    /// happened in `build`; a rejected login drops the cached token.
+    Token(crate::connector::oauth::TokenSource),
+}
+
+#[derive(Debug)]
 enum AuthMethod {
     Password,
     XOauth2,
+    /// OAuth2 over the connector's `oauth2_refresh` auth block: the same
+    /// bearer token source the HTTP path uses, sent over XOAUTH2.
+    OAuth2,
 }
 
 /// The typed, validated op plan (spec 3.3). Every field is already parsed from
-/// the rendered params, so the execute path never re-parses a string.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// the rendered params, so the execute path never re-parses a string. The
+/// draft's message is composed here too (dry-run and live alike, D7), so the
+/// dry-run shows the preview and the execute path carries the exact bytes a
+/// dry-run described.
+#[derive(Debug)]
 enum ImapOpPlan {
     Verify,
     ListFolders,
@@ -76,6 +168,15 @@ enum ImapOpPlan {
         uids: Vec<u32>,
         seen: bool,
     },
+    AppendDraft {
+        /// `None` means "the folder the server marks `\Drafts`".
+        folder: Option<String>,
+        message: Box<Composed>,
+    },
+    SaveAttachments {
+        folder: String,
+        uid: u32,
+    },
 }
 
 /// A rendered, ready-to-run imap call. Holds the resolved connection parameters
@@ -88,26 +189,48 @@ pub struct ImapCall {
     use_tls: bool,
     auth_method: AuthMethod,
     username: String,
-    /// The secret: an account password (LOGIN) or a bearer token (XOAUTH2).
+    /// The credential: an account password (LOGIN), a fixed bearer token
+    /// (XOAUTH2), or the connector's OAuth2 token source (`oauth2`).
     /// Sealed, exposed only by `authenticate`; scrubbed out of every error
     /// via `redactions`.
-    secret: Secret,
+    secret: ImapSecret,
+    /// The access token minted in `build` for an `oauth2` call, in process
+    /// memory only. `None` for every other auth method.
+    access: Option<Secret>,
     plan: ImapOpPlan,
-    timeout_sec: u64,
+    /// The run directory attachment writes anchor at, and the attachments
+    /// directory beneath it (`attachments/<node>[/<item>]`, D7), owned
+    /// because the call outlives the `ImapExtras` borrow. Only
+    /// `save_attachments` reads them, and `build` refuses that op without
+    /// both.
+    files: Option<PathBuf>,
+    attachments_dir: Option<String>,
+    /// The one deadline of the whole call, computed when the call was
+    /// built. Every stage (connect, greeting, authenticate, op) shares it.
+    deadline: Instant,
+    /// Warnings minting already produced (a rotated refresh token, D1);
+    /// empty until the imap OAuth path exists.
+    pub(crate) warnings: Vec<String>,
     /// The resolved secrets with their labels; every error message is
     /// scrubbed against these before it leaves the process.
     redactions: Vec<Redaction>,
 }
 
 impl ImapCall {
-    /// Lowers the timeout to at most `secs`.
-    pub(crate) fn cap_timeout(&mut self, secs: u64) {
-        self.timeout_sec = self.timeout_sec.min(secs);
+    /// Lowers the call's deadline to at most `deadline`.
+    pub(crate) fn cap_deadline(&mut self, deadline: Instant) {
+        self.deadline = self.deadline.min(deadline);
     }
 
     /// The event-log endpoint: `imap://host:port`, no credentials.
     pub(crate) fn endpoint(&self) -> String {
         format!("imap://{}:{}", self.host, self.port)
+    }
+
+    /// The warnings minting produced (a rotated refresh token), for
+    /// surfaces and tests; the dispatcher carries them into the result.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// Event metadata: none. Spec 3.4 keeps subjects and recipient counts out
@@ -120,9 +243,9 @@ impl ImapCall {
     /// Connects (optionally over TLS), authenticates, runs the op, and logs
     /// out. Every returned error is scrubbed against the resolved secrets.
     pub fn send(self) -> Result<CallOk, CallError> {
-        let deadline = Instant::now() + Duration::from_secs(self.timeout_sec);
+        let deadline = self.deadline;
         let stream = self.connect(deadline)?;
-        let mut client = imap::Client::new(stream);
+        let mut client = imap_client(stream);
         client
             .read_greeting()
             .map_err(|e| self.map_err(Stage::Connect, e))?;
@@ -131,7 +254,14 @@ impl ImapCall {
         let result = self.run_op(&mut session);
         // LOGOUT is best-effort: the op result is authoritative.
         let _ = session.logout();
-        result
+        // A server can echo a credential in what it returns (a folder
+        // name, a message), so a success is scrubbed like an error.
+        result.map(|ok| match ok {
+            CallOk::Smtp { body } => CallOk::Smtp {
+                body: redact_value(body, &self.redactions),
+            },
+            other => other,
+        })
     }
 
     /// Opens the TCP (and, when `use_tls`, the rustls) stream with a connect
@@ -219,20 +349,34 @@ impl ImapCall {
     /// Runs LOGIN or AUTHENTICATE XOAUTH2. A rejected credential maps to
     /// `auth`; a transport failure maps to `network`/`timeout`.
     fn authenticate(&self, client: imap::Client<ImapStream>) -> Result<Session, CallError> {
-        match self.auth_method {
-            AuthMethod::Password => client
-                .login(&self.username, self.secret.expose_secret())
-                .map_err(|(e, _)| self.map_err(Stage::Auth, e)),
-            AuthMethod::XOauth2 => {
+        let token: &Secret = match &self.secret {
+            ImapSecret::Fixed(secret) => secret,
+            ImapSecret::Token(_source) => self.access.as_ref().ok_or_else(|| {
+                CallError::new(
+                    CallErrorCode::Config,
+                    "the OAuth access token was not minted before the imap call",
+                )
+            })?,
+        };
+        let result = match self.auth_method {
+            AuthMethod::Password => client.login(&self.username, token.expose_secret()),
+            AuthMethod::XOauth2 | AuthMethod::OAuth2 => {
                 let authenticator = XOauth2 {
                     user: self.username.clone(),
-                    token: self.secret.expose_secret().to_string(),
+                    token: token.expose_secret().to_string(),
                 };
-                client
-                    .authenticate("XOAUTH2", &authenticator)
-                    .map_err(|(e, _)| self.map_err(Stage::Auth, e))
+                client.authenticate("XOAUTH2", &authenticator)
             }
-        }
+        };
+        result.map_err(|(e, _)| {
+            // A rejected login with a token source means the cached access
+            // token is no good: drop it, so the next call mints a fresh
+            // one. There is no in-call retry.
+            if let ImapSecret::Token(source) = &self.secret {
+                source.forget();
+            }
+            self.map_err(Stage::Auth, e)
+        })
     }
 
     /// Dispatches the typed op against the authenticated session.
@@ -261,6 +405,12 @@ impl ImapCall {
             ImapOpPlan::Fetch { folder, uid } => self.op_fetch(session, folder, *uid),
             ImapOpPlan::SetFlags { folder, uids, seen } => {
                 self.op_set_flags(session, folder, uids, *seen)
+            }
+            ImapOpPlan::AppendDraft { folder, message } => {
+                self.op_append_draft(session, folder.as_deref(), message)
+            }
+            ImapOpPlan::SaveAttachments { folder, uid } => {
+                self.op_save_attachments(session, folder, *uid)
             }
         }
     }
@@ -355,8 +505,12 @@ impl ImapCall {
         })?;
         let seen = has_seen(fetch);
         let raw = fetch.body().unwrap_or(&[]);
+        // The shared RFC 822 parse (D7); the fetch contributes uid and seen.
+        let mut body = crate::connector::mime_read::message_json(raw);
+        body.insert("uid".into(), json!(uid));
+        body.insert("seen".into(), json!(seen));
         Ok(CallOk::Smtp {
-            body: fetch_body_json(uid, raw, seen),
+            body: Value::Object(body),
         })
     }
 
@@ -386,6 +540,181 @@ impl ImapCall {
             .map_err(|e| self.map_err(Stage::Op, e))?;
         Ok(CallOk::Smtp {
             body: json!({ "folder": folder, "updated": updated.iter().count() }),
+        })
+    }
+
+    /// APPENDs the composed draft (D7): to the given folder, or to the
+    /// first the server marks `\Drafts`, with the `\Draft` and `\Seen`
+    /// flags. A draft composes once in `build_plan`, so the appended bytes
+    /// are exactly what a dry-run described.
+    fn op_append_draft(
+        &self,
+        session: &mut Session,
+        folder: Option<&str>,
+        message: &Composed,
+    ) -> Result<CallOk, CallError> {
+        let folder = match folder {
+            Some(f) => f.to_string(),
+            None => match drafts_folder(session) {
+                Ok(Some(f)) => f,
+                Ok(None) => {
+                    return Err(CallError::new(
+                        CallErrorCode::InvalidArgs,
+                        "no folder is marked \\Drafts on this server; pass `folder`",
+                    ));
+                }
+                Err(e) => return Err(self.map_err(Stage::Op, e)),
+            },
+        };
+        session
+            .append_with_flags(
+                &folder,
+                &message.formatted,
+                &[imap::types::Flag::Draft, imap::types::Flag::Seen],
+            )
+            .map_err(|e| self.map_err(Stage::Op, e))?;
+        let mut body = json!({
+            "folder": folder,
+            "appended": true,
+            "subject": message.subject,
+        });
+        if let Some(id) = &message.message_id {
+            body["message_id"] = json!(id);
+        }
+        Ok(CallOk::Smtp { body })
+    }
+
+    /// Saves a message's attachments into the run (D7): one EXAMINE and one
+    /// partial `BODY.PEEK[]` read (never `SELECT`, never `\Seen`), then
+    /// descriptor-relative writes through `Beneath` under
+    /// `attachments/<node>[/<item>]/<uid>/`, each name sanitized, each cap
+    /// checked before its write, no file ever overwritten.
+    fn op_save_attachments(
+        &self,
+        session: &mut Session,
+        folder: &str,
+        uid: u32,
+    ) -> Result<CallOk, CallError> {
+        let run = self.files.as_deref().ok_or_else(|| {
+            CallError::new(
+                CallErrorCode::Permission,
+                "save_attachments saves files only inside a run",
+            )
+        })?;
+        let dir_rel = format!(
+            "{}/{}",
+            self.attachments_dir.as_deref().unwrap_or("attachments"),
+            uid
+        );
+        // Everything below anchors at the run directory: a link at any
+        // component of the attachments path is refused, and a run directory
+        // that is itself a link too.
+        let anchor = apb_core::fsutil::beneath::Beneath::open(run).map_err(file_err)?;
+
+        // Read the mailbox without changing it: EXAMINE and a PEEK, never
+        // SELECT and never a bare BODY[.
+        session
+            .examine(folder)
+            .map_err(|e| self.map_err(Stage::Op, e))?;
+        let fetches = session
+            .uid_fetch(uid.to_string(), format!("(BODY.PEEK[]<0.{FETCH_WINDOW}>)"))
+            .map_err(|e| self.map_err(Stage::Op, e))?;
+        let fetch = fetches.iter().find(|f| f.uid == Some(uid)).ok_or_else(|| {
+            self.redact(CallError::new(
+                CallErrorCode::Service,
+                format!("imap message with uid {uid} was not found in `{folder}`"),
+            ))
+        })?;
+        let raw = fetch.body().unwrap_or(&[]);
+        // The advertised size was never read; the received bytes decide.
+        if raw.len() > MESSAGE_CAP {
+            return Err(CallError::new(
+                CallErrorCode::InvalidArgs,
+                format!(
+                    "the message is over the 50 MiB limit ({} bytes received)",
+                    raw.len()
+                ),
+            ));
+        }
+        let Some(msg) = MessageParser::default().parse(raw) else {
+            return Err(CallError::new(
+                CallErrorCode::Service,
+                "the fetched message could not be parsed as MIME",
+            ));
+        };
+
+        // The directories are created only once the message passed the size
+        // check and parsed, so a failed save leaves nothing in the run.
+        anchor.mkdir_all(&dir_rel).map_err(file_err)?;
+
+        let mut saved: Vec<Value> = Vec::new();
+        let mut skipped: Vec<Value> = Vec::new();
+        let mut written: usize = 0;
+        for (n, part) in msg.attachments().enumerate() {
+            let n = n + 1;
+            let raw_name = part.attachment_name().map(str::to_string);
+            let filename = raw_name.clone().unwrap_or_else(|| safe_file_name(None, n));
+            let bytes = part.decoded().into_owned();
+            let size = bytes.len();
+            let mime = crate::connector::mime_read::mime_of(&part);
+
+            // Every cap is checked before its write.
+            if saved.len() >= ATTACH_FILE_COUNT {
+                skipped.push(json!({ "filename": filename, "reason": "file_cap" }));
+                continue;
+            }
+            if size > ATTACH_FILE_CAP {
+                skipped.push(json!({ "filename": filename, "reason": "too_large" }));
+                continue;
+            }
+            if written + size > ATTACH_CALL_CAP {
+                // Later, smaller files are still tried.
+                skipped.push(json!({ "filename": filename, "reason": "call_cap" }));
+                continue;
+            }
+
+            let name = safe_file_name(raw_name.as_deref(), n);
+            // Never overwrite: an existing name moves aside to a numbered
+            // sibling, up to -99; then the file is skipped.
+            let mut actual = name.clone();
+            let mut attempt = 2u32;
+            let mut wrote = false;
+            loop {
+                match anchor.create_exclusive(&dir_rel, &actual, &bytes) {
+                    Ok(()) => {
+                        wrote = true;
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        if attempt > 99 {
+                            skipped.push(json!({ "filename": filename, "reason": "name_taken" }));
+                            break;
+                        }
+                        actual = crate::connector::files::numbered_name(&name, attempt);
+                        attempt += 1;
+                    }
+                    Err(e) => return Err(file_err(e)),
+                }
+            }
+            if !wrote {
+                continue;
+            }
+            written += size;
+            saved.push(json!({
+                "filename": filename,
+                "path": run.join(&dir_rel).join(&actual),
+                "mime": mime,
+                "size": size,
+            }));
+        }
+
+        Ok(CallOk::Smtp {
+            body: json!({
+                "folder": folder,
+                "uid": uid,
+                "saved": saved,
+                "skipped": skipped,
+            }),
         })
     }
 
@@ -496,6 +825,14 @@ impl Write for ImapStream {
     }
 }
 
+/// A client over `stream` with protocol debugging off: the imap crate's
+/// debug output prints LOGIN credentials and the XOAUTH2 payload.
+fn imap_client<T: Read + Write>(stream: T) -> imap::Client<T> {
+    let mut client = imap::Client::new(stream);
+    client.debug = false;
+    client
+}
+
 /// True when an I/O error is a socket read/write timeout (the read/write
 /// timeout deadline elapsed), on either the connect or an operation.
 fn is_timeout(e: &std::io::Error) -> bool {
@@ -517,14 +854,21 @@ fn has_seen(fetch: &imap::types::Fetch) -> bool {
 /// typed params without connecting or touching secrets; a real build resolves
 /// the full connection. Bad params are `invalid_args` and are caught before any
 /// connection. Mirrors `connector_smtp::build`'s parameter shape exactly.
+/// The eight parameters mirror the design (D7): the extras (the connector's
+/// auth block, the run's file root) ride beside the original seven, and the
+/// callers are the two shared build paths (the call pipeline and the
+/// contract runner), so bundling them into a struct would move the call
+/// sites more than it saves.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     spec: &ImapSpec,
     account: &BTreeMap<String, String>,
     args: &Value,
     secrets: &BTreeMap<String, Secret>,
-    redactions: Vec<Redaction>,
+    mut redactions: Vec<Redaction>,
     dry_run: bool,
     timeout_sec: u64,
+    extras: &ImapExtras<'_>,
 ) -> Result<ImapBuild, CallError> {
     let ctx = RenderCtx {
         account,
@@ -533,8 +877,27 @@ pub fn build(
     };
 
     // Params + typed plan render for both dry-run and real runs (args only, no
-    // secrets), so a bad param is rejected before anything connects.
-    let plan = build_plan(spec.op, &spec.params, &ctx)?;
+    // secrets), so a bad param is rejected before anything connects. An
+    // `append_draft` composes here, dry-run and live alike (D7).
+    let plan = build_plan(spec, &ctx)?;
+
+    // D7: `save_attachments` writes only inside a run. A live call without
+    // one (healthcheck, playground) is refused before anything connects; a
+    // dry-run render writes nothing and so shows the op like any other.
+    let files = match &plan {
+        ImapOpPlan::SaveAttachments { .. } => match extras.files {
+            Some(p) => Some(p.to_path_buf()),
+            None if dry_run => None,
+            None => {
+                return Err(CallError::new(
+                    CallErrorCode::Permission,
+                    "save_attachments saves files only inside a run",
+                ));
+            }
+        },
+        _ => extras.files.map(|p| p.to_path_buf()),
+    };
+    let attachments_dir = extras.attachments_dir.map(str::to_string);
 
     if dry_run {
         // The endpoint uses only the host/port templates (account values), so
@@ -553,7 +916,30 @@ pub fn build(
         })));
     }
 
-    let conn = render_connection(spec, &ctx)?;
+    // The one deadline of the call, from here: minting and every IMAP
+    // stage share it, so a caller's bound covers the token request too.
+    let deadline = extras
+        .deadline
+        .unwrap_or_else(|| Instant::now() + Duration::from_secs(timeout_sec));
+    let conn = render_connection(spec, &ctx, extras)?;
+    // Live-only minting, before dispatch, as for HTTP: a rotated refresh
+    // token warns, every minted credential joins the redactions, and a
+    // mint failure fails the build (nothing has connected yet).
+    let mut warnings = Vec::new();
+    let mut access = None;
+    if let ImapSecret::Token(source) = &conn.secret {
+        let minted = source
+            .access_token(deadline, &redactions)
+            .map_err(CallError::from)?;
+        if minted.rotated {
+            warnings.push(crate::connector::oauth::ROTATION_WARNING.to_string());
+        }
+        redactions.push(Redaction::new(minted.access.clone(), "oauth:access_token"));
+        if let Some(new) = &minted.new_refresh {
+            redactions.push(Redaction::new(new.clone(), "oauth:refresh_token"));
+        }
+        access = Some(minted.access);
+    }
     Ok(ImapBuild::Call(Box::new(ImapCall {
         host: conn.host,
         port: conn.port,
@@ -561,8 +947,12 @@ pub fn build(
         auth_method: conn.auth_method,
         username: conn.username,
         secret: conn.secret,
+        access,
         plan,
-        timeout_sec,
+        files,
+        attachments_dir,
+        deadline,
+        warnings,
         redactions,
     })))
 }
@@ -575,7 +965,7 @@ struct Connection {
     use_tls: bool,
     auth_method: AuthMethod,
     username: String,
-    secret: Secret,
+    secret: ImapSecret,
 }
 
 /// Builds a config-kind render error naming the imap field.
@@ -607,14 +997,46 @@ fn render_port(template: &str, ctx: &RenderCtx) -> Result<u16, CallError> {
 /// only). `use_tls` defaults to true when its template references an absent
 /// account field (mirrors the smtp presence rule); `auth_method` must render to
 /// `password` or `xoauth2`.
-fn render_connection(spec: &ImapSpec, ctx: &RenderCtx) -> Result<Connection, CallError> {
+fn render_connection(
+    spec: &ImapSpec,
+    ctx: &RenderCtx,
+    extras: &ImapExtras<'_>,
+) -> Result<Connection, CallError> {
     let c = &spec.connection;
     let host = render_field("host", &c.host, ctx)?;
     let port = render_port(&c.port, ctx)?;
     let use_tls = render_use_tls(&c.use_tls, ctx)?;
     let auth_method = render_auth_method(&c.auth_method, ctx)?;
     let username = render_field("username", &c.username, ctx)?;
-    let secret = Secret::new(render_field("password", &c.password, ctx)?);
+    let secret = match auth_method {
+        AuthMethod::OAuth2 => {
+            let Some(auth) = extras.auth else {
+                return Err(CallError::new(
+                    CallErrorCode::Config,
+                    "auth_method oauth2 needs an oauth2_refresh auth block on the connector"
+                        .to_string(),
+                ));
+            };
+            let source = crate::connector::oauth::TokenSource::render(
+                Some(auth),
+                ctx.account,
+                ctx.secrets,
+                extras.connector,
+                extras.account,
+            )?
+            .ok_or_else(|| {
+                CallError::new(
+                    CallErrorCode::Config,
+                    "auth_method oauth2 needs an oauth2_refresh auth block on the connector"
+                        .to_string(),
+                )
+            })?;
+            ImapSecret::Token(source)
+        }
+        AuthMethod::Password | AuthMethod::XOauth2 => {
+            ImapSecret::Fixed(Secret::new(render_field("password", &c.password, ctx)?))
+        }
+    };
     Ok(Connection {
         host,
         port,
@@ -649,9 +1071,10 @@ fn render_auth_method(template: &str, ctx: &RenderCtx) -> Result<AuthMethod, Cal
     match s.trim() {
         "password" => Ok(AuthMethod::Password),
         "xoauth2" => Ok(AuthMethod::XOauth2),
+        "oauth2" => Ok(AuthMethod::OAuth2),
         other => Err(CallError::new(
             CallErrorCode::Config,
-            format!("imap auth_method must be `password` or `xoauth2`: `{other}`"),
+            format!("imap auth_method must be `password`, `xoauth2` or `oauth2`: `{other}`"),
         )),
     }
 }
@@ -659,13 +1082,13 @@ fn render_auth_method(template: &str, ctx: &RenderCtx) -> Result<AuthMethod, Cal
 /// Renders the op params and validates them into a typed `ImapOpPlan`. Every
 /// failure is `invalid_args` naming the param. A params value that is a single
 /// `{{args.x}}` placeholder with `x` absent (or explicitly null) is dropped
-/// (Task 3 rule), which is how optional search params arrive absent.
-fn build_plan(
-    op: ImapOp,
-    params: &BTreeMap<String, String>,
-    ctx: &RenderCtx,
-) -> Result<ImapOpPlan, CallError> {
-    let rendered = render_params(params, ctx)?;
+/// (Task 3 rule), which is how optional search params arrive absent. An
+/// `append_draft` composes its message here, dry-run and live alike (D7),
+/// with the `Bcc` header kept in the bytes and a `Message-ID` generated from
+/// the sender's domain.
+fn build_plan(spec: &ImapSpec, ctx: &RenderCtx) -> Result<ImapOpPlan, CallError> {
+    let op = spec.op;
+    let rendered = render_params(&spec.params, ctx)?;
     match op {
         ImapOp::Verify => Ok(ImapOpPlan::Verify),
         ImapOp::ListFolders => Ok(ImapOpPlan::ListFolders),
@@ -705,6 +1128,67 @@ fn build_plan(
             };
             Ok(ImapOpPlan::SetFlags { folder, uids, seen })
         }
+        ImapOp::AppendDraft => {
+            let folder = optional_folder(&rendered)?;
+            let msg = spec.message.as_ref().ok_or_else(|| {
+                CallError::new(
+                    CallErrorCode::Config,
+                    "imap op `append_draft` needs a `message` block to compose",
+                )
+            })?;
+            // The Message-ID is generated from the sender's domain, so the
+            // draft carries a deterministic-shaped id apb can reference.
+            let from_email = render_raw(&msg.from_email, ctx)
+                .map_err(|e| compose_render_err("from_email", e))?;
+            let domain = from_email
+                .contains('@')
+                .then(|| from_email.rsplit('@').next().unwrap_or("").to_string())
+                .filter(|d| !d.is_empty());
+            let message = compose(
+                "message",
+                msg,
+                ctx,
+                &ComposeOpts {
+                    keep_bcc: true,
+                    message_id_domain: domain,
+                },
+            )?;
+            Ok(ImapOpPlan::AppendDraft {
+                folder,
+                message: Box::new(message),
+            })
+        }
+        ImapOp::SaveAttachments => {
+            let folder = require_folder(&rendered)?;
+            let uid = parse_uid(&rendered)?;
+            Ok(ImapOpPlan::SaveAttachments { folder, uid })
+        }
+    }
+}
+
+/// A config-kind error naming the field the draft render failed on.
+fn compose_render_err(field: &str, err: impl std::fmt::Display) -> CallError {
+    CallError::new(
+        CallErrorCode::Config,
+        format!("message {field} render failed: {err}"),
+    )
+}
+
+/// The optional `folder` of `append_draft`: control characters rejected,
+/// an empty value refused; absent means "the server's `\Drafts` folder".
+fn optional_folder(rendered: &BTreeMap<String, String>) -> Result<Option<String>, CallError> {
+    match rendered.get("folder") {
+        Some(v) => {
+            reject_controls("folder", v)?;
+            if v.is_empty() {
+                return Err(CallError::new(
+                    CallErrorCode::InvalidArgs,
+                    "imap param `folder` must not be empty",
+                ));
+            }
+            Ok(Some(v.clone()))
+        }
+        None => Ok(None),
     }
 }
 
@@ -990,112 +1474,6 @@ fn bytes_lossy(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
-/// Parses the raw RFC822 bytes of a fetched message into the fetch result body
-/// (spec 3.3): from/to/cc/subject/date/seen plus the capped text and html
-/// bodies, the attachment list, and the `truncated` flag.
-fn fetch_body_json(uid: u32, raw: &[u8], seen: bool) -> Value {
-    let mut m = Map::new();
-    m.insert("uid".into(), json!(uid));
-    let mut truncated = false;
-
-    if let Some(msg) = MessageParser::default().parse(raw) {
-        if let Some(from) = msg.from().and_then(mail_address_first) {
-            m.insert("from".into(), json!(from));
-        }
-        if let Some(to) = msg.to().map(mail_address_join).filter(|s| !s.is_empty()) {
-            m.insert("to".into(), json!(to));
-        }
-        if let Some(cc) = msg.cc().map(mail_address_join).filter(|s| !s.is_empty()) {
-            m.insert("cc".into(), json!(cc));
-        }
-        if let Some(subject) = msg.subject() {
-            m.insert("subject".into(), json!(subject));
-        }
-        if let Some(date) = msg.date() {
-            m.insert("date".into(), json!(date.to_rfc3339()));
-        }
-        if let Some(text) = msg.body_text(0) {
-            let (capped, cut) = cap_body(&text);
-            truncated |= cut;
-            m.insert("text".into(), json!(capped));
-        }
-        if let Some(html) = msg.body_html(0) {
-            let (capped, cut) = cap_body(&html);
-            truncated |= cut;
-            m.insert("html".into(), json!(capped));
-        }
-        let attachments: Vec<Value> = msg
-            .attachments()
-            .map(|part| {
-                json!({
-                    "filename": part.attachment_name(),
-                    "mime": mime_of(&part),
-                    "size": part_size(&part),
-                })
-            })
-            .collect();
-        m.insert("attachments".into(), json!(attachments));
-    } else {
-        m.insert("attachments".into(), json!([]));
-    }
-
-    m.insert("seen".into(), json!(seen));
-    m.insert("truncated".into(), json!(truncated));
-    Value::Object(m)
-}
-
-/// Caps a body part at `BODY_PART_CAP` bytes on a UTF-8 boundary, reporting
-/// whether anything was cut (spec 3.3).
-fn cap_body(s: &str) -> (String, bool) {
-    if s.len() <= BODY_PART_CAP {
-        return (s.to_string(), false);
-    }
-    let mut end = BODY_PART_CAP;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    (s[..end].to_string(), true)
-}
-
-/// The `type/subtype` MIME string of a message part, or `application/octet-stream`.
-fn mime_of(part: &mail_parser::MessagePart) -> String {
-    match part.content_type() {
-        Some(ct) => match ct.subtype() {
-            Some(sub) => format!("{}/{}", ct.ctype(), sub),
-            None => ct.ctype().to_string(),
-        },
-        None => "application/octet-stream".to_string(),
-    }
-}
-
-/// The size of an attachment part: the length of its text after charset
-/// conversion for a text part, 0 for a multipart, otherwise the length of its
-/// transfer-decoded body.
-fn part_size(part: &mail_parser::MessagePart) -> usize {
-    if part.is_multipart() {
-        0
-    } else if let Some(text) = part.text() {
-        text.len()
-    } else {
-        part.decoded_len()
-    }
-}
-
-/// The first address of a mail-parser address header, as its email string.
-fn mail_address_first(addr: mail_parser::AddressList) -> Option<String> {
-    addr.first()
-        .and_then(|a| a.address())
-        .map(|c| c.to_string())
-}
-
-/// All addresses of a mail-parser address header joined by `, `.
-fn mail_address_join(addr: mail_parser::AddressList) -> String {
-    addr.mailboxes()
-        .filter_map(|a| a.address().map(|c| c.to_string()))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 /// The typed params JSON for the dry-run render (spec 3.3): the plan's fields,
 /// with optional search params present only when set.
 fn plan_params_json(plan: &ImapOpPlan) -> Value {
@@ -1128,86 +1506,23 @@ fn plan_params_json(plan: &ImapOpPlan) -> Value {
         ImapOpPlan::SetFlags { folder, uids, seen } => {
             json!({ "folder": folder, "uids": uids, "seen": seen })
         }
+        ImapOpPlan::AppendDraft { folder, message } => {
+            // The dry-run shows the composed message's readable preview;
+            // the bytes themselves carry no secret by the manifest rules.
+            let mut m = Map::new();
+            if let Some(f) = folder {
+                m.insert("folder".into(), json!(f));
+            }
+            m.insert("preview".into(), message.preview.clone());
+            Value::Object(m)
+        }
+        ImapOpPlan::SaveAttachments { folder, uid } => json!({ "folder": folder, "uid": uid }),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cap_body_truncates_large_part() {
-        // A part just over the cap is cut and reported truncated; the returned
-        // text is exactly the cap length (on a UTF-8 boundary of ASCII input).
-        let big = "a".repeat(BODY_PART_CAP + 10);
-        let (capped, truncated) = cap_body(&big);
-        assert!(truncated, "an over-cap part must report truncated");
-        assert_eq!(capped.len(), BODY_PART_CAP);
-    }
-
-    #[test]
-    fn cap_body_keeps_small_part() {
-        let (capped, truncated) = cap_body("hello");
-        assert!(!truncated);
-        assert_eq!(capped, "hello");
-    }
-
-    #[test]
-    fn fetch_body_json_caps_large_text() {
-        // The fetch body helper parses a raw message with an over-cap text part
-        // and marks the whole result truncated (the unit named in the brief).
-        let big = "x".repeat(BODY_PART_CAP + 100);
-        let raw = format!(
-            "From: a@b.c\r\nTo: d@e.f\r\nSubject: Big\r\nContent-Type: text/plain\r\n\r\n{big}"
-        );
-        let body = fetch_body_json(7, raw.as_bytes(), true);
-        assert_eq!(body["uid"], json!(7));
-        assert_eq!(body["truncated"], json!(true));
-        assert_eq!(body["seen"], json!(true));
-        assert_eq!(body["text"].as_str().unwrap().len(), BODY_PART_CAP);
-    }
-
-    #[test]
-    fn fetch_body_json_reads_addresses_and_attachments() {
-        // Groups are flattened into the address lists; an attachment reports
-        // its name, its MIME type and the length of its decoded body.
-        let raw = concat!(
-            "From: Ann <ann@x.org>\r\n",
-            "To: bob@x.org, team: cy@x.org, dee@x.org;\r\n",
-            "Cc: eve@x.org\r\n",
-            "Subject: Files\r\n",
-            "Content-Type: multipart/mixed; boundary=\"b1\"\r\n",
-            "\r\n",
-            "--b1\r\n",
-            "Content-Type: text/plain\r\n",
-            "\r\n",
-            "body text\r\n",
-            "--b1\r\n",
-            "Content-Type: application/pdf; name=\"a.pdf\"\r\n",
-            "Content-Disposition: attachment; filename=\"a.pdf\"\r\n",
-            "Content-Transfer-Encoding: base64\r\n",
-            "\r\n",
-            "aGVsbG8=\r\n",
-            "--b1\r\n",
-            "Content-Type: text/plain; name=\"n.txt\"\r\n",
-            "Content-Disposition: attachment; filename=\"n.txt\"\r\n",
-            "\r\n",
-            "hi there\r\n",
-            "--b1--\r\n",
-        );
-        let body = fetch_body_json(3, raw.as_bytes(), false);
-        assert_eq!(body["from"], json!("ann@x.org"));
-        assert_eq!(body["to"], json!("bob@x.org, cy@x.org, dee@x.org"));
-        assert_eq!(body["cc"], json!("eve@x.org"));
-        assert_eq!(body["subject"], json!("Files"));
-        assert_eq!(
-            body["attachments"],
-            json!([
-                { "filename": "a.pdf", "mime": "application/pdf", "size": 5 },
-                { "filename": "n.txt", "mime": "text/plain", "size": 8 },
-            ])
-        );
-    }
 
     #[test]
     fn quote_imap_escapes_backslash_and_quote() {

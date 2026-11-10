@@ -22,7 +22,7 @@ static JWT: LazyLock<Regex> = LazyLock::new(|| {
 });
 static PREFIXED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"\b(?:sk-|sk_|pk_live_|rk_live_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[abeprs]-|AKIA|ASIA|AIza|hf_|npm_)[A-Za-z0-9_\-]{8,}|hooks\.slack\.com/services/[A-Za-z0-9_/]{20,}",
+        r"\b(?:sk-|sk_|pk_live_|rk_live_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[abeprs]-|AKIA|ASIA|AIza|hf_|npm_|ya29\.|1//0|GOCSPX-)[A-Za-z0-9_\-]{8,}|hooks\.slack\.com/services/[A-Za-z0-9_/]{20,}",
     )
     .expect("valid")
 });
@@ -257,6 +257,31 @@ mod tests {
         ] {
             assert!(!name_looks_secret(name), "{name}");
         }
+    }
+
+    #[test]
+    fn google_token_shapes_are_detected_and_redacted() {
+        for (case, secret) in [
+            "ya29.a0ARr3Mlongtokenvalue123",
+            "1//0gh0CEabcdefghij",
+            "GOCSPX-abcdefghijklmnop",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                looks_like_credential(secret),
+                "credential case {i}",
+                i = case
+            );
+            assert!(
+                redact_tokens(secret).contains("[redacted-token]"),
+                "not redacted: {case}"
+            );
+        }
+        // A plain URL holding `1//` is not a token.
+        assert!(!looks_like_credential("http://1//x"));
+        assert_eq!(redact_tokens("http://1//x"), "http://1//x");
     }
 
     #[test]

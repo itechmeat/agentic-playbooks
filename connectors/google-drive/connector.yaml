@@ -1,0 +1,147 @@
+name: google-drive
+version: 0.1.0
+healthcheck: verify
+# A bearer access token minted from the account's refresh token at call
+# time; it lives in process memory only. `apb connector oauth google-drive`
+# runs the consent in a person's terminal and prints the refresh token once.
+auth:
+  kind: oauth2_refresh
+  token_url: "{{account.token_url}}"
+  authorize_url: "https://accounts.google.com/o/oauth2/v2/auth"
+  client_id_template: "{{account.client_id}}"
+  client_secret_template: "{{secret.client_secret}}"
+  refresh_token_template: "{{secret.refresh_token}}"
+  granted_scopes_template: "{{account.granted_scopes}}"
+  consent_scopes: "https://www.googleapis.com/auth/drive.readonly"
+  authorize_params: { access_type: offline, prompt: consent }
+account_fields:
+  - name: api_base
+    required: true
+  - name: token_url
+    required: true
+  - name: client_id
+    required: true
+  - name: client_secret
+    required: true
+    secret: true
+  - name: refresh_token
+    required: true
+    secret: true
+  - name: granted_scopes
+functions:
+  - name: verify
+    description: Check that the token works and return the Google account whose Drive it reads
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/about"
+    query:
+      fields: "user(emailAddress,displayName)"
+    args_schema: { type: object, properties: {}, required: [] }
+    scopes:
+      - https://www.googleapis.com/auth/drive
+      - https://www.googleapis.com/auth/drive.readonly
+      - https://www.googleapis.com/auth/drive.metadata.readonly
+      - https://www.googleapis.com/auth/drive.metadata
+      - https://www.googleapis.com/auth/drive.file
+    response_pick: [user]
+
+  - name: search_files
+    description: Search files and folders with a Drive query, following nextPageToken pages up to the limit; returns each file's id, name, type, modified time, size and link
+    read_only: true
+    untrusted_output: true
+    method: GET
+    url: "{{account.api_base}}/files"
+    query:
+      q: "{{args.q}}"
+      pageSize: "{{args.page_size}}"
+      pageToken: "{{args.page_token}}"
+      fields: "nextPageToken,files(id,name,mimeType,modifiedTime,size,webViewLink)"
+      supportsAllDrives: "true"
+      includeItemsFromAllDrives: "true"
+    args_schema:
+      type: object
+      properties:
+        q: { type: string, description: "Drive query, for example name contains 'plan' and trashed = false; the trash is included unless the query says trashed = false" }
+        page_size: { type: integer, minimum: 1, maximum: 1000, description: "files per page, up to 1000" }
+        page_token: { type: string, description: "nextPageToken of an earlier result that said more, to continue that listing" }
+      required: [q]
+    paginate:
+      items: files
+      next: { token_path: nextPageToken, token_arg: page_token }
+      max_pages: 5
+    timeout_sec: 60
+    scopes:
+      - https://www.googleapis.com/auth/drive
+      - https://www.googleapis.com/auth/drive.readonly
+      - https://www.googleapis.com/auth/drive.metadata.readonly
+      - https://www.googleapis.com/auth/drive.metadata
+      - https://www.googleapis.com/auth/drive.file
+    response_pick: [files.id, files.name, files.mimeType, files.modifiedTime, files.size, files.webViewLink, nextPageToken]
+    examples:
+      - args: { q: "name contains 'roadmap' and mimeType = 'application/vnd.google-apps.document' and trashed = false", page_size: 50 }
+        note: "q uses Drive's query language: name contains 'x', fullText contains 'x', mimeType = 'type', 'FOLDER_ID' in parents, modifiedTime > '2026-01-01T00:00:00'; join terms with and, or, not."
+
+  - name: get_file_metadata
+    description: Get one file's name, type, modified time, size, link, description and owners by id
+    read_only: true
+    untrusted_output: true
+    method: GET
+    url: "{{account.api_base}}/files/{{args.file_id}}"
+    query:
+      fields: "id,name,mimeType,modifiedTime,size,webViewLink,description,owners(emailAddress)"
+      supportsAllDrives: "true"
+    args_schema:
+      type: object
+      properties:
+        file_id: { type: string, description: "the file id, from search_files or from the file's link" }
+      required: [file_id]
+    scopes:
+      - https://www.googleapis.com/auth/drive
+      - https://www.googleapis.com/auth/drive.readonly
+      - https://www.googleapis.com/auth/drive.metadata.readonly
+      - https://www.googleapis.com/auth/drive.metadata
+      - https://www.googleapis.com/auth/drive.file
+    response_pick: [id, name, mimeType, modifiedTime, size, webViewLink, description, owners.emailAddress]
+
+  - name: export_text
+    description: "Export a Google Docs, Sheets or Slides file as text: Docs as text/plain or text/markdown, Sheets as text/csv or text/tab-separated-values (first sheet only), Slides as text/plain. The result body is the text itself"
+    read_only: true
+    untrusted_output: true
+    method: GET
+    url: "{{account.api_base}}/files/{{args.file_id}}/export"
+    query:
+      mimeType: "{{args.mime_type}}"
+    args_schema:
+      type: object
+      properties:
+        file_id: { type: string, description: "the id of a Google Docs, Sheets or Slides file" }
+        mime_type:
+          type: string
+          enum: [text/plain, text/markdown, text/csv, text/tab-separated-values]
+          description: "the text format to export to; it must suit the file's kind"
+      required: [file_id, mime_type]
+    content_types: ["text/"]
+    scopes:
+      - https://www.googleapis.com/auth/drive
+      - https://www.googleapis.com/auth/drive.readonly
+      - https://www.googleapis.com/auth/drive.file
+
+  - name: read_text_file
+    description: Read the content of a stored text file (plain text, Markdown, CSV, JSON, XML, YAML) by id; the result body is the text, or the parsed document for a JSON file. A Google Docs, Sheets or Slides file has no stored content and fails here (use export_text), and so does a binary file
+    read_only: true
+    untrusted_output: true
+    method: GET
+    url: "{{account.api_base}}/files/{{args.file_id}}"
+    query:
+      alt: media
+      supportsAllDrives: "true"
+    args_schema:
+      type: object
+      properties:
+        file_id: { type: string, description: "the id of a file stored in Drive, not a Google Docs, Sheets or Slides file" }
+      required: [file_id]
+    content_types: ["text/", "application/json", "application/xml", "application/yaml", "application/x-yaml"]
+    scopes:
+      - https://www.googleapis.com/auth/drive
+      - https://www.googleapis.com/auth/drive.readonly
+      - https://www.googleapis.com/auth/drive.file

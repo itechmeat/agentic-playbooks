@@ -18,6 +18,9 @@ pub enum IncompleteReason {
     BodyCap,
     /// The read failed partway through (the transport closed or errored).
     ReadError,
+    /// The body was not read at all: its media type is one the function
+    /// does not read (`content_types`).
+    ContentType,
 }
 
 impl IncompleteReason {
@@ -26,6 +29,7 @@ impl IncompleteReason {
         match self {
             IncompleteReason::BodyCap => "body_cap",
             IncompleteReason::ReadError => "read_error",
+            IncompleteReason::ContentType => "content_type",
         }
     }
 }
@@ -60,6 +64,15 @@ impl BodyIncomplete {
             reason: IncompleteReason::ReadError,
             cap_bytes: None,
             io_error_kind: Some(io_kind_name(kind).to_string()),
+        }
+    }
+
+    /// The body was not read: its media type is refused.
+    pub(crate) fn refused_content_type() -> Self {
+        BodyIncomplete {
+            reason: IncompleteReason::ContentType,
+            cap_bytes: None,
+            io_error_kind: None,
         }
     }
 

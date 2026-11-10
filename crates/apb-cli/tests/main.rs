@@ -66,6 +66,8 @@ mod cli_test;
 mod cloud_models_cli_test;
 #[path = "suite/connector_cli.rs"]
 mod connector_cli;
+#[path = "suite/connector_oauth_test.rs"]
+mod connector_oauth_test;
 #[path = "suite/demo_playbooks_test.rs"]
 mod demo_playbooks_test;
 // Unix-only: a shell script stands in for git on PATH.

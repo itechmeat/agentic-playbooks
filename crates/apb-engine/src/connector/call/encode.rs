@@ -1,7 +1,7 @@
 //! Wire encoding helpers: percent-encoding for paths and query components,
 //! form bodies, and base64 for basic auth. Pure functions over strings.
-
-use super::*;
+use crate::connector::call::url_encode::encode_component;
+use serde_json::Value;
 
 /// Percent-encodes the top-level string values of an args object so they can
 /// be substituted RAW into a URL template without letting an argument inject
@@ -9,23 +9,6 @@ use super::*;
 /// (their `to_string` form carries no reserved bytes); nested values are not
 /// reachable by a URL `{{args.name}}` placeholder (only top-level scalar args
 /// are), so they are left untouched.
-pub(crate) fn encode_args_for_url(args: &Value) -> Value {
-    match args {
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(k, v)| {
-                    let v = match v {
-                        Value::String(s) => Value::String(encode_component(s)),
-                        other => other.clone(),
-                    };
-                    (k.clone(), v)
-                })
-                .collect(),
-        ),
-        other => other.clone(),
-    }
-}
-
 /// Projects `body` down to the dot-separated field chains in `paths`
 /// (spec 4.5). Objects keep the named field; arrays (top-level or midway
 /// through a chain) map the projection over their elements; a path absent
@@ -77,10 +60,6 @@ pub(crate) fn encode_path_segment(s: &str) -> String {
 /// Percent-encodes a whole string as a single URL component (same set the
 /// renderer uses for substituted values). Applied to literal query keys and
 /// auth param names so a stray reserved byte cannot restructure the URL.
-pub(crate) fn encode_component(s: &str) -> String {
-    apb_core::url_component::encode(s)
-}
-
 /// Encodes DECODED form pairs into the `application/x-www-form-urlencoded`
 /// wire body, percent-encoding keys and values with the same component set
 /// query rendering uses so encoding stays uniform (spec
@@ -118,14 +97,4 @@ pub(crate) fn base64_encode(input: &[u8]) -> String {
         }
     }
     out
-}
-
-/// Appends an already-encoded query string to a base URL, choosing `?` or `&`
-/// depending on whether the base already carries a query.
-pub(crate) fn assemble_url(base: &str, query: &str) -> String {
-    if query.is_empty() {
-        return base.to_string();
-    }
-    let sep = if base.contains('?') { '&' } else { '?' };
-    format!("{base}{sep}{query}")
 }
