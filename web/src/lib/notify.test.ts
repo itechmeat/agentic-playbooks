@@ -9,6 +9,7 @@ import {
   notifyState,
   onText,
   onWords,
+  RUN_TRANSITIONS,
   sentLines,
   startNotify,
   targetText,
@@ -100,5 +101,18 @@ describe('notify', () => {
     expect(notifySetNote({ target, on: ['finished:failed', 'host_task'], source: 'run' })).toBe(
       'notifications on: telegram/me about finished (failed), host_task (from run)',
     )
+  })
+
+  it('the run dialog never offers health', () => {
+    expect(RUN_TRANSITIONS).not.toContain('health')
+    expect(onText(['review', 'question', 'paused', 'finished'])).toBe('everything')
+    expect(journalCoverage(['review', 'health']).on).toEqual(['review'])
+  })
+
+  it('onWords never names health: a run sends no health notice', () => {
+    expect(onWords(['review', 'question', 'paused', 'finished', 'health'])).toBe(
+      'a review waiting, a question waiting, a pause you did not make and the end of the run',
+    )
+    expect(onWords(['health'])).toBe('')
   })
 })

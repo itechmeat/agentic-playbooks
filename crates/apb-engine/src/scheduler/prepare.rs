@@ -1011,7 +1011,7 @@ pub(crate) fn prepare_placed(
     // once here where the params are final and nothing is written yet: a
     // refusal here (unreadable history, a bad `when_none` time) leaves no
     // run behind. Only a definition that reads the namespace looks at all.
-    let previous_success = if !apb_core::previous_success::reads(&playbook) {
+    let mut previous_success = if !apb_core::previous_success::reads(&playbook) {
         None
     } else if scenario.is_some() || opts.eval.is_some() {
         // Repeatable by design: no lookup, so every play renders the same.
@@ -1029,12 +1029,7 @@ pub(crate) fn prepare_placed(
                 "previous_success_unreadable: run `{pred}`: its journal does not read; repair or remove it, then start again"
             ))
         })?;
-        let recorded = pred_events.iter().find_map(|e| match &e.payload {
-            EventPayload::RunProvenance {
-                previous_success, ..
-            } => previous_success.clone(),
-            _ => None,
-        });
+        let recorded = crate::previous_success::recorded(&pred_events);
         Some(match recorded {
             Some(ps) => ps,
             None => look_up_previous_success(root, id, t.origin_label, &playbook, &params)?,
@@ -1067,6 +1062,46 @@ pub(crate) fn prepare_placed(
         }
     };
 
+    // The concurrency key (routine health D1): rendered from the final
+    // params, checked for sensitivity, recorded for `run_provenance`;
+    // nothing is written yet. A refusal here leaves nothing.
+    let key = crate::concurrency::key_for_start(
+        root,
+        &playbook,
+        &params,
+        &crate::concurrency::KeyScope {
+            scenario: scenario.is_some(),
+            eval: opts.eval.is_some(),
+            child: opts.parent_run.is_some(),
+            depth: opts.depth,
+        },
+    )?;
+    // The health hold (routine health D2), authoritative: a hold that
+    // appeared after the gate, or a direct engine start, is still refused
+    // here, before anything is claimed or written. A trial runs held: it
+    // is how a person checks a fix before clearing.
+    let top_level =
+        scenario.is_none() && opts.eval.is_none() && opts.parent_run.is_none() && opts.depth == 0;
+    let trial = opts
+        .launch
+        .as_ref()
+        .is_some_and(|g| g.record.kind == "trial");
+    if top_level && !trial {
+        let scope = if t.origin_label == "global" {
+            apb_core::scope::Scope::Global
+        } else {
+            apb_core::scope::Scope::Project
+        };
+        if let Err(refusal) = crate::health::state::hold_refusal(root, scope, &playbook.id) {
+            return Err(EngineError::Conflict(format!(
+                "playbook_on_hold: {}",
+                refusal["detail"]
+                    .as_str()
+                    .unwrap_or("the playbook is on hold")
+            )));
+        }
+    }
+
     // The start key is claimed before the tree lock, so a repeat while the
     // first run holds the tree answers that run, not "workdir busy"; the
     // claim stays pending (its owner this preparation) until the run is
@@ -1090,7 +1125,22 @@ pub(crate) fn prepare_placed(
     let is_write = scenario.is_none() && playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
     let mut queued_workdir = None;
     let mut queued_reason = String::new();
-    let guard = if is_write {
+    // A keyed start takes the tree only once it holds its key: no
+    // `acquire_tree` here, whatever its `on_busy` answers. Two keyed
+    // starts that both took the tree first would meet at the tree and the
+    // loser would fail before its mode was ever evaluated.
+    let guard = if key.is_some() {
+        // A start that shares the tree takes no lock, keyed or not.
+        if is_write && !opts.allow_shared_workdir {
+            queued_workdir = Some(
+                opts.workdir_queue_wait
+                    .unwrap_or(Duration::ZERO)
+                    .max(crate::concurrency::TREE_AFTER_TURN),
+            );
+            queued_reason = "concurrency: the key is taken before the working tree".into();
+        }
+        None
+    } else if is_write {
         match acquire_tree(
             root,
             worktree.as_ref().map(|w| w.path.as_path()),
@@ -1115,6 +1165,67 @@ pub(crate) fn prepare_placed(
         c.attach(&run_id)?;
         #[cfg(any(test, feature = "testing"))]
         crate::start_key::test_hooks::after_attach(root);
+    }
+    // Step 4 of the key's preparation order: the run gets a driver claim
+    // of its own (an `apb stop` or `apb pause` of the waiting run is then
+    // posted, not written over it), the slot is admitted in one
+    // recoverable transaction, and the record says whether it queued.
+    let mut slot_owner = None;
+    let mut key_queued = false;
+    if let Some(record) = &key {
+        crate::driver::publish_driver_pid(&run_dir, std::process::id());
+        let lineage = crate::concurrency::lineage(
+            root,
+            opts.launch
+                .as_ref()
+                .and_then(|g| g.record.started_by.as_ref()),
+        );
+        let on_busy = playbook
+            .concurrency
+            .as_ref()
+            .map(|c| c.on_busy)
+            .unwrap_or_default();
+        let scope = apb_core::scope::Scope::parse(t.origin_label)
+            .unwrap_or(apb_core::scope::Scope::Project);
+        match crate::concurrency::admit(root, scope, id, record, on_busy, &run_id, &lineage) {
+            Err(e) => {
+                // A refused start leaves no run and frees its start key:
+                // the directory holds only the empty journal and
+                // `driver.pid`, so it goes away whole, and the `Claim`
+                // drop finds no `run_started` and frees its entry.
+                crate::driver::let_go_unclaimed(&run_dir);
+                if std::fs::symlink_metadata(&run_dir).is_ok_and(|m| m.is_dir()) {
+                    let _ = std::fs::remove_dir_all(&run_dir);
+                }
+                return Err(e);
+            }
+            Ok(admission) => {
+                #[cfg(any(test, feature = "testing"))]
+                crate::deadline_hooks::at(crate::deadline_hooks::Hook::KeyAdmitted, &run_dir);
+                let holder;
+                match admission {
+                    crate::concurrency::Admission::Active(owner) => {
+                        holder = None;
+                        slot_owner = Some(owner);
+                    }
+                    crate::concurrency::Admission::Queued { holder: h, owner } => {
+                        holder = Some(h);
+                        slot_owner = Some(owner);
+                        key_queued = true;
+                    }
+                }
+                if let Some(h) = holder {
+                    queued_reason =
+                        format!("concurrency: key `{}` is held by run `{h}`", record.display);
+                }
+            }
+        }
+    }
+    // Step 5 of the key's order: a queued routine reads its
+    // `run.previous_success` window once it got the key, not here, so a
+    // run B queued behind A does not keep the success before A.
+    if key_queued && opts.continued_from.is_none() {
+        previous_success = None;
     }
     // A scenario run's session answers every boundary from here on.
     if let Some(sp) = scenario {
@@ -1452,13 +1563,24 @@ pub(crate) fn prepare_placed(
             .collect(),
         deadline,
         start_key: start_key_tag,
+        // The record says whether this start waited for its key: a queued
+        // run reads its window once it got the key, at either drive entry.
+        concurrency: key.clone().map(|mut record| {
+            record.queued = key_queued;
+            record
+        }),
     })?;
     // A definition using a feature an older apb would drop is guarded from
     // here on: every checkpoint carries the guard, so such an apb refuses
     // to continue the run. A deadline from the run argument alone is named
-    // too.
-    if let Some(guard) = run_guard_of(&playbook, deadline.is_some()) {
+    // too, and the concurrency feature exactly when the run took a slot.
+    if let Some(guard) = run_guard_of(&playbook, deadline.is_some(), key.is_some()) {
         log.append(guard)?;
+    }
+    // The claim is durable now: an active holder's reservation is cleared
+    // (its owner released), a waiter's owner is kept for its turn.
+    if let Some(owner) = slot_owner.take() {
+        slot_owner = prep_try(&mut log, owner.confirm())?;
     }
     // The run is verifiable now: its key is bound to it.
     if let Some(c) = key_claim.take() {
@@ -1529,6 +1651,8 @@ pub(crate) fn prepare_placed(
         worktree: worktree.map(|w| w.path),
         start_node,
         mode: opts.mode,
+        slot_owner,
+        key_queued,
     })
 }
 
@@ -1758,22 +1882,40 @@ pub(crate) fn run_guard(
     playbook: &Playbook,
     events: &[crate::event::Event],
 ) -> Option<EventPayload> {
-    run_guard_of(playbook, crate::run_deadline::in_force(events).is_some())
+    let keyed = events.iter().any(|e| {
+        matches!(
+            &e.payload,
+            EventPayload::RunProvenance {
+                concurrency: Some(_),
+                ..
+            }
+        )
+    });
+    run_guard_of(
+        playbook,
+        crate::run_deadline::in_force(events).is_some(),
+        keyed,
+    )
 }
 
 /// [`run_guard`] with the run's contract given: the definition's features,
 /// with `deadline` named exactly when a deadline is in force for the run
-/// (a scenario, an eval and a child ignore the playbook's).
-fn run_guard_of(playbook: &Playbook, deadline: bool) -> Option<EventPayload> {
+/// (a scenario, an eval and a child ignore the playbook's) and
+/// `concurrency` named exactly when the run took a slot (a child, a
+/// scenario and an eval take none).
+fn run_guard_of(playbook: &Playbook, deadline: bool, concurrency: bool) -> Option<EventPayload> {
     use apb_core::validate::GuardedFeature;
     let mut features: Vec<GuardedFeature> = apb_core::validate::guarded_features(playbook)
         .into_iter()
-        .filter(|f| *f != GuardedFeature::Deadline)
+        .filter(|f| *f != GuardedFeature::Deadline && *f != GuardedFeature::Concurrency)
         .collect();
     if deadline {
         features.push(GuardedFeature::Deadline);
-        features.sort();
     }
+    if concurrency {
+        features.push(GuardedFeature::Concurrency);
+    }
+    features.sort();
     let requires: Vec<String> = features
         .into_iter()
         .map(|f| f.as_str().to_string())
@@ -1812,7 +1954,7 @@ fn run_limits(manifest: &crate::manifest::RunExecutionManifest) -> Vec<crate::ev
 /// earlier success of `id` in scope `scope_label` (spec recurring-routines
 /// D2), snapshotted, or the none window. A run directory that cannot be
 /// classified refuses the start.
-fn look_up_previous_success(
+pub(crate) fn look_up_previous_success(
     root: &std::path::Path,
     id: &str,
     scope_label: &str,
@@ -1826,4 +1968,29 @@ fn look_up_previous_success(
         ))
     })?;
     crate::previous_success::snapshot(root, found.as_deref(), playbook, params)
+}
+
+#[cfg(test)]
+mod run_guard_tests {
+    use super::*;
+
+    /// A playbook with the block names `concurrency` only when asked: the
+    /// run's slot decides, not the definition alone.
+    #[test]
+    fn run_guard_of_names_concurrency_only_when_asked() {
+        let pb = Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nconcurrency: { on_busy: refuse }\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+        )
+        .unwrap();
+        let none = run_guard_of(&pb, false, false).map(|p| match p {
+            EventPayload::RunGuard { requires } => requires,
+            _ => Vec::new(),
+        });
+        assert_eq!(none, None);
+        let keyed = run_guard_of(&pb, false, true).map(|p| match p {
+            EventPayload::RunGuard { requires } => requires,
+            _ => Vec::new(),
+        });
+        assert_eq!(keyed, Some(vec!["concurrency".to_string()]));
+    }
 }

@@ -6,6 +6,7 @@
   import {
     finishedCount,
     glyphLetter,
+    healthBadge,
     medianRunTime,
     playbookKey,
     runHistory,
@@ -376,6 +377,15 @@
                     {#if w.frozen}
                       <span class="tag text-blue" title="Frozen: new versions are refused">frozen</span>
                     {/if}
+                    {#if healthBadge(w) === 'on hold'}
+                      <span
+                        class="tag health-held"
+                        title={`Starts are refused until a person clears it: ${w.health?.hold?.clear ?? 'apb health clear ' + w.id}`}
+                        >on hold</span
+                      >
+                    {:else if healthBadge(w) === 'tripped'}
+                      <span class="tag health-tripped" title="A health rule of this routine tripped">tripped</span>
+                    {/if}
                   </div>
                   <div class="truncate text-xs text-muted-foreground">
                     <span class="font-mono">{w.id}</span>{#if w.description}{' · '}<span
@@ -496,6 +506,12 @@
 </AlertDialog.Root>
 
 <style>
+  .health-held {
+    color: var(--c-red);
+  }
+  .health-tripped {
+    color: var(--c-amber);
+  }
   .demo-actions {
     display: flex;
     flex-wrap: wrap;

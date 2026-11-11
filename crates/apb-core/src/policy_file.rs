@@ -51,6 +51,39 @@ pub struct PolicyFile {
     pub launch: LaunchSection,
     pub billing: crate::billing::section::BillingSection,
     pub runs: RunsSection,
+    pub health: HealthSection,
+}
+
+/// The `health:` section: which playbooks with a `health:` block this
+/// machine (or project) watches. The rules themselves live in the
+/// playbook.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HealthSection {
+    /// `<id>` or `global:<id>`; absent: every playbook with a block;
+    /// empty: none.
+    pub playbooks: Option<Vec<String>>,
+}
+
+impl HealthSection {
+    fn validate(&self) -> Result<(), String> {
+        for entry in self.playbooks.iter().flatten() {
+            let id = entry.strip_prefix(GLOBAL_PREFIX).unwrap_or(entry);
+            if !is_safe_segment(id) {
+                return Err(format!(
+                    "health.playbooks: `{entry}` is not a playbook id or `global:<id>`"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `playbook` passes this file's list.
+    fn watches(&self, playbook: &PlaybookKey) -> bool {
+        self.playbooks
+            .as_ref()
+            .is_none_or(|list| list.iter().any(|e| *e == playbook.name()))
+    }
 }
 
 /// The `runs:` section: how long apb keeps what a run start leaves.
@@ -60,6 +93,24 @@ pub struct RunsSection {
     /// The days a start key is remembered (1 to 365, default 7). A project
     /// file may only lengthen the machine's.
     pub start_key_days: Option<u32>,
+    /// Successful runs older than this many days are removed (1 to 3650,
+    /// default 30).
+    pub keep_days: Option<u32>,
+    /// The newest runs of each playbook always stay (1 to 3650, default
+    /// 20).
+    pub keep_last: Option<u32>,
+    /// Failed and aborted runs older than this many days are removed (1
+    /// to 3650, default 90).
+    pub keep_failed_days: Option<u32>,
+}
+
+/// The retention settings in force over one project: each value the
+/// larger of the machine and the project, defaults when unset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionSettings {
+    pub keep_days: u32,
+    pub keep_last: u32,
+    pub keep_failed_days: u32,
 }
 
 impl RunsSection {
@@ -69,7 +120,19 @@ impl RunsSection {
                 Err(format!("runs.start_key_days is {d}; use 1 to 365 days"))
             }
             _ => Ok(()),
+        }?;
+        for (key, value) in [
+            ("keep_days", self.keep_days),
+            ("keep_last", self.keep_last),
+            ("keep_failed_days", self.keep_failed_days),
+        ] {
+            if let Some(v) = value
+                && !(1..=3650).contains(&v)
+            {
+                return Err(format!("runs.{key} is {v}; use 1 to 3650"));
+            }
         }
+        Ok(())
     }
 }
 
@@ -290,10 +353,35 @@ impl Policies {
             .map_or(machine, |p| p.max(machine))
     }
 
+    /// The retention settings in force: each the machine's value (the
+    /// default when it sets none), lengthened by a value the project sets;
+    /// a project that sets nothing never lengthens it.
+    pub fn retention(&self) -> RetentionSettings {
+        let take = |m: Option<u32>, p: Option<u32>, default: u32| {
+            let machine = m.unwrap_or(default);
+            p.map_or(machine, |p| p.max(machine))
+        };
+        RetentionSettings {
+            keep_days: take(self.machine.runs.keep_days, self.project.runs.keep_days, 30),
+            keep_last: take(self.machine.runs.keep_last, self.project.runs.keep_last, 20),
+            keep_failed_days: take(
+                self.machine.runs.keep_failed_days,
+                self.project.runs.keep_failed_days,
+                90,
+            ),
+        }
+    }
+
     /// Whether a default subscription covers `playbook`: both files'
     /// `playbooks` filters pass it.
     pub fn covers(&self, playbook: &PlaybookKey) -> bool {
         self.machine.notify.covers(playbook) && self.project.notify.covers(playbook)
+    }
+
+    /// Whether this machine watches `playbook`'s health: both files'
+    /// `health.playbooks` pass it (the project narrows).
+    pub fn health_watches(&self, playbook: &PlaybookKey) -> bool {
+        self.machine.health.watches(playbook) && self.project.health.watches(playbook)
     }
 
     /// The machine's `finished` filter narrowed by the project's.
@@ -338,6 +426,7 @@ fn parse_as(raw: &str, source: PolicySource) -> Result<PolicyFile, String> {
     file.notify.validate()?;
     file.launch.validate(source)?;
     file.runs.validate()?;
+    file.health.validate()?;
     Ok(file)
 }
 
@@ -408,6 +497,18 @@ fn summary(file: &PolicyFile) -> String {
     if let Some(d) = file.runs.start_key_days {
         sets.push(format!("runs.start_key_days {d}"));
     }
+    for (key, value) in [
+        ("keep_days", file.runs.keep_days),
+        ("keep_last", file.runs.keep_last),
+        ("keep_failed_days", file.runs.keep_failed_days),
+    ] {
+        if let Some(v) = value {
+            sets.push(format!("runs.{key} {v}"));
+        }
+    }
+    if let Some(p) = &file.health.playbooks {
+        sets.push(format!("health.playbooks [{}]", p.join(", ")));
+    }
     if sets.is_empty() {
         "valid, sets nothing".into()
     } else {
@@ -418,6 +519,87 @@ fn summary(file: &PolicyFile) -> String {
 #[cfg(test)]
 mod runs_tests {
     use super::*;
+
+    /// The retention defaults are 30, 20 and 90 days; a value out of
+    /// range is refused with the key named; a project file only
+    /// lengthens what the machine sets.
+    #[test]
+    fn retention_defaults_are_30_20_90() {
+        let parsed = parse("").unwrap();
+        assert_eq!(parsed.runs.keep_days, None);
+        assert_eq!(parsed.runs.keep_last, None);
+        assert_eq!(parsed.runs.keep_failed_days, None);
+        let both = |m: RunsSection, p: RunsSection| Policies {
+            machine: PolicyFile {
+                runs: m,
+                ..Default::default()
+            },
+            project: PolicyFile {
+                runs: p,
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            both(RunsSection::default(), RunsSection::default()).retention(),
+            RetentionSettings {
+                keep_days: 30,
+                keep_last: 20,
+                keep_failed_days: 90
+            }
+        );
+        let long = |f: u32| RunsSection {
+            keep_days: Some(f),
+            ..Default::default()
+        };
+        assert_eq!(
+            both(long(60), RunsSection::default()).retention().keep_days,
+            60
+        );
+        assert_eq!(both(long(60), long(30)).retention().keep_days, 60);
+        assert_eq!(
+            both(RunsSection::default(), long(60)).retention().keep_days,
+            60
+        );
+        assert_eq!(both(long(90), long(30)).retention().keep_days, 90);
+    }
+
+    /// A project that leaves a value unset keeps the machine's shorter
+    /// value: only a value the project sets lengthens it.
+    #[test]
+    fn an_unset_project_value_keeps_a_shorter_machine_value() {
+        let p = Policies {
+            machine: PolicyFile {
+                runs: RunsSection {
+                    keep_days: Some(7),
+                    keep_last: Some(2),
+                    keep_failed_days: Some(14),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            project: PolicyFile::default(),
+        };
+        assert_eq!(
+            p.retention(),
+            RetentionSettings {
+                keep_days: 7,
+                keep_last: 2,
+                keep_failed_days: 14
+            }
+        );
+    }
+
+    #[test]
+    fn a_keep_value_out_of_range_is_refused() {
+        for key in ["keep_days", "keep_last", "keep_failed_days"] {
+            for bad in ["0", "3651"] {
+                let e = parse(&format!("runs:\n  {key}: {bad}\n")).unwrap_err();
+                assert!(e.contains(&format!("runs.{key}")), "{e}");
+            }
+        }
+        assert!(parse("runs:\n  keep_days: 1\n").is_ok());
+        assert!(parse("runs:\n  keep_days: 3650\n").is_ok());
+    }
 
     /// `runs.start_key_days` reads within 1 to 365 days and names the key
     /// when it is out of range; a project file only lengthens it.
@@ -432,11 +614,17 @@ mod runs_tests {
         assert!(parse("runs:\n  other: 1\n").is_err());
         let both = |m: Option<u32>, p: Option<u32>| Policies {
             machine: PolicyFile {
-                runs: RunsSection { start_key_days: m },
+                runs: RunsSection {
+                    start_key_days: m,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             project: PolicyFile {
-                runs: RunsSection { start_key_days: p },
+                runs: RunsSection {
+                    start_key_days: p,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         };
@@ -446,5 +634,72 @@ mod runs_tests {
         assert_eq!(both(Some(3), None).start_key_days(), 3);
         assert_eq!(both(None, Some(3)).start_key_days(), 7);
         assert!(summary(&ten).contains("runs.start_key_days 10"));
+    }
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+
+    fn both(machine: &str, project: &str) -> Policies {
+        Policies {
+            machine: parse(machine).unwrap(),
+            project: parse_as(project, PolicySource::Project).unwrap(),
+        }
+    }
+
+    const DIGEST: PlaybookKey<'static> = PlaybookKey {
+        id: "digest",
+        global: false,
+    };
+
+    #[test]
+    fn an_empty_list_is_valid_and_watches_nothing() {
+        let p = both("health:\n  playbooks: []\n", "");
+        assert!(!p.health_watches(&DIGEST));
+    }
+
+    #[test]
+    fn an_absent_list_watches_every_playbook() {
+        assert!(both("", "").health_watches(&DIGEST));
+        assert!(both("health: {}\n", "").health_watches(&DIGEST));
+    }
+
+    #[test]
+    fn the_project_narrows() {
+        let p = both(
+            "health:\n  playbooks: [digest, crm]\n",
+            "health:\n  playbooks: [crm]\n",
+        );
+        assert!(!p.health_watches(&DIGEST));
+        assert!(p.health_watches(&PlaybookKey {
+            id: "crm",
+            global: false
+        }));
+        let p = both("", "health:\n  playbooks: [crm]\n");
+        assert!(!p.health_watches(&DIGEST));
+    }
+
+    #[test]
+    fn an_unknown_health_key_is_refused() {
+        let e = parse("health:\n  rules: 3\n").unwrap_err();
+        assert!(e.contains("rules"), "{e}");
+        let e = parse("health:\n  playbooks: [\"../x\"]\n").unwrap_err();
+        assert!(e.contains("health.playbooks"), "{e}");
+    }
+
+    #[test]
+    fn a_global_entry_matches_a_global_playbook() {
+        let p = both("health:\n  playbooks: [\"global:digest\"]\n", "");
+        assert!(!p.health_watches(&DIGEST));
+        assert!(p.health_watches(&PlaybookKey {
+            id: "digest",
+            global: true
+        }));
+        assert!(
+            summary(&p.machine).contains("health.playbooks [global:digest]"),
+            "{}",
+            summary(&p.machine)
+        );
     }
 }

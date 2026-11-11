@@ -156,7 +156,7 @@ fn three_runs() -> Vec<StatsRun> {
 
 #[test]
 fn first_pass_counts_only_runs_with_no_retry_fallback_or_loop() {
-    let r = build(&three_runs(), &StatsFilter::default());
+    let r = build(&three_runs(), &[], &StatsFilter::default());
     assert_eq!(r.runs, 3);
     let v = &r.versions[0];
     assert_eq!(v.success, Rate::new(2, 3));
@@ -178,7 +178,7 @@ fn first_pass_counts_only_runs_with_no_retry_fallback_or_loop() {
 
 #[test]
 fn gate_wait_pairs_each_request_with_its_decision() {
-    let r = build(&three_runs(), &StatsFilter::default());
+    let r = build(&three_runs(), &[], &StatsFilter::default());
     let v = &r.versions[0];
     assert_eq!(v.gate_wait.count, 1);
     assert_eq!(v.gate_wait.median_ms, Some(60_000));
@@ -213,14 +213,14 @@ fn goal_results_are_counted_per_criterion() {
         ),
         run("c", "1.0.0", None, &[(3_000, end("succeeded"))]),
     ];
-    let v = &build(&runs, &StatsFilter::default()).versions[0];
+    let v = &build(&runs, &[], &StatsFilter::default()).versions[0];
     assert_eq!(v.goal.len(), 2);
     assert_eq!(v.goal[0].passed.text(), "1/2 (50%)");
     assert_eq!(v.goal[0].failed, 1);
     assert_eq!(v.goal[1].manual, 2);
     assert_eq!(v.goal[1].passed.of, 0);
     // A version whose runs checked no goal has none.
-    let plain = build(&three_runs(), &StatsFilter::default());
+    let plain = build(&three_runs(), &[], &StatsFilter::default());
     assert!(plain.versions[0].goal.is_empty());
 }
 
@@ -243,7 +243,7 @@ fn compare_puts_the_base_against_the_latest_other_version() {
         compare: Some("1.0.0".into()),
         ..Default::default()
     };
-    let r = build(&runs, &filter);
+    let r = build(&runs, &[], &filter);
     // Versions sort numerically, so 1.10.0 is the latest.
     let order: Vec<&str> = r.versions.iter().map(|v| v.version.as_str()).collect();
     assert_eq!(order, ["1.0.0", "1.2.0", "1.10.0"]);
@@ -251,7 +251,7 @@ fn compare_puts_the_base_against_the_latest_other_version() {
     assert_eq!(c.against.as_deref(), Some("1.10.0"));
     assert_eq!(c.success_delta, Some(0.33));
     assert_eq!(c.first_pass_delta, Some(0.67));
-    let text = render_text(&build(&runs, &filter));
+    let text = render_text(&build(&runs, &[], &filter));
     assert!(text.contains("compare p 1.0.0 -> 1.10.0"), "{text}");
     assert!(text.contains("success: +33 points"), "{text}");
 }
@@ -260,6 +260,7 @@ fn compare_puts_the_base_against_the_latest_other_version() {
 fn filters_and_the_empty_report() {
     let r = build(
         &three_runs(),
+        &[],
         &StatsFilter {
             playbook: Some("other".into()),
             ..Default::default()
@@ -270,6 +271,7 @@ fn filters_and_the_empty_report() {
     assert_eq!(render_text(&r), "no runs recorded\n");
     let later = build(
         &three_runs(),
+        &[],
         &StatsFilter {
             since_ms: Some(2_000),
             ..Default::default()
@@ -301,19 +303,19 @@ fn spend_sums_the_usage_the_attempts_reported() {
         ),
         run("c", "1.0.0", None, &[(3_000, end("succeeded"))]),
     ];
-    let v = &build(&runs, &StatsFilter::default()).versions[0];
+    let v = &build(&runs, &[], &StatsFilter::default()).versions[0];
     assert_eq!(v.spend.runs_with_usage, 2);
     assert_eq!(v.spend.tokens.total, 300);
     assert_eq!(v.spend.tokens.per_run, Some(150.0));
     assert_eq!(v.spend.runs_with_cost, 1);
     assert_eq!(v.spend.cost_per_run_usd, Some(0.02));
-    let text = render_text(&build(&runs, &StatsFilter::default()));
+    let text = render_text(&build(&runs, &[], &StatsFilter::default()));
     assert!(text.contains("reported by 1 of 3 runs"), "{text}");
 }
 
 #[test]
 fn the_json_shape_is_stable() {
-    let r = build(&three_runs()[..1], &StatsFilter::default());
+    let r = build(&three_runs()[..1], &[], &StatsFilter::default());
     let v = serde_json::to_value(&r).unwrap();
     assert_eq!(v["runs"], 1);
     assert_eq!(
@@ -345,7 +347,7 @@ fn a_host_execution_fallback_counts_as_a_fallback() {
             (4_000, end("succeeded")),
         ],
     )];
-    let r = build(&runs, &StatsFilter::default());
+    let r = build(&runs, &[], &StatsFilter::default());
     let v = &r.versions[0];
     assert_eq!(v.fallbacks.total, 1);
     assert_eq!(v.first_pass.text(), "0/1 (0%)");
@@ -375,7 +377,7 @@ fn a_withdrawn_review_request_is_not_paired_with_the_next_decision() {
             (1_600, end("succeeded")),
         ],
     )];
-    let v = &build(&runs, &StatsFilter::default()).versions[0];
+    let v = &build(&runs, &[], &StatsFilter::default()).versions[0];
     // Waits of 60 ms and 20 ms; the withdrawn request records none (paired
     // with the first decision it would read 160 ms).
     assert_eq!(v.gate_wait.count, 2);
@@ -395,7 +397,7 @@ fn an_infrastructure_retry_without_retry_started_is_not_a_first_pass_run() {
             (3_000, end("succeeded")),
         ],
     )];
-    let v = &build(&runs, &StatsFilter::default()).versions[0];
+    let v = &build(&runs, &[], &StatsFilter::default()).versions[0];
     assert_eq!(v.first_pass.text(), "0/1 (0%)");
     let w = v.nodes.iter().find(|n| n.node == "w").unwrap();
     assert_eq!(w.first_pass.text(), "0/1 (0%)");
@@ -408,7 +410,7 @@ fn compare_against_a_version_without_runs_says_so() {
         compare: Some("9.9.9".into()),
         ..Default::default()
     };
-    let text = render_text(&build(&three_runs(), &filter));
+    let text = render_text(&build(&three_runs(), &[], &filter));
     assert!(text.contains("compare p 9.9.9: no runs of 9.9.9"), "{text}");
 }
 
@@ -437,7 +439,7 @@ fn a_two_hour_pause_is_left_out_of_run_and_node_durations() {
             (10_000 + 2 * hour, end("succeeded")),
         ],
     )];
-    let r = build(&runs, &StatsFilter::default());
+    let r = build(&runs, &[], &StatsFilter::default());
     let v = &r.versions[0];
     // 1 000 -> 10 000 + 2 h, minus the 2 h pause.
     assert_eq!(v.duration.median_ms, Some(9_000));
@@ -466,7 +468,7 @@ fn the_day_a_run_sat_failed_before_a_resume_is_left_out() {
             (9_000 + day, end("succeeded")),
         ],
     )];
-    let r = build(&runs, &StatsFilter::default());
+    let r = build(&runs, &[], &StatsFilter::default());
     assert_eq!(r.versions[0].duration.median_ms, Some(8_000));
 }
 
@@ -526,7 +528,7 @@ fn findings_group_by_kind_and_location_across_runs() {
             ],
         ),
     ];
-    let v = &build(&runs, &StatsFilter::default()).versions[0];
+    let v = &build(&runs, &[], &StatsFilter::default()).versions[0];
     let bug = v.findings.by_kind.iter().find(|k| k.kind == "bug").unwrap();
     assert_eq!((bug.occurrences, bug.runs), (2, 2));
     let top = &v.findings.top[0];
@@ -540,7 +542,7 @@ fn findings_group_by_kind_and_location_across_runs() {
         ("bug", "src/a.rs", 2, "b")
     );
     assert_eq!(v.findings.runs_with_warnings.text(), "1/2 (50%)");
-    let text = render_text(&build(&runs, &StatsFilter::default()));
+    let text = render_text(&build(&runs, &[], &StatsFilter::default()));
     assert!(text.contains("bug at src/a.rs: 2 runs, last b"), "{text}");
     assert!(
         text.contains("findings: bug: 2 findings in 2 runs"),
@@ -557,7 +559,7 @@ fn the_last_run_of_a_finding_is_the_one_that_started_last() {
     let mut newer = run("newer", "1.0.0", None, &[(9_000, reported())]);
     newer.events[0].ts = 8_000;
     let older = run("older", "1.0.0", None, &[(2_000, reported())]);
-    let v = &build(&[newer, older], &StatsFilter::default()).versions[0];
+    let v = &build(&[newer, older], &[], &StatsFilter::default()).versions[0];
     assert_eq!(v.findings.top[0].last_run, "newer");
 }
 
@@ -578,7 +580,7 @@ fn a_hidden_character_in_a_reported_location_never_reaches_the_terminal() {
             ),
         )],
     )];
-    let text = render_text(&build(&runs, &StatsFilter::default()));
+    let text = render_text(&build(&runs, &[], &StatsFilter::default()));
     assert!(!text.contains('\u{202E}') && !text.contains('\u{1b}'));
     assert!(text.contains("bug at src/a.rs??[2J"));
 }
@@ -605,7 +607,7 @@ fn a_hidden_character_in_a_baseline_name_never_reaches_the_terminal() {
             (3_000, end("succeeded")),
         ],
     )];
-    let text = render_text(&build(&runs, &StatsFilter::default()));
+    let text = render_text(&build(&runs, &[], &StatsFilter::default()));
     assert!(!text.contains('\u{202E}') && !text.contains('\u{1b}'));
     assert!(text.contains("baseline deals?[2J.count?: met"), "{text}");
 }
@@ -640,7 +642,7 @@ fn cost_known_counts_attempts_that_reported_a_cost() {
             ],
         ),
     ];
-    let v = &build(&runs, &StatsFilter::default()).versions[0];
+    let v = &build(&runs, &[], &StatsFilter::default()).versions[0];
     assert_eq!((v.spend.cost_known.count, v.spend.cost_known.of), (1, 4));
 }
 
@@ -703,13 +705,13 @@ fn baseline_observations_count_met_regressed_and_unknown() {
             ],
         ),
     ];
-    let v = &build(&runs, &StatsFilter::default()).versions[0];
+    let v = &build(&runs, &[], &StatsFilter::default()).versions[0];
     let b = &v.baseline[0];
     assert_eq!(
         (b.compared, b.met.count, b.regressed, b.unknown),
         (3, 1, 1, 1)
     );
-    let text = render_text(&build(&runs, &StatsFilter::default()));
+    let text = render_text(&build(&runs, &[], &StatsFilter::default()));
     assert!(
         text.contains("baseline deals.count: met 1/3 (33%), regressed in 1, unknown in 1"),
         "{text}"
@@ -753,7 +755,7 @@ fn a_profile_change_within_a_version_splits_the_node_by_digest() {
         bind(one_visit("r2", "1.0.0", 300), "aaa"),
         bind(one_visit("r3", "1.0.0", 900), "bbb"),
     ];
-    let report = build(&runs, &StatsFilter::default());
+    let report = build(&runs, &[], &StatsFilter::default());
     let work = report.versions[0]
         .nodes
         .iter()
@@ -777,7 +779,7 @@ fn a_profile_change_within_a_version_splits_the_node_by_digest() {
     );
     // One executor throughout: no groups.
     let same = vec![bind(one_visit("r1", "1.0.0", 1), "aaa")];
-    let report = build(&same, &StatsFilter::default());
+    let report = build(&same, &[], &StatsFilter::default());
     assert!(
         report.versions[0]
             .nodes
@@ -797,7 +799,7 @@ fn compare_names_the_nodes_whose_latest_executor_changed() {
         compare: Some("1.0.0".into()),
         ..StatsFilter::default()
     };
-    let report = build(&runs, &filter);
+    let report = build(&runs, &[], &filter);
     let c = report.compare.as_ref().unwrap();
     assert_eq!(c.executor_changes.len(), 1);
     assert_eq!(
@@ -874,7 +876,7 @@ fn quality_rows_count_the_latest_grade_of_each_grader_per_run() {
         ),
         graded("d", "1.0.0", Vec::new()),
     ];
-    let r = build(&runs, &StatsFilter::default());
+    let r = build(&runs, &[], &StatsFilter::default());
     let q = &r.versions[0].quality;
     let rows: Vec<(&str, usize, String, String)> = q
         .iter()
@@ -926,6 +928,7 @@ fn quality_deltas_need_the_same_definition_on_both_sides() {
     ];
     let r = build(
         &runs,
+        &[],
         &StatsFilter {
             playbook: Some("p".into()),
             compare: Some("1.0.0".into()),
@@ -946,7 +949,7 @@ fn quality_deltas_need_the_same_definition_on_both_sides() {
 
 #[test]
 fn no_grade_means_no_quality_field() {
-    let r = build(&three_runs(), &StatsFilter::default());
+    let r = build(&three_runs(), &[], &StatsFilter::default());
     assert!(r.versions.iter().all(|v| v.quality.is_empty()));
     let json = serde_json::to_value(&r).unwrap();
     assert!(json["versions"][0].get("quality").is_none());
@@ -972,6 +975,7 @@ fn a_running_node_is_one_open_execution() {
             Some(SNAPSHOT),
             &[(1_100, started("work"))],
         )],
+        &[],
         &StatsFilter::default(),
     );
     let w = node_of(&r, "work");
@@ -1005,6 +1009,7 @@ fn a_quota_paused_first_execution_has_no_reentry() {
                 (1_700, finished("work", "succeeded", 1)),
             ],
         )],
+        &[],
         &StatsFilter::default(),
     );
     let w = node_of(&r, "work");
@@ -1040,6 +1045,7 @@ fn reentries_are_executions_less_runs_across_runs() {
                 ],
             ),
         ],
+        &[],
         &StatsFilter::default(),
     );
     let w = node_of(&r, "work");
@@ -1061,6 +1067,7 @@ fn a_finished_execution_and_an_open_one_are_one_reentry() {
                 (1_400, started("work")),
             ],
         )],
+        &[],
         &StatsFilter::default(),
     );
     let w = node_of(&r, "work");
@@ -1080,6 +1087,7 @@ fn a_race_loser_is_counted_apart() {
                 (1_100, finished("work", "cancelled", 1)),
             ],
         )],
+        &[],
         &StatsFilter::default(),
     );
     let w = node_of(&r, "work");
@@ -1101,6 +1109,7 @@ fn a_finish_without_a_prompt_counts_and_unexecuted_nodes_have_zero_rows() {
                 (1_500, end("succeeded")),
             ],
         )],
+        &[],
         &StatsFilter::default(),
     );
     let done = node_of(&r, "done");
@@ -1129,7 +1138,7 @@ fn unknown_membership_shows_for_a_node_that_also_executed() {
     // An older run: its snapshot names `work`, no definition is known.
     let mut old = run("r2", "1.0.0", Some(SNAPSHOT), &[(1_400, end("succeeded"))]);
     old.definitions = Default::default();
-    let r = build(&[executed, old], &StatsFilter::default());
+    let r = build(&[executed, old], &[], &StatsFilter::default());
     let w = node_of(&r, "work");
     assert_eq!((w.runs, w.in_runs, w.in_runs_unknown), (1, 1, 1));
     let text = render::render_text(&r);
@@ -1166,14 +1175,14 @@ fn only_production_runs_count_in_the_statistics() {
         with("eval", 9_000, RunOrigin::Eval),
         with("newer", 9_000, RunOrigin::Unknown),
     ];
-    let report = build(&runs, &StatsFilter::default());
+    let report = build(&runs, &[], &StatsFilter::default());
     assert_eq!(report.versions.len(), 1);
     let v = &report.versions[0];
     assert_eq!(v.runs, 1, "only the production run counts");
     assert_eq!(v.spend.runs_with_usage, 1);
     assert_eq!(
         v.spend,
-        build(&runs[..1], &StatsFilter::default()).versions[0].spend
+        build(&runs[..1], &[], &StatsFilter::default()).versions[0].spend
     );
 }
 
@@ -1270,7 +1279,7 @@ fn the_executor_report_splits_steps_and_names_transition_reasons() {
         "x1:eeeeeeeeeeeeeeee".into(),
         vec!["primary".into(), "fallback".into(), "fallback".into()],
     );
-    let report = build(&[r], &StatsFilter::default());
+    let report = build(&[r], &[], &StatsFilter::default());
     let groups = group_of(&report);
     assert_eq!(groups.len(), 1);
     let g = &groups[0];
@@ -1361,7 +1370,7 @@ fn a_transition_written_after_the_attempt_it_entered_counts_once() {
         ],
     );
     let r = with_identities(r, "x1:sha256:0123456789abcdef0123456789abcdef", false);
-    let report = build(&[r], &StatsFilter::default());
+    let report = build(&[r], &[], &StatsFilter::default());
     let g = &group_of(&report)[0];
     assert_eq!(
         g.transitions,
@@ -1404,7 +1413,7 @@ fn a_step_cost_splits_by_basis() {
         ],
     );
     let r = with_identities(r, "x1:eeeeeeeeeeeeeeee", false);
-    let report = build(&[r], &StatsFilter::default());
+    let report = build(&[r], &[], &StatsFilter::default());
     let step = &group_of(&report)[0].steps[0];
     assert_eq!(step.cost_usd, Some(0.875));
     assert_eq!(
@@ -1453,7 +1462,7 @@ fn an_old_journal_reads_not_recorded_and_is_never_reclassified() {
         "x1:eeeeeeeeeeeeeeee".into(),
         vec!["tier".into(), "primary".into(), "fallback".into()],
     );
-    let report = build(&[r], &StatsFilter::default());
+    let report = build(&[r], &[], &StatsFilter::default());
     let g = &group_of(&report)[0];
     assert_eq!(g.steps.len(), 1, "{:?}", g.steps);
     assert_eq!(
@@ -1497,7 +1506,7 @@ fn an_override_equal_to_the_base_is_its_own_executor_group() {
     next.node_profiles
         .insert("work".into(), digests("x1:cccccccccccccccc"));
     let runs = vec![base.clone(), over.clone(), next];
-    let report = build(&runs, &StatsFilter::default());
+    let report = build(&runs, &[], &StatsFilter::default());
     let groups: Vec<_> = node_of(&report, "work")
         .digests
         .iter()
@@ -1509,6 +1518,7 @@ fn an_override_equal_to_the_base_is_its_own_executor_group() {
     );
     let report = build(
         &[base, runs[2].clone()],
+        &[],
         &StatsFilter {
             playbook: Some("p".into()),
             compare: Some("1.0.0".into()),
@@ -1551,7 +1561,7 @@ fn hint_follow_counts_followed_not_followed_and_not_reported() {
         "x1:hhhhhhhhhhhhhhhh",
         false,
     );
-    let report = build(&[r], &StatsFilter::default());
+    let report = build(&[r], &[], &StatsFilter::default());
     let g = &group_of(&report)[0];
     assert_eq!(
         g.hint_follow,
@@ -1586,7 +1596,7 @@ fn a_host_group_without_hints_has_no_hint_counts() {
         "x1:hhhhhhhhhhhhhhhh",
         false,
     );
-    let report = build(&[r], &StatsFilter::default());
+    let report = build(&[r], &[], &StatsFilter::default());
     let g = &group_of(&report)[0];
     assert_eq!(g.hint_follow, None);
 }
@@ -1618,7 +1628,7 @@ fn quality_rows_of_a_node_criterion_split_by_executor() {
         );
         runs.push(r);
     }
-    let report = build(&runs, &StatsFilter::default());
+    let report = build(&runs, &[], &StatsFilter::default());
     let q = &report.versions[0].quality[0];
     assert_eq!(q.graded_runs, 3);
     let by: Vec<_> = q
@@ -1634,4 +1644,156 @@ fn quality_rows_of_a_node_criterion_split_by_executor() {
         })
         .collect();
     assert_eq!(by, vec![("aaaa", 2, 0, 2), ("cccc", 0, 1, 1)]);
+}
+
+/// An archived run of `p` for the stats tests over the archive.
+fn archived_run(
+    id: &str,
+    version: &str,
+    origin: &str,
+    outcome: &str,
+    started_ms: u64,
+) -> crate::retention::archive::ArchivedRun {
+    crate::retention::archive::ArchivedRun {
+        run_id: id.into(),
+        playbook: "p".into(),
+        scope: "project".into(),
+        version: version.into(),
+        origin: origin.into(),
+        parent: None,
+        started_ms,
+        ended_ms: Some(started_ms + 10),
+        outcome: outcome.into(),
+        class: if outcome == "succeeded" {
+            "succeeded".into()
+        } else {
+            "failed".into()
+        },
+        aborted_by: None,
+        abort_code: None,
+        active_ms: None,
+        tokens: Some(100),
+        cost_usd: Some(0.5),
+        execution: Some("cli".into()),
+    }
+}
+
+fn version_json(r: &StatsReport, version: &str) -> serde_json::Value {
+    let v = serde_json::to_value(r).unwrap();
+    v["versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["version"] == version)
+        .cloned()
+        .unwrap_or_else(|| panic!("no version {version} in {v}"))
+}
+
+#[test]
+fn an_archive_only_version_is_listed() {
+    let live = vec![run(
+        "r1",
+        "1.1.0",
+        Some(SNAPSHOT),
+        &[(1_100, started("work")), (1_200, end("succeeded"))],
+    )];
+    let archived = vec![
+        archived_run("a1", "1.0.0", "production", "succeeded", 500),
+        archived_run("a2", "1.0.0", "production", "failed", 600),
+    ];
+    let r = build(&live, &archived, &StatsFilter::default());
+    assert!(r.note.is_none());
+    let old = version_json(&r, "1.0.0");
+    assert_eq!(old["runs"], 0);
+    assert_eq!(old["archived"]["runs"], 2);
+    assert_eq!(old["archived"]["succeeded"], 1);
+    assert_eq!(old["archived"]["failed"], 1);
+    assert_eq!(old["archived"]["tokens"], 200);
+    let new = version_json(&r, "1.1.0");
+    assert_eq!(new["runs"], 1);
+    assert!(new.get("archived").is_none());
+}
+
+#[test]
+fn archived_runs_follow_the_filter() {
+    let archived = vec![
+        archived_run("a1", "1.0.0", "production", "succeeded", 500),
+        archived_run("a2", "1.0.0", "production", "failed", 5_000),
+    ];
+    let r = build(
+        &[],
+        &archived,
+        &StatsFilter {
+            since_ms: Some(1_000),
+            ..Default::default()
+        },
+    );
+    assert_eq!(version_json(&r, "1.0.0")["archived"]["runs"], 1);
+    let r = build(
+        &[],
+        &archived,
+        &StatsFilter {
+            playbook: Some("other".into()),
+            ..Default::default()
+        },
+    );
+    assert!(r.versions.is_empty());
+    assert_eq!(r.note.as_deref(), Some(NO_RUNS));
+}
+
+#[test]
+fn archived_counts_production_summaries_only() {
+    let mut child = archived_run("a4", "1.0.0", "production", "succeeded", 500);
+    child.parent = Some("a1".into());
+    let archived = vec![
+        archived_run("a1", "1.0.0", "production", "succeeded", 500),
+        archived_run("a2", "1.0.0", "eval", "succeeded", 500),
+        archived_run("a3", "1.0.0", "external_data", "succeeded", 500),
+        child,
+    ];
+    let r = build(&[], &archived, &StatsFilter::default());
+    assert_eq!(version_json(&r, "1.0.0")["archived"]["runs"], 1);
+}
+
+#[test]
+fn render_text_prints_the_archived_line() {
+    let mut aborted = archived_run("a3", "1.0.0", "production", "aborted", 500);
+    aborted.class = "ignored".into();
+    let archived = vec![
+        archived_run("a1", "1.0.0", "production", "succeeded", 500),
+        archived_run("a2", "1.0.0", "production", "failed", 500),
+        aborted,
+    ];
+    let text = render_text(&build(&[], &archived, &StatsFilter::default()));
+    assert!(
+        text.contains("archived: 3 runs (1 succeeded, 1 failed, 1 aborted)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn stats_list_playbooks_not_ok() {
+    let view = |id: &str, status: &str| crate::health::view::HealthView {
+        playbook: id.into(),
+        scope: "project".into(),
+        status: status.into(),
+        rules: vec![crate::health::view::HealthRuleView {
+            rule: "overdue".into(),
+            tripped: status == "tripped",
+            since: None,
+            detail: String::new(),
+        }],
+        hold: None,
+        muted_until: None,
+        last_notice: None,
+    };
+    let mut r = build(&[], &[], &StatsFilter::default());
+    r.health = vec![view("good", "ok"), view("late", "tripped")];
+    let text = render_text(&r);
+    assert!(
+        text.starts_with("health: late tripped (overdue)\n"),
+        "{text}"
+    );
+    assert!(!text.contains("good"), "{text}");
+    assert!(text.contains(NO_RUNS), "{text}");
 }

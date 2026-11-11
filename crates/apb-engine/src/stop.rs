@@ -70,8 +70,8 @@ pub const PARENT_ABORTED_REASON: &str = "parent aborted";
 /// Serializes `stop_run`'s read-check-append over the run journal against
 /// another `stop_run` racing it: without it two concurrent stops of the same
 /// dead run could both observe a non-terminal state and both append
-/// `RunAborted`.
-pub const EVENT_LOCK: &str = "events.jsonl.lock";
+/// `RunAborted`. Defined in the leaf [`crate::run_lock`].
+pub use crate::run_lock::EVENT_LOCK;
 
 /// What a `stop_run` call actually did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

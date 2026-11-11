@@ -155,6 +155,31 @@ pub fn all_runs_of(roots: &[PathBuf], id: &str, version: Option<&str>) -> Vec<Pa
     matched.into_iter().map(|(_, d)| d).collect()
 }
 
+/// The runs routine health counts of playbook `id` under `roots`, newest
+/// start first: every run apb created here whose manifest origin is
+/// production or external data. Health is operational, like the follow-up
+/// check, so an external data run counts; an eval or scenario run never
+/// does.
+pub fn operational_runs_of(roots: &[PathBuf], id: &str) -> Vec<PathBuf> {
+    let mut matched: Vec<(u128, PathBuf)> = crate::decision::report::candidate_run_dirs(roots)
+        .into_iter()
+        .filter_map(|d| {
+            let head = started(&d)?;
+            (head.playbook == id).then_some((head.ts, d))
+        })
+        .filter(|(_, d)| {
+            crate::decision::report::created_here(d)
+                && matches!(
+                    crate::manifest::RunOrigin::of_read(&crate::manifest::read(d)),
+                    crate::manifest::RunOrigin::Production
+                        | crate::manifest::RunOrigin::ExternalData
+                )
+        })
+        .collect();
+    matched.sort_by_key(|a| std::cmp::Reverse(a.0));
+    matched.into_iter().map(|(_, d)| d).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -237,6 +262,31 @@ mod tests {
                     names(super::all_runs_of(&roots, "p", Some("1.0.0"))),
                     ["prod", "old"]
                 );
+            },
+        );
+    }
+
+    /// The runs health counts: production and external data runs, never
+    /// an eval run.
+    #[test]
+    fn operational_runs_include_external_data_and_exclude_eval() {
+        apb_core::process_mode::testing::in_plain_child(
+            "run_history::tests::operational_runs_include_external_data_and_exclude_eval",
+            || {
+                let cfg = tempfile::tempdir().unwrap();
+                // SAFETY: a child process runs this one test on one thread.
+                unsafe { std::env::set_var("APB_CONFIG_DIR", cfg.path()) };
+                apb_core::run_origin::ensure_key().unwrap();
+                let project = tempfile::tempdir().unwrap();
+                let root = project.path();
+                seed(root, "prod", 1, Some(RunOrigin::Production));
+                seed(root, "flagged", 2, Some(RunOrigin::ExternalData));
+                seed(root, "eval", 3, Some(RunOrigin::Eval));
+                let names: Vec<String> = super::operational_runs_of(&[root.to_path_buf()], "p")
+                    .iter()
+                    .map(|d| d.file_name().unwrap().to_string_lossy().into_owned())
+                    .collect();
+                assert_eq!(names, ["flagged", "prod"]);
             },
         );
     }

@@ -30,7 +30,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
-  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`), `output_types` for the typed output field contract V167-V168, `write_scope` for a declared write scope V170-V172, `deadline` for a run's `deadline` V200, `previous_success` for the `run.previous_success` grammar, the `when_none` block and V176; `nodes` also holds V68, ids that start with `@`
+  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`), `output_types` for the typed output field contract V167-V168, `write_scope` for a declared write scope V170-V172, `deadline` for a run's `deadline` V200, `concurrency` for the `concurrency:` block V210 and V211, `health` for the `health:` block V212, `previous_success` for the `run.previous_success` grammar, the `when_none` block and V176; `nodes` also holds V68, ids that start with `@`
   are the engine's, V101, `audience` on a finish without a prompt, and
   V163, a `success_check` `scope` that names no glob or one that does not
   compile, and V173, a `prove_fails_first` proof that cannot mean anything), the
@@ -39,9 +39,16 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   a filtered `finished` (`Coverage`), and `precedence` combining them),
   the settings file `policy.yaml` of the machine and the project
   (`policy_file.rs`: the strict reader of its `notify:` filters and its
-  `launch:` section, its `runs:` section (`start_key_days`, a project
-  only lengthening the machine's), and the doctor line; nothing in apb
-  writes it), the start key's pure half (`start_key.rs`: `StartKey::parse`,
+  `launch:` section, its `runs:` section (`start_key_days` and the
+  retention keys `keep_days`, `keep_last` and `keep_failed_days`,
+  `RetentionSettings`, a project only lengthening the machine's), its
+  `health:` section (`health.playbooks`, the playbooks this machine
+  watches, a project narrowing it, `Policies::health_watches`), and the
+  doctor line; nothing in apb writes it), the concurrency key's schema
+  (`concurrency.rs`: the `concurrency:` block, `OnBusy`, the key and
+  display limits, `SUPERSEDED`), the routine health rules (`health.rs`:
+  the `health:` block, `RunClass` and `class_of`, the one classification
+  a live run and an archived one share, `RunFact` and `evaluate`), the start key's pure half (`start_key.rs`: `StartKey::parse`,
   the frozen `StartRequest` captured from `StartRequestFields` once by a
   launch surface, `StartKeyRequest`, and `StartKeysFile`, the signed
   per-playbook file of key MACs under `.apb/start-keys/`, with pending and
@@ -446,6 +453,29 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `gate::launch::decide` for a run step's new start only;
   `run_view/started.rs` the starter and the reverse links read from the
   new runs' records, bounded at 500 run directories),
+  the concurrency key (`concurrency.rs`: the run check `checked_run` every
+  stored run name goes through, the owner lock of a provisional claim,
+  `heal`, `admit` in one recoverable transaction, the stops posted outside
+  it, `wait_turn`, a resume's `reserve_resume`, the patch refusal and the
+  doctor line; `concurrency/slots.rs` the signed slot file, a leaf the run
+  surfaces read), routine health (`health/`: `mod` the evaluation in three
+  phases, the claim and the dispatch check under the generation, `sweep`,
+  `view`, `clear`, `mute`, the doctor line and `install` of the terminal
+  observer; `state` the signed state file with its notice ledger,
+  `hold_refusal` and `reference`; `view` the view types; `facts` the facts
+  over the combined run view), the journal's terminal observer
+  (`terminal_hook.rs`, a leaf: `EventLog::append_inner` calls it once a
+  `run_finished` or `run_aborted` line is in the file, and the `apb`
+  binary installs `health`'s at start), the health sender
+  (`notify/health.rs`: the pinned target, `send` through
+  `connector::call::play_call_pinned`, the outcome classes), run retention
+  (`retention/`: `mod` the plan with its keep rules over whole families and
+  `apply` with the recheck under the journal locks; `archive` the signed
+  summaries, the commit protocol, `recover` and `runs_view`, the combined
+  view every reader counts from), the review channel's torn tail
+  (`review.rs`: a torn last line of `reviews.jsonl` reads as a decision not
+  yet written, a torn middle line still fails, a poster writes one whole
+  line and first repairs a tail a crashed poster left),
   the run deadline (`run_deadline.rs`: the deadline in force, the
   `DeadlineLatch` every work site checks through `refuses_work`, the
   graceful stop decided under the event lock (`stop_if_expired` over
@@ -542,8 +572,11 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   (`external_data_remember_refused`), `check_resume`, `learnable_run_dirs`
   filtering before the cap, `flagged_markers` for discovery and the save
   hook),
-  the tree-scoped busy lock (`workdir.rs`), attempt failure
-  classification and the bounded infrastructure backoff (`failure_class.rs`),
+  the tree-scoped busy lock (`workdir.rs`), the run's event lock
+  and `in_run`, a write into a run (a grade, a grading session) under
+  that lock that never lands where a pruned run was (`run_lock.rs`),
+  attempt failure classification and the bounded infrastructure
+  backoff (`failure_class.rs`),
   what an ending run records (`run_end.rs`: the one call every end path
   makes, the known problems and the corrections), the corrections a run
   contributes (`corrections/`: `extract` the sightings of a journal and
@@ -760,7 +793,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   answer without a terminal, except `--feedback-loop yes`, which only a
   person gives at a terminal (refused with 3 otherwise and inside a run
   step). `setup.rs` is `apb setup plan|apply|remove`
-  over `apb_mcp::setup`. `hook.rs` is `apb hook stop`, Claude Code's Stop
+  over `apb_mcp::setup`. `health.rs` is `apb health` (the state, `check`
+  with exit 3 on hold, a person's `clear`, `mute` and `unmute`, refused
+  inside a run step), `prune.rs` is `apb runs prune` (a dry run unless
+  `--yes`, a person's command). `hook.rs` is `apb hook stop`, Claude Code's Stop
   hook over `apb_core::save_nudge`, which prints the host's answer or
   nothing and always exits 0. `apb self-update` updates
   installer-based installs in place, then runs the hidden `apb
@@ -815,7 +851,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `quality` for a run's grades, a playbook's candidate, its summary and a
   promotion that names what it saw, `judge` for the judge sandbox and
   labelled examples, `scenario` for scenario runs, `demo` for the keyless
-  demo, `passkeys` for the enrollment and assertion ceremonies over the
+  demo, `health_sweep.rs` the dashboard's sweep of every watched playbook
+  every ten minutes, `passkeys` for the enrollment and assertion ceremonies over the
   machine's passkey store (the assertion challenge for a decision
   derived from the run, gate, decision, request and nonce the engine
   re-derives), `problems` for
@@ -856,6 +893,26 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   under the run's event lock, so a resume's grant committed first counts;
   a plain resume past the deadline is refused `deadline_passed`. The run
   guard names `deadline`, and a supervisor patch may not change it.
+  A `concurrency:` key (spec
+  `docs/superpowers/specs/2026-11-11-routine-health-design.md`) is taken
+  after the start key and before the tree, for starts and resumes alike:
+  at most one active and one waiting run per key, a newer start replacing
+  the waiting one (`superseded:`), `supersede` also stopping the active
+  one, `refuse` refusing `concurrency_busy`; a provisional claim belongs to
+  the live process holding its owner lock, every promised stop is posted
+  outside the slot's transaction, and a run step never waits for or
+  replaces its own run (`concurrency_own_run`). The slot file and the
+  health state are signed per-playbook files that refuse a file that does
+  not verify. A `health:` block's rules are evaluated after every run end,
+  by `apb health check`, `apb resume --all` and the dashboard; a trip and
+  a recovery each send one notice, claimed and settled in the health
+  file's ledger under its generation, and `on_trip: hold` refuses starts
+  (`playbook_on_hold`) until a person's `apb health clear`. `apb runs
+  prune` never removes a live run, the newest, the latest success, a run
+  with a pending follow-up, a graded or candidate trial run, an unknown
+  send, a run a live start key or a slot names, or a parent of a run it
+  keeps; it removes a family whole, writing its signed summary before the
+  directories move to staging, and commits by one rename.
 
 - **Run quality** (`docs/QUALITY.md`): a playbook's `quality:` block names
   the built-in criteria and at most three of its own. The rules grader

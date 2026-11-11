@@ -388,6 +388,109 @@ no history at start. The method:
   finished attempt (a cache hit, a child run whose journal does not read)
   is no sample, never a zero one.
 
+## Pruning runs
+
+Run directories are never removed on their own. `apb runs prune` is a
+person's command that removes the old ones the retention settings of
+`policy.yaml` no longer keep:
+
+```yaml
+runs:
+  keep_days: 30         # successful runs older than this go (1 to 3650, default 30)
+  keep_last: 20         # the newest runs of each playbook always stay (default 20)
+  keep_failed_days: 90  # failed and aborted runs older than this go (default 90)
+```
+
+A project's `policy.yaml` only lengthens what the machine's says. Without
+`--yes` the command prints the plan and writes nothing:
+
+```text
+remove  digest-1730000000000  digest  2026-09-01  succeeded
+keep    digest-1731000000000  digest  2026-10-01  succeeded  latest success
+42 runs would be removed (1.3 GB), 18 kept; run again with --yes to remove them
+```
+
+`--yes` removes them (`removed 42 runs (1.3 GB), kept 18`); `--json` prints
+the rows, `--playbook <id>` looks at one playbook. Inside a run step `--yes`
+is refused with exit 2. No MCP tool and no HTTP route prunes.
+
+What is always kept, and the reason the plan shows (the first that holds):
+
+1. `unsafe`: an entry of `.apb/runs` that is a link, a file or an unsafe
+   name, a run whose journal names a child that is not its own, or every
+   run when `.apb/runs-archive` is a link (then `--yes` refuses and removes
+   nothing). Nothing outside `.apb/runs` and `.apb/runs-archive` is ever
+   touched.
+2. `unreadable`: a journal that does not read strictly (a torn tail, an
+   unknown event after the last checkpoint). An unknown event before a
+   checkpoint does not keep a run.
+3. `live`: a run that has not ended (paused and queued runs included), or
+   whose driver is alive.
+4. `newest`: the newest `keep_last` runs of each playbook, whatever their
+   outcome.
+5. `latest success`: the newest successful top-level production run, the
+   one `run.previous_success` reads. An eval, a child or an external data
+   success never takes its place.
+6. `follow-up pending`: a successful run whose follow-up check was not
+   read yet.
+7. `graded`: a run with a stored grade.
+8. `candidate trial`: a trial run of the version that is still the
+   candidate.
+9. `unknown send`: a run with a send nobody resolved.
+10. `start key`: a run a live start-key entry names; when the playbook's
+    start-key file does not verify, every run of it.
+11. `concurrency key`: a run a concurrency slot holds, queues or owes a
+    stop; when the slot file does not verify, every run of the playbook.
+12. `kept child`: a run one of whose descendants is kept, at any depth.
+13. `young`: started less than `keep_days` ago (a success) or
+    `keep_failed_days` ago (a failure or an abort).
+
+A run and all its descendants (sub-playbook runs at any depth) are one
+family, removed whole or kept whole: a child is never removed apart from
+its parent. Eval runs follow the same rules; scenario runs are not
+touched. Each family is checked again under its runs' journal locks just
+before it goes, so a run resumed, graded or given a send since the plan
+stays.
+
+Each removed family leaves one signed summary,
+`.apb/runs-archive/<run id>.json`: per run its id, playbook, scope,
+version, origin, parent, start and end times, outcome, health class, who
+aborted it and a fixed abort code (`deadline_exceeded`, `superseded`,
+`operator_stop`, `parent_aborted` or `other`), active time, tokens, cost
+and execution mode. Never a param value, an output or a reason's text.
+The summary is written before the directories leave, and every reader
+counts a run from its directory while it has one, so the routine health
+rules and `apb stats` count every run exactly once at every moment of a
+removal. A summary changed outside apb does not verify and is not read.
+An interrupted prune is finished or undone by the next one. One prune
+runs at a time in a project; a second is refused `prune_in_progress`.
+
+`apb stats` counts the archived production top-level runs of a version
+apart from its live figures, in `archived`:
+
+```text
+digest 1.0.0: 0 runs
+  archived: 120 runs (110 succeeded, 8 failed, 2 aborted)
+```
+
+A version whose runs were all pruned is still listed, with `runs: 0` and
+its `archived` counts (`runs`, `succeeded`, `failed`, `aborted`, and the
+`tokens` and `cost_usd` the summaries recorded). The estimate does not
+read the archive: `keep_last` keeps the newest runs whole.
+
+## Routine health
+
+`health` lists the routine health of the watched playbooks the report's
+`--playbook` names (every watched one without it), whether or not they
+have runs in the window: their status (`ok`, `tripped`, `held`), each rule,
+the hold and the mute (the `HealthView` of `apb health --json`). The text
+report prints one line per playbook that is not `ok`, before everything
+else and also when no run matched:
+
+```text
+health: nightly-digest held (consecutive_failures)
+```
+
 ## JSON shape
 
 ```

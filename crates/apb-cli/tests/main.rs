@@ -88,6 +88,8 @@ mod discover_cli_test;
 mod doctor_agents_cli_test;
 #[path = "suite/grade_cli_test.rs"]
 mod grade_cli_test;
+#[path = "suite/health_cli_test.rs"]
+mod health_cli_test;
 #[path = "suite/hook_cli_test.rs"]
 mod hook_cli_test;
 #[cfg(unix)]
@@ -140,6 +142,8 @@ mod problems_cli_test;
 mod profile_cli_test;
 #[path = "suite/projects_cli_test.rs"]
 mod projects_cli_test;
+#[path = "suite/prune_cli_test.rs"]
+mod prune_cli_test;
 // Unix-only: a shell script stands in for git on PATH.
 #[cfg(unix)]
 #[path = "suite/launch_cli_test.rs"]

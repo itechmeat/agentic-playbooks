@@ -156,6 +156,7 @@ pub(super) fn header(w: &Writer, title: &str, report: &Report) -> Markup {
             .map(crate::run_view::previous_success_line),
     );
     let deadline = meta("deadline", report.deadline.clone());
+    let concurrency = meta("concurrency", report.concurrency.clone());
     let start_key = meta("start key", report.start_key.clone());
     let started_by = meta("started by", report.started_by.clone());
     let started_runs = meta("started runs in this project", report.started_runs.clone());
@@ -172,6 +173,7 @@ pub(super) fn header(w: &Writer, title: &str, report: &Report) -> Markup {
         head,
         previous,
         deadline,
+        concurrency,
         start_key,
         started_by,
         started_runs,

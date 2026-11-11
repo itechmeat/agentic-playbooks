@@ -331,18 +331,37 @@ pub(crate) fn record_values(ps: &PreviousSuccess) -> BTreeMap<String, String> {
     out
 }
 
+/// The window the journal records: the latest `previous_success_set`,
+/// else the first `run_provenance.previous_success`. The one reader of
+/// the window: a run that waited for its concurrency key reads it after
+/// its turn, and every surface and rule then sees the window the run
+/// actually read.
+pub(crate) fn recorded(events: &[Event]) -> Option<PreviousSuccess> {
+    events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::PreviousSuccessSet { previous_success } => Some(previous_success.clone()),
+            _ => None,
+        })
+        .next_back()
+        .or_else(|| {
+            events.iter().find_map(|e| match &e.payload {
+                EventPayload::RunProvenance {
+                    previous_success, ..
+                } => Some(previous_success.clone()),
+                _ => None,
+            })
+        })
+        .flatten()
+}
+
 /// Why a patch from `old` to `new` must be refused, if it must: `new`
 /// reads the namespace while the run recorded no snapshot, or reads an
 /// output key that `old` did not read (the start never snapshotted it).
 /// A key the old definition read but the snapshot lacks is not a
 /// refusal: it renders empty in both.
 pub(crate) fn patch_refusal(old: &Playbook, new: &Playbook, events: &[Event]) -> Option<String> {
-    let recorded = events.iter().find_map(|e| match &e.payload {
-        EventPayload::RunProvenance {
-            previous_success, ..
-        } => previous_success.clone(),
-        _ => None,
-    });
+    let recorded = recorded(events);
     if recorded.is_none() {
         return apb_core::previous_success::reads(new).then(|| {
             "previous_success_unrecorded: the run recorded no run.previous_success at start; start a new run instead".to_string()
@@ -375,6 +394,110 @@ pub(crate) fn patch_refusal(old: &Playbook, new: &Playbook, events: &[Event]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ev(seq: u64, payload: EventPayload) -> Event {
+        Event {
+            seq,
+            ts: 0,
+            payload,
+        }
+    }
+
+    fn window(run_id: &str) -> Option<PreviousSuccess> {
+        Some(PreviousSuccess {
+            run_id: Some(run_id.to_string()),
+            ..Default::default()
+        })
+    }
+
+    /// A bare `run_provenance` carrying only `previous_success`.
+    fn prov(seq: u64, ps: Option<PreviousSuccess>) -> Event {
+        ev(
+            seq,
+            EventPayload::RunProvenance {
+                origin: None,
+                digest: None,
+                execution_root: None,
+                scripts_digest: None,
+                profiles: Vec::new(),
+                remembered: Vec::new(),
+                apb: None,
+                limits: Vec::new(),
+                previous_success: ps,
+                untrusted: Vec::new(),
+                deadline: None,
+                start_key: None,
+                concurrency: None,
+            },
+        )
+    }
+
+    /// The latest `previous_success_set` wins over the start's window.
+    #[test]
+    fn recorded_prefers_the_latest_set() {
+        let events = vec![
+            prov(1, window("old")),
+            ev(
+                2,
+                EventPayload::PreviousSuccessSet {
+                    previous_success: window("new"),
+                },
+            ),
+        ];
+        assert_eq!(
+            recorded(&events).and_then(|p| p.run_id),
+            Some("new".to_string())
+        );
+    }
+
+    /// Without a set event, the start's window is the record.
+    #[test]
+    fn recorded_falls_back_to_provenance() {
+        let events = vec![prov(1, window("old"))];
+        assert_eq!(
+            recorded(&events).and_then(|p| p.run_id),
+            Some("old".to_string())
+        );
+    }
+
+    /// A run whose provenance recorded `None` and whose set event
+    /// recorded a window: a patch that reads the namespace is judged
+    /// against the window the run actually read.
+    #[test]
+    fn a_patch_is_judged_against_the_set_window() {
+        let yaml = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: w, type: agent_task, prompt: \"{{run.previous_success.started_at}}\" }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: w }\n  - { from: w, to: done }\n";
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        let events = vec![
+            prov(1, None),
+            ev(
+                2,
+                EventPayload::PreviousSuccessSet {
+                    previous_success: window("later"),
+                },
+            ),
+        ];
+        assert_eq!(patch_refusal(&pb, &pb, &events), None);
+    }
+
+    /// The fold takes a later `previous_success_set` over the start's
+    /// window.
+    #[test]
+    fn the_fold_takes_a_later_previous_success_set() {
+        let events = vec![
+            prov(1, window("old")),
+            ev(
+                2,
+                EventPayload::PreviousSuccessSet {
+                    previous_success: window("new"),
+                },
+            ),
+        ];
+        let state = RunState::fold(&events);
+        assert_eq!(
+            state.previous_success.and_then(|p| p.run_id),
+            Some("new".to_string())
+        );
+    }
 
     /// Seeds a stamped run of playbook `p`: the manifest origin
     /// `manifest`, the `run_provenance` origin label, `parent_run` in its

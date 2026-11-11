@@ -369,6 +369,28 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
     if let Some(d) = apb_engine::run_view::deadline(&view.events, apb_core::clock::now_ms()) {
         out["deadline"] = json!(d);
     }
+    // The run's concurrency key, when its start took a slot.
+    let scope = view
+        .events
+        .iter()
+        .find_map(|e| match &e.payload {
+            apb_engine::event::EventPayload::RunProvenance { origin, .. } => origin.clone(),
+            _ => None,
+        })
+        .and_then(|o| apb_core::scope::Scope::parse(&o))
+        .unwrap_or(apb_core::scope::Scope::Project);
+    let playbook = view
+        .events
+        .iter()
+        .find_map(|e| match &e.payload {
+            apb_engine::event::EventPayload::RunStarted { playbook, .. } => Some(playbook.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if let Some(v) = apb_engine::run_view::concurrency(root, run_id, scope, &playbook, &view.events)
+    {
+        out["concurrency"] = json!(v);
+    }
     // Runs started from a run step: the starter this run records, and the
     // runs a step of this run started in this project.
     if let Some(tag) = apb_engine::run_view::start_key(&view.events) {

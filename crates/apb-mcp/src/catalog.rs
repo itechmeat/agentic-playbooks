@@ -289,11 +289,16 @@ pub fn build(
         && let Some(rev) = req.revision
         && rev == catalog_revision
     {
-        return json!({
+        let mut answer = json!({
             "unchanged": true,
             "catalog_revision": catalog_revision,
             "profiles_hint": { "count": profiles_count },
         });
+        let held = held(root);
+        if !held.is_empty() {
+            answer["held"] = json!(held);
+        }
+        return answer;
     }
 
     if let Some(n) = req.limit {
@@ -310,6 +315,7 @@ pub fn build(
     if req.fit {
         add_fit(root, &mut entries);
     }
+    add_health(root, &mut entries);
     json!({
         "catalog_revision": catalog_revision,
         "entries": entries,
@@ -348,6 +354,42 @@ pub fn add_fit(root: &Path, entries: &mut Value) {
             Err(e) => entry["fit_error"] = json!(e.to_string()),
         }
     }
+}
+
+/// Adds `health` (an [`apb_engine::health::HealthView`]) to every entry
+/// whose playbook is watched or keeps a health state: `held` means the
+/// playbook refuses starts until a person clears it.
+pub fn add_health(root: &Path, entries: &mut Value) {
+    let Some(list) = entries.as_array_mut() else {
+        return;
+    };
+    let now = apb_core::clock::now_ms_u64();
+    for entry in list {
+        let Ok(wref) = PlaybookRef::deserialize(&entry["ref"]) else {
+            continue;
+        };
+        let scope = match wref.origin {
+            Origin::Global => apb_core::scope::Scope::Global,
+            Origin::Project { .. } => apb_core::scope::Scope::Project,
+        };
+        if let Ok(Some(view)) = apb_engine::health::view(root, scope, &wref.id, now) {
+            entry["health"] = json!(view);
+        }
+    }
+}
+
+/// The references of the playbooks on hold, for an unchanged catalog.
+fn held(root: &Path) -> Vec<String> {
+    apb_engine::health::all_views(root, apb_core::clock::now_ms_u64())
+        .into_iter()
+        .filter(|v| v.status == "held")
+        .map(|v| {
+            apb_engine::health::reference(
+                apb_core::scope::Scope::parse(&v.scope).unwrap_or(apb_core::scope::Scope::Project),
+                &v.playbook,
+            )
+        })
+        .collect()
 }
 
 /// A cheap count of profiles (project + global) - the number of subdirectories with

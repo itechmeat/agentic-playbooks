@@ -4,7 +4,7 @@
 // does not carry comes back as null and the row leaves the cell empty.
 
 import type { StatsReport } from './api.gen'
-import type { RunSummary } from './types'
+import type { PlaybookSummary, RunSummary } from './types'
 import { isTerminalRunStatus } from './status'
 
 
@@ -73,4 +73,17 @@ export function medianRunTime(
   const cur = versions.find((v) => v.version === current && v.duration.median_ms !== undefined)
   const pick = cur ?? [...versions].reverse().find((v) => v.duration.median_ms !== undefined)
   return pick ? { ms: pick.duration.median_ms as number, version: pick.version } : null
+}
+
+/**
+ * The health badge of a playbook row: `on hold` when the playbook refuses
+ * starts until a person clears it, `tripped` when a rule tripped, else
+ * nothing.
+ */
+export function healthBadge(entry: Pick<PlaybookSummary, 'health'>): 'on hold' | 'tripped' | null {
+  const h = entry.health
+  if (!h) return null
+  if (h.status === 'held' || h.hold) return 'on hold'
+  if (h.status === 'tripped' || h.rules.some((r) => r.tripped)) return 'tripped'
+  return null
 }

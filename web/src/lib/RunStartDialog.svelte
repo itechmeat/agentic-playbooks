@@ -348,8 +348,13 @@
             <input type="checkbox" data-testid="run-start-notify-me" bind:checked={notifyMe} />
             Notify me about this run
           </label>
-          <p class="muted hint">
-            About {onWords(machineNotify.on)}, through {targetText(machineNotify.target)}.
+          <p class="muted hint" data-testid="run-start-notify-about">
+            {#if onWords(machineNotify.on)}
+              About {onWords(machineNotify.on)}, through {targetText(machineNotify.target)}.
+            {:else}
+              Nothing about this run: the machine's notifications name only routine health, through
+              {targetText(machineNotify.target)}.
+            {/if}
           </p>
           {#if notifyNote}<p class="muted hint" data-testid="run-start-notify-note">{notifyNote}</p>{/if}
         </fieldset>

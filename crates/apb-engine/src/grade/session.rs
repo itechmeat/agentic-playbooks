@@ -133,10 +133,15 @@ fn session_path(run_dir: &Path, session: &str) -> Result<PathBuf, EngineError> {
     Ok(grading_dir(run_dir).join(format!("{session}.json")))
 }
 
+/// Saves a session file in its run, under the run's event lock like a
+/// grade ([`crate::run_lock::in_run`]): never into a run a prune moved away.
 fn save(run_dir: &Path, file: &SessionFile) -> Result<(), EngineError> {
     let json = serde_json::to_vec_pretty(file).map_err(|e| EngineError::Invalid(e.to_string()))?;
-    apb_core::fsutil::atomic_write_private(&session_path(run_dir, &file.session)?, &json)?;
-    Ok(())
+    let path = session_path(run_dir, &file.session)?;
+    crate::run_lock::in_run(run_dir, || {
+        apb_core::fsutil::atomic_write_private(&path, &json)?;
+        Ok(())
+    })
 }
 
 fn load(run_dir: &Path, session: &str) -> Result<SessionFile, EngineError> {

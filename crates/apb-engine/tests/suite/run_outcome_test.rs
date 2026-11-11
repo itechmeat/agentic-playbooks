@@ -309,7 +309,7 @@ fn the_outcome_the_listing_and_stats_read_the_same_current_comparisons() {
         let summary = OutcomeSummary::build(&view, &dir);
         let listing = NeedsLook::for_run(&dir, &view.events);
         let run = apb_engine::run_stats::StatsRun::load(&dir).unwrap();
-        let stats = apb_engine::run_stats::build(&[run], &Default::default());
+        let stats = apb_engine::run_stats::build(&[run], &[], &Default::default());
         let stats_regressed: usize = stats.versions[0].baseline.iter().map(|b| b.regressed).sum();
         let summary_regressed = summary.needs_look.as_ref().map_or(0, |n| n.regressions);
         let listing_regressed = listing.as_ref().map_or(0, |n| n.regressions);

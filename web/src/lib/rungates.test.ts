@@ -51,6 +51,7 @@ const detail = (
   unknown_events: 0,
   execution: 'cli',
   execution_fallback: false,
+  concurrency: null,
   next_actions: { observed_at_ms: 0, status, stop: 'needs_input', actions } satisfies RunActions,
   events: events.map((e, i) => ({ seq: i, ts: i, type: '', ...e })),
 })

@@ -37,7 +37,12 @@ pub(crate) fn stats_cmd(
         since_ms,
         compare,
     };
-    let (r, runs) = run_stats::stats_with_runs(&roots, &filter);
+    let (mut r, runs) = run_stats::stats_with_runs(&roots, &filter);
+    let now = apb_core::clock::now_ms_u64();
+    r.health = roots
+        .iter()
+        .flat_map(|root| apb_engine::health::watched_views(root, filter.playbook.as_deref(), now))
+        .collect();
     let skipped = apb_engine::decision::report::unverified_run_dirs(&roots);
     if skipped > 0 {
         eprintln!(

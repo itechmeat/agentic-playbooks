@@ -544,3 +544,46 @@ async fn billed_work_starts_from_the_dashboard_only_with_the_refusals_nonce() {
         }
     }
 }
+
+/// A held playbook (routine health D2) is refused by the dashboard's
+/// start with 409 and the `playbook_on_hold` policy; no run is made.
+#[tokio::test]
+async fn a_held_playbook_is_refused_over_http() {
+    let _cfg = config_sandbox().await;
+    let dir = project(
+        "held",
+        "health:\n  consecutive_failures: 2\n  on_trip: hold\n",
+    );
+    let root = dir.path();
+    apb_core::signed_store::transact(
+        root,
+        apb_core::scope::Scope::Project,
+        "held",
+        apb_core::signed_store::Unsigned::Refuse,
+        |h: &mut apb_engine::health::state::HealthFile| {
+            h.first_seen_ms = 1;
+            h.hold = Some(apb_engine::health::state::Hold {
+                since_ms: 1,
+                rule: "consecutive_failures".into(),
+                detail: "2 failed in a row".into(),
+            });
+            Ok::<_, apb_core::signed_store::StoreError>(((), true))
+        },
+    )
+    .unwrap();
+    let app = build_router(AppState::new(root.to_path_buf()));
+    let (status, refusal) = call(
+        &app,
+        "POST",
+        "/api/playbooks/held/run",
+        None,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    assert!(
+        refusal.to_string().contains("playbook_on_hold"),
+        "{refusal}"
+    );
+    assert_eq!(runs(root), 0);
+}

@@ -28,6 +28,7 @@ use serde::Serialize;
 
 use crate::decision::report::run_dirs;
 use crate::event::EventPayload;
+use crate::retention::archive::ArchivedRun;
 use crate::run_estimate::sample::RunSample;
 use crate::run_view::RunUsage;
 
@@ -257,6 +258,57 @@ pub struct VersionStats {
     #[cfg_attr(feature = "ts", ts(as = "Option<usize>", optional))]
     #[serde(default, skip_serializing_if = "is_zero")]
     pub candidate_trials: usize,
+    /// The production top-level runs of this version `apb runs prune`
+    /// removed, counted from their summaries, apart from `outcomes` and
+    /// `spend`; absent when none.
+    #[cfg_attr(feature = "ts", ts(optional))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived: Option<ArchivedCounts>,
+}
+
+/// The archived runs of one version (routine health D3).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ArchivedCounts {
+    /// Archived production top-level runs of this version.
+    pub runs: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub aborted: usize,
+    /// The sum over the summaries that recorded tokens; absent when none did.
+    #[cfg_attr(feature = "ts", ts(optional))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+    /// The sum over the summaries that recorded a cost; absent when none did.
+    #[cfg_attr(feature = "ts", ts(optional))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+impl ArchivedCounts {
+    fn of(runs: &[&ArchivedRun]) -> Option<Self> {
+        if runs.is_empty() {
+            return None;
+        }
+        let mut c = ArchivedCounts {
+            runs: runs.len(),
+            ..Default::default()
+        };
+        for r in runs {
+            match r.outcome.as_str() {
+                "succeeded" => c.succeeded += 1,
+                "failed" => c.failed += 1,
+                _ => c.aborted += 1,
+            }
+            if let Some(t) = r.tokens {
+                c.tokens = Some(c.tokens.unwrap_or(0).saturating_add(t));
+            }
+            if let Some(x) = r.cost_usd {
+                c.cost_usd = Some(((c.cost_usd.unwrap_or(0.0) + x) * 1e8).round() / 1e8 + 0.0);
+            }
+        }
+        Some(c)
+    }
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -329,6 +381,15 @@ pub struct StatsReport {
     #[cfg_attr(feature = "ts", ts(optional))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The routine health of the watched playbooks the filter names (every
+    /// watched one without a filter), whether or not they have runs; the
+    /// stats callers fill it ([`crate::health::watched_views`]).
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<crate::health::view::HealthView>>", optional)
+    )]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub health: Vec<crate::health::view::HealthView>,
 }
 
 /// A semver-ish sort key: numeric components first, the text as tiebreak.
@@ -364,6 +425,15 @@ pub fn stats_with_runs(
             runs.push(r);
         }
     }
+    // The archived runs are read after the directories: a run removed
+    // since the listing is counted from its summary, and one still loaded
+    // from its directory is not counted twice.
+    let mut archived: Vec<ArchivedRun> = roots
+        .iter()
+        .filter_map(|root| crate::retention::archive::runs_view(root).ok())
+        .flat_map(|v| v.archived)
+        .collect();
+    archived.retain(|a| !runs.iter().any(|r| r.run_id == a.run_id));
     let contributed = kept_ids(&runs, filter)
         .into_iter()
         .map(|i| {
@@ -374,7 +444,7 @@ pub fn stats_with_runs(
             (runs[i].run_id.clone(), root)
         })
         .collect();
-    (build(&runs, filter), contributed)
+    (build(&runs, &archived, filter), contributed)
 }
 
 /// The indexes of the runs [`build`] reads: created by apb, counted as
@@ -394,8 +464,21 @@ fn kept_ids(runs: &[StatsRun], filter: &StatsFilter) -> Vec<usize> {
         .collect()
 }
 
-/// Builds the report over already-read runs.
-pub fn build(runs: &[StatsRun], filter: &StatsFilter) -> StatsReport {
+/// Whether an archived run is inside the filter: a production top-level
+/// run of the filter's playbook, started inside its window.
+fn archived_kept(a: &ArchivedRun, filter: &StatsFilter) -> bool {
+    a.origin == "production"
+        && a.parent.is_none()
+        && !a.playbook.is_empty()
+        && filter.playbook.as_ref().is_none_or(|p| &a.playbook == p)
+        && filter
+            .since_ms
+            .is_none_or(|s| u128::from(a.started_ms) >= s)
+}
+
+/// Builds the report over already-read runs and the archived runs of the
+/// combined view (`apb runs prune`).
+pub fn build(runs: &[StatsRun], archived: &[ArchivedRun], filter: &StatsFilter) -> StatsReport {
     let kept: Vec<&StatsRun> = kept_ids(runs, filter)
         .into_iter()
         .map(|i| &runs[i])
@@ -407,9 +490,32 @@ pub fn build(runs: &[StatsRun], filter: &StatsFilter) -> StatsReport {
             .or_default()
             .push(r);
     }
-    let versions: Vec<VersionStats> = groups
-        .iter()
-        .map(|((playbook, (_, version)), runs)| version_stats(playbook, version, runs))
+    let mut old: BTreeMap<(String, VersionKey), Vec<&ArchivedRun>> = BTreeMap::new();
+    for a in archived.iter().filter(|a| archived_kept(a, filter)) {
+        old.entry((a.playbook.clone(), version_key(&a.version)))
+            .or_default()
+            .push(a);
+    }
+    let keys: std::collections::BTreeSet<&(String, VersionKey)> =
+        groups.keys().chain(old.keys()).collect();
+    let versions: Vec<VersionStats> = keys
+        .into_iter()
+        .map(|key| {
+            let (playbook, (_, version)) = key;
+            let counts = old.get(key).and_then(|a| ArchivedCounts::of(a));
+            match groups.get(key) {
+                Some(runs) => VersionStats {
+                    archived: counts,
+                    ..version_stats(playbook, version, runs)
+                },
+                None => VersionStats {
+                    playbook: playbook.clone(),
+                    version: version.clone(),
+                    archived: counts,
+                    ..Default::default()
+                },
+            }
+        })
         .collect();
     let compare = match (&filter.playbook, &filter.compare) {
         (Some(p), Some(base)) => {
@@ -429,9 +535,10 @@ pub fn build(runs: &[StatsRun], filter: &StatsFilter) -> StatsReport {
     };
     StatsReport {
         runs: kept.len(),
-        note: kept.is_empty().then(|| NO_RUNS.to_string()),
+        note: (kept.is_empty() && old.is_empty()).then(|| NO_RUNS.to_string()),
         versions,
         compare,
+        health: Vec::new(),
     }
 }
 
@@ -815,6 +922,7 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
         .collect();
     VersionStats {
         candidate_trials: runs.iter().filter(|r| r.candidate_trial).count(),
+        archived: None,
         playbook: playbook.to_string(),
         version: version.to_string(),
         runs: runs.len(),

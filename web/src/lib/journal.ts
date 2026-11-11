@@ -118,7 +118,7 @@ export function followUpNote(r: Record<string, unknown>): string | undefined {
 // what apb handed it, the run's notifications (who
 // changed them, and each notification sent), and what a follow-up check
 // read after the run. Every other kind has none.
-function eventNote(e: WfEvent): string | undefined {
+export function eventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
   // A notification's send rides the send ledger and the connector call
   // events under the engine site `@notify`.
@@ -129,7 +129,12 @@ function eventNote(e: WfEvent): string | undefined {
     case 'run_aborted':
       return typeof r.reason === 'string' && r.reason.startsWith('deadline_exceeded')
         ? 'deadline exceeded'
-        : undefined
+        : typeof r.reason === 'string' && r.reason.startsWith('superseded:')
+          ? 'superseded'
+          : undefined
+    // The window a queued routine read once it got its concurrency key.
+    case 'previous_success_set':
+      return 'previous success read after the key came free'
     case 'session_handoff':
       return r.warm
         ? `warm: continues the session of ${String(r.from_node ?? '')}`

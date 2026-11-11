@@ -100,7 +100,7 @@ apb hook stop       Claude Code's Stop hook (registered by apb setup apply, acti
 apb list            playbooks and versions
 apb validate        validate playbooks, the profiles and scripts they reference, profile models, requires and connectors
 apb run <id>        run a playbook (--confirm-irreversible: consent without a terminal; --confirm-launch: a person's confirmation of a playbook that asks before an agent launches it; --remember: keep its params and instruction for this project; --notify / --no-notify: tell a person about its reviews, questions, pauses and end)
-apb runs            list runs, marking those that need a look (apb runs <id> [--json]: one run with its execution mode and outcome; --items [--node N] [--state S]: one line per list item; --html <path|->: the report as one self-contained page)
+apb runs            list runs, marking those that need a look (apb runs <id> [--json]: one run with its execution mode and outcome; --items [--node N] [--state S]: one line per list item; --html <path|->: the report as one self-contained page; apb runs prune [--yes] [--json] [--playbook <id>]: remove old runs the retention settings no longer keep, a dry run without --yes)
 apb results <run>   a run's result snapshots by node, execution and item ([--node N] [--json]); show <run> r:<snapshot>/<entry> [--out FILE] prints one entry's stored text, re-verified; clean <run> [--dry-run] removes what no stamp names; also lists the claims each evidence session checked
 apb evidence read  read through an attempt's evidence session (--session ID, default APB_EVIDENCE_SESSION): outline | children --view V | read --ref R [--span A,B] | page --view V | search --phrase P; JSON, the same object as MCP run_evidence_read
 apb notify          the machine's notify target, a run's notifications or a person's change of them (--on[=LIST], --off, --via, --to; refused inside a run step); apb notify test sends a test message
@@ -134,6 +134,7 @@ apb cache           inspect and manage the node result cache
 apb decide          ask the configured decision providers a bounded question (host tasks, scripts)
 apb decisions       decision-model report, stored thresholds, replay
 apb stats           cross-run metrics per playbook version and node (read-only)
+apb health          routine health of watched playbooks (apb health [<id>] [--json]; check [<id>]: evaluate now, exit 3 on hold; a person's clear <id>, mute <id> --until <time|duration>, unmute <id>)
 apb grade <run>     grade an ended run by rules (built-in quality criteria) or by the decision model (--model: the playbook's own criteria); --show, --json, --reopen; --backfill <playbook> [--version] [--last N] [--model]
 apb candidate <id>  a playbook's candidate compared with current by quality, with the summary a person reads first (--promote --expect <version>@<digest> [--ack <summary_id>], --keep-current [--reason])
 apb judge eval <id> <node>  a judge node evaluated outside any run (--inputs, --answers, --emulate); also examples <id> [--check] [--live], save-example <run> <node> --expect q=v, values <run> <node>

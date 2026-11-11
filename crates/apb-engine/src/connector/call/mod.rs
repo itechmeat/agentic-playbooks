@@ -1042,6 +1042,48 @@ pub fn play_call(
     answer_live(|| prepare_play_call(root, name, account, function_name, args, dry_run, full))
 }
 
+/// [`play_call`] of a notice whose target was pinned when it was
+/// recorded (routine health): the live connector and account must still
+/// carry `pins`, checked on the same loaded target the call uses, and the
+/// call is bounded by `max_secs`.
+pub(crate) fn play_call_pinned(
+    root: &Path,
+    name: &str,
+    account: &str,
+    function_name: &str,
+    args: &Value,
+    pins: &TargetPins,
+    max_secs: u64,
+) -> (Value, bool) {
+    answer_live(|| {
+        let live = LiveTarget::load(root, name, Some(account), function_name)?;
+        live.require_trust()?;
+        if &live.pins() != pins {
+            return Err(CallError::new(
+                CallErrorCode::Permission,
+                "target changed since the notice was recorded",
+            ));
+        }
+        let target = live.into_target()?;
+        build_prepared(
+            &target.function,
+            &target.doc,
+            target.account,
+            &target.maccount,
+            args,
+            root,
+            CallMode {
+                dry_run: false,
+                full: false,
+                stamp: None,
+                max_secs: Some(max_secs),
+                files: None,
+                attachments_dir: None,
+            },
+        )
+    })
+}
+
 /// Shared live-call preparation for both `healthcheck` (fixed function, no
 /// args, always live) and `play_call` (dashboard playground, spec section
 /// 7: arbitrary function, args, optional dry-run): the [`LiveTarget`], with

@@ -572,6 +572,9 @@ impl RunState {
                         s.previous_success = previous_success.clone();
                     }
                 }
+                EventPayload::PreviousSuccessSet { previous_success } => {
+                    s.previous_success = previous_success.clone();
+                }
                 EventPayload::NodeStarted { node, .. } => {
                     s.seqs.started.insert(node.clone(), e.seq);
                     s.nodes.insert(node.clone(), NodeStatus::Running);

@@ -33,6 +33,7 @@ mod eval;
 // --- end 0.24.0 eval suites ---
 mod evidence;
 mod grade;
+mod health;
 mod hook;
 mod import_preview;
 mod intent;
@@ -50,6 +51,7 @@ mod pause;
 mod pipe;
 mod problems;
 mod profile;
+mod prune;
 mod publish;
 mod report;
 mod results;
@@ -361,8 +363,11 @@ enum Command {
         json: bool,
     },
     /// List runs, or show one run (its nodes and the token usage its agents
-    /// reported)
+    /// reported); `apb runs prune` removes old runs
+    #[command(args_conflicts_with_subcommands = true)]
     Runs {
+        #[command(subcommand)]
+        action: Option<prune::RunsAction>,
         /// Show only this run
         run_id: Option<String>,
         /// With a run id: the run as JSON, the same object as MCP run_status;
@@ -602,6 +607,10 @@ enum Command {
     /// list them; show one's draft, or mark the version that carries the
     /// fix (fixed), dismiss or reopen one
     Corrections(crate::corrections::CorrectionsArgs),
+    /// The routine health of watched playbooks: the state; `check`
+    /// evaluates now and exits 3 on hold; a person's `clear`, `mute` and
+    /// `unmute`
+    Health(crate::health::HealthArgs),
     /// Find step sequences your past agent sessions repeat (Claude Code and
     /// Codex history of the named projects) and offer them as playbook
     /// drafts; list or show stored results, save or decline a suggestion.
@@ -1060,6 +1069,8 @@ const SANDBOX_EXEC: &str = "__sandbox-exec";
 
 fn main() -> ExitCode {
     pipe::install();
+    // Routine health observes every run end this process writes.
+    apb_engine::health::install();
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == SANDBOX_EXEC) {
         let code = apb_engine::sandbox::scope::exec_main(&args[2..]);
@@ -1165,6 +1176,11 @@ fn main() -> ExitCode {
             json,
         }) => results::results_cmd(&root, action, run_id, node, json),
         Some(Command::Runs {
+            action: Some(prune::RunsAction::Prune(args)),
+            ..
+        }) => prune::prune_cmd(&root, args),
+        Some(Command::Runs {
+            action: None,
             run_id: Some(run_id),
             items: true,
             node,
@@ -1179,16 +1195,19 @@ fn main() -> ExitCode {
             },
         ),
         Some(Command::Runs {
+            action: None,
             run_id: Some(run_id),
             html: Some(out),
             ..
         }) => report::html_cmd(&root, &run_id, &out),
         Some(Command::Runs {
+            action: None,
             run_id: Some(run_id),
             outputs_json: true,
             ..
         }) => run_outputs::outputs_json_cmd(&root, &run_id),
         Some(Command::Runs {
+            action: None,
             run_id,
             json,
             playbook,
@@ -1341,6 +1360,7 @@ fn main() -> ExitCode {
         Some(Command::Corrections(args)) => corrections::corrections_cmd(&root, args),
         Some(Command::Discover(args)) => discover::discover_cmd(&root, args),
         // --- 0.23.0 stats (C3) ---
+        Some(Command::Health(args)) => health::health_cmd(&root, args),
         Some(Command::Stats {
             playbook,
             since,

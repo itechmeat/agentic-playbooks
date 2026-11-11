@@ -816,6 +816,19 @@ pub fn try_hold_lock(dir: &Path, lock_name: &str) -> io::Result<HeldLock> {
     hold_lock_within(dir, lock_name, 1)
 }
 
+/// [`hold_lock`] that waits up to `wait` for another holder to let go: a
+/// section whose holder may legitimately take longer than a state-file
+/// update (reading many run journals) and whose waiter must not give up
+/// after the usual two seconds.
+pub fn hold_lock_waiting(
+    dir: &Path,
+    lock_name: &str,
+    wait: std::time::Duration,
+) -> io::Result<HeldLock> {
+    let attempts = (wait.as_millis() / u128::from(LOCK_STEP_MS)).clamp(1, u128::from(u32::MAX));
+    hold_lock_within(dir, lock_name, attempts as u32)
+}
+
 fn hold_lock_within(dir: &Path, lock_name: &str, attempts: u32) -> io::Result<HeldLock> {
     crate::process_mode::guard_write(&dir.join(lock_name))?;
     fs::create_dir_all(dir)?;
@@ -906,7 +919,7 @@ pub fn lock_dir_with_lifetime(
 /// same staleness rule) is stolen and a live one is `WouldBlock` at once.
 /// For a writer on a hot path that would rather drop its write than wait.
 pub fn try_lock_dir(dir: &Path, lock_name: &str) -> io::Result<DirLock> {
-    lock_dir_attempts(dir, lock_name, LOCK_STALE_MS, 1).map(|(lock, _)| lock)
+    lock_dir_attempts(dir, lock_name, LOCK_STALE_MS, 1, true).map(|(lock, _)| lock)
 }
 
 fn lock_dir_stale_after(
@@ -914,7 +927,15 @@ fn lock_dir_stale_after(
     lock_name: &str,
     stale_ms: u128,
 ) -> io::Result<(DirLock, bool)> {
-    lock_dir_attempts(dir, lock_name, stale_ms, LOCK_ATTEMPTS)
+    lock_dir_attempts(dir, lock_name, stale_ms, LOCK_ATTEMPTS, true)
+}
+
+/// [`lock_dir`] of a directory that must already exist: it is never made,
+/// so a directory moved or removed before the lock is taken is
+/// `NotFound`, and once the lock is held it stays where it is for as long
+/// as every mover takes the same lock first.
+pub fn lock_existing_dir(dir: &Path, lock_name: &str) -> io::Result<DirLock> {
+    lock_dir_attempts(dir, lock_name, LOCK_STALE_MS, LOCK_ATTEMPTS, false).map(|(lock, _)| lock)
 }
 
 fn lock_dir_attempts(
@@ -922,9 +943,12 @@ fn lock_dir_attempts(
     lock_name: &str,
     stale_ms: u128,
     attempts: u32,
+    create: bool,
 ) -> io::Result<(DirLock, bool)> {
     crate::process_mode::guard_write(&dir.join(lock_name))?;
-    fs::create_dir_all(dir)?;
+    if create {
+        fs::create_dir_all(dir)?;
+    }
     let path = dir.join(lock_name);
     let token = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4().simple());
     for attempt in 0..attempts {
@@ -1330,5 +1354,20 @@ mod write_new_tests {
         assert!(started.elapsed() < std::time::Duration::from_millis(500));
         drop(first);
         try_hold_lock(tmp.path(), "r.lock").unwrap();
+    }
+
+    /// The lock of a directory that is gone is `NotFound`, and nothing is
+    /// made in its place.
+    #[test]
+    fn lock_existing_dir_never_makes_its_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gone = tmp.path().join("run");
+        let e = lock_existing_dir(&gone, "l.lock").err().unwrap();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
+        assert!(!gone.exists());
+        fs::create_dir(&gone).unwrap();
+        let held = lock_existing_dir(&gone, "l.lock").unwrap();
+        drop(held);
+        assert!(!gone.join("l.lock").exists());
     }
 }

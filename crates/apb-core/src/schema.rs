@@ -205,6 +205,14 @@ pub struct Playbook {
     /// Additive to schema 2; no migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<String>,
+    /// At most one active and one waiting run per rendered key (see
+    /// [`crate::concurrency`]). Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<crate::concurrency::ConcurrencyBlock>,
+    /// The health rules a watched routine is judged by across its runs
+    /// (see [`crate::health`]). Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<crate::health::HealthBlock>,
     /// What `run.previous_success.*` renders when no earlier run of this
     /// playbook succeeded (see [`crate::previous_success`]). Additive to
     /// schema 2; no migration.
@@ -2656,6 +2664,44 @@ pub fn cache_key_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
 }
 #[cfg(test)]
 mod tests {
+    /// A playbook with a `concurrency:` block reads it; one without reads
+    /// `None`.
+    #[test]
+    fn a_playbook_reads_its_concurrency_block() {
+        let pb = Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nconcurrency: { key: \"{{params.a}}\", on_busy: refuse }\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+        )
+        .unwrap();
+        let block = pb
+            .concurrency
+            .as_ref()
+            .expect("the concurrency block must read");
+        assert_eq!(block.key.as_deref(), Some("{{params.a}}"));
+        assert_eq!(block.on_busy, crate::concurrency::OnBusy::Refuse);
+        let plain = Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+        )
+        .unwrap();
+        assert!(plain.concurrency.is_none());
+    }
+
+    #[test]
+    fn a_playbook_reads_its_health_block() {
+        let pb = Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nhealth:\n  consecutive_failures: 3\n  failure_rate: { at_least: 0.5, window: 10, min_runs: 5 }\n  overdue: 26h\n  on_trip: hold\n  cooldown: 24h\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+        )
+        .unwrap();
+        let h = pb.health.as_ref().expect("the health block must read");
+        assert_eq!(h.consecutive_failures, Some(3));
+        assert_eq!(h.overdue.as_deref(), Some("26h"));
+        assert_eq!(h.on_trip, crate::health::OnTrip::Hold);
+        assert_eq!(h.failure_rate.as_ref().map(|f| f.window), Some(10));
+        let bad = Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nhealth: { overdue: 26h, extra: 1 }\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+        );
+        assert!(bad.is_err(), "an unknown health field is refused");
+    }
+
     /// A bare-string binding still round-trips to the bare string; a
     /// binding marked `untrusted` round-trips as an object and an older
     /// apb's object without the key reads as not untrusted.

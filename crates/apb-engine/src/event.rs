@@ -83,6 +83,24 @@ pub struct PreviousSuccess {
     pub fallback: bool,
 }
 
+/// The run's concurrency key, as `run_provenance` carries it: the slot's
+/// identity for ownership and a display text for people.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConcurrencyRecord {
+    /// `apb_core::run_origin::tag(apb_core::concurrency::KEY_DOMAIN,
+    /// rendered)`: the slot's identity, never shown.
+    pub key_digest: String,
+    /// The rendered key scrubbed with the run's scrubber and clipped to
+    /// `DISPLAY_MAX_CHARS` characters: shown, never compared.
+    pub display: String,
+    pub on_busy: String,
+    /// Whether the start waited for the key: the run then reads its
+    /// `run.previous_success` window once it got the key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queued: bool,
+}
+
 /// A follower that renders untrusted text, as the start definition says
 /// (display only, like `RunLimit`).
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -204,6 +222,29 @@ pub enum EventPayload {
         /// Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         start_key: Option<String>,
+        /// The run's concurrency key, when its playbook has a
+        /// `concurrency:` block and the run is a top-level production run.
+        /// Additive.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        concurrency: Option<ConcurrencyRecord>,
+    },
+    /// The `run.previous_success` window of a run that waited for its
+    /// concurrency key, read once it got the key and before its first
+    /// node. Display and templates read it like
+    /// `run_provenance.previous_success`. Not a checkpoint: safe to skip,
+    /// and a run that has it carries the `concurrency` guard, so an older
+    /// apb never continues it.
+    PreviousSuccessSet {
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        previous_success: Option<PreviousSuccess>,
     },
     NodeStarted {
         node: String,
@@ -2815,7 +2856,7 @@ impl EventLog {
         let file = self.file.try_clone()?;
         // A durable decision (a send intent) must not race another writer:
         // without the lock it is refused, and nothing is sent.
-        let _lock = if durable {
+        let lock = if durable {
             JournalLock::required(&file)?
         } else {
             JournalLock::on(&file)
@@ -2906,11 +2947,34 @@ impl EventLog {
         }
         self.deferrals.set_folded_to(self.known_len);
         let event = lines.swap_remove(0);
-        if durable {
+        if syncs_before_release(durable, &event.payload) {
             self.file.sync_data()?;
+        }
+        drop(lock);
+        // Routine health (D2): every terminal event is observed from this
+        // one place, once its line is in the file and the journal lock is
+        // released, whoever wrote it.
+        if matches!(
+            event.payload,
+            EventPayload::RunFinished { .. } | EventPayload::RunAborted { .. }
+        ) && let Some(dir) = self.run_dir()
+        {
+            crate::terminal_hook::observe(&dir);
         }
         Ok(Some(event))
     }
+}
+
+/// Whether an append syncs the journal before it releases the lock: a
+/// durable decision, and every terminal event, which the health observer
+/// acts on (a hold, a recorded notice) once the lock is released, so the
+/// event it acted on never outlives a power failure less than its effects.
+fn syncs_before_release(durable: bool, payload: &EventPayload) -> bool {
+    durable
+        || matches!(
+            payload,
+            EventPayload::RunFinished { .. } | EventPayload::RunAborted { .. }
+        )
 }
 
 impl EventLog {
@@ -3874,6 +3938,123 @@ pub struct RunDeadline {
 
 #[cfg(test)]
 mod tests {
+    /// An old `run_provenance` without `concurrency` decodes `None`.
+    #[test]
+    fn run_provenance_without_concurrency_decodes_none() {
+        let old = r#"{"type":"run_provenance","origin":"project","digest":"sha256:abc"}"#;
+        let back: EventPayload = serde_json::from_str(old).unwrap();
+        match back {
+            EventPayload::RunProvenance { concurrency, .. } => assert!(concurrency.is_none()),
+            other => panic!("not a run_provenance: {other:?}"),
+        }
+    }
+
+    /// A terminal event is synced before the lock is released and the
+    /// health observer acts on it; an ordinary event is not.
+    #[test]
+    fn a_terminal_event_is_synced_before_it_is_observed() {
+        assert!(syncs_before_release(
+            false,
+            &EventPayload::RunFinished {
+                outcome: "failed".into()
+            }
+        ));
+        assert!(syncs_before_release(
+            false,
+            &EventPayload::RunAborted {
+                reason: "x".into(),
+                by: None
+            }
+        ));
+        assert!(!syncs_before_release(
+            false,
+            &EventPayload::RunStarted {
+                playbook: "p".into(),
+                version: "1.0.0".into(),
+                definition: None,
+                external_data: false,
+            }
+        ));
+        assert!(syncs_before_release(
+            true,
+            &EventPayload::RunStarted {
+                playbook: "p".into(),
+                version: "1.0.0".into(),
+                definition: None,
+                external_data: false,
+            }
+        ));
+    }
+
+    /// A `concurrency` field of another shape reads as `None`, never
+    /// fails the journal (the lenient read).
+    #[test]
+    fn run_provenance_with_another_concurrency_shape_decodes_none() {
+        let odd =
+            r#"{"type":"run_provenance","origin":"project","digest":"sha256:abc","concurrency":7}"#;
+        let back: EventPayload = serde_json::from_str(odd).unwrap();
+        match back {
+            EventPayload::RunProvenance { concurrency, .. } => assert!(concurrency.is_none()),
+            other => panic!("not a run_provenance: {other:?}"),
+        }
+    }
+
+    /// The window event round-trips its `previous_success`.
+    #[test]
+    fn previous_success_set_round_trips() {
+        let payload = EventPayload::PreviousSuccessSet {
+            previous_success: Some(PreviousSuccess {
+                run_id: Some("p-1".into()),
+                ..Default::default()
+            }),
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        let back: EventPayload = serde_json::from_str(&line).unwrap();
+        match back {
+            EventPayload::PreviousSuccessSet { previous_success } => {
+                assert_eq!(
+                    previous_success.and_then(|p| p.run_id),
+                    Some("p-1".to_string())
+                );
+            }
+            other => panic!("not a previous_success_set: {other:?}"),
+        }
+        assert!(line.contains("previous_success_set"));
+    }
+
+    /// The window event is not a checkpoint: an older binary may skip it.
+    #[test]
+    fn previous_success_set_is_not_a_checkpoint() {
+        let payload = EventPayload::PreviousSuccessSet {
+            previous_success: None,
+        };
+        assert!(!payload.is_checkpoint());
+    }
+
+    /// A `previous_success_set` line whose type a build before this
+    /// change wrote reads as unknown here, and is settled by the following
+    /// `node_finished` (an older journal contract, design D1 test 25).
+    #[test]
+    fn previous_success_set_then_node_finished_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let lines = [
+            r#"{"seq":1,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+            r#"{"seq":2,"ts":1,"type":"unknown_window_event_of_a_newer_apb"}"#,
+            r#"{"seq":3,"ts":1,"type":"node_finished","node":"n","status":"succeeded","attempt":1,"output":""}"#,
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        // The tolerant reader skips the unknown line and counts it.
+        let tolerant = read_journal(dir.path()).unwrap();
+        assert_eq!(
+            tolerant.events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            [1, 3]
+        );
+        // The strict read settles it on the checkpoint.
+        let strict = read_all(dir.path()).unwrap();
+        assert_eq!(strict.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 3]);
+    }
+
     /// An old `connector_call` line without `pages` reads as `None`, and a
     /// call without paging serializes no `pages` key (D2, additive field).
     #[test]

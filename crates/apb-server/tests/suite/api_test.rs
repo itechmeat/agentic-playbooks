@@ -899,3 +899,50 @@ async fn trust_lists_and_revokes() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// A watched playbook's entry carries its health (routine health D2); a
+/// playbook without a block carries none.
+#[tokio::test]
+async fn the_playbook_list_carries_health() {
+    let _cfg = crate::common::config_sandbox().await;
+    let dir = seed();
+    let root = dir.path();
+    let vdir = root.join(".apb/playbooks/routine/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        "schema: 2\nid: routine\nname: routine\nversion: 1.0.0\nhealth:\n  consecutive_failures: 2\n  on_trip: hold\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+    )
+    .unwrap();
+    fs::write(root.join(".apb/playbooks/routine/current"), "1.0.0").unwrap();
+    apb_core::run_origin::ensure_key().unwrap();
+    apb_core::signed_store::transact(
+        root,
+        apb_core::scope::Scope::Project,
+        "routine",
+        apb_core::signed_store::Unsigned::Refuse,
+        |h: &mut apb_engine::health::state::HealthFile| {
+            h.first_seen_ms = 1;
+            h.hold = Some(apb_engine::health::state::Hold {
+                since_ms: 1,
+                rule: "consecutive_failures".into(),
+                detail: "2 failed in a row".into(),
+            });
+            Ok::<_, apb_core::signed_store::StoreError>(((), true))
+        },
+    )
+    .unwrap();
+    let app = build_router(AppState::new(root.to_path_buf()));
+    let (status, json) = get_json(app, "/api/playbooks").await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = |id: &str| {
+        json.as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(entry("routine")["health"]["status"], "held");
+    assert!(entry("implement-task").get("health").is_none());
+}

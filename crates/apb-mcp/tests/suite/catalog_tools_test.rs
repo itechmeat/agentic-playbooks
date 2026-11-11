@@ -405,3 +405,76 @@ fn catalog_fit_adds_a_summary_without_moving_the_revision() {
     assert!(again.get("unchanged").is_none(), "{again}");
     assert!(again["entries"].as_array().is_some_and(|e| !e.is_empty()));
 }
+
+fn hold(root: &Path, id: &str) {
+    use apb_engine::health::state::{HealthFile, Hold};
+    apb_core::run_origin::ensure_key().unwrap();
+    apb_core::signed_store::transact(
+        root,
+        apb_core::scope::Scope::Project,
+        id,
+        apb_core::signed_store::Unsigned::Refuse,
+        |h: &mut HealthFile| {
+            h.first_seen_ms = 1;
+            h.hold = Some(Hold {
+                since_ms: 1,
+                rule: "consecutive_failures".into(),
+                detail: "2 failed in a row".into(),
+            });
+            Ok::<_, apb_core::signed_store::StoreError>(((), true))
+        },
+    )
+    .unwrap();
+}
+
+/// A project with a watched playbook `routine` that is on hold.
+fn held_project(cfg: &Path, proj: &Path) {
+    setup(cfg);
+    init_project(proj).unwrap();
+    let parent = proj.join(".apb");
+    let vdir = parent.join("playbooks/routine/1.0.0");
+    std::fs::create_dir_all(&vdir).unwrap();
+    std::fs::write(
+        vdir.join("playbook.yaml"),
+        "schema: 2\nid: routine\nname: routine\nversion: 1.0.0\nhealth:\n  consecutive_failures: 2\n  on_trip: hold\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+    )
+    .unwrap();
+    std::fs::write(parent.join("playbooks/routine/current"), "1.0.0").unwrap();
+    seed(&parent, "plain");
+    hold(proj, "routine");
+}
+
+#[test]
+fn the_catalog_carries_health() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    held_project(cfg.path(), proj.path());
+    let _g = EnvGuard;
+    let cat = playbook_catalog(proj.path(), &CatalogRequest::default()).unwrap();
+    let entries = cat["entries"].as_array().unwrap();
+    let of = |id: &str| entries.iter().find(|e| e["ref"]["id"] == id).unwrap();
+    assert_eq!(of("routine")["health"]["status"], "held", "{cat}");
+    assert!(of("plain").get("health").is_none());
+}
+
+#[test]
+fn an_unchanged_catalog_names_held_playbooks() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    held_project(cfg.path(), proj.path());
+    let _g = EnvGuard;
+    let first = playbook_catalog(proj.path(), &CatalogRequest::default()).unwrap();
+    let rev = first["catalog_revision"].as_str().unwrap().to_string();
+    let again = playbook_catalog(
+        proj.path(),
+        &CatalogRequest {
+            revision: Some(&rev),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(again["unchanged"], true);
+    assert_eq!(again["held"], serde_json::json!(["routine"]), "{again}");
+}

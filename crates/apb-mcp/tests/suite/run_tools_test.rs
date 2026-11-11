@@ -1858,3 +1858,76 @@ fn runs_list_answers_a_search_filter_and_keeps_the_plain_array() {
     let bad = apb_mcp::tools::run::run_filter(None, Some("other".into()), &[], false);
     assert!(bad.is_err());
 }
+
+/// A held playbook (routine health D2): `playbook_run` is refused
+/// `playbook_on_hold`, and a trial still runs, since a trial is how a
+/// person checks a fix before clearing the hold.
+#[test]
+fn a_held_playbook_is_refused_over_mcp() {
+    use apb_engine::gate::launch::{LaunchContext, LaunchKind};
+    let _lock = crate::common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let git = |args: &[&str]| {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        )
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "user.name", "t"]);
+    apb_core::registry::init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/held/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        "schema: 2\nid: held\nname: held\nversion: 1.0.0\nhealth:\n  consecutive_failures: 2\n  on_trip: hold\nnodes:\n  - { id: start, type: start }\n  - { id: note, type: prompt, prompt: \"hi\" }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: note }\n  - { from: note, to: done }\n",
+    )
+    .unwrap();
+    fs::write(root.join(".apb/playbooks/held/current"), "1.0.0").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "init"]);
+    apb_core::run_origin::ensure_key().unwrap();
+    hold(root, "held");
+    let e = playbook_run(root, "held", None, apb_mcp::tools::StartArgs::default()).unwrap_err();
+    assert!(e.to_string().contains("playbook_on_hold"), "{e}");
+    let trial = apb_mcp::tools::playbook_trial(
+        root,
+        "held",
+        None,
+        Default::default(),
+        None,
+        "project",
+        &LaunchContext::dashboard(LaunchKind::Trial),
+    )
+    .unwrap();
+    assert_eq!(trial["status"], "succeeded", "{trial}");
+}
+
+/// Writes a signed hold for project playbook `id`.
+fn hold(root: &Path, id: &str) {
+    use apb_engine::health::state::{HealthFile, Hold};
+    apb_core::signed_store::transact(
+        root,
+        apb_core::scope::Scope::Project,
+        id,
+        apb_core::signed_store::Unsigned::Refuse,
+        |h: &mut HealthFile| {
+            h.first_seen_ms = 1;
+            h.hold = Some(Hold {
+                since_ms: 1,
+                rule: "consecutive_failures".into(),
+                detail: "2 failed in a row".into(),
+            });
+            Ok::<_, apb_core::signed_store::StoreError>(((), true))
+        },
+    )
+    .unwrap();
+}

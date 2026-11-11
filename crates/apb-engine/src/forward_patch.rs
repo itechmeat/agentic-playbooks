@@ -251,7 +251,7 @@ type Unchanged = fn(&Playbook, &Playbook) -> bool;
 
 /// The parts of the definition a forward patch may not change, as (the
 /// refusal code, why, the comparison), in the order they are checked.
-fn protected_fields() -> [(&'static str, &'static str, Unchanged); 9] {
+fn protected_fields() -> [(&'static str, &'static str, Unchanged); 10] {
     [
         (
             "goal_changed",
@@ -296,6 +296,11 @@ fn protected_fields() -> [(&'static str, &'static str, Unchanged); 9] {
             "deadline_changed",
             "the run's `deadline` is not a supervisor's to change",
             |a, b| a.deadline == b.deadline,
+        ),
+        (
+            "concurrency_changed",
+            "the `concurrency:` block decides which runs wait or stop: only a person may change it",
+            |a, b| a.concurrency == b.concurrency,
         ),
     ]
 }
@@ -434,6 +439,26 @@ mod tests {
             assert!(err.to_string().contains("launch_policy_changed"), "{err}");
         }
         let same = Playbook::from_yaml(&yaml("agent_launch: deny\n")).unwrap();
+        assert!(definition_guard(root.path(), &base, &same).is_ok());
+    }
+
+    /// The `concurrency:` block decides which runs wait or stop: a
+    /// forward patch never changes it, in either direction.
+    #[test]
+    fn a_forward_patch_may_not_change_concurrency() {
+        let yaml = |decl: &str| {
+            format!(
+                "schema: 2\nid: p\nname: p\nversion: 1.0.0\n{decl}nodes:\n  - {{ id: start, type: start }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: done }}\n"
+            )
+        };
+        let root = tempfile::tempdir().unwrap();
+        let base = Playbook::from_yaml(&yaml("concurrency: { on_busy: refuse }\n")).unwrap();
+        for patched in ["", "concurrency: { on_busy: supersede }\n"] {
+            let patched = Playbook::from_yaml(&yaml(patched)).unwrap();
+            let err = definition_guard(root.path(), &base, &patched).unwrap_err();
+            assert!(err.to_string().contains("concurrency_changed"), "{err}");
+        }
+        let same = Playbook::from_yaml(&yaml("concurrency: { on_busy: refuse }\n")).unwrap();
         assert!(definition_guard(root.path(), &base, &same).is_ok());
     }
 

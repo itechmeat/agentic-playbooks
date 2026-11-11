@@ -204,6 +204,12 @@ pub(crate) struct Prepared {
     pub(crate) worktree: Option<PathBuf>,
     pub(crate) start_node: String,
     pub(crate) mode: RunMode,
+    /// The owner lock of this run's provisional slot claim, held from
+    /// admission until the run is confirmed or released.
+    pub(crate) slot_owner: Option<crate::concurrency::SlotOwner>,
+    /// Whether the start waited for its key: the run reads its
+    /// `run.previous_success` window once it got the key.
+    pub(crate) key_queued: bool,
 }
 
 impl Prepared {
@@ -215,15 +221,57 @@ impl Prepared {
     /// `run_started` already exist, so a queue that runs out has to close the
     /// run out the same way any other start-time refusal does - otherwise the
     /// admitted event would sit in a run that reads as `running` forever.
-    fn claim_queued_workdir(&mut self, root: &Path) -> Result<(), EngineError> {
-        let Some(wait) = self.queued_workdir.take() else {
-            return Ok(());
-        };
+    fn claim_queued_workdir(&mut self, root: &Path) -> Result<Option<RunResult>, EngineError> {
+        let wait = self.queued_workdir.take();
         let run_dir = self.run_dir.clone();
         let run_id = run_dir
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        // A run that waited for its key takes its turn before any tree
+        // claim; the answer, when there is one, is what the caller returns.
+        if self.key_queued {
+            let owner = self.slot_owner.take();
+            match crate::concurrency::wait_turn(root, &run_dir, &run_id, owner) {
+                Ok(crate::concurrency::Turn::Active) => {
+                    if let Err(e) = after_the_turn(
+                        root,
+                        &run_dir,
+                        &run_id,
+                        &self.playbook,
+                        &self.cfg,
+                        &mut self.log,
+                    ) {
+                        crate::driver::let_go_unclaimed(&run_dir);
+                        self.close_out_unclaimed(&run_dir, &e);
+                        return Err(e);
+                    }
+                    if self.cfg.mode.expects_supervisor_agent() {
+                        let _ = super::supervisor::spawn_supervisor_or_hold(
+                            root,
+                            &run_id,
+                            &self.playbook,
+                            &mut self.log,
+                        );
+                    }
+                }
+                Ok(crate::concurrency::Turn::Paused) => {
+                    crate::driver::let_go_unclaimed(&run_dir);
+                    return Ok(Some(RunResult {
+                        run_id,
+                        outcome: RunStatus::Paused,
+                    }));
+                }
+                Err(e) => {
+                    crate::driver::let_go_unclaimed(&run_dir);
+                    self.close_out_unclaimed(&run_dir, &e);
+                    return Err(e);
+                }
+            }
+        }
+        let Some(wait) = wait else {
+            return Ok(None);
+        };
         let claimed = acquire_queued_tree(root, self.worktree.as_deref(), wait, &mut || {
             // A run whose deadline passed in the queue ends there, without
             // the lock: the stop ends it aborted `deadline_exceeded` (nothing
@@ -245,7 +293,7 @@ impl Prepared {
         match claimed {
             Ok(guard) => {
                 self.guard = guard;
-                Ok(())
+                Ok(None)
             }
             Err(e) => {
                 self.close_out_unclaimed(&run_dir, &e);
@@ -265,27 +313,90 @@ impl Prepared {
     /// may well have recorded the abort already - and a second outcome would
     /// rewrite what the run did.
     fn close_out_unclaimed(&mut self, run_dir: &Path, e: &EngineError) {
-        let already_decided = read_all(run_dir)
-            .map(|events| RunState::fold(&events).run_status.is_terminal())
-            .unwrap_or(false);
-        if already_decided {
-            return;
-        }
-        if let Ok(Some((_, by))) = crate::control::pending_stop(run_dir) {
-            let _ = self.log.append(EventPayload::RunAborted {
-                reason: e.to_string(),
-                by,
-            });
-            return;
-        }
-        let _ = self.log.append(EventPayload::RunError {
-            node: None,
-            reason: e.to_string(),
-        });
-        let _ = self.log.append(EventPayload::RunFinished {
-            outcome: "failed".into(),
-        });
+        close_out_unclaimed(&mut self.log, run_dir, e);
     }
+}
+
+/// After the turn of a run that waited for its key: the
+/// `run.previous_success` window it did not read at preparation is read
+/// now, once, and journaled as `previous_success_set`. A lookup error
+/// ends the run the way a start-time lookup error does. Skipped when the
+/// definition does not read the namespace, when the journal already holds
+/// the event, or when the run continues another one.
+fn after_the_turn(
+    root: &Path,
+    run_dir: &Path,
+    run_id: &str,
+    playbook: &Playbook,
+    cfg: &RunConfig,
+    log: &mut EventLog,
+) -> Result<(), EngineError> {
+    if !apb_core::previous_success::reads(playbook) || cfg.continued_from.is_some() {
+        return Ok(());
+    }
+    let events = crate::event::read_all(run_dir)?;
+    if events
+        .iter()
+        .any(|e| matches!(&e.payload, EventPayload::PreviousSuccessSet { .. }))
+    {
+        return Ok(());
+    }
+    let scope = events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::RunProvenance { origin, .. } => origin.clone(),
+            _ => None,
+        })
+        .unwrap_or_else(|| "project".to_string());
+    let window = crate::scheduler::prepare::look_up_previous_success(
+        root,
+        crate::run_history::started(run_dir)
+            .map(|h| h.playbook)
+            .as_deref()
+            .unwrap_or_default(),
+        &scope,
+        playbook,
+        &cfg.params,
+    )?;
+    log.append(EventPayload::PreviousSuccessSet {
+        previous_success: Some(window),
+    })?;
+    let _ = run_id;
+    Ok(())
+}
+
+/// Writes the outcome of a run that was admitted and never got the
+/// workdir (see [`Prepared::close_out_unclaimed`]), free so both drive
+/// entries share it. A superseded waiter settles aborted whatever the
+/// replacing start's stop did.
+pub(crate) fn close_out_unclaimed(log: &mut EventLog, run_dir: &Path, e: &EngineError) {
+    let already_decided = read_all(run_dir)
+        .map(|events| RunState::fold(&events).run_status.is_terminal())
+        .unwrap_or(false);
+    if already_decided {
+        return;
+    }
+    if let EngineError::Superseded(reason) = e {
+        let _ = log.append(EventPayload::RunAborted {
+            reason: format!("superseded: {reason}"),
+            by: Some(crate::pause::kind::PauseBy::Engine),
+        });
+        return;
+    }
+    if let Ok(Some((_, by))) = crate::control::pending_stop(run_dir) {
+        let _ = log.append(EventPayload::RunAborted {
+            reason: e.to_string(),
+            by,
+        });
+        return;
+    }
+    let _ = log.append(EventPayload::RunError {
+        node: None,
+        reason: e.to_string(),
+    });
+    let _ = log.append(EventPayload::RunFinished {
+        outcome: "failed".into(),
+    });
 }
 
 pub fn run(
@@ -295,7 +406,9 @@ pub fn run(
     opts: RunOptions,
 ) -> Result<RunResult, EngineError> {
     let mut p = prepare_run(root, id, version, opts)?;
-    p.claim_queued_workdir(root)?;
+    if let Some(answer) = p.claim_queued_workdir(root)? {
+        return Ok(answer);
+    }
     // `p.guard` lives until the end of this function (dropped together with `p`
     // after drive returns) - the workdir lock is held for the whole synchronous run,
     // just as before the refactor.
@@ -329,7 +442,9 @@ pub fn run_resolved(
         origin_label: resolved.origin_label,
     };
     let mut p = prepare_run_target(&t, &resolved.id, Some(&resolved.version), opts)?;
-    p.claim_queued_workdir(&resolved.execution_root)?;
+    if let Some(answer) = p.claim_queued_workdir(&resolved.execution_root)? {
+        return Ok(answer);
+    }
     drive(
         p.playbook.clone(),
         &p.run_dir,
@@ -421,8 +536,12 @@ pub(crate) fn prepare_supervised_background_target(
     // and heartbeat monitoring (agent-supervised runs) will log SupervisorLost
     // and attempt a respawn itself. A supervisor the run's billing holds is
     // journaled and pauses the run before its first node: a supervised run
-    // never waits for a supervisor that was not started.
-    if p.mode.expects_supervisor_agent() {
+    // never waits for a supervisor that was not started. A run that waits
+    // for its concurrency key spawns no supervisor yet: one that watches
+    // while its run waits costs for nothing, and its billing hold journals
+    // a pause the waiting run cannot apply; the drive entry spawns it
+    // after the turn.
+    if p.mode.expects_supervisor_agent() && !p.key_queued {
         let _ = supervisor::spawn_supervisor_or_hold(
             &t.execution_root,
             &p.run_id,
@@ -446,7 +565,9 @@ pub fn drive_prepared(root: &Path, prepared: PreparedRun) -> Result<RunResult, E
     // thread, not on the caller's - the whole point of admitting it was that
     // the caller (a webhook bridge, the dashboard) already has its run id and
     // is gone. `claim_queued_workdir` journals its own failure.
-    p.claim_queued_workdir(root)?;
+    if let Some(answer) = p.claim_queued_workdir(root)? {
+        return Ok(answer);
+    }
     let res = drive(
         p.playbook.clone(),
         &p.run_dir,
@@ -575,6 +696,63 @@ pub fn drive_run_from_dir(root: &Path, run_id: &str) -> Result<RunResult, Engine
     let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)?;
     let cfg = read_run_config(&run_dir)?;
     let mut log = EventLog::open(&run_dir)?;
+
+    // The key's turn before any tree claim: a run whose journal carries a
+    // concurrency record holds a place in a slot. It needs no owner: the
+    // preparing process's owner lock ended with that process, and until
+    // this driver's first look the heal reads the driver claim its
+    // spawner published; the first transaction re-reserves the place.
+    let keyed = events.iter().any(|e| {
+        matches!(
+            &e.payload,
+            EventPayload::RunProvenance {
+                concurrency: Some(_),
+                ..
+            }
+        )
+    });
+    if keyed {
+        match crate::concurrency::wait_turn(root, &run_dir, run_id, None) {
+            Ok(crate::concurrency::Turn::Active) => {
+                let queued = events.iter().any(|e| {
+                    matches!(
+                        &e.payload,
+                        EventPayload::RunProvenance {
+                            concurrency: Some(record),
+                            ..
+                        } if record.queued
+                    )
+                });
+                // Only a start that waited for its key reads its window
+                // now; one admitted at once keeps what its preparation read.
+                if queued
+                    && let Err(e) =
+                        after_the_turn(root, &run_dir, run_id, &playbook, &cfg, &mut log)
+                {
+                    crate::driver::let_go_unclaimed(&run_dir);
+                    close_out_unclaimed(&mut log, &run_dir, &e);
+                    return Err(e);
+                }
+                if queued && cfg.mode.expects_supervisor_agent() {
+                    let _ = super::supervisor::spawn_supervisor_or_hold(
+                        root, run_id, &playbook, &mut log,
+                    );
+                }
+            }
+            Ok(crate::concurrency::Turn::Paused) => {
+                crate::driver::let_go_unclaimed(&run_dir);
+                return Ok(RunResult {
+                    run_id: run_id.to_string(),
+                    outcome: RunStatus::Paused,
+                });
+            }
+            Err(e) => {
+                crate::driver::let_go_unclaimed(&run_dir);
+                close_out_unclaimed(&mut log, &run_dir, &e);
+                return Err(e);
+            }
+        }
+    }
 
     let start_node = playbook
         .nodes

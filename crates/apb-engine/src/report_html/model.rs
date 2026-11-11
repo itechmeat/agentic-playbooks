@@ -38,6 +38,9 @@ pub(super) struct Report {
     pub(super) previous_success: Option<crate::run_view::PreviousSuccessView>,
     /// The deadline line (`45m, 12m left (ends ...)`); absent without one.
     pub(super) deadline: Option<String>,
+    /// The concurrency line (`key "<display>" (queue_latest)`); absent
+    /// without a slot.
+    pub(super) concurrency: Option<String>,
     /// The start key's MAC prefix the run was started with.
     pub(super) start_key: Option<String>,
     /// The run step this run was started from, as a line.
@@ -111,6 +114,26 @@ impl Report {
         let untrusted = crate::run_view::untrusted_nodes(&view.events);
         let deadline = crate::run_view::deadline(&view.events, u128::from(now))
             .map(|d| crate::run_view::deadline_line(&d));
+        let concurrency = {
+            let scope = view
+                .events
+                .iter()
+                .find_map(|e| match &e.payload {
+                    crate::event::EventPayload::RunProvenance { origin, .. } => origin.clone(),
+                    _ => None,
+                })
+                .and_then(|o| apb_core::scope::Scope::parse(&o))
+                .unwrap_or(apb_core::scope::Scope::Project);
+            crate::run_view::concurrency(
+                root,
+                &run_id,
+                scope,
+                playbook.as_deref().unwrap_or(""),
+                &view.events,
+            )
+            .as_ref()
+            .map(crate::run_view::concurrency_line)
+        };
         let start_key = crate::run_view::start_key(&view.events);
         let here = apb_core::projects::registered_id(root);
         let started_by = crate::run_view::started_by(run_dir)
@@ -129,6 +152,7 @@ impl Report {
             link: crate::people::link::run_link(root, &run_id),
             previous_success,
             deadline,
+            concurrency,
             start_key,
             started_by,
             started_runs,

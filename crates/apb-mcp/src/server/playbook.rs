@@ -30,7 +30,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Compact structured catalog of playbooks (project and global scope) with trigger, effects, trust and shadowing. Call once per task when matching a user request to a playbook. Pass revision to skip the body when unchanged. Optional query (the task in one sentence): where the machine enabled decision-model ranking, adds an advisory ranked list, needs_playbook_p and covered_by; entries stay unchanged and your own matching still decides. fit: true adds to every entry that is not shadowed whether it can run in this project (ready, compatible, setup, trusted, needs_consent); playbook_adopt_report gives the full report.",
+        description = "Compact structured catalog of playbooks (project and global scope) with trigger, effects, trust and shadowing. Call once per task when matching a user request to a playbook. Pass revision to skip the body when unchanged. Optional query (the task in one sentence): where the machine enabled decision-model ranking, adds an advisory ranked list, needs_playbook_p and covered_by; entries stay unchanged and your own matching still decides. fit: true adds to every entry that is not shadowed whether it can run in this project (ready, compatible, setup, trusted, needs_consent); playbook_adopt_report gives the full report. health.status held: the playbook refuses starts until a person clears it; tell the person, never retry. An unchanged answer lists held playbooks in held.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn playbook_catalog(

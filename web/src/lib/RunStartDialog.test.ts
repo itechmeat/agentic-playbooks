@@ -200,6 +200,21 @@ describe('RunStartDialog', () => {
     expect(optOut).toHaveBeenLastCalledWith(undefined, { params: {}, notify: false })
   })
 
+  it('never names routine health as something this run sends', async () => {
+    const target = { connector: 'telegram', account: 'me', function: 'send_message', to: '42' }
+    fetchNotify.mockResolvedValue({ target, on: ['finished', 'health'], default_on: false })
+    await open(null, [])
+    expect(byTestId('run-start-notify-about')?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      'About the end of the run, through telegram/me send_message to 42.',
+    )
+    unmount(app!)
+    app = null
+
+    fetchNotify.mockResolvedValue({ target, on: ['health'], default_on: false })
+    await open(null, [])
+    expect(byTestId('run-start-notify-about')?.textContent).toContain('Nothing about this run')
+  })
+
   it('says when the notification settings cannot be read', async () => {
     fetchNotify.mockRejectedValue(new Error('offline'))
     await open(null, [])
