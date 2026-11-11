@@ -50,6 +50,15 @@ pub const LOCAL_ENTRIES: &[&str] = &[
     // The keyed MACs of start keys and their reservations, signed by this
     // installation (`apb_core::start_key`).
     "start-keys/",
+    // The signed per-playbook concurrency slot files of at most one active
+    // and one waiting run per key (`apb_core`'s signed store, D1 of the
+    // routine-health change).
+    "concurrency/",
+    // The signed per-playbook health state and notice ledgers
+    // (`apb_engine::health`).
+    "health/",
+    // The signed summaries of removed run directories (`apb_engine::retention`).
+    "runs-archive/",
 ];
 
 /// The projects `dir` lies in, nearest first: `dir` itself and every
@@ -307,5 +316,18 @@ mod tests {
     fn fingerprint_none_without_git() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(fingerprint(tmp.path()).is_none());
+    }
+
+    /// The enforcement state this change adds is machine-local and git
+    /// ignored: the concurrency slots, the health state and the run archive
+    /// are listed, so a checkout with a state file never shares it.
+    #[test]
+    fn the_enforcement_state_directories_are_local_entries() {
+        for entry in ["concurrency/", "health/", "runs-archive/"] {
+            assert!(
+                LOCAL_ENTRIES.contains(&entry),
+                "{entry} is missing from LOCAL_ENTRIES"
+            );
+        }
     }
 }

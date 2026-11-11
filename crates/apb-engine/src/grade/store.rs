@@ -27,20 +27,26 @@ fn path_of(run_dir: &Path, grade_id: &str) -> Result<PathBuf, EngineError> {
     Ok(run_dir.join(GRADES_DIR).join(format!("{grade_id}.json")))
 }
 
-/// Writes `grade` into its run. A grade id that is already taken is
-/// refused: grades are write-once.
+/// Writes `grade` into its run, under the run's event lock
+/// ([`crate::run_lock::in_run`]).
+/// A grade id that is already taken is refused: grades are write-once.
 pub fn write(run_dir: &Path, grade: &Grade) -> Result<(), EngineError> {
     let path = path_of(run_dir, &grade.grade_id)?;
-    if path.exists() {
-        return Err(EngineError::Conflict(format!(
-            "grade `{}` already exists",
-            grade.grade_id
-        )));
-    }
-    apb_core::fsutil::create_dir_under(run_dir, &run_dir.join(GRADES_DIR))?;
-    let json = serde_json::to_vec_pretty(grade).map_err(|e| EngineError::Invalid(e.to_string()))?;
-    apb_core::fsutil::atomic_write_private(&path, &json)?;
-    Ok(())
+    crate::run_lock::in_run(run_dir, || {
+        if path.exists() {
+            return Err(EngineError::Conflict(format!(
+                "grade `{}` already exists",
+                grade.grade_id
+            )));
+        }
+        apb_core::fsutil::create_dir_under(run_dir, &run_dir.join(GRADES_DIR))?;
+        #[cfg(any(test, feature = "testing"))]
+        crate::deadline_hooks::at(crate::deadline_hooks::Hook::GradeBeforeWrite, run_dir);
+        let json =
+            serde_json::to_vec_pretty(grade).map_err(|e| EngineError::Invalid(e.to_string()))?;
+        apb_core::fsutil::atomic_write_private(&path, &json)?;
+        Ok(())
+    })
 }
 
 /// Every readable grade of the run at `run_dir`, oldest first. A file that

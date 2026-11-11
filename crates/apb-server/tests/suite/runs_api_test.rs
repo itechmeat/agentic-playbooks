@@ -2994,6 +2994,7 @@ async fn get_run_detail_shows_previous_success_without_values() {
     log.append(apb_engine::event::EventPayload::RunProvenance {
         deadline: None,
         start_key: None,
+        concurrency: None,
         origin: Some("project".into()),
         digest: None,
         execution_root: None,

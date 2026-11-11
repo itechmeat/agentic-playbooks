@@ -6,6 +6,17 @@
 import type { FinishOutcome, MachineNotify, NotifyTarget, RunNotify, Transition } from './api.gen'
 import { NOTIFY_DEFAULT_TRANSITIONS, NOTIFY_OUTCOMES, NOTIFY_TRANSITIONS } from './consts.gen'
 
+/**
+ * The transitions a run's own subscription can name: every one but
+ * `health`, which is about a routine across its runs, never one run.
+ */
+export const RUN_TRANSITIONS = NOTIFY_TRANSITIONS.filter(
+  (t): t is Exclude<Transition, 'health'> => t !== 'health',
+)
+
+/** The run-level defaults: what `everything` means for one run. */
+const RUN_DEFAULTS = NOTIFY_DEFAULT_TRANSITIONS.filter((t) => t !== 'health')
+
 /** `telegram/me send_message to 123456789`. */
 export function targetText(t: NotifyTarget): string {
   return `${t.connector}/${t.account} ${t.function} to ${t.to}`
@@ -18,8 +29,8 @@ export function targetText(t: NotifyTarget): string {
  */
 export function onText(on: Transition[], finished: FinishOutcome[] = [...NOTIFY_OUTCOMES]): string {
   const narrowed = finished.length > 0 && finished.length < NOTIFY_OUTCOMES.length
-  if (!narrowed && NOTIFY_DEFAULT_TRANSITIONS.every((t) => on.includes(t))) {
-    const extra = NOTIFY_TRANSITIONS.filter((t) => on.includes(t) && !isDefault(t))
+  if (!narrowed && RUN_DEFAULTS.every((t) => on.includes(t))) {
+    const extra = RUN_TRANSITIONS.filter((t) => on.includes(t) && !isDefault(t))
     return ['everything', ...extra].join(', ')
   }
   const name = (t: Transition) => (t === 'finished' && narrowed ? `finished (${outcomeText(finished)})` : t)
@@ -54,7 +65,7 @@ export function journalCoverage(names: string[]): { on: Transition[]; finished: 
         if (!finished.includes(outcome as FinishOutcome)) finished.push(outcome as FinishOutcome)
         add('finished')
       }
-    } else if ((NOTIFY_TRANSITIONS as readonly string[]).includes(name)) {
+    } else if ((RUN_TRANSITIONS as readonly string[]).includes(name)) {
       plainFinished ||= name === 'finished'
       add(name as Transition)
     }
@@ -62,9 +73,13 @@ export function journalCoverage(names: string[]): { on: Transition[]; finished: 
   return { on, finished: plainFinished || finished.length === 0 ? [...NOTIFY_OUTCOMES] : finished }
 }
 
-/** What a start notifies about, in words for the Run dialog. */
+/**
+ * What a start notifies about, in words for the Run dialog. `health` is
+ * left out: it is about a routine across its runs, never this run, so the
+ * machine's `on` naming it says nothing about what this run sends.
+ */
 export function onWords(on: Transition[]): string {
-  const words: Record<Transition, string> = {
+  const words: Record<Exclude<Transition, 'health'>, string> = {
     review: 'a review waiting',
     question: 'a question waiting',
     paused: 'a pause you did not make',
@@ -74,7 +89,7 @@ export function onWords(on: Transition[]): string {
     stalled: 'a step that stopped retrying on the same rejection',
     follow_up: 'the follow-up check read after the run',
   }
-  const said = NOTIFY_TRANSITIONS.filter((t) => on.includes(t)).map((t) => words[t])
+  const said = RUN_TRANSITIONS.filter((t) => on.includes(t)).map((t) => words[t])
   if (said.length < 2) return said.join('')
   return `${said.slice(0, -1).join(', ')} and ${said.at(-1)}`
 }

@@ -44,11 +44,15 @@ pub enum GuardedFeature {
     /// The run has a wall-clock limit (`deadline`, a run argument or a
     /// resume's grant); an older apb would continue the run without it.
     Deadline,
+    /// At most one active and one waiting run per rendered key
+    /// (`concurrency:`); an older apb drops the block and would start
+    /// overlapping runs.
+    Concurrency,
 }
 
 impl GuardedFeature {
     /// Every feature this binary knows, in declaration order.
-    pub const ALL: [GuardedFeature; 8] = [
+    pub const ALL: [GuardedFeature; 9] = [
         GuardedFeature::ApprovalBinding,
         GuardedFeature::PersonOnly,
         GuardedFeature::RequiredApproval,
@@ -57,6 +61,7 @@ impl GuardedFeature {
         GuardedFeature::PreviousSuccess,
         GuardedFeature::UntrustedInput,
         GuardedFeature::Deadline,
+        GuardedFeature::Concurrency,
     ];
 
     /// The name a `run_guard` carries.
@@ -70,6 +75,7 @@ impl GuardedFeature {
             GuardedFeature::PreviousSuccess => "previous_success",
             GuardedFeature::UntrustedInput => "untrusted_input",
             GuardedFeature::Deadline => "deadline",
+            GuardedFeature::Concurrency => "concurrency",
         }
     }
 
@@ -113,6 +119,9 @@ pub fn guarded_features(playbook: &Playbook) -> Vec<GuardedFeature> {
     if playbook.deadline.is_some() {
         used.insert(GuardedFeature::Deadline);
     }
+    if playbook.concurrency.is_some() {
+        used.insert(GuardedFeature::Concurrency);
+    }
     used.into_iter().collect()
 }
 
@@ -130,7 +139,7 @@ mod tests {
     /// Each declaration names its own feature, a definition using several
     /// names each once in declaration order, and a definition using none
     /// needs no guard.
-    /// `deadline:` names `deadline`, and this binary knows eight features.
+    /// `deadline:` names `deadline`, and this binary knows nine features.
     #[test]
     fn a_deadline_is_a_guarded_feature() {
         let pb = Playbook::from_yaml(
@@ -138,7 +147,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(guarded_features(&pb), vec![GuardedFeature::Deadline]);
-        assert_eq!(GuardedFeature::ALL.len(), 8);
+        assert_eq!(GuardedFeature::ALL.len(), 9);
         assert_eq!(
             GuardedFeature::parse("deadline"),
             Some(GuardedFeature::Deadline)
@@ -232,6 +241,42 @@ mod tests {
             assert_eq!(GuardedFeature::parse(f.as_str()), Some(f));
         }
         assert_eq!(GuardedFeature::parse("evidence_v2"), None);
+    }
+
+    /// A `concurrency:` block is a guarded feature; a playbook without
+    /// one is not.
+    #[test]
+    fn a_concurrency_block_is_guarded() {
+        let keyed = Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nconcurrency: { on_busy: refuse }\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+        )
+        .unwrap();
+        assert_eq!(guarded_features(&keyed), vec![GuardedFeature::Concurrency]);
+        let plain = Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+        )
+        .unwrap();
+        assert!(guarded_features(&plain).is_empty());
+    }
+
+    /// `ALL` knows nine features, `concurrency` the last one.
+    #[test]
+    fn all_has_nine_entries_in_order() {
+        assert_eq!(GuardedFeature::ALL.len(), 9);
+        assert_eq!(
+            GuardedFeature::ALL[GuardedFeature::ALL.len() - 1],
+            GuardedFeature::Concurrency
+        );
+    }
+
+    /// The name round-trips.
+    #[test]
+    fn concurrency_parses_and_prints() {
+        assert_eq!(GuardedFeature::Concurrency.as_str(), "concurrency");
+        assert_eq!(
+            GuardedFeature::parse("concurrency"),
+            Some(GuardedFeature::Concurrency)
+        );
     }
 }
 

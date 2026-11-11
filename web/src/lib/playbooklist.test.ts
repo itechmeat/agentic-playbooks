@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   finishedCount,
   glyphLetter,
+  healthBadge,
   medianRunTime,
   runHistory,
   runsByPlaybook,
@@ -107,5 +108,27 @@ describe('medianRunTime', () => {
   it('is null without one', () => {
     expect(medianRunTime(null, '1.0.0')).toBeNull()
     expect(medianRunTime({ versions: [v('1.0.0')] }, '1.0.0')).toBeNull()
+  })
+})
+
+describe('healthBadge', () => {
+  const rule = (tripped: boolean) => ({ rule: 'overdue', tripped, detail: '' })
+  const entry = (status: string, tripped: boolean, hold = false) =>
+    ({
+      health: {
+        playbook: 'r',
+        scope: 'project',
+        status,
+        rules: [rule(tripped)],
+        ...(hold ? { hold: { since: 'x', rule: 'overdue', detail: 'd', clear: 'apb health clear r' } } : {}),
+      },
+    }) as Parameters<typeof healthBadge>[0]
+
+  it('healthBadge names a hold before a trip', () => {
+    expect(healthBadge(entry('held', true, true))).toBe('on hold')
+    expect(healthBadge(entry('tripped', true))).toBe('tripped')
+    expect(healthBadge(entry('ok', false))).toBeNull()
+    expect(healthBadge(entry('unwatched', false))).toBeNull()
+    expect(healthBadge({} as Parameters<typeof healthBadge>[0])).toBeNull()
   })
 })

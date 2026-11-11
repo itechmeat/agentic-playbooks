@@ -4346,6 +4346,70 @@ outright (`budget_change_refused`).
 | V97 | error | `budget.tokens` is 0, or `budget.usd` is not a finite amount greater than 0 |
 | V98 | warning | a `budget` on a playbook with no agent node and no `playbook` node, so it never applies |
 
+## concurrency (one run per key)
+
+`concurrency` keeps at most one active and one waiting run of a playbook
+per rendered key, in the project the playbook runs in. It is what a
+routine an outside scheduler starts needs when two events of one customer
+arrive before the last run finished: without it the runs overlap; with it
+the newest start decides.
+
+```yaml
+concurrency:
+  key: "{{params.account}}"   # a template over params.*; absent: one key for the whole playbook
+  on_busy: queue_latest       # or supersede, refuse
+```
+
+The key is rendered once at start from the params and kept as a keyed
+MAC for ownership; people see a scrubbed display text of at most 120
+characters. What `on_busy` says about a busy key:
+
+- `queue_latest` (the default): the newest start waits for the key; a
+  newer start replaces the waiting one, which ends aborted `superseded:`.
+  There is at most one waiting run per key.
+- `supersede`: the newest start also stops the active run, gracefully,
+  and runs after it.
+- `refuse`: a busy key refuses the start `concurrency_busy`, naming the
+  holder; `apb stop <id>` frees the key.
+
+A keyed start waits for the tree only after it holds its key, so a run
+waiting for its key holds no working-tree lock and never blocks the run
+that holds the key. A queued run keeps its deadline (it ends at it in the
+queue), a posted pause applies at its first boundary after it got the
+key, a supervisor of a queued run starts after its turn, and a start
+whose key reads a value that looks like a credential is refused
+`concurrency_key_sensitive`, naming the param, never the value.
+
+A queued routine that reads `run.previous_success.*` resolves its window
+once it got the key and before its first node, so a run B queued behind A
+renders A's facts, not the success before A. A resume of a keyed run
+reserves its slot before the tree and gives it back when the resume is
+refused; a second resume of the same run while one is in progress is
+refused `concurrency_busy`.
+
+A sub-playbook child never takes a slot of its own (its parent may hold
+the same key), and a run step never waits for or replaces the run that
+started it: that start is refused `concurrency_own_run`, whatever
+`on_busy` says. A start refused `concurrency_busy`,
+`concurrency_own_run` or `concurrency_key_sensitive` leaves no run
+directory, and a start key it carried stays free for a later start of the
+same event.
+
+The slot state lives in `.apb/concurrency/`, signed by this
+installation; a file that does not verify refuses starts and resumes of
+the playbook `concurrency_state_unreadable` until it is moved aside. A
+run that took a slot carries the guarded feature `concurrency`, so an
+older apb refuses to continue it, and a supervisor patch may not change
+the block.
+
+| Code | Level | What it covers |
+|---|---|---|
+| V210 | error | the `key` is empty or over 500 characters, or reads something other than a declared non-secret `params.<name>` (a node output, an undeclared param, a `secret` param, or a param whose name looks like a credential) |
+| V211 | warning | `on_busy: supersede` on a playbook whose effective effects include `irreversible` |
+
+An older apb drops the block and would start overlapping runs; a run that
+took a slot is guarded against it.
+
 ## deadline (a run's wall-clock limit)
 
 `deadline` bounds how long the world waits for a run. It is a duration
@@ -4406,6 +4470,79 @@ detail and the dashboard carry the `deadline` block.
 | Code | Severity | Meaning |
 | --- | --- | --- |
 | V200 | error | `deadline` is not a duration, is zero, under 1 minute or over 30 days |
+
+## health (a routine across runs)
+
+A routine that keeps failing, or that stops running, says nothing about
+itself run by run. `health:` names the rules a watched playbook is judged
+by across its runs, and what happens when one trips:
+
+```yaml
+health:
+  consecutive_failures: 3                               # the newest 3 counted runs all failed
+  failure_rate: { at_least: 0.5, window: 10, min_runs: 5 } # half of the newest 10, with at least 5
+  overdue: 26h                                          # no successful run for 26 hours
+  on_trip: hold                                         # or notify (the default)
+  cooldown: 24h                                         # least time between two trip notices of one rule
+```
+
+At least one rule is required. A run counts when it is a top-level
+production or external data run of the playbook created on this machine:
+`succeeded` counts as a success, `failed` as a failure, and so does an
+abort by the engine or the supervisor (a `deadline_exceeded` end, a quota,
+a budget). A person's stop and a `superseded:` end (the concurrency key)
+never count, and neither does a child run, an eval run or a start refused
+in preparation before its provenance was journaled (a profile that does
+not resolve): nothing says in which scope it ran, and a routine whose
+starts keep failing that early has no success, so `overdue` trips. Runs
+`apb runs prune` removed are counted from their archived summaries, so a
+prune never makes a routine look new.
+
+The first evaluation counts every run there is: a new routine's third
+failed run trips `consecutive_failures: 3` when it ends. `overdue` gives a
+new routine its grace from the first evaluation (or from the last clear);
+afterwards it measures from the newest success's end.
+
+When is it evaluated: after every terminal event of a top-level run,
+whoever wrote it; by `apb health check`; by `apb resume --all`; and by the
+dashboard every 10 minutes, so an `overdue` routine trips even when
+nothing runs. Which playbooks a machine watches is `health.playbooks` in
+`policy.yaml` (absent: every playbook with a block; an empty list: none; a
+project file narrows it), so a laptop that holds the checkout but no timer
+stays quiet.
+
+A trip and a recovery each send one notice through the machine's notify
+target (the `health` transition, docs/NOTIFY.md). The notice is recorded
+before it leaves, claimed by one sender, and settled once: `sent`,
+`failed` (tried again, at most three times), or `unknown` (a timeout or a
+server error: never sent again, because it may have arrived). A recovery
+is sent only for a trip whose notice was sent. `cooldown` spans a
+recovery: a rule that trips again within it sends no new trip notice until
+the cooldown since the last delivered one is over. `apb health mute <id>
+--until 2h` sends nothing until then; a rule still tripped when the mute
+ends sends its notice then. A clear, a mute and an unmute each retire the
+notices not sent yet, and a send already in flight then changes no rule
+state.
+
+`on_trip: hold` refuses every start of the playbook (`playbook_on_hold`)
+at every launch surface until a person runs `apb health clear <id>`; a
+trial still runs, and a repeated start key still answers its run. The
+clear drops the hold and every trip, and starts the count and `overdue`
+over. `apb health check` exits 3 while a playbook is on hold, so an
+outside scheduler can stop there.
+
+The state lives in `.apb/health/<scope>/<id>.json`, signed with the
+installation key. A file that does not verify reads as held (`apb doctor`
+names it); `apb health clear` moves it aside and starts fresh.
+
+`apb health` lists the state, `apb doctor` has a `health` line, the
+dashboard's playbook list shows `on hold` or `tripped`, MCP
+`playbook_catalog` and `playbook_stats` carry `health`, and `apb stats`
+prints a `health:` line for every watched playbook that is not `ok`.
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| V212 | error | `health` sets no rule, `consecutive_failures` is outside 1 to 100, `failure_rate.at_least` outside (0, 1], `window` outside 2 to 200, `min_runs` outside 1 to `window`, or `overdue` or `cooldown` is not a duration, under 10 minutes or over 90 days |
 
 ## goal (target and criteria)
 

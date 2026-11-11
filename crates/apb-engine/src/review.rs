@@ -4,8 +4,7 @@
 //! ReviewDecided event. This does not violate the single-writer rule for
 //! events: events.jsonl is still written only by drive.
 
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -798,6 +797,31 @@ pub(crate) fn post_engine_decision(
     )
 }
 
+/// Completes or cuts the unterminated tail a crashed poster left, before
+/// any check or sequence number: a tail that parses as a whole entry
+/// keeps it by getting its newline (the drive may already have consumed
+/// it), a partial one is cut (its poster never returned success, so no
+/// caller was told its decision was recorded). Only posters write, under
+/// the lock this runs under.
+fn repair_tail(path: &Path) -> Result<(), EngineError> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Ok(());
+    };
+    if bytes.is_empty() || bytes.ends_with(b"\n") {
+        return Ok(());
+    }
+    let (_, tail) = split_reviews(&bytes);
+    let mut file = apb_core::fsutil::open_append_private(path)?;
+    if tail.is_some_and(|t| serde_json::from_slice::<ReviewEntry>(t).is_ok()) {
+        file.write_all(b"\n")?;
+    } else {
+        let cut = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+        file.set_len(cut as u64)?;
+    }
+    file.flush()?;
+    Ok(())
+}
+
 fn append_decision(
     run_dir: &Path,
     cmd: ReviewCommand,
@@ -812,6 +836,7 @@ fn append_decision(
     // the check would queue two decisions for one visit, and the second
     // would decide the gate's next visit unseen.
     let _lock = apb_core::fsutil::lock_dir(run_dir, "reviews.jsonl.lock")?;
+    repair_tail(&run_dir.join("reviews.jsonl"))?;
     if let Some(seq) = request {
         check_review_request(run_dir, &cmd.node, seq)?;
     }
@@ -884,7 +909,7 @@ fn append_decision(
 
     let path = run_dir.join("reviews.jsonl");
     let mut file = apb_core::fsutil::open_append_private(&path)?;
-    writeln!(file, "{line}")?;
+    file.write_all(format!("{line}\n").as_bytes())?;
     file.flush()?;
 
     Ok(seq)
@@ -985,6 +1010,25 @@ fn check_review_request(run_dir: &Path, node: &str, seq: u64) -> Result<(), Engi
     Ok(())
 }
 
+/// The complete lines of `bytes` (without their newlines) and the
+/// unterminated tail (`None` when the file ends with a newline or is
+/// empty). The one split both the reader and the writer repair share.
+fn split_reviews(bytes: &[u8]) -> (Vec<&[u8]>, Option<&[u8]>) {
+    let mut lines: Vec<&[u8]> = bytes.split(|b| *b == b'\n').collect();
+    // The last element of `split` is the unterminated tail: empty when the
+    // file ends with a newline, a partial line otherwise.
+    let tail = lines.pop().and_then(|t| (!t.is_empty()).then_some(t));
+    lines.retain(|l| !l.is_empty());
+    (lines, tail)
+}
+
+/// Reads the review channel as bytes: every complete line is decoded on
+/// its own (a torn line in the middle, and an unparsable line that ends
+/// with a newline, are corruption and fail the read as before), and the
+/// unterminated tail is a decision still being written: returned when it
+/// parses as a whole entry, skipped otherwise, so a decision appended by
+/// a poster under its lock while the drive polls is read whole on the
+/// next poll instead of failing the run.
 pub fn read_reviews_after(
     run_dir: &Path,
     after_seq: Option<u64>,
@@ -993,23 +1037,29 @@ pub fn read_reviews_after(
     if !path.is_file() {
         return Ok(Vec::new());
     }
-
+    let bytes = std::fs::read(&path)?;
+    let (lines, tail) = split_reviews(&bytes);
     let mut out = Vec::new();
-    for line in BufReader::new(File::open(&path)?).lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+    for line in lines {
+        if line.iter().all(|b| b.is_ascii_whitespace()) {
             continue;
         }
+        let text = std::str::from_utf8(line).map_err(|e| EngineError::Yaml(e.to_string()))?;
         let entry: ReviewEntry =
-            serde_json::from_str(&line).map_err(|e| EngineError::Yaml(e.to_string()))?;
-
-        if let Some(threshold) = after_seq {
-            if entry.seq > threshold {
-                out.push(entry);
-            }
-        } else {
+            serde_json::from_str(text).map_err(|e| EngineError::Yaml(e.to_string()))?;
+        if after_seq.is_none_or(|threshold| entry.seq > threshold) {
             out.push(entry);
         }
+    }
+    // The unterminated tail: returned when it parses as a whole entry (a
+    // writer that wrote the line and not yet the newline), skipped as a
+    // line still being written otherwise.
+    if let Some(tail) = tail
+        && !tail.iter().all(|b| b.is_ascii_whitespace())
+        && let Ok(entry) = serde_json::from_slice::<ReviewEntry>(tail)
+        && after_seq.is_none_or(|threshold| entry.seq > threshold)
+    {
+        out.push(entry);
     }
     Ok(out)
 }
@@ -1017,6 +1067,276 @@ pub fn read_reviews_after(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One whole line as `post_review` writes it, for the torn-tail tests.
+    fn whole_line() -> String {
+        let scratch = tempfile::tempdir().unwrap();
+        post_review(
+            scratch.path(),
+            ReviewCommand {
+                node: "gate".into(),
+                decision: "approved".into(),
+                note: "a".into(),
+            },
+        )
+        .unwrap();
+        serde_json::to_string(&read_reviews_after(scratch.path(), None).unwrap()[0]).unwrap()
+    }
+
+    /// The line cut in half at a byte (never inside a character).
+    fn half_of(line: &str) -> String {
+        let b = line.as_bytes();
+        String::from_utf8_lossy(&b[..b.len() / 2]).into_owned()
+    }
+
+    /// A torn last line (no trailing newline) is a decision not yet
+    /// written: the read returns the whole entries and skips it; once the
+    /// rest of the line and its newline arrive, it is returned.
+    #[test]
+    fn a_torn_last_line_is_not_yet_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reviews.jsonl");
+        post_review(
+            dir.path(),
+            ReviewCommand {
+                node: "gate".into(),
+                decision: "approved".into(),
+                note: "a".into(),
+            },
+        )
+        .unwrap();
+        post_review(
+            dir.path(),
+            ReviewCommand {
+                node: "gate".into(),
+                decision: "approved".into(),
+                note: "b".into(),
+            },
+        )
+        .unwrap();
+        let line = whole_line();
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(half_of(&line).as_bytes())
+            .unwrap();
+        assert_eq!(
+            read_reviews_after(dir.path(), None).unwrap().len(),
+            2,
+            "a torn last line must not fail the read"
+        );
+        // The rest of the line and the newline land; now it is read.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(format!("{}\n", &line[half_of(&line).len()..]).as_bytes())
+            .unwrap();
+        assert_eq!(read_reviews_after(dir.path(), None).unwrap().len(), 3);
+    }
+
+    /// A torn line in the middle is corruption, not a write in progress.
+    #[test]
+    fn a_torn_middle_line_still_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reviews.jsonl");
+        post_review(
+            dir.path(),
+            ReviewCommand {
+                node: "gate".into(),
+                decision: "approved".into(),
+                note: "a".into(),
+            },
+        )
+        .unwrap();
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(half_of(&whole_line()).as_bytes()).unwrap();
+        f.write_all(b"\n").unwrap();
+        drop(f);
+        assert!(
+            read_reviews_after(dir.path(), None).is_err(),
+            "a torn middle line must fail the read"
+        );
+    }
+
+    /// An unparsable last line that ends with a newline is corruption.
+    #[test]
+    fn an_unparsable_terminated_last_line_still_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reviews.jsonl");
+        post_review(
+            dir.path(),
+            ReviewCommand {
+                node: "gate".into(),
+                decision: "approved".into(),
+                note: "a".into(),
+            },
+        )
+        .unwrap();
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"garbage\n")
+            .unwrap();
+        assert!(read_reviews_after(dir.path(), None).is_err());
+    }
+
+    /// A whole last line whose writer has not written the newline yet is
+    /// returned: the drive may consume it.
+    #[test]
+    fn a_whole_last_line_without_newline_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reviews.jsonl");
+        post_review(
+            dir.path(),
+            ReviewCommand {
+                node: "gate".into(),
+                decision: "approved".into(),
+                note: "a".into(),
+            },
+        )
+        .unwrap();
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(whole_line().as_bytes())
+            .unwrap();
+        assert_eq!(read_reviews_after(dir.path(), None).unwrap().len(), 2);
+    }
+
+    /// A poster cuts a partial tail a crashed poster left, and its own
+    /// decision becomes the only line after the whole one.
+    #[test]
+    fn a_post_cuts_a_crashed_posters_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reviews.jsonl");
+        post_review(
+            dir.path(),
+            ReviewCommand {
+                node: "gate".into(),
+                decision: "approved".into(),
+                note: "a".into(),
+            },
+        )
+        .unwrap();
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(half_of(&whole_line()).as_bytes())
+            .unwrap();
+        post_review(
+            dir.path(),
+            ReviewCommand {
+                node: "gate".into(),
+                decision: "rejected".into(),
+                note: "n".into(),
+            },
+        )
+        .unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        let lines: Vec<&[u8]> = raw
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(lines.len(), 2, "the partial tail must be cut: {lines:?}");
+        for l in &lines {
+            serde_json::from_slice::<ReviewEntry>(l)
+                .unwrap_or_else(|e| panic!("a line must parse: {e}"));
+        }
+        let second = serde_json::from_slice::<ReviewEntry>(lines[1]).unwrap();
+        assert_eq!(second.seq, 1);
+        assert_eq!(second.cmd.note, "n");
+    }
+
+    /// A tail cut inside a multi-byte character is a line still being
+    /// written, not corruption (a `read_to_string` reader fails here).
+    #[test]
+    fn a_tail_split_inside_a_character_is_not_yet_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reviews.jsonl");
+        post_review(
+            dir.path(),
+            ReviewCommand {
+                node: "gate".into(),
+                decision: "approved".into(),
+                note: "a".into(),
+            },
+        )
+        .unwrap();
+        let line = whole_line().replace(r#""note":"a""#, r#""note":"é""#);
+        let bytes = line.as_bytes();
+        // The second entry, cut between the two bytes of the e-acute.
+        let cut = line.find('é').expect("the fixture holds the e-acute") + 1;
+        assert!(
+            std::str::from_utf8(&bytes[..cut]).is_err(),
+            "the tail must end inside the character"
+        );
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&bytes[..cut])
+            .unwrap();
+        assert_eq!(read_reviews_after(dir.path(), None).unwrap().len(), 1);
+    }
+
+    /// A whole entry that lost only its newline survives a later post:
+    /// the repair appends the newline instead of cutting the entry.
+    #[test]
+    fn a_post_keeps_a_whole_entry_missing_its_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reviews.jsonl");
+        post_review(
+            dir.path(),
+            ReviewCommand {
+                node: "gate".into(),
+                decision: "approved".into(),
+                note: "a".into(),
+            },
+        )
+        .unwrap();
+        // Rewrite the file as the whole entry without its newline.
+        let raw0 = std::fs::read(&path).unwrap();
+        let line = raw0
+            .split(|b| *b == b'\n')
+            .find(|l| !l.is_empty())
+            .unwrap()
+            .to_vec();
+        std::fs::write(&path, &line).unwrap();
+        post_review(
+            dir.path(),
+            ReviewCommand {
+                node: "gate".into(),
+                decision: "rejected".into(),
+                note: "n".into(),
+            },
+        )
+        .unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        let lines: Vec<&[u8]> = raw
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        let first = serde_json::from_slice::<ReviewEntry>(lines[0]).unwrap();
+        assert_eq!(first.seq, 0, "the whole entry missing its newline stays");
+        assert_eq!(first.cmd.note, "a");
+        let second = serde_json::from_slice::<ReviewEntry>(lines[1]).unwrap();
+        assert_eq!(second.seq, 1);
+    }
 
     #[test]
     fn post_and_read_reviews_round_trip() {

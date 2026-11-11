@@ -233,6 +233,9 @@ pub struct RunDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub previous_success: Option<apb_engine::run_view::PreviousSuccessView>,
+    /// The run's concurrency key, when its start took a slot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<apb_engine::run_view::ConcurrencyView>,
     /// The run's deadline: its total, what is left and whether the clock is
     /// frozen. Left out for a run without one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -586,6 +589,17 @@ pub(crate) async fn get_run_handler(
             shared.progress.clone(),
         ),
     };
+    let concurrency_view = {
+        let scope = events
+            .iter()
+            .find_map(|e| match &e.payload {
+                apb_engine::event::EventPayload::RunProvenance { origin, .. } => origin.clone(),
+                _ => None,
+            })
+            .and_then(|o| apb_core::scope::Scope::parse(&o))
+            .unwrap_or(apb_core::scope::Scope::Project);
+        apb_engine::run_view::concurrency(&root, &id, scope, &playbook_id, &events)
+    };
     let detail = RunDetail {
         run_id: id,
         playbook: playbook_id,
@@ -620,6 +634,7 @@ pub(crate) async fn get_run_handler(
         unattended,
         external_data,
         previous_success: apb_engine::run_view::previous_success(&events),
+        concurrency: concurrency_view,
         deadline: apb_engine::run_view::deadline(&events, apb_core::clock::now_ms()),
         start_key: apb_engine::run_view::start_key(&events),
         started_by: apb_engine::run_view::started_by(&run_dir),

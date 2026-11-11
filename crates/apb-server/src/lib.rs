@@ -14,6 +14,7 @@
 pub mod assets;
 pub mod auth;
 mod cloud_refresh;
+mod health_sweep;
 mod httpserve;
 pub mod ingest;
 pub mod lock;
@@ -402,6 +403,7 @@ pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::erro
     };
     // The public cloud model catalogs, at start and then once a day.
     cloud_refresh::spawn(&global_cfg.cloud_models);
+    health_sweep::spawn();
     let app = build_router(state);
     println!(
         "apb dashboard (global): http://{}:{port}",

@@ -326,6 +326,15 @@ fn policy_actions(of: StartOf<'_>, refusal: &Value) -> Vec<StartAction> {
                 format!("playbook `{id}` cannot start unattended this way: {detail}"),
             )]
         }
+        "playbook_on_hold" => vec![of.fix(
+            Remedy::Manual {
+                detail: format!("apb health clear {id}"),
+            },
+            refusal["detail"]
+                .as_str()
+                .unwrap_or("the playbook is on hold")
+                .to_string(),
+        )],
         "requires_unsafe_path" | "requires_unsafe_command" => {
             let what = refusal["path"]
                 .as_str()
@@ -519,6 +528,35 @@ mod tests {
     /// codes of the fit module, the model checks' codes, the missing-script
     /// codes, and the refusals of the sub-playbook walk the report turns
     /// into compatibility items. A new code without a row fails here.
+    /// A held playbook's refusal offers a person the clear command.
+    #[test]
+    fn a_hold_refusal_offers_the_clear_command() {
+        let refusal = serde_json::json!({
+            "policy": "playbook_on_hold",
+            "id": "digest",
+            "detail": "playbook `digest` is on hold since 2026-11-10T06:00:00Z: consecutive_failures (5 failed in a row); a person clears it with `apb health clear digest`",
+            "rule": "consecutive_failures",
+            "since": "2026-11-10T06:00:00Z",
+        });
+        let actions = from_refusal(
+            StartOf {
+                playbook: "digest",
+                version: None,
+            },
+            &refusal,
+        );
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        let a = &actions[0];
+        assert_eq!(a.code, StartActionCode::FixRequirement);
+        assert_eq!(
+            a.remedy,
+            Some(Remedy::Manual {
+                detail: "apb health clear digest".into()
+            })
+        );
+        assert!(a.reason.contains("on hold"), "{}", a.reason);
+    }
+
     #[test]
     fn the_fit_table_covers_every_code_the_fit_report_emits() {
         let literal = regex::Regex::new(

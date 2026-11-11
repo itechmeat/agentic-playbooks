@@ -30,7 +30,7 @@ const _: () = assert!(
 /// `raw` (the env var's value) in a build that honours [`TEST_KNOBS`], else
 /// `None`, so a value left exported in a shell never changes how a shipped
 /// binary runs.
-pub(crate) fn test_override(raw: Option<&str>) -> Option<Duration> {
+pub fn test_override(raw: Option<&str>) -> Option<Duration> {
     if !TEST_KNOBS {
         return None;
     }

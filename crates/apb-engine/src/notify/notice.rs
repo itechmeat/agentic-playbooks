@@ -72,6 +72,12 @@ impl Notice {
             Transition::Supervisor => supervisor(&playbook, run_id, opened),
             Transition::Stalled => stalled(&playbook, run_id, events, t),
             Transition::FollowUp => follow_up(&playbook, run_id, opened),
+            // A health notice is about a routine, never one run: the
+            // run-level sweep never asks for one ([`health_notice`]).
+            Transition::Health => (
+                format!("{playbook} health"),
+                vec![format!("Run {run_id} of {playbook}.")],
+            ),
         };
         lines.push(match crate::people::link::run_link(root, run_id) {
             Some(url) => format!("Open the run: {url}"),
@@ -89,6 +95,34 @@ impl Notice {
     pub fn one_line(&self) -> String {
         let body = self.text.split_whitespace().collect::<Vec<_>>().join(" ");
         format!("{}. {body}", self.subject)
+    }
+}
+
+/// A health notice of playbook `playbook` (routine health): `<playbook>:
+/// <rule> tripped` or `<playbook>: <rule> recovered`, the detail, the
+/// clear command while held, and where the runs are. `id` is the reference
+/// a command names (`<id>` or `global:<id>`).
+pub fn health_notice(
+    playbook: &str,
+    rule: &str,
+    kind: &str,
+    detail: &str,
+    held: bool,
+    id: &str,
+) -> Notice {
+    let word = if kind == "recovery" {
+        "recovered"
+    } else {
+        "tripped"
+    };
+    let mut lines = vec![detail.to_string()];
+    if held {
+        lines.push(format!("on hold: apb health clear {id}"));
+    }
+    lines.push(format!("apb runs --playbook {id}"));
+    Notice {
+        subject: format!("{playbook}: {rule} {word}"),
+        text: lines.join("\n"),
     }
 }
 
@@ -177,7 +211,8 @@ pub fn command_for(
         Transition::Finished
         | Transition::Supervisor
         | Transition::Stalled
-        | Transition::FollowUp => false,
+        | Transition::FollowUp
+        | Transition::Health => false,
     };
     actions
         .iter()

@@ -8,6 +8,7 @@
   // started names its starter, and a run whose steps started runs lists
   // them (links within this workspace only).
   import type {
+    ConcurrencyView,
     Released,
     PreviousSuccessView,
     RunDeadlineView,
@@ -20,9 +21,17 @@
   import { deadlineLine } from './rundeadline'
   import { TRUNCATED_NOTE, runHref, startedByLine, startedRunLabel, starterHref } from './startedruns'
 
+  // The one wording of the key line, shared with the report.
+  function concurrencyLine(v: ConcurrencyView): string {
+    return v.waiting_for
+      ? `Key: ${v.display} (${v.on_busy}), waiting for run ${v.waiting_for}`
+      : `Key: ${v.display} (${v.on_busy})`
+  }
+
   let {
     released,
     drivenBy,
+    concurrency,
     previousSuccess,
     untrusted,
     externalData = false,
@@ -36,6 +45,7 @@
   }: {
     released?: Released | null
     drivenBy?: string | null
+    concurrency?: ConcurrencyView | null
     previousSuccess?: PreviousSuccessView | null
     untrusted?: UntrustedNode[]
     externalData?: boolean
@@ -56,6 +66,11 @@
 {/if}
 {#if deadline}
   <p class="previous-success" data-testid="run-deadline">{deadlineLine(deadline)}</p>
+{/if}
+{#if concurrency}
+  <p class="previous-success" data-testid="run-concurrency">
+    {concurrencyLine(concurrency)}
+  </p>
 {/if}
 {#if startKey}
   <p class="previous-success" data-testid="run-start-key">Started under a start key ({startKey}).</p>

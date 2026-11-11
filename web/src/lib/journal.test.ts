@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { interventionJournal, runEventJournal } from './journal'
+import { eventNote, interventionJournal, runEventJournal } from './journal'
 import { attemptOutputNote } from './outputloss'
 import type { WfEvent } from './types'
 
@@ -352,5 +352,24 @@ describe('follow-up rows', () => {
       'follow-up deal_won',
       undefined,
     ])
+  })
+})
+
+describe('journal eventNote concurrency', () => {
+  it('reads a superseded abort', () => {
+    expect(
+      eventNote({
+        type: 'run_aborted',
+        seq: 0,
+        ts: 0,
+        reason: 'superseded: a newer start (run t-2) replaced this queued run',
+      } as never),
+    ).toBe('superseded')
+  })
+
+  it('reads previous_success_set', () => {
+    expect(
+      eventNote({ type: 'previous_success_set', seq: 0, ts: 0 } as never),
+    ).toBe('previous success read after the key came free')
   })
 })

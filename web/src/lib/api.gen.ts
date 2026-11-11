@@ -1076,6 +1076,88 @@ export type PreviousSuccessView = { run_id?: string, started_at?: string, finish
  */
 keys?: Array<string>, withheld?: Array<string>, fallback: boolean, };
 
+export type ConcurrencyRecord = { 
+/**
+ * `apb_core::run_origin::tag(apb_core::concurrency::KEY_DOMAIN,
+ * rendered)`: the slot's identity, never shown.
+ */
+key_digest: string, 
+/**
+ * The rendered key scrubbed with the run's scrubber and clipped to
+ * `DISPLAY_MAX_CHARS` characters: shown, never compared.
+ */
+display: string, on_busy: string, 
+/**
+ * Whether the start waited for the key: the run then reads its
+ * `run.previous_success` window once it got the key.
+ */
+queued?: boolean, };
+
+export type ConcurrencyView = { display: string, on_busy: string, 
+/**
+ * The run this one waits for, while it waits.
+ */
+waiting_for?: string, };
+
+export type HealthView = { 
+/**
+ * The playbook id.
+ */
+playbook: string, 
+/**
+ * `project` or `global`.
+ */
+scope: string, 
+/**
+ * `held` when a hold is set (or the file does not verify), else
+ * `unwatched` when the playbook is not watched, else `tripped` when
+ * any rule is tripped, else `ok`.
+ */
+status: string, 
+/**
+ * One entry per rule the block sets, in the order
+ * `consecutive_failures`, `failure_rate`, `overdue`; empty for an
+ * unwatched playbook and a file that does not verify.
+ */
+rules: Array<HealthRuleView>, hold?: HoldView, 
+/**
+ * ISO UTC; absent when not muted.
+ */
+muted_until?: string, 
+/**
+ * The newest notice: `<rule> <kind> <state> <ISO UTC>`; absent when
+ * the ledger is empty.
+ */
+last_notice?: string, };
+
+export type HealthRuleView = { 
+/**
+ * `consecutive_failures`, `failure_rate` or `overdue`.
+ */
+rule: string, tripped: boolean, 
+/**
+ * ISO UTC of the trip; absent while not tripped.
+ */
+since?: string, 
+/**
+ * The verdict's detail; empty for a rule never evaluated.
+ */
+detail: string, };
+
+export type HoldView = { 
+/**
+ * ISO UTC of the hold's start.
+ */
+since: string, 
+/**
+ * The rule that set it; `unreadable` for a file that does not verify.
+ */
+rule: string, detail: string, 
+/**
+ * The command that clears it: `apb health clear <ref>`.
+ */
+clear: string, };
+
 export type RunDeadlineView = { total_ms: number, elapsed_ms: number, remaining_ms: number, source: DeadlineSource, 
 /**
  * A person paused the run, or it ended: the clock does not run.
@@ -1171,6 +1253,20 @@ cost_usd: number, cost_per_run_usd?: number,
  * equivalent nobody is billed, or of unknown basis.
  */
 cost_by_basis?: CostByBasis, };
+
+export type ArchivedCounts = { 
+/**
+ * Archived production top-level runs of this version.
+ */
+runs: number, succeeded: number, failed: number, aborted: number, 
+/**
+ * The sum over the summaries that recorded tokens; absent when none did.
+ */
+tokens?: number, 
+/**
+ * The sum over the summaries that recorded a cost; absent when none did.
+ */
+cost_usd?: number, };
 
 export type ModelUse = { 
 /**
@@ -1653,6 +1749,12 @@ interventions?: InterventionStats, nodes: Array<NodeStats>, note?: string,
  */
 candidate_trials?: number, 
 /**
+ * The production top-level runs of this version `apb runs prune`
+ * removed, counted from their summaries, apart from `outcomes` and
+ * `spend`; absent when none.
+ */
+archived?: ArchivedCounts, 
+/**
  * Attempts per model actually used ([`UNREPORTED`] when a host said
  * nothing).
  */
@@ -1691,7 +1793,13 @@ versions: Array<VersionStats>, compare?: Comparison,
 /**
  * [`NO_RUNS`] when no run matched.
  */
-note?: string, };
+note?: string, 
+/**
+ * The routine health of the watched playbooks the filter names (every
+ * watched one without a filter), whether or not they have runs; the
+ * stats callers fill it ([`crate::health::watched_views`]).
+ */
+health?: Array<HealthView>, };
 
 export type UsageSource = "reported" | "estimated";
 
@@ -1987,7 +2095,7 @@ unestimated_tokens: Array<string>,
  */
 unestimated_cost: Array<string>, note?: string, };
 
-export type Transition = "review" | "question" | "paused" | "finished" | "host_task" | "supervisor" | "stalled" | "follow_up";
+export type Transition = "review" | "question" | "paused" | "finished" | "host_task" | "supervisor" | "stalled" | "follow_up" | "health";
 
 export type FinishOutcome = "succeeded" | "needs_look" | "failed" | "aborted";
 
@@ -2724,6 +2832,10 @@ external_data?: boolean,
  * for a run whose definition does not read the namespace.
  */
 previous_success?: PreviousSuccessView, 
+/**
+ * The run's concurrency key, when its start took a slot.
+ */
+concurrency: ConcurrencyView | null, 
 /**
  * The run's deadline: its total, what is left and whether the clock is
  * frozen. Left out for a run without one.

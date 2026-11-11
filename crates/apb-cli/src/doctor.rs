@@ -162,6 +162,25 @@ fn doctor_env(root: &Path, mut out: Out) -> ExitCode {
             &sanitize_for_terminal(&detail, SANDBOX_LINE_MAX),
         );
     }
+    // Routine health: the watched playbooks, which tripped, which hold.
+    if let Some((warn, detail)) =
+        apb_engine::health::doctor_line(root, apb_core::clock::now_ms_u64())
+    {
+        out.line(
+            if warn { WARN } else { OK },
+            "health",
+            &sanitize_for_terminal(&detail, SANDBOX_LINE_MAX),
+        );
+    }
+    // A concurrency slot file that does not verify refuses its playbook's
+    // keyed starts and resumes until a person moves it aside.
+    if let Some(detail) = apb_engine::concurrency::doctor_line(root) {
+        out.line(
+            WARN,
+            "concurrency",
+            &sanitize_for_terminal(&detail, SANDBOX_LINE_MAX),
+        );
+    }
     out.finish(blocking)
 }
 

@@ -1120,7 +1120,7 @@ fn statistics_membership_counts_established_definitions_and_unknown_apart() {
         .iter()
         .map(|id| StatsRun::load(&r.join(".apb/runs").join(id)).unwrap())
         .collect();
-    let report = build(&runs, &StatsFilter::default());
+    let report = build(&runs, &[], &StatsFilter::default());
     let v = &report.versions[0];
     let node = |id: &str| v.nodes.iter().find(|n| n.node == id).unwrap();
     assert_eq!((node("discard").runs, node("discard").in_runs), (1, 1));

@@ -435,7 +435,7 @@ mod tests {
             since_ms: None,
             compare: Some("1.0.0".into()),
         };
-        let report = crate::run_stats::build(&runs, &filter);
+        let report = crate::run_stats::build(&runs, &[], &filter);
         let base = report
             .versions
             .iter()
@@ -452,7 +452,7 @@ mod tests {
         assert_eq!((rate.base, rate.against), (0.5, 1.0));
 
         let plain_runs = vec![run("a", "1.0.0", PLAIN, vec![succeeded()])];
-        let report = crate::run_stats::build(&plain_runs, &filter);
+        let report = crate::run_stats::build(&plain_runs, &[], &filter);
         assert!(report.versions[0].follow_up.is_none());
     }
 }

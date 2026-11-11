@@ -80,6 +80,8 @@ extern "C" fn isolate_config() {
     }) {
         return;
     }
+    // Routine health observes every run end, as the `apb` binary does.
+    apb_engine::health::install();
     let parent = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
     let _ = std::fs::create_dir_all(parent);
     let created = own_dir(parent, "apb-engine-test-xdg");
@@ -373,6 +375,8 @@ mod goal_criteria_test;
 mod grade_rules_test;
 #[path = "suite/grade_session_test.rs"]
 mod grade_session_test;
+#[path = "suite/health_test.rs"]
+mod health_test;
 #[path = "suite/heartbeat_lost_test.rs"]
 mod heartbeat_lost_test;
 #[cfg(unix)]
@@ -499,6 +503,8 @@ mod untrusted_prompt_test;
 #[path = "suite/write_scope_test.rs"]
 mod write_scope_test;
 // Unix-only: `runner: sh` scripts and shell hooks in the bare remote.
+#[path = "suite/concurrency_test.rs"]
+mod concurrency_test;
 #[cfg(unix)]
 #[path = "suite/publish_test.rs"]
 mod publish_test;
@@ -522,6 +528,8 @@ mod report_summary_test;
 mod resume_capture_test;
 #[path = "suite/resume_test.rs"]
 mod resume_test;
+#[path = "suite/retention_test.rs"]
+mod retention_test;
 #[path = "suite/retry_test.rs"]
 mod retry_test;
 #[cfg(unix)]
@@ -531,6 +539,8 @@ mod review_panel_test;
 mod review_state_test;
 #[path = "suite/review_test.rs"]
 mod review_test;
+#[path = "suite/review_torn_test.rs"]
+mod review_torn_test;
 #[cfg(unix)]
 #[path = "suite/run_estimate_test.rs"]
 mod run_estimate_test;

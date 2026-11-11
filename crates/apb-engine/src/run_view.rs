@@ -406,18 +406,13 @@ pub fn untrusted_nodes(events: &[Event]) -> Vec<crate::event::UntrustedNode> {
 /// (`run_provenance.previous_success`) as a surface shows it; `None` when
 /// its definition does not read the namespace.
 pub fn previous_success(events: &[Event]) -> Option<PreviousSuccessView> {
-    events.iter().find_map(|e| match &e.payload {
-        crate::event::EventPayload::RunProvenance {
-            previous_success, ..
-        } => previous_success.as_ref().map(|ps| PreviousSuccessView {
-            run_id: ps.run_id.clone(),
-            started_at: ps.started_at.clone(),
-            finished_at: ps.finished_at.clone(),
-            keys: ps.outputs.keys().cloned().collect(),
-            withheld: ps.withheld.clone(),
-            fallback: ps.fallback,
-        }),
-        _ => None,
+    crate::previous_success::recorded(events).map(|ps| PreviousSuccessView {
+        run_id: ps.run_id.clone(),
+        started_at: ps.started_at.clone(),
+        finished_at: ps.finished_at.clone(),
+        keys: ps.outputs.keys().cloned().collect(),
+        withheld: ps.withheld.clone(),
+        fallback: ps.fallback,
     })
 }
 
@@ -488,6 +483,69 @@ pub fn deadline_line(v: &RunDeadlineView) -> String {
     match &v.ends_at {
         Some(at) => format!("{total}, {left} left (ends {at})"),
         None => format!("{total}, {left} left, frozen (paused by a person)"),
+    }
+}
+
+/// A run's concurrency key as every surface shows it (`apb runs <id>`,
+/// MCP `run_status`, the HTTP run detail, the report).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ConcurrencyView {
+    pub display: String,
+    pub on_busy: String,
+    /// The run this one waits for, while it waits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub waiting_for: Option<String>,
+}
+
+/// The run's concurrency view: the record it journaled, and, while the
+/// run is not terminal, a display read of its slot file: when the slot
+/// still names this run as `waiting` and holds an active run, that run is
+/// what it waits for.
+pub fn concurrency(
+    root: &Path,
+    run_id: &str,
+    scope: apb_core::scope::Scope,
+    playbook: &str,
+    events: &[Event],
+) -> Option<ConcurrencyView> {
+    let record = events.iter().find_map(|e| match &e.payload {
+        crate::event::EventPayload::RunProvenance {
+            concurrency: Some(record),
+            ..
+        } => Some(record.clone()),
+        _ => None,
+    })?;
+    let terminal = crate::state::RunState::fold(events)
+        .run_status
+        .is_terminal();
+    let waiting_for = if terminal {
+        None
+    } else {
+        crate::concurrency::slots::read_slots(root, scope, playbook)
+            .iter()
+            .find(|s| s.key_digest == record.key_digest)
+            .filter(|s| s.waiting.as_ref().is_some_and(|h| h.run_id == run_id))
+            .and_then(|s| s.active.as_ref().map(|h| h.run_id.clone()))
+    };
+    Some(ConcurrencyView {
+        display: record.display,
+        on_busy: record.on_busy,
+        waiting_for,
+    })
+}
+
+/// The one text line of a concurrency view:
+/// `key "<display>" (queue_latest)` and, queued,
+/// `key "<display>" (queue_latest), waiting for run <id>`.
+pub fn concurrency_line(v: &ConcurrencyView) -> String {
+    match &v.waiting_for {
+        Some(id) => format!(
+            "key \"{}\" ({}), waiting for run {}",
+            v.display, v.on_busy, id
+        ),
+        None => format!("key \"{}\" ({})", v.display, v.on_busy),
     }
 }
 
@@ -1023,6 +1081,124 @@ pub fn previous_success_line(ps: &PreviousSuccessView) -> String {
 
 #[cfg(test)]
 mod decision_tests {
+    fn ev(seq: u64, payload: crate::event::EventPayload) -> Event {
+        Event {
+            seq,
+            ts: 0,
+            payload,
+        }
+    }
+
+    fn keyed_record(queued: bool) -> crate::event::ConcurrencyRecord {
+        crate::event::ConcurrencyRecord {
+            key_digest: "d1".into(),
+            display: "acme".into(),
+            on_busy: "queue_latest".into(),
+            queued,
+        }
+    }
+
+    /// An active run's view: the record's display and mode, no holder.
+    #[test]
+    fn concurrency_view_of_an_active_run() {
+        let events = vec![ev(
+            1,
+            crate::event::EventPayload::RunProvenance {
+                origin: Some("project".into()),
+                digest: None,
+                execution_root: None,
+                scripts_digest: None,
+                profiles: Vec::new(),
+                remembered: Vec::new(),
+                apb: None,
+                limits: Vec::new(),
+                previous_success: None,
+                untrusted: Vec::new(),
+                deadline: None,
+                start_key: None,
+                concurrency: Some(keyed_record(false)),
+            },
+        )];
+        let tmp = tempfile::tempdir().unwrap();
+        let v = concurrency(
+            tmp.path(),
+            "p-1",
+            apb_core::scope::Scope::Project,
+            "p",
+            &events,
+        )
+        .unwrap();
+        assert_eq!(v.display, "acme");
+        assert_eq!(v.on_busy, "queue_latest");
+        assert_eq!(v.waiting_for, None);
+        assert_eq!(concurrency_line(&v), "key \"acme\" (queue_latest)");
+    }
+
+    /// A run the slot names as waiting shows the holder it waits for.
+    #[test]
+    fn concurrency_view_of_a_waiter() {
+        let events = vec![ev(
+            1,
+            crate::event::EventPayload::RunProvenance {
+                origin: Some("project".into()),
+                digest: None,
+                execution_root: None,
+                scripts_digest: None,
+                profiles: Vec::new(),
+                remembered: Vec::new(),
+                apb: None,
+                limits: Vec::new(),
+                previous_success: None,
+                untrusted: Vec::new(),
+                deadline: None,
+                start_key: None,
+                concurrency: Some(keyed_record(true)),
+            },
+        )];
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let slot = crate::concurrency::Slot {
+            key_digest: "d1".into(),
+            display: "acme".into(),
+            active: Some(crate::concurrency::Holder {
+                run_id: "p-0".into(),
+                reservation: None,
+            }),
+            waiting: Some(crate::concurrency::Holder {
+                run_id: "p-1".into(),
+                reservation: None,
+            }),
+            stops: Vec::new(),
+        };
+        let key = slot.key_digest.clone();
+        let display = slot.display.clone();
+        crate::concurrency::seed_for_view(root, slot);
+        let v = concurrency(root, "p-1", apb_core::scope::Scope::Project, "p", &events).unwrap();
+        assert_eq!(v.waiting_for.as_deref(), Some("p-0"));
+        assert_eq!(
+            concurrency_line(&v),
+            "key \"acme\" (queue_latest), waiting for run p-0"
+        );
+        let _ = (key, display);
+    }
+
+    /// No record, no view.
+    #[test]
+    fn no_record_no_view() {
+        let events = Vec::new();
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            concurrency(
+                tmp.path(),
+                "p-1",
+                apb_core::scope::Scope::Project,
+                "p",
+                &events
+            )
+            .is_none()
+        );
+    }
+
     use super::*;
     use crate::event::DecisionAnswer;
 

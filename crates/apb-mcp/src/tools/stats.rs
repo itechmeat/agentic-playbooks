@@ -41,7 +41,12 @@ pub fn playbook_stats(
         since_ms,
         compare,
     };
-    let (report, runs) = apb_engine::run_stats::stats_with_runs(&[root.to_path_buf()], &filter);
+    let (mut report, runs) = apb_engine::run_stats::stats_with_runs(&[root.to_path_buf()], &filter);
+    report.health = apb_engine::health::watched_views(
+        root,
+        filter.playbook.as_deref(),
+        apb_core::clock::now_ms_u64(),
+    );
     let mut value = serde_json::to_value(&report).map_err(|e| ToolError::Engine(e.to_string()))?;
     // Every contributing run's redactor, so a finding location, a baseline
     // observation or a `last_run` line that echoes a secret param value

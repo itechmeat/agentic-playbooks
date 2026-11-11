@@ -2136,6 +2136,26 @@ fn run_detail_text(
     if let Some(d) = apb_engine::run_view::deadline(&view.events, apb_core::clock::now_ms()) {
         say!("  deadline: {}", apb_engine::run_view::deadline_line(&d));
     }
+    // The run's concurrency key, when its start took a slot.
+    {
+        let scope = view
+            .events
+            .iter()
+            .find_map(|e| match &e.payload {
+                apb_engine::event::EventPayload::RunProvenance { origin, .. } => origin.clone(),
+                _ => None,
+            })
+            .and_then(|o| apb_core::scope::Scope::parse(&o))
+            .unwrap_or(apb_core::scope::Scope::Project);
+        if let Some(v) =
+            apb_engine::run_view::concurrency(root, run_id, scope, &playbook, &view.events)
+        {
+            say!(
+                "  concurrency: {}",
+                apb_engine::run_view::concurrency_line(&v)
+            );
+        }
+    }
     if let Some(tag) = apb_engine::run_view::start_key(&view.events) {
         say!(
             "  start key: {}",
@@ -2780,6 +2800,21 @@ pub(crate) fn resume_all_cmd(root: &Path, launch: &crate::launch::LaunchFlags) -
                     }
                 };
                 println!("{}  {what}", e.run_id);
+            }
+            // Routine health: a machine that was off evaluates every
+            // watched playbook once it is back.
+            for (r, res) in apb_engine::health::sweep(root, &apb_core::clock::now_ms_u64) {
+                match res {
+                    Ok(v) => {
+                        for t in apb_engine::health::tripped_rules(&v) {
+                            println!(
+                                "health: {r}: {}",
+                                crate::util::sanitize_for_terminal(&t, 300)
+                            );
+                        }
+                    }
+                    Err(e) => eprintln!("health: {r}: {e}"),
+                }
             }
             ExitCode::SUCCESS
         }

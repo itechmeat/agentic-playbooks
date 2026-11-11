@@ -22,10 +22,10 @@ export const START_ACTION_CODES = ['confirm_irreversible_start', 'fix_requiremen
 export const LAUNCH_POLICIES = ['allow', 'ask', 'deny'] as const
 
 /** Every run transition a person can be notified about, in report order. */
-export const NOTIFY_TRANSITIONS = ['review', 'question', 'paused', 'finished', 'host_task', 'supervisor', 'stalled', 'follow_up'] as const
+export const NOTIFY_TRANSITIONS = ['review', 'question', 'paused', 'finished', 'host_task', 'supervisor', 'stalled', 'follow_up', 'health'] as const
 
 /** The transitions a subscription covers when nothing narrows it. */
-export const NOTIFY_DEFAULT_TRANSITIONS = ['review', 'question', 'paused', 'finished'] as const
+export const NOTIFY_DEFAULT_TRANSITIONS = ['review', 'question', 'paused', 'finished', 'health'] as const
 
 /** Every run outcome an end-of-run notice can be narrowed to. */
 export const NOTIFY_OUTCOMES = ['succeeded', 'needs_look', 'failed', 'aborted'] as const

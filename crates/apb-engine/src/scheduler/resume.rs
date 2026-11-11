@@ -1217,6 +1217,12 @@ fn resume_inner_checked(
     if let Some(hold) = hold {
         still_holds(root, run_id, hold)?;
     }
+    // A keyed run reserves its slot before the tree: a resume never takes
+    // the tree while another run holds its key. The reservation is given
+    // back when anything below refuses, and confirmed (its provisional
+    // reservation cleared, the slot's stops posted) once `run_resumed` is
+    // durable.
+    let reservation = crate::concurrency::reserve_resume(root, &run_dir, run_id)?;
     let mut guard = match resume_lock_tree(&playbook, &run_dir)? {
         Some(tree) => {
             crate::workdir::acquire_tree_for(root, tree.as_deref(), allow_shared_workdir, run_id)?
@@ -1226,7 +1232,7 @@ fn resume_inner_checked(
     // Journal a proper `run_resumed` marker (folds to running), replacing the
     // old `RunPaused { reason: "resume from X" }` write that used to leave the
     // folded status stuck on paused for the rest of the run.
-    let budget_changed = journal_resumed(
+    let resumed = journal_resumed(
         &mut log,
         &run_dir,
         &ResumeJournal {
@@ -1254,7 +1260,34 @@ fn resume_inner_checked(
             apb: crate::event::apb_version(),
             deadline: None,
         },
-    )?;
+    );
+    let budget_changed = match resumed {
+        Ok(budget_changed) => {
+            if let Some(reservation) = reservation
+                && let Err(e) = reservation.confirm()
+            {
+                // The slot file was moved aside or rewritten by hand
+                // while the resume went through: the run stops.
+                let _ = crate::stop::stop_run_with(
+                    root,
+                    run_id,
+                    &crate::stop::StopRequest {
+                        by: crate::pause::kind::PauseBy::Engine,
+                        reason: "concurrency_lost: the run's key slot changed while it resumed",
+                        graceful: true,
+                        due: None,
+                    },
+                );
+                return Err(e);
+            }
+            budget_changed
+        }
+        Err(e) => {
+            // The reservation drops unconfirmed and frees the slot.
+            drop(reservation);
+            return Err(e);
+        }
+    };
     // A budget set on a run that started without one needs the run's
     // estimate before the drive's gate reads it; written after the journal
     // lock is released.

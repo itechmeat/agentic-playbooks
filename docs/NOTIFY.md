@@ -25,8 +25,8 @@ spaces.
 
 ## What is sent
 
-A run notifies about these transitions; the first four are the default,
-the last three are asked for by name:
+A run notifies about these transitions; `review`, `question`, `paused`,
+`finished` and `health` are the default, the others are asked for by name:
 
 | Transition | When |
 | --- | --- |
@@ -38,6 +38,17 @@ the last three are asked for by name:
 | `supervisor` | A failed or timed-out step waits for the run's supervisor to retry it, continue from another step, or stop the run |
 | `stalled` | A step stopped retrying: the same rejection came back `stall_after` times in a row (opt-in, like `host_task` and `supervisor`) |
 | `follow_up` | The playbook's `follow_up` check was read after the run ended: one notice for the observation, for every verdict (opt-in, like `host_task`; not in the default subscription) |
+| `health` | A watched routine tripped a health rule or recovered (`health:` in docs/HOWTO-authoring.md); in the default set |
+
+`health` is never about one run. Its notice goes to the machine's notify
+target when the machine's `on` holds `health` (the default does), the
+`notify.playbooks` filters of `policy.yaml` pass the playbook, and the
+project's notify config is not `enabled: false`; `notify.default` does not
+matter. The target is pinned with its connector and account digests when
+the notice is recorded, and a target that changed since is not sent to.
+A run-level `on` that names `health` changes nothing, and the Run dialog
+does not offer it. A config that lists `on` explicitly hears about health
+only by adding `health`.
 
 `host_task` and `supervisor` are sent while the wait is still open: the
 attempt waiting for the host and the run waiting for its supervisor check

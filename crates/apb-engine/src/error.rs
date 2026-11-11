@@ -12,6 +12,11 @@ pub enum EngineError {
     /// Surfaces that map HTTP status codes treat this as 409 Conflict.
     #[error("conflict: {0}")]
     Conflict(String),
+    /// A queued concurrency run was replaced by a newer start of its key;
+    /// it settles itself aborted `superseded:` (see
+    /// [`crate::concurrency`]).
+    #[error("superseded: {0}")]
+    Superseded(String),
     /// A start key named a run that already started; nothing was started.
     #[error("already started: {0}")]
     AlreadyStarted(String),

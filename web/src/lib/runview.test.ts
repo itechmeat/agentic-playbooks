@@ -86,6 +86,7 @@ function detail(over: Partial<RunDetail> = {}): RunDetail {
     unknown_events: 0,
     execution: 'cli',
     execution_fallback: false,
+    concurrency: null,
     next_actions: { observed_at_ms: 0, status: 'running', stop: 'progresses_by_itself', actions: [] },
     events: [
       ev(0, 1_000, 'run_started'),

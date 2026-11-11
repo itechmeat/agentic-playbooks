@@ -92,3 +92,29 @@ describe('RunDriveNotes start key', () => {
     expect(document.querySelector('[data-testid="run-start-key"]')).toBeNull()
   })
 })
+
+describe('RunDriveNotes concurrency', () => {
+  it('shows the concurrency key and what it waits for', () => {
+    app = mount(RunDriveNotes, {
+      target: document.body,
+      props: { concurrency: { display: 'acme', on_busy: 'queue_latest', waiting_for: 't-1' } },
+    })
+    const line = document.querySelector('[data-testid="run-concurrency"]')
+    expect(line?.textContent?.trim()).toBe('Key: acme (queue_latest), waiting for run t-1')
+  })
+
+  it('shows the key alone when the run is active', () => {
+    app = mount(RunDriveNotes, {
+      target: document.body,
+      props: { concurrency: { display: 'acme', on_busy: 'refuse', waiting_for: undefined } },
+    })
+    expect(document.querySelector('[data-testid="run-concurrency"]')?.textContent?.trim()).toBe(
+      'Key: acme (refuse)',
+    )
+  })
+
+  it('says nothing without a key', () => {
+    app = mount(RunDriveNotes, { target: document.body, props: {} })
+    expect(document.querySelector('[data-testid="run-concurrency"]')).toBeNull()
+  })
+})

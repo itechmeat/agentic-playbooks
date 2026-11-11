@@ -41,11 +41,14 @@ pub enum Transition {
     /// The playbook's follow-up check was read after a successful run
     /// ended, whatever its verdict (opt-in).
     FollowUp,
+    /// A watched routine tripped a health rule or recovered; never about
+    /// one run, so a run's own subscription does not narrow it.
+    Health,
 }
 
 impl Transition {
     /// Every transition, in the order they are reported.
-    pub const ALL: [Transition; 8] = [
+    pub const ALL: [Transition; 9] = [
         Transition::Review,
         Transition::Question,
         Transition::Paused,
@@ -54,17 +57,19 @@ impl Transition {
         Transition::Supervisor,
         Transition::Stalled,
         Transition::FollowUp,
+        Transition::Health,
     ];
 
     /// The transitions a subscription covers when nothing narrows it: the
-    /// waits on the person and the run's end. `host_task`, `supervisor`
-    /// and `follow_up` wait on a host, an agent, or the run's aftermath
-    /// and are asked for by name.
-    pub const DEFAULT: [Transition; 4] = [
+    /// waits on the person, the run's end, and a watched routine's health.
+    /// `host_task`, `supervisor` and `follow_up` wait on a host, an agent,
+    /// or the run's aftermath and are asked for by name.
+    pub const DEFAULT: [Transition; 5] = [
         Transition::Review,
         Transition::Question,
         Transition::Paused,
         Transition::Finished,
+        Transition::Health,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -77,6 +82,7 @@ impl Transition {
             Transition::Supervisor => "supervisor",
             Transition::Stalled => "stalled",
             Transition::FollowUp => "follow_up",
+            Transition::Health => "health",
         }
     }
 
@@ -475,6 +481,21 @@ impl NotifyRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_is_in_all_and_default() {
+        assert_eq!(Transition::ALL.len(), 9);
+        assert_eq!(Transition::ALL[8], Transition::Health);
+        assert_eq!(Transition::DEFAULT.len(), 5);
+        assert!(Transition::DEFAULT.contains(&Transition::Health));
+    }
+
+    #[test]
+    fn health_parses_and_prints() {
+        assert_eq!(Transition::Health.as_str(), "health");
+        assert_eq!(Transition::parse("health"), Some(Transition::Health));
+        assert!(Transition::names().ends_with("follow_up, health"));
+    }
 
     #[test]
     fn every_outcome_class_passes_only_its_filter() {

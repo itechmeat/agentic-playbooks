@@ -121,3 +121,40 @@ fn playbook_stats_refuses_bad_arguments() {
     let e = playbook_stats(tmp.path(), None, Some("yesterday-ish"), None).unwrap_err();
     assert!(matches!(e, ToolError::Conflict(_)), "{e:?}");
 }
+
+/// The report names the routine health of a watched playbook, whether or
+/// not it has runs (routine health D2).
+#[test]
+fn playbook_stats_carries_health() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    apb_core::registry::init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/p/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        "schema: 2\nid: p\nname: p\nversion: 1.0.0\nhealth:\n  consecutive_failures: 2\n  on_trip: hold\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+    )
+    .unwrap();
+    fs::write(root.join(".apb/playbooks/p/current"), "1.0.0").unwrap();
+    write_run(root, "r1", "1.0.0", &[]);
+    apb_core::signed_store::transact(
+        root,
+        apb_core::scope::Scope::Project,
+        "p",
+        apb_core::signed_store::Unsigned::Refuse,
+        |h: &mut apb_engine::health::state::HealthFile| {
+            h.first_seen_ms = 1;
+            h.hold = Some(apb_engine::health::state::Hold {
+                since_ms: 1,
+                rule: "consecutive_failures".into(),
+                detail: "2 failed in a row".into(),
+            });
+            Ok::<_, apb_core::signed_store::StoreError>(((), true))
+        },
+    )
+    .unwrap();
+    let v = playbook_stats(root, Some("p".into()), None, None).unwrap();
+    assert_eq!(v["health"][0]["playbook"], "p", "{v}");
+    assert_eq!(v["health"][0]["status"], "held");
+}

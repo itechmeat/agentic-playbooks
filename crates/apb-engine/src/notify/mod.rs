@@ -19,6 +19,7 @@
 //! person's own subscription, trusted when it was set and checked against
 //! the pinned digests at every send. A failure never fails the run.
 
+pub mod health;
 pub mod notice;
 pub mod record;
 pub mod retry;

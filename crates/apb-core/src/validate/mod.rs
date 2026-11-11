@@ -11,6 +11,7 @@ mod approval;
 mod baseline;
 mod budget;
 pub mod cloud_models;
+mod concurrency;
 mod connectors;
 mod deadline;
 mod decisions;
@@ -20,6 +21,7 @@ mod follow_up;
 mod forks;
 mod graph;
 pub mod guarded;
+mod health;
 mod isolation;
 mod judge;
 mod known_problems;
@@ -454,6 +456,8 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     output_types::check_output_types(playbook, &mut r); // V167, V168
     write_scope::check_write_scope(playbook, &mut r); // V170-V172
     deadline::check_deadline(playbook, &mut r); // V200
+    concurrency::check_concurrency(playbook, &mut r); // V210, V211
+    health::check_health(playbook, &mut r); // V212
     cloud_models::check_cloud_models(playbook, ctx, &mut r); // V220-V222
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08

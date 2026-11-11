@@ -727,6 +727,13 @@ pub fn check_run(
     // Lifecycle: draft/retired does not run through the normal path - only via trial.
     let playbook_dir = definition_parent.join("playbooks").join(&wref.id);
     check_lifecycle(&playbook_dir, &wref.id)?;
+    // A playbook a person must look at first (routine health): refused
+    // until `apb health clear`. A trial is not refused here.
+    let health_scope = match wref.origin {
+        Origin::Global => apb_core::scope::Scope::Global,
+        Origin::Project { .. } => apb_core::scope::Scope::Project,
+    };
+    crate::health::state::hold_refusal(root, health_scope, &wref.id)?;
     if let Ok(digest) = loaded.trust_digest() {
         check_import_approval(&playbook_dir, &wref.id, &loaded.version, &digest)?;
     }

@@ -20,6 +20,45 @@ pub enum Hook {
     /// In a `playbook` node, after the child was prepared and before
     /// `child_run_started` is appended.
     ChildPrepared,
+    /// In the concurrency key path, right after `admit` returned `Ok`
+    /// (preparation step 4).
+    KeyAdmitted,
+    /// In `wait_turn`, before each look at the slot.
+    KeyBeforeLook,
+    /// In health phase 2, after the claim of phase 1 and before the
+    /// dispatch check (D2). The argument is `<root>/.apb/health`.
+    HealthBeforeDispatch,
+    /// In health phase 2, after the call returned and before phase 3 (D2).
+    /// The argument is `<root>/.apb/health`.
+    HealthBeforeSettle,
+    /// In retention `apply`, after the event locks of a family are taken
+    /// and before its recheck (D3). The argument is the family root's run
+    /// directory.
+    PruneFamilyLocked,
+    /// In retention `apply`, after the members of a family were moved into
+    /// staging and before the commit rename (D3). The argument is the
+    /// family root's run directory.
+    PruneAfterStage,
+    /// In retention `apply`, after the recheck of a family under its event
+    /// locks found nothing that keeps it and before its summary and staged
+    /// move (D3). The argument is the family root's run directory.
+    PruneAfterRecheck,
+    /// In a health evaluation, after the facts were read and before the
+    /// state transaction (D2). The argument is `<root>/.apb/health`.
+    HealthAfterFacts,
+    /// In the health facts, after a listed run checked valid and before
+    /// its run config and start are read (D2). The argument is the run
+    /// directory.
+    HealthFactRead,
+    /// In the health facts, after a listed run was found gone and before
+    /// the fresh view is taken (D2). The argument is the run directory.
+    HealthFactGone,
+    /// In a health evaluation, before the evaluation lock is taken (D2).
+    /// The argument is `<root>/.apb/health`.
+    HealthBeforeLock,
+    /// In a grade write, after the grades directory was made and before
+    /// the grade file is written. The argument is the run directory.
+    GradeBeforeWrite,
 }
 
 type Action = Arc<dyn Fn(&Path) + Send + Sync>;

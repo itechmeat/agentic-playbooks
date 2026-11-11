@@ -60,6 +60,36 @@ of keys under `.apb/start-keys/` does not verify, every keyed start of that
 playbook is refused `start_key_state_unreadable` until a person moves the
 file aside (`apb doctor` names it); unkeyed starts are not affected.
 
+### Before a start: `apb health check`
+
+A routine with a `health:` block (docs/HOWTO-authoring.md) can be put on
+hold when it keeps failing. The scheduler asks first:
+
+```sh
+apb health check nightly-digest || exit 0   # exit 3: on hold, a person clears it
+apb run nightly-digest --detach --start-key "digest-$(date +%F)"
+```
+
+`apb health check` evaluates the routine now (its notices go out), prints
+the tripped rules on stderr, and exits 0 when a start would be admitted
+and 3 while the playbook is on hold; a held playbook is refused
+`playbook_on_hold` anyway, so the check only saves the start. A routine
+that keeps failing without a hold keeps running, so it can recover.
+
+### Pruning old runs
+
+Run directories pile up under a scheduler. The same scheduler may prune
+them once a week, which is a person's decision written into the job:
+
+```sh
+apb runs prune --yes
+```
+
+It keeps the newest, the latest success, every run something still
+depends on, and every run younger than the retention settings of
+`policy.yaml` (`docs/STATS.md` "Pruning runs"). Without `--yes` it prints
+what it would remove.
+
 ### Following automatic progress: `--follow-auto`
 
 The default `apb wait` returns as soon as anything stops the run itself: a

@@ -776,8 +776,17 @@ pub(crate) async fn list_playbooks(State(state): State<AppState>) -> impl IntoRe
         let Ok(list) = reg.list() else {
             continue;
         };
+        let now = apb_core::clock::now_ms_u64();
         for summary in &list {
-            out.push(tag_summary(summary, &workspace_id, &project));
+            let mut entry = tag_summary(summary, &workspace_id, &project);
+            // Routine health: a watched playbook's state, or one whose
+            // state file remains.
+            if let Ok(Some(health)) =
+                apb_engine::health::view(&root, apb_core::scope::Scope::Project, &summary.id, now)
+            {
+                entry["health"] = serde_json::json!(health);
+            }
+            out.push(entry);
         }
     }
     Json(out).into_response()

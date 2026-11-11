@@ -669,7 +669,7 @@ fn baseline(report: &RetroReport, history: &[StatsRun], n: usize) -> Option<Base
         playbook: Some(report.playbook.clone()),
         ..Default::default()
     };
-    let stats = crate::run_stats::build(&owned, &filter);
+    let stats = crate::run_stats::build(&owned, &[], &filter);
     let success = stats
         .versions
         .first()

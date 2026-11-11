@@ -714,6 +714,7 @@ mod tests {
         log.append(EventPayload::RunProvenance {
             deadline: None,
             start_key: None,
+            concurrency: None,
             origin: Some("project".into()),
             digest: None,
             execution_root: None,

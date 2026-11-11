@@ -1,4 +1,4 @@
-import type { BudgetLimit, OnNoEstimate } from './api.gen'
+import type { BudgetLimit, HealthView, OnNoEstimate } from './api.gen'
 
 // A run's budget argument: the generated limit plus the policy.
 export type RunBudget = BudgetLimit & { on_no_estimate?: OnNoEstimate }
@@ -27,6 +27,8 @@ export interface PlaybookSummary {
   // Owning project (global dashboard). Empty on the pinned-root test server.
   workspace_id: string
   project: string
+  // Routine health of a watched playbook; absent without a health block.
+  health?: HealthView
 }
 
 export interface PlaybookNode {

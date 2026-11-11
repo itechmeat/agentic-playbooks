@@ -228,3 +228,64 @@ fn an_unknown_feature_settled_by_a_later_checkpoint_reads() {
     let events = read_all(&dir).unwrap();
     assert_eq!(events.len(), 2);
 }
+
+/// A run whose start took a concurrency slot journals `concurrency` in
+/// its guard, right after `run_provenance`.
+#[test]
+fn a_keyed_run_is_guarded_for_concurrency() {
+    let yaml = "schema: 2\nid: kp\nname: kp\nversion: 1.0.0\nconcurrency: { on_busy: refuse }\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n";
+    let _lock = common::env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    seed(root, "kp", yaml, &[]);
+    let _env = [
+        EnvVar::set("APB_AGENT_CMD", agent(root, "0")),
+        EnvVar::set("APB_CONFIG_DIR", cfg.path()),
+    ];
+    let res = run(root, "kp", None, RunOptions::default()).unwrap();
+    let events = read_all(&root.join(".apb/runs").join(&res.run_id)).unwrap();
+    let provenance = events
+        .iter()
+        .position(|e| matches!(e.payload, EventPayload::RunProvenance { .. }))
+        .unwrap();
+    let EventPayload::RunGuard { requires } = &events[provenance + 1].payload else {
+        panic!(
+            "no run guard after provenance: {:?}",
+            events[provenance + 1]
+        );
+    };
+    assert_eq!(names(&["concurrency"]), Some(requires.clone()));
+}
+
+/// A child of a keyed playbook takes no slot of its own, so its guard
+/// never names `concurrency`, whatever its definition says.
+#[test]
+fn a_child_of_a_keyed_playbook_is_not_guarded_for_concurrency() {
+    let yaml = "schema: 2\nid: kc\nname: kc\nversion: 1.0.0\nconcurrency: { on_busy: refuse }\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n";
+    let _lock = common::env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    seed(root, "kc", yaml, &[]);
+    let _env = [
+        EnvVar::set("APB_AGENT_CMD", agent(root, "0")),
+        EnvVar::set("APB_CONFIG_DIR", cfg.path()),
+    ];
+    let opts = RunOptions {
+        parent_run: Some("kc-parent".into()),
+        ..RunOptions::default()
+    };
+    let res = run(root, "kc", None, opts).unwrap();
+    let events = read_all(&root.join(".apb/runs").join(&res.run_id)).unwrap();
+    let provenance = events
+        .iter()
+        .position(|e| matches!(e.payload, EventPayload::RunProvenance { .. }))
+        .unwrap();
+    if let EventPayload::RunGuard { requires } = &events[provenance + 1].payload {
+        assert!(
+            !requires.contains(&"concurrency".to_string()),
+            "a child is not guarded for concurrency: {requires:?}"
+        );
+    }
+}

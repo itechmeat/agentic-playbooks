@@ -32,6 +32,28 @@ fn per_run_text(p: &PerRun) -> String {
 /// The report as text for a terminal.
 pub fn render_text(r: &StatsReport) -> String {
     let mut out = String::new();
+    // The routine health of a watched playbook comes first, also when no
+    // run matched: an overdue routine with no run is what it is for.
+    for h in r.health.iter().filter(|h| h.status != "ok") {
+        let rules: Vec<&str> = h
+            .rules
+            .iter()
+            .filter(|x| x.tripped)
+            .map(|x| x.rule.as_str())
+            .chain(h.hold.iter().map(|x| x.rule.as_str()))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let name = crate::health::state::reference(
+            apb_core::scope::Scope::parse(&h.scope).unwrap_or(apb_core::scope::Scope::Project),
+            &h.playbook,
+        );
+        out.push_str(&format!(
+            "health: {name} {} ({})\n",
+            h.status,
+            rules.join(", ")
+        ));
+    }
     if let Some(note) = &r.note {
         out.push_str(note);
         out.push('\n');
@@ -45,6 +67,15 @@ pub fn render_text(r: &StatsReport) -> String {
         ));
         if let Some(note) = &v.note {
             out.push_str(&format!("  note: {note}\n"));
+        }
+        if let Some(a) = &v.archived {
+            out.push_str(&format!(
+                "  archived: {} runs ({} succeeded, {} failed, {} aborted)\n",
+                a.runs, a.succeeded, a.failed, a.aborted
+            ));
+        }
+        if v.runs == 0 {
+            continue;
         }
         if v.candidate_trials > 0 {
             out.push_str(&format!(
