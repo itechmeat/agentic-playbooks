@@ -119,7 +119,7 @@ apb import          preview and import a playbook bundle into this project (--pr
 apb trash           list deleted playbooks, restore one with its versions
 apb trust           list approvals (trust.json), revoke by digest or id, approve a version (--digest for imported scripts)
 apb profile         manage agent profiles
-apb connector       list or manage connectors
+apb connector       list or manage connectors (apb connector oauth <connector> [--account A] [--scope S]: a person's loopback consent that prints a refresh token once)
 apb detect          detect installed coding agents (--json)
 apb models          the cloud model catalogs (NEAR AI Cloud): rows, privacy classes, prices (--refresh, --json)
 apb adopt           will it fit here: adoption readiness report for a playbook (--scope project|global)
@@ -178,11 +178,13 @@ Six crates under `crates/` with dependency direction core <- engine <- mcp, cli 
 - [Eval suites](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/EVALS.md): `apb eval`, cases next to a playbook's versions, repeated runs in scratch repositories, results per configuration
 - [Host integration](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOST-INTEGRATION.md): tier-0 instructions delivery, client compatibility
 - [Profile authoring](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/PROFILES.md): how profiles bind agent + model + fallbacks + skills; `process_env: allowlist` limits which operator environment variables an agent process inherits
+- [Cloud models](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CLOUD-MODELS.md): the NEAR AI Cloud catalog (`apb models`, `--refresh`), privacy classes, `nearai/<id>` models on dsh with only `NEARAI_API_KEY`, catalog pricing, the `catalog: near-ai-cloud` decisions provider
+- [External data runs](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/EXTERNAL-DATA.md): `external_data: true` (`apb run --external-data`) for a run whose input comes from outside the operator; nothing it produces reaches a learning store or a history reader
 - [Playbook authoring guide](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/HOWTO-authoring.md): node types, edges, conditions, params, templating, list processing (`list:` runs a step once per item, in batches, with an engine check per item and per-item state kept across retries, pauses and loops), a run `budget:` (a token or dollar limit; the run pauses before a node whose median spend in comparable runs no longer fits, `on_no_estimate: ask|pause|continue`), goal criteria, baseline checks (before and after snapshots the engine reads itself), findings and warnings, the retry briefing, `Apb-Run` trailer reporting
 - [Guardrails](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/GUARDRAILS.md): which controls advise and which enforce, by layer; project hooks under the minimal environment
-- [Running apb in CI](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CI.md): `apb run --detach` plus `apb wait` exit codes, config and secrets, trust in CI
+- [Running apb in CI](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CI.md): `apb run --detach` plus `apb wait` exit codes, config and secrets, trust in CI, starting once per event (`--start-key`), `apb health check` before a start, `apb runs prune`, a run `--deadline`
 - [Notifications](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/NOTIFY.md): "Notify me": a run tells a person about a waiting review or question, a pause they did not make and its end, through a connector they configured; trust checked at set time and at every send
-- [Connectors](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CONNECTORS.md): calling external services (HTTP, mail, chat) from playbooks, accounts, secrets, trust, sending once (the send ledger, `--intent`, `on_unknown`)
+- [Connectors](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/CONNECTORS.md): calling external services (HTTP, mail, chat, Gmail, Google Calendar, Google Drive, web search) from playbooks, accounts, secrets, trust, OAuth refresh accounts (`apb connector oauth`), bounded paging, sending once (the send ledger, `--intent`, `on_unknown`)
 - [Deployment](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/DEPLOYMENT.md): running the dashboard on a server behind a TLS proxy with API keys
 - [Decision models](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/DECISIONS.md): optional small models for completion checks, judge nodes, retry advice and catalog ranking
 - [Reference scenarios](https://github.com/itechmeat/agentic-playbooks/blob/main/docs/scenarios/README.md): realistic code and routine situations features are checked against, each naming today's gaps
