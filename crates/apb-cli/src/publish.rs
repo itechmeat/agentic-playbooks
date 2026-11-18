@@ -259,7 +259,16 @@ fn decide(root: &Path, run_id: &str, node: Option<&str>, d: Decision<'_>) -> Exi
         Ok(n) => n,
         Err(e) => return fail(d.command, &e),
     };
-    crate::run::review_cmd(root, run_id, &node, d.decision, d.note, d.nonce, None)
+    crate::run::review_cmd(
+        root,
+        run_id,
+        &node,
+        d.decision,
+        d.note,
+        d.nonce,
+        None,
+        Vec::new(),
+    )
 }
 
 fn fail(what: &str, e: &str) -> ExitCode {

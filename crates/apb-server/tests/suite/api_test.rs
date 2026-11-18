@@ -131,6 +131,28 @@ async fn playbook_detail_includes_model_and_validation() {
     assert_eq!(addresses[0]["rendered"], "e:start>plan#1");
 }
 
+/// The detail carries the diagram rendered from the YAML just loaded; the
+/// `playbook.mmd` beside the version is never read back, so a hand-edited
+/// file on disk is ignored.
+#[tokio::test]
+async fn the_playbook_detail_carries_the_diagram() {
+    let _cfg = crate::common::config_sandbox().await;
+    let dir = seed();
+    let edited = "flowchart TD\n  n0[\"hand edited, never read back\"]\n";
+    fs::write(
+        dir.path()
+            .join(".apb/playbooks/implement-task/1.0.0/playbook.mmd"),
+        edited,
+    )
+    .unwrap();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = get_json(app, "/api/playbooks/implement-task").await;
+    assert_eq!(status, StatusCode::OK);
+    let playbook = apb_core::schema::Playbook::from_yaml(VALID).unwrap();
+    let want = apb_core::diagram::mermaid(&playbook, &apb_core::scope::digest_str(VALID));
+    assert_eq!(json["diagram"].as_str(), Some(want.as_str()), "{json}");
+}
+
 #[tokio::test]
 async fn unknown_playbook_404() {
     let dir = seed();

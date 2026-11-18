@@ -118,7 +118,7 @@ impl crate::decision::DecisionJournal for Journal<'_> {
 // channel validates against exactly the same predicate before it accepts a
 // decision, and it must not reach up into the scheduler to do so. Re-exported
 // here so the drive loop keeps naming them alongside the question counters.
-pub(crate) use crate::event::{review_decided_count, review_open_count};
+pub(crate) use crate::event::review_open_count;
 
 /// How many `QuestionAsked` events a node already carries. Mirrors
 /// `review_requested_count`: drive declares a question once per suspension and

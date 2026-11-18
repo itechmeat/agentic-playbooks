@@ -175,6 +175,12 @@ fn stage(src: &Path, staging: &Path, from_scope: &str) -> io::Result<()> {
             _ => {}
         }
     }
+    // Every copied version leaves with the diagram derived from the yaml it
+    // holds (people-in-the-loop D6): one the source lacked, or held stale,
+    // is written into the copy before the one rename publishes it.
+    for version in crate::registry::list_versions(staging)? {
+        crate::diagram::ensure_beside(staging, &version)?;
+    }
     record_arrival(staging, from_scope)
 }
 
@@ -238,6 +244,30 @@ mod tests {
         );
         req.expected_from = Some(Some("1.0.0"));
         req
+    }
+
+    /// Every copied version arrives with the diagram derived from its
+    /// yaml, also one whose source never had it.
+    #[test]
+    fn every_copied_version_carries_its_diagram() {
+        use crate::diagram::{DiagramState, state_of};
+        let _cfg = crate::test_config();
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        let dir = seed(src.path());
+        assert_eq!(state_of(&dir.join("1.1.0")), DiagramState::Missing);
+        copy_playbook_to(
+            &dir,
+            dst.path(),
+            "p",
+            "project",
+            &CopyFloors::project_to_global("ws", "p", floor::SaveChannel::Person),
+        )
+        .unwrap();
+        let copied = dst.path().join("playbooks/p");
+        for v in ["1.0.0", "1.1.0"] {
+            assert_eq!(state_of(&copied.join(v)), DiagramState::Current, "{v}");
+        }
     }
 
     #[test]

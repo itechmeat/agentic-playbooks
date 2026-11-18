@@ -633,6 +633,26 @@ fn a_spent_bounded_edge_out_of_a_review_fails_the_run_naming_it() {
     assert_eq!(count_finishes(&events, "fix"), 1, "the loop ran once");
 }
 
+/// The review loop of [`REVIEW_CAP`] on a gate with a field: its output is
+/// one JSON object, yet the dead end still names the spent edge of the
+/// decision word.
+#[test]
+fn a_spent_bounded_edge_out_of_a_fielded_review_is_named() {
+    let yaml = REVIEW_CAP.replace(
+        "options: [approved, rejected] }",
+        "options: [approved, rejected], fields: [{ name: remark, type: text }] }",
+    );
+    let (errors, _) = dead_end_after(&yaml, &["rejected", "rejected"]);
+    assert_eq!(
+        errors,
+        vec![(
+            Some("review".to_string()),
+            "no edge can be taken from `review`: decision `rejected`; exhausted: e:review>fix#1"
+                .to_string()
+        )]
+    );
+}
+
 /// A review with two capped loops, one per decision: once both are spent,
 /// the dead end names only the edge of the decision that found no edge,
 /// never the other decision's spent edge.

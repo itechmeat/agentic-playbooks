@@ -263,6 +263,34 @@ graph page and read the rendered branches back, the way a human reviewer
 would. This is advisory only, no code path depends on `agent-browser`; a
 plain manual look is equally valid.
 
+### The diagram text (playbook.mmd)
+
+Every version directory carries a `playbook.mmd` beside its
+`playbook.yaml`: a flowchart text derived from the definition, one line
+per node in definition order and one per edge, with a first line naming
+the digest of the YAML. It is written at every version write, in the
+same staging directory and rename as the YAML, so no version is ever
+visible without it, and `current` never moves to a version until its
+diagram matches its YAML (one that is missing, stale or edited is written
+then; when that cannot be done, the move is refused). It is
+never read back: nothing decides, exports or shows from the file, and no digest,
+approval or bundle includes it. Neither a person nor an agent maintains
+it: an edit of `playbook.mmd` is overwritten by the next version write,
+move of `current` or `--rebuild`, and a link, FIFO or device at that name
+is replaced, never followed, by a fresh file renamed over it, so the name
+is never left empty. A directory at that name is never removed: the move
+of `current` is refused and `--rebuild` skips the version, both naming
+the file.
+
+`apb diagram <id>` prints the text of the current version (or of
+`--version V`, in `--scope project` or `--scope global`), `--out PATH`
+writes it, and `apb diagram --rebuild <id>` (or `--rebuild --all`) writes
+the file again from the YAML. Neither follows a link: a playbook or
+version directory in the store that is a link is refused or passed by,
+so nothing is written outside the store. `apb doctor` names missing, stale and
+edited diagrams and points at `--rebuild`; editing the file by hand never
+changes what any surface shows, and the edit is overwritten.
+
 ### Edges in the editor
 
 The editor works on edges by their address (see "Edge ids and edge
@@ -2511,6 +2539,177 @@ refuses to continue it. An older apb that starts such a playbook ignores
 the fields and runs plain gates, and one that stops such a run can then
 resume it past its gates, so every apb that runs it must be this release
 or newer.
+
+### What a decision covers (scope, max_scope)
+
+A gate that uses `max_scope`, `fields` or `show` shows what its decision
+covers: the commits, changed
+files and added and removed lines of those commits, the list items settled,
+the connector writes, the send intents and the result snapshots since the
+gate's previous decision on the same node, or since the run started (a
+withdrawn request decided nothing, so its work stays in the scope of the
+request that reopens the gate):
+
+```
+scope: 3 commits, 6 files, +41 -38 lines
+```
+
+The scope is counts only: no path, no file content, no commit subject is
+stored or shown. It is committed work only: an uncommitted change in the
+tree is part of no node's recorded result and is not counted. The scope
+counts every commit the run recorded since that point, each once,
+whatever the branch looks like now: a commit a later node reset or rebased
+away still counts. Files and lines are counted over every commit on its
+own, against its first parent: a file counts once however many commits
+change it, a change a later commit takes back still counts, and what a
+merge commit brings in or adds itself counts too (a root commit counts
+against the empty tree). A binary file is a file with 0 lines, and a
+rename counts both paths whatever the repository's rename settings say.
+When git cannot read a recorded commit, the scope says `files not read`
+and `lines not read`, never 0, and a `max_scope` limit on them counts as
+passed.
+
+`max_scope` withholds options above a size limit:
+
+```yaml
+- { id: confirm, type: human_review, options: [approve, reject],
+    max_scope: { files: 20, withhold: [approve] } }
+```
+
+`files`, `lines` (added plus removed) and `writes` (connector writes plus
+send intents) are the limits; `withhold` names the options to refuse
+(left out, `approve` when the gate offers it; a gate without `approve`
+names its own). While the scope passes a limit, the withheld options are
+refused on every channel, person-only and approving gates and the
+engine's own decisions included, so an unattended run's declared decision
+of a withheld option fails the run instead of approving it. The scope line
+on the gate says what passed:
+
+```
+withheld: approve (the scope (90 files) is above max_scope (files 20); split the work or choose another option)
+```
+
+No surface offers a withheld option as a command: the gate's next action,
+the `apb` hint, the MCP action and the dashboard list only the options the
+gate takes now and name the withheld ones with the reason.
+
+| Code | Severity | What it means |
+|------|----------|---------------|
+| V243 | error | a malformed `max_scope`: no limit set, a limit of 0, a withheld option the gate does not offer, every offered option withheld, or no `withhold` on a gate that offers no `approve` (it would withhold nothing) |
+
+The scope is journaled in the same write as the request, only for a gate
+that uses `max_scope`, `fields` or `show`. A plain gate and a publish
+consent journal their request alone, as an older apb does, so an older apb
+still resumes a run waiting there; they show no scope. A form gate's
+request whose detail is not recorded (a write cut by a crash) refuses its
+decisions until the resumed run records it, which it does before it posts
+or waits for one. Such a run carries a run guard, so an older apb refuses
+to continue it; it still reads, pauses and stops it.
+
+A decision is taken on the scope it covers. Work can land while a form
+gate's request waits (a deferred retry that falls due runs while the gate
+waits), so before a decision is consumed the scope is measured again. When
+it is unchanged the decision is taken as it is. When it changed, the
+decision is set aside, the request is withdrawn with the reason
+`scope_changed: work landed while the request waited, ...`, and the gate
+asks again at once on what is there now: the new request's instruction
+says it was asked again, and `max_scope` is checked against the new
+scope. An unattended run decides again on the new request by its
+`unattended:` rule, so a withheld option then fails the run. The gate
+asks again only when the scope changed, so it never loops without
+progress.
+
+`apb wait`, `apb run` and `apb runs <id>` print the scope, the withheld
+options, the shown entries and the fields under a pending gate.
+
+`apb stats` also reports decisions made faster than their scope takes to
+read (`N decided without review`): a person's decision (a scenario's
+scripted one never counts; who decided is read from the decision itself,
+so a person who decides after a model recommendation `max_scope` withheld
+counts as a person) whose active run time between the request and
+the decision stayed below a floor that grows with the scope (5 s plus
+1 s per changed file, 50 ms per changed line, 2 s per write or send, 1 s
+per list item, at most 5 min) counts as decided without review. It is a
+report-only signal: it changes no outcome, notification or routing.
+
+### Values a reviewer fills in (fields, show)
+
+A gate can show earlier outputs above its options and take typed values
+with the decision:
+
+```yaml
+- id: confirm
+  type: human_review
+  options: [approve, reject]
+  prompt: Check the extracted invoice before it is booked.
+  show:
+    - { label: Supplier, text: "{{nodes.extract.output.supplier}}" }
+  fields:
+    - { name: amount, type: number, required: [approve], default: "{{nodes.extract.output.total}}" }
+    - { name: currency, type: enum, options: [EUR, USD], default: EUR }
+    - { name: remark, type: text, max_len: 200 }
+```
+
+The types are `text`, `number`, `bool` and `enum`. A `text` value is a
+string of at most `max_len` characters (2000 without one); a `number` is
+a finite number, or a string that reads as one (a whole number stays
+whole: `42`, never `42.0`); a `bool` is `true`,
+`false`, or the words; an `enum` is one of its `options`. `required` is
+`true` (every decision needs a value) or a list of the options that do:
+`required: [approve]` lets a `reject` through without a value. An empty
+or whitespace-only text is no value for a required field: every surface
+refuses it, the dashboard included (it posts what was typed and shows
+the refusal), even when the field has a default. A cleared optional text
+field stays empty; a cleared optional field of another type keeps its
+default. A number may carry spaces around it.
+
+`show` entries and field defaults are templates over earlier outputs,
+rendered once per request, whole (the gate's context budget does not
+apply), scrubbed of the run's secrets and token-shaped strings and then
+cut at 2000 bytes. A literal default goes the same way, and so do the
+`show` labels and the enum options a request shows. A default that does not fit its field is no value: it never
+fails a decision the field is not required for. A default over untrusted text warns (V247),
+its view is marked untrusted, and the gate's output taints the nodes that
+read it. A gate that may be decided without a person (`auto_decide` or
+`unattended: { decide }`) needs a default for every field required for an
+option the engine may choose (V246).
+
+A gate with fields outputs one JSON object instead of the bare decision
+word: `decision` and every field. The next node reads a value as
+`{{nodes.confirm.output.amount}}`, an `output_field` edge routes on it,
+and `{{nodes.confirm.review_decision}}` and `review_status` edges still
+read the decision word. Routing is unchanged. Values are checked when the
+decision is posted (through `review_decide` with `fields`, `apb review
+--field name=value`, the HTTP route and the dashboard) and again when the
+drive consumes it; a hand-written channel line with bad values ends the
+run `review_fields_refused`. A refusal names the field and the kind of
+value it takes, never the value, the field's options, a posted key or the
+decision word, and it is scrubbed of the run's secret values on every
+surface. A number is a whole decimal number: `12abc` is refused,
+never read as 12. A bool without a default has no value until one is
+given: the dashboard shows it as "not chosen" and posts nothing for it,
+as the CLI and MCP do, so a required one needs an explicit choice. A value that holds a secret value of the run, or is
+shaped like a credential, is refused when it is posted, before the review
+channel holds anything: the refusal names the field and says it holds a
+value this run keeps secret, never the value. While the run's secret
+values cannot be read, a text value is refused the same way. Values are
+scrubbed of the run's secret values again before they are journaled or
+output. A passkey assertion covers
+the field values. A run of a playbook that uses `fields` or `show` or
+`max_scope` carries a run guard, so an older apb refuses to continue it.
+
+| Code | Severity | What it means |
+|------|----------|---------------|
+| V244 | error | a malformed `human_review.fields`: names, duplicates, the reserved `decision`, enum shape, `max_len` misuse, a required option the gate does not offer, a literal default that does not coerce |
+| V245 | error | a malformed `human_review.show`: an empty or over-long label, an empty text, more than 10 entries |
+| V246 | error | a field required for an option the engine may choose without a default (or with a blank literal one) on a gate with `auto_decide` or `unattended: { decide }` |
+| V247 | warning | a field default renders untrusted text |
+
+No V243 to V247 message repeats a literal default, an option or a field
+name outside the field-name grammar: it names the gate, the field by its
+name (or by its position, `field 2`, when the name is not in the
+grammar or looks like a credential), the entry by its position, and what
+is expected.
 
 ## Publishing (the publish node)
 

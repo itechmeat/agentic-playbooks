@@ -16,14 +16,18 @@ export interface PublishGate {
   /** Why this dashboard does not take the consent, as the server marked the
    * gate's next action (`keyless_dashboard` on a dashboard without keys). */
   callerRefusal?: CallerRefusal
+  /** What the consent covers since the gate's last decision, the one scope
+   * line every surface prints. */
+  scopeLine?: string
 }
 
 /** A publish node as the panel shows it: its run block, and the guidance,
- * unattended outcome and caller refusal of an open gate. */
+ * unattended outcome, caller refusal and scope of an open gate. */
 export type PublishCard = PublishView & {
   prompt?: string
   unattended?: UnattendedOutcome
   callerRefusal?: CallerRefusal
+  scopeLine?: string
 }
 
 /** A node of the playbook as the publish source picker and skeleton read it. */
@@ -114,6 +118,7 @@ export function publishCards(views: PublishView[] | null | undefined, gates: Pub
     if (g.prompt) card.prompt = g.prompt
     if (g.unattended) card.unattended = g.unattended
     if (g.callerRefusal) card.callerRefusal = g.callerRefusal
+    if (g.scopeLine) card.scopeLine = g.scopeLine
     return card
   }
   const list: PublishCard[] = (views ?? []).map((v) => {

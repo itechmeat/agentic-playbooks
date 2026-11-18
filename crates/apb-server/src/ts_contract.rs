@@ -113,6 +113,10 @@ fn render_types() -> String {
         apb_engine::approval::ReviewBinding::decl(&cfg),
         apb_engine::approval::ApprovalRefusal::decl(&cfg),
         apb_engine::decision_channel::DecisionChannel::decl(&cfg),
+        apb_engine::review::scope::ReviewScope::decl(&cfg),
+        apb_engine::review::form::ShownEntry::decl(&cfg),
+        apb_engine::review::form::FieldView::decl(&cfg),
+        apb_core::review_form::FieldKind::decl(&cfg),
         apb_engine::progress::PendingReview::decl(&cfg),
         apb_engine::progress::PendingSupervisor::decl(&cfg),
         // List mode: a list node's counts and its items.

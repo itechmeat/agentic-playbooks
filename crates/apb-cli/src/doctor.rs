@@ -181,6 +181,46 @@ fn doctor_env(root: &Path, mut out: Out) -> ExitCode {
             &sanitize_for_terminal(&detail, SANDBOX_LINE_MAX),
         );
     }
+    // The derived diagrams beside every playbook.yaml (people-in-the-loop
+    // D6): a missing, stale or hand-edited one is named; the doctor stays
+    // read-only and `apb diagram --rebuild --all` writes them again.
+    let mut current = 0u32;
+    let mut missing = 0u32;
+    let mut stale = 0u32;
+    let mut edited = 0u32;
+    let mut stores = vec![root.join(".apb").join("playbooks")];
+    if let Some(cfg) = apb_core::store::global_playbooks_parent() {
+        stores.push(cfg.join("playbooks"));
+    }
+    for store in &stores {
+        let s = apb_core::diagram::scan(store);
+        current += s.current;
+        missing += s.missing;
+        stale += s.stale;
+        edited += s.edited;
+    }
+    let total = current + missing + stale + edited;
+    if total > 0 {
+        if missing + stale + edited == 0 {
+            out.line(
+                OK,
+                "diagrams",
+                &sanitize_for_terminal(&format!("{current} current"), SANDBOX_LINE_MAX),
+            );
+        } else {
+            out.line(
+                WARN,
+                "diagrams",
+                &sanitize_for_terminal(
+                    &format!(
+                        "{missing} missing, {stale} stale, {edited} edited of {total}; \
+                         apb diagram --rebuild --all writes them again"
+                    ),
+                    SANDBOX_LINE_MAX,
+                ),
+            );
+        }
+    }
     out.finish(blocking)
 }
 

@@ -223,6 +223,12 @@ describe('publish gates', () => {
     expect(gates.publishes).toEqual([{ node: 'ship', plan, prompt: 'Check the subjects.', runId: 'r' }])
   })
 
+  it('carries the scope line of a publish consent', () => {
+    const scoped = { ...publish, scope_line: '3 commits, 6 files, +41 -38 lines' }
+    const gates = runGates(detail([], progress({ pending_reviews: [scoped] }), 'running'))
+    expect(gates.publishes[0].scopeLine).toBe('3 commits, 6 files, +41 -38 lines')
+  })
+
   it('is empty without progress', () => {
     expect(runGates(detail([], null as unknown as ProgressSummary, 'running')).publishes).toEqual([])
   })

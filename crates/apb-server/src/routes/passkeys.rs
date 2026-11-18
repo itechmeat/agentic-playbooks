@@ -45,19 +45,30 @@ pub(crate) struct DecisionPurpose {
     pub(crate) request: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) nonce: Option<String>,
+    /// The values the decision carries on a gate with `fields`
+    /// (people-in-the-loop D3): part of the purpose body, so the purpose
+    /// digest binds the assertion to the exact values, and covered by the
+    /// derived challenge through `decision_material`: the same material
+    /// the drive recomputes from the stamped entry. Left out (and not
+    /// serialized) when the gate takes no fields, so every existing
+    /// purpose and challenge is unchanged.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(crate) fields: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl AssertPurpose {
-    /// The purpose of deciding gate `node` of run `run` with `decision`.
-    /// Every digest over a decision purpose is taken from this one value,
-    /// so the challenge request, the verify request and the review route
-    /// can never disagree on the bytes.
+    /// The purpose of deciding gate `node` of run `run` with `decision`,
+    /// carrying the field values `fields` the person gave. Every digest
+    /// over a decision purpose is taken from this one value, so the
+    /// challenge request, the verify request and the review route can
+    /// never disagree on the bytes.
     pub(crate) fn decision(
         run: &str,
         node: &str,
         decision: &str,
         request: Option<u64>,
         nonce: Option<&str>,
+        fields: &std::collections::BTreeMap<String, serde_json::Value>,
     ) -> AssertPurpose {
         AssertPurpose {
             decision: Some(DecisionPurpose {
@@ -66,6 +77,7 @@ impl AssertPurpose {
                 decision: decision.to_string(),
                 request,
                 nonce: nonce.map(str::to_string),
+                fields: fields.clone(),
             }),
             enroll_new: None,
             remove: None,
@@ -158,19 +170,21 @@ impl AssertPurpose {
             &d.decision,
             request,
             nonce.as_deref(),
+            &d.fields,
         ))
     }
 
     /// The challenge an assertion for this purpose is issued with: a
     /// decision's challenge is derived deterministically from the run, the
-    /// gate, the decision, the request and the nonce, so the drive can
-    /// recompute it from the stamped entry alone.
+    /// gate, the decision (bound to its field values through
+    /// `decision_material`, people-in-the-loop D3), the request and the
+    /// nonce, so the drive can recompute it from the stamped entry alone.
     pub(crate) fn challenge_for(&self) -> Result<String, String> {
         match &self.decision {
             Some(d) => Ok(apb_engine::review::passkey_proof::decision_challenge(
                 &d.run,
                 &d.node,
-                &d.decision,
+                &apb_core::review_form::decision_material(&d.decision, &d.fields),
                 d.request,
                 d.nonce.as_deref(),
             )),

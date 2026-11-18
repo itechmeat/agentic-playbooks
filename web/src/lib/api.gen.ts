@@ -407,7 +407,13 @@ lists?: Array<ListOutcome>,
 /**
  * The finish node's answer: the agent's own account, not checked.
  */
-agent_summary?: string, };
+agent_summary?: string, 
+/**
+ * Gate decisions a person took faster than their scope takes to read
+ * (`review::scope::fast_floor_ms` over active run time). Report
+ * only: never a needs-look reason, notification filter or routing.
+ */
+fast_decisions?: number, };
 
 export type RunStatus = "created" | "running" | "paused" | "succeeded" | "failed" | "aborted" | "interrupted";
 
@@ -629,6 +635,60 @@ export type ApprovalRefusal = "approval_missing" | "approval_stale" | "approval_
 
 export type DecisionChannel = "terminal" | "cli_unattended" | "dashboard_session" | "dashboard_keyless" | "http_bearer" | "mcp" | "run_step" | "scenario" | "engine" | "unattended" | "unknown";
 
+export type ReviewScope = { 
+/**
+ * The journal seq the window starts after (0: the run's start).
+ */
+since_seq: number, 
+/**
+ * Commits the run's nodes made in the window (`artifacts_committed`).
+ */
+commits: number, 
+/**
+ * Files those commits changed; absent when git could not tell.
+ */
+files?: number, 
+/**
+ * Lines added and removed by those commits; absent when git could not
+ * tell. A binary file counts as a file with no lines.
+ */
+lines_added?: number, lines_removed?: number, 
+/**
+ * List items settled `passed` or `needs_look` (carried ones left out).
+ */
+items_settled: number, 
+/**
+ * Connector calls that wrote (or may have written), apb's own
+ * notifications left out.
+ */
+writes: number, 
+/**
+ * Of those, writes whose effect nobody can tell.
+ */
+writes_unknown: number, 
+/**
+ * Send intents recorded, apb's own notifications left out.
+ */
+sends: number, 
+/**
+ * Of those, sends a person still has to resolve.
+ */
+sends_open: number, 
+/**
+ * Node executions that took a result snapshot (`results:`).
+ */
+results: number, };
+
+export type ShownEntry = { label: string, text: string, untrusted?: boolean, clipped?: boolean, };
+
+export type FieldView = { name: string, kind: FieldKind, 
+/**
+ * The options a value is required for (every option for `required: true`).
+ */
+required?: Array<string>, default?: unknown, default_problem?: string | null, options?: Array<string>, max_len?: number | null, untrusted?: boolean, };
+
+export type FieldKind = "text" | "number" | "bool" | "enum";
+
 export type PendingReview = { node: string, 
 /**
  * The gate node's title from the playbook, when it has one.
@@ -676,7 +736,34 @@ binding?: ReviewBinding,
  * Only a person's channel decides this gate: the CLI at a terminal or
  * the dashboard with a signed-in session.
  */
-person_only?: boolean, };
+person_only?: boolean, 
+/**
+ * What the decision covers since the gate's previous decision
+ * (people-in-the-loop D2), from the request's `review_detail`.
+ */
+scope?: ReviewScope, 
+/**
+ * The one scope line every surface prints.
+ */
+scope_line?: string, 
+/**
+ * The options `max_scope` withholds above the scope, with the reason.
+ */
+withheld?: Array<string>, withheld_reason?: string, 
+/**
+ * When the request was declared, for "open since" on every surface.
+ */
+requested_at?: number, 
+/**
+ * The rendered `show:` entries the gate displays above its options
+ * (people-in-the-loop D3).
+ */
+show?: Array<ShownEntry>, 
+/**
+ * The typed fields the gate takes, with their rendered defaults
+ * (people-in-the-loop D3).
+ */
+fields?: Array<FieldView>, };
 
 export type PendingSupervisor = { node: string, 
 /**
@@ -1618,6 +1705,11 @@ withdrawn: number,
  * Requests still open.
  */
 open: number, 
+/**
+ * Channel decisions taken faster than their scope takes to read
+ * (`review::scope::fast_floor_ms` over active run time); report only.
+ */
+fast: number, 
 /**
  * Decisions an older binary wrote without saying who decided:
  * neither `channel` nor `automatic` is known for the run then.

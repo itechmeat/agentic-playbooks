@@ -396,7 +396,14 @@ impl RunCx<'_> {
                     },
                     review_reason(r),
                 );
-                let options: Vec<&str> = r.options.iter().map(String::as_str).collect();
+                // An option the gate withholds above its scope is never
+                // offered as a command; the reason names it instead.
+                let options: Vec<&str> = r
+                    .options
+                    .iter()
+                    .filter(|o| !r.withheld.contains(o))
+                    .map(String::as_str)
+                    .collect();
                 a.args = vec![
                     choice("decision", &options, None),
                     optional("note", "a note"),
@@ -841,6 +848,12 @@ fn review_reason(r: &crate::progress::PendingReview) -> String {
         line.push_str(
             "; only a person decides it, at an interactive terminal or on the dashboard run page where they are signed in",
         );
+    }
+    if !r.withheld.is_empty() {
+        line.push_str(&format!("; withheld: {}", r.withheld.join(", ")));
+        if let Some(reason) = &r.withheld_reason {
+            line.push_str(&format!(" ({reason})"));
+        }
     }
     line
 }

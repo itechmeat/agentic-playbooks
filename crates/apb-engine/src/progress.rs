@@ -124,6 +124,42 @@ pub struct PendingReview {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
     pub person_only: bool,
+    /// What the decision covers since the gate's previous decision
+    /// (people-in-the-loop D2), from the request's `review_detail`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub scope: Option<crate::review::scope::ReviewScope>,
+    /// The one scope line every surface prints.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub scope_line: Option<String>,
+    /// The options `max_scope` withholds above the scope, with the reason.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<String>>", optional))]
+    pub withheld: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub withheld_reason: Option<String>,
+    /// When the request was declared, for "open since" on every surface.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub requested_at: Option<u64>,
+    /// The rendered `show:` entries the gate displays above its options
+    /// (people-in-the-loop D3).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<crate::review::form::ShownEntry>>", optional)
+    )]
+    pub show: Vec<crate::review::form::ShownEntry>,
+    /// The typed fields the gate takes, with their rendered defaults
+    /// (people-in-the-loop D3).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<crate::review::form::FieldView>>", optional)
+    )]
+    pub fields: Vec<crate::review::form::FieldView>,
 }
 
 /// The pending block of an open publish gate: the request's own
@@ -146,7 +182,7 @@ fn pending_publish(
         NodeKind::Publish { prompt, .. } => prompt.clone(),
         _ => None,
     };
-    Some(PendingReview {
+    let mut pr = PendingReview {
         node: node.id.clone(),
         title: node.title.clone(),
         instruction,
@@ -157,7 +193,37 @@ fn pending_publish(
         publish: Some(plan),
         binding: None,
         person_only,
-    })
+        scope: None,
+        scope_line: None,
+        withheld: Vec::new(),
+        withheld_reason: None,
+        requested_at: None,
+        show: Vec::new(),
+        fields: Vec::new(),
+    };
+    fill_detail(events, &mut pr);
+    Some(pr)
+}
+
+/// Fills `pr`'s scope, form and withheld fields from the latest
+/// `review_detail` of the node whose `request` is the open request's seq,
+/// and the open-since timestamp from the request itself (people-in-the-loop
+/// D2). A gate whose detail is not journaled yet shows none of them.
+fn fill_detail(events: &[crate::event::Event], pr: &mut PendingReview) {
+    if let Some(detail) = crate::review::form::detail_of(events, &pr.node) {
+        pr.scope_line = detail.scope.as_ref().map(crate::review::scope::scope_line);
+        pr.scope = detail.scope;
+        pr.withheld = detail.withheld;
+        pr.withheld_reason = detail.withheld_reason;
+        pr.show = detail.show;
+        pr.fields = detail.fields;
+    }
+    pr.requested_at = events.iter().rev().find_map(|e| match &e.payload {
+        crate::event::EventPayload::ReviewRequested { node, .. } if *node == pr.node => {
+            Some(u64::try_from(e.ts).ok()?)
+        }
+        _ => None,
+    });
 }
 
 /// What a gate's latest `review_requested` carries beside its options:
@@ -198,9 +264,11 @@ fn pending_gate(
     prompt: Option<&str>,
 ) -> PendingReview {
     let mut pr = pending_review(&node.id, node.title.as_deref(), options, prompt);
+    fill_detail(events, &mut pr);
     let Some(open) = open_request(events, &node.id) else {
         return pr;
     };
+    let asked_again = asked_again(events, &node.id);
     if open.person_only || open.binding.is_some() {
         pr.instruction = instruction::review_instruction_for(
             &node.id,
@@ -224,9 +292,42 @@ fn pending_gate(
             .push_str(&crate::decision::review_triage::instruction_line(&r));
         pr.recommendation = Some(r);
     }
+    if asked_again {
+        pr.instruction.push_str(ASKED_AGAIN_LINE);
+    }
     pr.binding = open.binding;
     pr.person_only = open.person_only;
     pr
+}
+
+/// The sentence a request asked again after a scope re-ask carries: a
+/// decision on the earlier request was set aside, not taken.
+pub const ASKED_AGAIN_LINE: &str = " Asked again: work landed while the earlier request waited, so what this decision covers changed and a decision on the earlier request was set aside.";
+
+/// Whether gate `node`'s open request was asked right after a scope
+/// re-ask withdrew the one before it (`review_withdrawn` with the
+/// `scope_changed` reason, `crate::event::is_scope_changed`).
+fn asked_again(events: &[crate::event::Event], node: &str) -> bool {
+    use crate::event::EventPayload;
+    let mut seen_request = false;
+    for e in events.iter().rev() {
+        match &e.payload {
+            EventPayload::ReviewRequested { node: n, .. } if n == node => {
+                if seen_request {
+                    return false;
+                }
+                seen_request = true;
+            }
+            EventPayload::ReviewWithdrawn { node: n, reason } if n == node && seen_request => {
+                return crate::event::is_scope_changed(reason);
+            }
+            EventPayload::ReviewDecided { node: n, .. } if n == node && seen_request => {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Assembles the `PendingReview` block for a gate node from its id, title,
@@ -255,6 +356,13 @@ pub fn pending_review(
         publish: None,
         binding: None,
         person_only: false,
+        scope: None,
+        scope_line: None,
+        withheld: Vec::new(),
+        withheld_reason: None,
+        requested_at: None,
+        show: Vec::new(),
+        fields: Vec::new(),
     }
 }
 
@@ -976,9 +1084,9 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
     let pending_reviews: Vec<PendingReview> = open_gates
         .iter()
         .filter_map(|(n, _)| match &n.kind {
-            NodeKind::HumanReview { options, prompt } => {
-                Some(pending_gate(events, n, options, prompt.as_deref()))
-            }
+            NodeKind::HumanReview {
+                options, prompt, ..
+            } => Some(pending_gate(events, n, options, prompt.as_deref())),
             NodeKind::Publish { .. } => pending_publish(events, n),
             _ => None,
         })

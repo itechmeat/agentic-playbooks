@@ -76,6 +76,8 @@ mod demo_playbooks_test;
 mod daily_cleanup_script_test;
 #[path = "suite/decisions_cli_test.rs"]
 mod decisions_cli_test;
+#[path = "suite/diagram_cli_test.rs"]
+mod diagram_cli_test;
 // Unix-only: the module drives process groups through
 // `std::os::unix::process::CommandExt` and inspects them with `ps`/`kill`.
 #[cfg(unix)]
@@ -134,6 +136,8 @@ mod official_connectors_gate;
 mod pause_cli_test;
 #[path = "suite/pause_waker_cli_test.rs"]
 mod pause_waker_cli_test;
+#[path = "suite/people_cli_test.rs"]
+mod people_cli_test;
 #[path = "suite/phase9_cli_test.rs"]
 mod phase9_cli_test;
 #[path = "suite/problems_cli_test.rs"]

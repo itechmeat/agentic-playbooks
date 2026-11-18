@@ -164,6 +164,11 @@ fn git_version() -> Option<&'static str> {
 
 /// Whether `version` is at least [`MIN_GIT`].
 fn new_enough(version: &str) -> bool {
+    at_least(version, MIN_GIT)
+}
+
+/// Whether `version` is at least `min` (major, minor).
+fn at_least(version: &str, min: (u32, u32)) -> bool {
     let mut parts = version.split('.').map(|p| {
         p.chars()
             .take_while(char::is_ascii_digit)
@@ -171,7 +176,45 @@ fn new_enough(version: &str) -> bool {
             .parse::<u32>()
             .unwrap_or(0)
     });
-    (parts.next().unwrap_or(0), parts.next().unwrap_or(0)) >= MIN_GIT
+    (parts.next().unwrap_or(0), parts.next().unwrap_or(0)) >= min
+}
+
+/// The oldest git that reads attributes from `attr.tree` instead of the
+/// work tree's `.gitattributes` (the key came with git 2.43).
+pub const ATTR_TREE_GIT: (u32, u32) = (2, 43);
+
+/// The empty tree of a repository's object format.
+fn empty_tree(format: &str) -> Option<&'static str> {
+    match format {
+        "sha1" => Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904"),
+        "sha256" => Some("6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"),
+        _ => None,
+    }
+}
+
+/// The global options that keep attributes out of a diff of the stored
+/// commits of the repository at `dir`: none from the work tree
+/// (`attr.tree` names the empty tree of the repository's object format)
+/// and none from the operator's global attributes file, so a binary file
+/// is told by the commits' content alone. The system attributes file is
+/// left out by [`read_stored_diff`], which runs such a diff. The
+/// repository's own `info/attributes` is still read; it lives with the
+/// repository config.
+/// `None` when the installed git is older than [`ATTR_TREE_GIT`] (it
+/// ignores `attr.tree` and reads the work tree) or the object format does
+/// not read: the caller cannot keep the work tree's attributes out then.
+pub fn no_tree_attributes(dir: &Path) -> Option<Vec<String>> {
+    if !git_version().is_some_and(|v| at_least(v, ATTR_TREE_GIT)) {
+        return None;
+    }
+    let format = read(dir, &["rev-parse", "--show-object-format"])?;
+    let tree = empty_tree(format.trim())?;
+    Some(vec![
+        "-c".to_string(),
+        format!("attr.tree={tree}"),
+        "-c".to_string(),
+        "core.attributesFile=/dev/null".to_string(),
+    ])
 }
 
 /// A repository apb runs git in, pinned to the directories git discovered
@@ -320,9 +363,23 @@ impl Repo {
     /// `--stdin` revision list, a `cat-file --batch-check` query), `None` on
     /// any failure. One process however many lines `input` holds.
     pub fn read_input(&self, dir: &Path, args: &[&str], input: &str) -> Option<String> {
+        self.read_input_env(dir, args, input, &[])
+    }
+
+    /// [`Repo::read_input`] with `env` set on the hardened command.
+    pub fn read_input_env(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        input: &str,
+        env: &[(&str, &str)],
+    ) -> Option<String> {
         use std::io::Write;
-        let mut child = self
-            .command(dir)
+        let mut cmd = self.command(dir);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -418,6 +475,16 @@ pub fn read(dir: &Path, args: &[&str]) -> Option<String> {
 /// [`Repo::read_input`] for the repository `dir` belongs to.
 pub fn read_input(dir: &Path, args: &[&str], input: &str) -> Option<String> {
     Repo::locate(dir).ok()?.read_input(dir, args, input)
+}
+
+/// [`read_input`] for a diff of stored commits: the system attributes file
+/// is not read (`GIT_ATTR_NOSYSTEM`), so with [`no_tree_attributes`] in
+/// `args` no attribute of this machine or of the work tree changes how
+/// the commits read.
+pub fn read_stored_diff(dir: &Path, args: &[&str], input: &str) -> Option<String> {
+    Repo::locate(dir)
+        .ok()?
+        .read_input_env(dir, args, input, &[("GIT_ATTR_NOSYSTEM", "1")])
 }
 
 /// Whether the hardened `git -C dir <args>` exits 0: `Ok(false)` outside a

@@ -2388,6 +2388,17 @@ fn run_detail_text(
         say!("  {}", unknown_events_note(view.unknown.len()));
     }
     print_waiting_on_question(view.progress.as_ref());
+    if let Some(r) = view
+        .progress
+        .as_ref()
+        .and_then(|p| p.pending_review.as_ref())
+    {
+        say!(
+            "  waiting on human review (node `{}`)",
+            sanitize_for_terminal(&r.node, QUESTION_TEXT_MAX)
+        );
+        print_gate_detail(r, run_id);
+    }
     print_next_actions(
         &apb_engine::next_action::for_surface(
             redaction,
@@ -2970,6 +2981,16 @@ fn wait_report(
                 }
             };
             say!("run {run_id} needs input ({status}): {how}; then `apb wait {run_id}` again");
+            // A gate's scope, withheld options, shown outputs and fields.
+            if matches!(res.needs, Some(NeedsInput::Review))
+                && let Some(r) = res
+                    .view
+                    .progress
+                    .as_ref()
+                    .and_then(|p| p.pending_review.as_ref())
+            {
+                print_gate_detail(r, run_id);
+            }
             print_decisions();
             exit
         }
@@ -2988,7 +3009,7 @@ fn wait_report(
                 "run {run_id} stopped ({status}): {}; {how}",
                 crate::pause::marker(p)
             );
-            print_open_gates(&res.view);
+            print_open_gates(&res.view, run_id);
             print_decisions();
             exit
         }
@@ -3020,9 +3041,81 @@ fn wait_report(
     }
 }
 
+/// What a pending gate shows beside its options (people-in-the-loop D2/D3),
+/// one line each under its gate line: the scope, the withheld options
+/// with the reason, the rendered `show` entries and the typed fields with
+/// their defaults. Every value comes from the run's journal (rendered run
+/// output, the definition), so each goes through the terminal sanitizer
+/// with a cap.
+pub(crate) fn gate_detail_lines(
+    r: &apb_engine::progress::PendingReview,
+    run_id: &str,
+) -> Vec<String> {
+    let clean = |s: &str| sanitize_for_terminal(s, QUESTION_TEXT_MAX);
+    let mut out = Vec::new();
+    if let Some(line) = &r.scope_line {
+        out.push(format!("    scope: {}", clean(line)));
+    }
+    if !r.withheld.is_empty() {
+        out.push(format!(
+            "    withheld: {} ({})",
+            clean(&r.withheld.join(", ")),
+            clean(r.withheld_reason.as_deref().unwrap_or_default())
+        ));
+    }
+    for s in &r.show {
+        let untrusted = if s.untrusted { " (untrusted)" } else { "" };
+        out.push(format!(
+            "    {}: {}{untrusted}",
+            clean(&s.label),
+            clean(&s.text)
+        ));
+    }
+    for f in &r.fields {
+        let required = if f.required.is_empty() {
+            String::new()
+        } else {
+            format!(", required for {}", clean(&f.required.join(", ")))
+        };
+        let default = match &f.default {
+            Some(v) if !v.is_null() => clean(&v.to_string()),
+            _ => "none".to_string(),
+        };
+        let untrusted = if f.untrusted { " (untrusted)" } else { "" };
+        out.push(format!(
+            "    field {} ({}{required}): default {default}{untrusted}",
+            clean(&f.name),
+            kind_word(f.kind)
+        ));
+    }
+    if !r.fields.is_empty() {
+        out.push(format!(
+            "    decide with: apb review {run_id} {} --decision <option> --field <name>=<value>",
+            clean(&r.node)
+        ));
+    }
+    out
+}
+
+fn print_gate_detail(r: &apb_engine::progress::PendingReview, run_id: &str) {
+    for line in gate_detail_lines(r, run_id) {
+        say!("{line}");
+    }
+}
+
+/// The word a field's type prints as in the pending gate lines.
+fn kind_word(kind: apb_core::review_form::FieldKind) -> &'static str {
+    match kind {
+        apb_core::review_form::FieldKind::Text => "text",
+        apb_core::review_form::FieldKind::Number => "number",
+        apb_core::review_form::FieldKind::Bool => "bool",
+        apb_core::review_form::FieldKind::Enum => "enum",
+    }
+}
+
 /// The gates a paused run still has open, one line each: they stay open
 /// across the pause and are answered the usual way (issue #200).
-fn print_open_gates(view: &apb_engine::run_view::RunView) {
+fn print_open_gates(view: &apb_engine::run_view::RunView, run_id: &str) {
     let Some(p) = view.progress.as_ref() else {
         return;
     };
@@ -3039,6 +3132,7 @@ fn print_open_gates(view: &apb_engine::run_view::RunView) {
             r.node,
             r.how_to_decide
         );
+        print_gate_detail(r, run_id);
     }
     for t in &p.pending_tasks {
         say!(
@@ -3110,10 +3204,13 @@ pub(crate) fn note_cmd(root: &Path, run_id: &str, text: &str) -> ExitCode {
     }
 }
 
-/// Posts a gate decision through the one review channel (the MCP
-/// `review_decide` path): the node check, the publish nonce check, the
+/// Posts a gate decision through the one review channel (the engine's
+/// `review::post`): the node check, the publish nonce check, the
 /// one-decision rule and the refusal of a `publish` inside a run step all
 /// live in `apb_engine::review`. `nonce` answers a publish gate only.
+/// `field` carries the values the decision is posted with, one `NAME=VALUE`
+/// per flag.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn review_cmd(
     root: &Path,
     run_id: &str,
@@ -3122,8 +3219,23 @@ pub(crate) fn review_cmd(
     note: &str,
     nonce: Option<&str>,
     request: Option<crate::actions::RequestArg>,
+    field: Vec<String>,
 ) -> ExitCode {
     use apb_engine::next_action::RequestKind;
+    // The values a decision carries (people-in-the-loop D3): each flag is
+    // `NAME=VALUE`, split at the first `=`; the value is read as the
+    // field's type when the decision is posted.
+    let mut fields = std::collections::BTreeMap::new();
+    for f in &field {
+        let Some((name, value)) = f.split_once('=') else {
+            eprintln!("review failed: --field needs NAME=VALUE; one --field has no `=`");
+            return ExitCode::from(2);
+        };
+        fields.insert(
+            name.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
+    }
     let request = match request
         .map(|r| r.seq_for(&[RequestKind::Review, RequestKind::Publish]))
         .transpose()
@@ -3134,11 +3246,19 @@ pub(crate) fn review_cmd(
             return ExitCode::from(2);
         }
     };
+    // The run id is one path segment of an existing run, as before
+    // decisions carried values: never a path into another tree.
     let run_dir = root.join(".apb/runs").join(run_id);
-    if is_safe_segment(run_id)
-        && let Some(refusal) = [decision, note]
-            .into_iter()
-            .find_map(|v| unfilled_refusal(&run_dir, run_id, v))
+    if !is_safe_segment(run_id) || !run_dir.is_dir() {
+        eprintln!(
+            "review failed: run `{}` not found",
+            sanitize_for_terminal(run_id, QUESTION_TEXT_MAX)
+        );
+        return ExitCode::from(2);
+    }
+    if let Some(refusal) = [decision, note]
+        .into_iter()
+        .find_map(|v| unfilled_refusal(&run_dir, run_id, v))
     {
         eprintln!("review failed: {refusal}");
         return ExitCode::from(2);
@@ -3150,15 +3270,35 @@ pub(crate) fn review_cmd(
             return ExitCode::from(2);
         }
     };
-    match apb_mcp::tools::review_decide_via(
-        root, run_id, node_id, decision, note, nonce, request, channel,
+    match apb_engine::review::post(
+        &run_dir,
+        apb_engine::review::DecisionPost {
+            cmd: apb_engine::ReviewCommand {
+                node: node_id.to_string(),
+                decision: decision.to_string(),
+                note: note.to_string(),
+            },
+            nonce: nonce.map(str::to_string),
+            request,
+            channel,
+            fields,
+            passkey: None,
+        },
     ) {
-        Ok(v) => {
-            println!(
-                "review posted for {run_id}/{node_id}: {decision} (seq {})",
-                v["posted_seq"]
-            );
+        Ok(seq) => {
+            println!("review posted for {run_id}/{node_id}: {decision} (seq {seq})");
             ExitCode::SUCCESS
+        }
+        // A refused decision names its refusal code, like every facade
+        // renders `ChannelRefused` (`run_step_own_run`, `no_terminal`,
+        // `passkey_required`): the word is what a reader matches on.
+        Err(apb_engine::error::EngineError::ChannelRefused { refusal, message }) => {
+            eprintln!(
+                "review failed: refused ({}): {}",
+                refusal.as_str(),
+                sanitize_for_terminal(&message, QUESTION_TEXT_MAX * 3)
+            );
+            ExitCode::from(2)
         }
         Err(e) => {
             eprintln!(
@@ -3417,5 +3557,49 @@ mod tests {
                 .all(|l| !l.contains(['\n', '\r', '\u{202E}']))
         );
         assert_eq!(printed[2], "      outcome: Run succeeded");
+    }
+
+    /// A field whose default renders untrusted text says so, as a shown
+    /// entry does; a trusted one carries no marker.
+    #[test]
+    fn an_untrusted_field_default_is_marked() {
+        let field = |name: &str, untrusted: bool| apb_engine::review::form::FieldView {
+            name: name.into(),
+            kind: apb_core::review_form::FieldKind::Text,
+            required: Vec::new(),
+            default: Some(serde_json::json!("fetched")),
+            default_problem: None,
+            options: Vec::new(),
+            max_len: None,
+            untrusted,
+        };
+        let r = apb_engine::progress::PendingReview {
+            node: "gate".into(),
+            title: None,
+            instruction: String::new(),
+            options: vec!["approve".into()],
+            how_to_decide: String::new(),
+            prompt: None,
+            recommendation: None,
+            publish: None,
+            binding: None,
+            person_only: false,
+            scope: None,
+            scope_line: None,
+            withheld: Vec::new(),
+            withheld_reason: None,
+            requested_at: None,
+            show: Vec::new(),
+            fields: vec![field("note", true), field("plain", false)],
+        };
+        let lines = gate_detail_lines(&r, "run-1");
+        assert!(
+            lines.contains(&"    field note (text): default \"fetched\" (untrusted)".to_string()),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&"    field plain (text): default \"fetched\"".to_string()),
+            "{lines:?}"
+        );
     }
 }

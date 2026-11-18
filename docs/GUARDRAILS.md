@@ -274,6 +274,12 @@ falls back: the requirement stands and every person-only decision refuses
 until the file is fixed (fail closed), and `apb doctor` reports it as a
 failure. Ordinary review gates are unchanged.
 
+A gate with typed fields is covered by the same assertion: the challenge a
+decision's assertion is minted from is derived from the decision and its
+field values, so a decision posted with other values than the ones the
+assertion was made for is not consumed. A decision without fields keeps
+today's challenge, unchanged.
+
 **What apb stores.** Passkeys live per machine in
 `<config_dir>/passkeys.yaml` (0600, atomic write through
 `apb_core::fsutil`): the credential id, the COSE public key, the sign

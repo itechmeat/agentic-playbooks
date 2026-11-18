@@ -1345,6 +1345,7 @@ pub fn run_answer(
 /// A regular run tool (not supervised): takes run_id directly. Posted
 /// through the MCP channel ([`super::actions::mcp_channel`]): a person-only gate refuses
 /// it, and a run step never decides for its own run tree.
+#[allow(clippy::too_many_arguments)]
 pub fn review_decide(
     root: &Path,
     run_id: &str,
@@ -1353,6 +1354,7 @@ pub fn review_decide(
     note: &str,
     nonce: Option<&str>,
     request: Option<u64>,
+    fields: &BTreeMap<String, Value>,
 ) -> Result<Value, ToolError> {
     review_decide_via(
         root,
@@ -1363,12 +1365,15 @@ pub fn review_decide(
         nonce,
         request,
         super::actions::mcp_channel(),
+        fields,
     )
 }
 
 /// [`review_decide`] through the channel the surface states (`apb review`
 /// passes the terminal after its typed confirmation, else the CLI without
-/// a terminal or a run step).
+/// a terminal or a run step). `fields` are the values the person gave on a
+/// gate with `fields` (people-in-the-loop D3): checked against the gate's
+/// `fields` when posted, journaled `ReviewFields` when consumed.
 #[allow(clippy::too_many_arguments)]
 pub fn review_decide_via(
     root: &Path,
@@ -1379,18 +1384,25 @@ pub fn review_decide_via(
     nonce: Option<&str>,
     request: Option<u64>,
     channel: apb_engine::decision_channel::DecisionChannel,
+    fields: &BTreeMap<String, Value>,
 ) -> Result<Value, ToolError> {
     let run_dir = resolve_run_dir(root, run_id)?;
-    let seq = apb_engine::review::post_decision_via(
+    let seq = apb_engine::review::post(
         &run_dir,
-        apb_engine::ReviewCommand {
-            node: node.to_string(),
-            decision: decision.to_string(),
-            note: note.to_string(),
+        apb_engine::review::DecisionPost {
+            cmd: apb_engine::ReviewCommand {
+                node: node.to_string(),
+                decision: decision.to_string(),
+                note: note.to_string(),
+            },
+            nonce: nonce.map(str::to_string),
+            request,
+            channel,
+            fields: fields.clone(),
+            // The MCP tool layer never carries an assertion; the dashboard
+            // route posts through `DecisionPost.passkey` itself.
+            passkey: None,
         },
-        nonce.map(str::to_string),
-        request,
-        channel,
     )?;
     Ok(json!({ "posted_seq": seq }))
 }

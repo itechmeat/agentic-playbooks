@@ -222,3 +222,281 @@ describe('ReviewPanel bound and person-only gates', () => {
     ])
   })
 })
+
+// The scope of a review request (people-in-the-loop): what the decision
+// covers, as the one line, and the options `max_scope` withholds.
+describe('ReviewPanel scope', () => {
+  beforeEach(() => auth.set({ required: true, authenticated: true, checked: true }))
+  afterEach(() => auth.set({ required: false, authenticated: true, checked: false }))
+
+  const scoped: PendingReview = {
+    node: 'gate',
+    instruction: 'Decide gate',
+    options: ['approve', 'reject'],
+    how_to_decide: '',
+    scope_line: '3 commits, 6 files, +41 -38 lines',
+    withheld: ['approve'],
+    withheld_reason: 'the scope (90 files) is above max_scope (files 20); split the work or choose another option',
+  }
+
+  it('shows the scope line', () => {
+    app = mount(ReviewPanel, { target: document.body, props: { reviews: entries([scoped]), onDecide: () => {} } })
+    flushSync()
+    // The same label the CLI prints: the line says what the decision covers.
+    expect(texts('[data-testid="review-scope"]')).toEqual(['scope: 3 commits, 6 files, +41 -38 lines'])
+  })
+
+  it('on a dashboard without keys offers no command for a withheld option, and names it withheld', () => {
+    auth.set({ required: false, authenticated: true, checked: true })
+    const gate: PendingReview = { ...scoped, person_only: true }
+    app = mount(ReviewPanel, { target: document.body, props: { reviews: entries([gate]), onDecide: () => {} } })
+    flushSync()
+    expect(texts('[data-testid="review-cli-command"]')).toEqual(['apb review r1 gate --decision reject --request review:41'])
+    expect(texts('[data-testid="review-withheld"]')).toEqual([
+      'approve is withheld: the scope (90 files) is above max_scope (files 20); split the work or choose another option',
+    ])
+  })
+
+  it('a withheld option is disabled with its reason', () => {
+    app = mount(ReviewPanel, { target: document.body, props: { reviews: entries([scoped]), onDecide: () => {} } })
+    flushSync()
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('[data-testid="review-option"]')]
+    const approve = buttons.find((b) => b.textContent?.trim() === 'approve')
+    const reject = buttons.find((b) => b.textContent?.trim() === 'reject')
+    expect(approve?.disabled).toBe(true)
+    expect(approve?.title).toContain('max_scope')
+    expect(reject?.disabled).toBe(false)
+    expect(texts('[data-testid="review-withheld"]')).toEqual([
+      'approve is withheld: the scope (90 files) is above max_scope (files 20); split the work or choose another option',
+    ])
+  })
+})
+
+// Typed fields on a review gate (people-in-the-loop): the show entries and
+// one input per field, the values sent with the decision.
+describe('ReviewPanel fields', () => {
+  beforeEach(() => auth.set({ required: true, authenticated: true, checked: true }))
+  afterEach(() => auth.set({ required: false, authenticated: true, checked: false }))
+
+  const fielded: PendingReview = {
+    node: 'gate',
+    instruction: 'Decide gate',
+    options: ['approve', 'reject'],
+    how_to_decide: '',
+    show: [
+      { label: 'Total', text: '1108.5' },
+      { label: 'From the page', text: '<script>alert(1)</script>', untrusted: true },
+    ],
+    fields: [
+      { name: 'amount', kind: 'number', required: ['approve'], default: 1108.5 },
+      { name: 'currency', kind: 'enum', default: 'EUR', options: ['EUR', 'USD'] },
+      { name: 'remark', kind: 'text', max_len: 200 },
+      { name: 'sure', kind: 'bool', default: false },
+    ],
+  }
+
+  it('renders one input per field', () => {
+    app = mount(ReviewPanel, { target: document.body, props: { reviews: entries([fielded]), onDecide: () => {} } })
+    flushSync()
+    expect(document.querySelectorAll('[data-testid="review-field-input"]')).toHaveLength(4)
+    const amount = document.querySelector<HTMLInputElement>('[data-testid="review-field-amount"]')
+    expect(amount?.value).toBe('1108.5')
+    const select = document.querySelector<HTMLSelectElement>('[data-testid="review-field-currency"]')
+    // The empty placeholder first, so an enum without a default chooses
+    // nothing for the person.
+    expect([...(select?.options ?? [])].map((o) => o.value)).toEqual(['', 'EUR', 'USD'])
+    expect(select?.value).toBe('EUR')
+  })
+
+  it('names the options a field is required for', () => {
+    app = mount(ReviewPanel, { target: document.body, props: { reviews: entries([fielded]), onDecide: () => {} } })
+    flushSync()
+    expect(texts('[data-testid="review-field-input"] .fname')).toEqual([
+      'amount (required for approve)',
+      'currency',
+      'remark',
+      'sure',
+    ])
+  })
+
+  it('marks an untrusted shown entry', () => {
+    app = mount(ReviewPanel, { target: document.body, props: { reviews: entries([fielded]), onDecide: () => {} } })
+    flushSync()
+    const shown = texts('[data-testid="review-shown"]')
+    expect(shown).toEqual([
+      'Total 1108.5',
+      'From the page (untrusted text) <script>alert(1)</script>',
+    ])
+  })
+
+  it('renders shown entries that share a label', () => {
+    const twice: PendingReview = {
+      ...fielded,
+      show: [
+        { label: 'Output', text: 'first' },
+        { label: 'Output', text: 'second' },
+      ],
+    }
+    app = mount(ReviewPanel, { target: document.body, props: { reviews: entries([twice]), onDecide: () => {} } })
+    flushSync()
+    expect(texts('[data-testid="review-shown"]')).toEqual(['Output first', 'Output second'])
+  })
+
+  it('renders enum options that read the same after clipping', () => {
+    const clipped: PendingReview = {
+      ...fielded,
+      fields: [{ name: 'pick', kind: 'enum', options: ['same prefix', 'same prefix'] }],
+    }
+    app = mount(ReviewPanel, { target: document.body, props: { reviews: entries([clipped]), onDecide: () => {} } })
+    flushSync()
+    const select = document.querySelector<HTMLSelectElement>('[data-testid="review-field-pick"]')
+    expect([...(select?.options ?? [])].map((o) => o.value)).toEqual(['', 'same prefix', 'same prefix'])
+  })
+
+  it('marks a field whose default renders untrusted text', () => {
+    const tainted: PendingReview = {
+      ...fielded,
+      fields: [
+        { name: 'note', kind: 'text', default: 'from the page', untrusted: true },
+        { name: 'remark', kind: 'text' },
+      ],
+    }
+    app = mount(ReviewPanel, { target: document.body, props: { reviews: entries([tainted]), onDecide: () => {} } })
+    flushSync()
+    expect(texts('[data-testid="review-field-input"] .fname')).toEqual(['note (untrusted text)', 'remark'])
+  })
+
+  const field = <T extends HTMLElement>(name: string) =>
+    document.querySelector<T>(`[data-testid="review-field-${name}"]`)!
+  const type = (name: string, value: string) => {
+    const el = field<HTMLInputElement>(name)
+    el.value = value
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+    flushSync()
+  }
+  const click = (option: string) => {
+    ;[...document.querySelectorAll<HTMLButtonElement>('[data-testid="review-option"]')]
+      .find((b) => b.textContent?.trim() === option)!
+      .click()
+    flushSync()
+  }
+
+  it('sends the typed values with the decision, the other defaults kept', async () => {
+    const onDecide = vi.fn()
+    app = mount(ReviewPanel, { target: document.body, props: { reviews: entries([fielded]), onDecide } })
+    flushSync()
+    type('amount', '1180.5')
+    // The fields not edited still show their defaults after the edit.
+    expect(field<HTMLSelectElement>('currency').value).toBe('EUR')
+    expect(field<HTMLInputElement>('sure').checked).toBe(false)
+    type('remark', 'checked')
+    expect(field<HTMLInputElement>('amount').value).toBe('1180.5')
+    expect(field<HTMLSelectElement>('currency').value).toBe('EUR')
+    click('approve')
+    await Promise.resolve()
+    expect(onDecide).toHaveBeenCalled()
+    const [review, option, payload] = onDecide.mock.calls[0]
+    expect([review.node, option]).toEqual(['gate', 'approve'])
+    expect(payload).toEqual({ amount: 1180.5, currency: 'EUR', remark: 'checked', sure: false })
+  })
+
+  it('a bool without a default shows "not chosen" and posts only what the person chose', () => {
+    const unset: PendingReview = {
+      ...fielded,
+      fields: [
+        { name: 'agreed', kind: 'bool', required: ['approve'] },
+        { name: 'flag', kind: 'bool' },
+      ],
+    }
+    const onDecide = vi.fn()
+    app = mount(ReviewPanel, { target: document.body, props: { reviews: entries([unset]), onDecide } })
+    flushSync()
+    const agreed = field<HTMLSelectElement>('agreed')
+    // Not chosen is visible, marked, and can be chosen again.
+    expect([...agreed.options].map((o) => [o.value, o.textContent?.trim(), o.disabled])).toEqual([
+      ['', 'not chosen', false],
+      ['true', 'true', false],
+      ['false', 'false', false],
+    ])
+    expect(agreed.value).toBe('')
+    expect(agreed.classList.contains('unset')).toBe(true)
+    // Untouched: nothing posted for either, so the server's one check
+    // refuses the required one, as on the CLI and MCP.
+    click('approve')
+    expect(onDecide.mock.calls[0][2]).toEqual({})
+    const choose = (name: string, value: string) => {
+      const el = field<HTMLSelectElement>(name)
+      el.value = value
+      el.dispatchEvent(new Event('change', { bubbles: true }))
+      flushSync()
+    }
+    choose('agreed', 'false')
+    expect(field<HTMLSelectElement>('agreed').classList.contains('unset')).toBe(false)
+    choose('flag', 'true')
+    click('approve')
+    expect(onDecide.mock.calls[1][2]).toEqual({ agreed: false, flag: true })
+    choose('flag', '')
+    click('approve')
+    expect(onDecide.mock.calls[2][2]).toEqual({ agreed: false })
+  })
+
+  it('a cleared required field is posted blank and the server decides', () => {
+    // The panel never decides whether a required value is missing: it
+    // posts the blank the person left, and the server's one check (the
+    // same for the CLI, MCP and HTTP) refuses it for an approve.
+    const onDecide = vi.fn()
+    app = mount(ReviewPanel, { target: document.body, props: { reviews: entries([fielded]), onDecide } })
+    flushSync()
+    type('amount', '')
+    click('approve')
+    expect(onDecide).toHaveBeenCalledTimes(1)
+    expect(onDecide.mock.calls[0][1]).toBe('approve')
+    expect(onDecide.mock.calls[0][2]).toMatchObject({ amount: '' })
+    expect(texts('[data-testid="review-form-problem"]')).toEqual([])
+  })
+
+  it('a cleared default text is sent empty and text that is no number is named', () => {
+    const withNote: PendingReview = {
+      ...fielded,
+      fields: [
+        { name: 'amount', kind: 'number', default: 5 },
+        { name: 'note', kind: 'text', default: 'from the run' },
+      ],
+    }
+    const onDecide = vi.fn()
+    app = mount(ReviewPanel, { target: document.body, props: { reviews: entries([withNote]), onDecide } })
+    flushSync()
+    type('note', '')
+    // Spaces only: no value, never 0.
+    type('amount', '   ')
+    click('reject')
+    // Both cleared fields go blank to the server: the note stays empty, and
+    // the amount, required for no decision, keeps its default there.
+    expect(onDecide.mock.calls[0][2]).toEqual({ note: '', amount: '' })
+    // A typed amount that reads as no whole number is never dropped
+    // quietly, and never cut to the number it starts with.
+    onDecide.mockClear()
+    // A text input: a browser's number input drops the letters it cannot
+    // take, so "12abc" would post as 12 with no word to the person.
+    expect(field<HTMLInputElement>('amount').type).toBe('text')
+    expect(field<HTMLInputElement>('amount').inputMode).toBe('decimal')
+    type('amount', '12abc')
+    expect(field<HTMLInputElement>('amount').value).toBe('12abc')
+    click('reject')
+    expect(onDecide).not.toHaveBeenCalled()
+    expect(texts('[data-testid="review-form-problem"]')).toEqual(['amount: not a number'])
+  })
+
+  it('an enum without a default chooses nothing and posts nothing for it', () => {
+    const plain: PendingReview = {
+      ...fielded,
+      fields: [{ name: 'currency', kind: 'enum', options: ['EUR', 'USD'] }],
+    }
+    const onDecide = vi.fn()
+    app = mount(ReviewPanel, { target: document.body, props: { reviews: entries([plain]), onDecide } })
+    flushSync()
+    expect(field<HTMLSelectElement>('currency').value).toBe('')
+    click('approve')
+    expect(onDecide.mock.calls[0][2]).toEqual({})
+  })
+})

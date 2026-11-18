@@ -888,7 +888,10 @@ impl RunState {
                         reason: reason.clone(),
                     });
                 }
-                EventPayload::ReviewRequested { .. } | EventPayload::ReviewWithdrawn { .. } => {}
+                EventPayload::ReviewRequested { .. }
+                | EventPayload::ReviewWithdrawn { .. }
+                | EventPayload::ReviewDetail { .. }
+                | EventPayload::ReviewFields { .. } => {}
                 EventPayload::ReviewDecided {
                     node,
                     decision,

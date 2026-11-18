@@ -10,7 +10,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 pub mod channel;
+pub mod form;
 pub mod passkey_proof;
+pub mod scope;
+pub mod views;
 
 pub use channel::open_request;
 
@@ -75,6 +78,11 @@ pub struct ReviewEntry {
     /// process). `None` in old channels and whenever no passkey was used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passkey_proof: Option<passkey_proof::PasskeyProof>,
+    /// The field values the decision carried, checked when it was posted
+    /// and scrubbed before they are journaled (people-in-the-loop D3).
+    /// Empty for a gate without fields and in old channels.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub fields: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// Rejects a decision that names something other than a currently pending gate
@@ -115,6 +123,7 @@ fn check_review_target(
     run_dir: &Path,
     cmd: &ReviewCommand,
     nonce: Option<String>,
+    fields: &std::collections::BTreeMap<String, serde_json::Value>,
     poster: Poster,
 ) -> Result<Stamps, EngineError> {
     use apb_core::publish::OPTION_PUBLISH;
@@ -123,11 +132,18 @@ fn check_review_target(
     let node = cmd.node.as_str();
     let consent = cmd.decision == OPTION_PUBLISH;
     // Whether the node is a publish node, and whether a snapshot said so.
-    let (publish, snapshot) = match crate::progress::load_run_playbook(run_dir) {
+    // `formed`: the gate uses a form feature
+    // (`NodeKind::needs_review_detail`), whose checks fail closed on
+    // a journal that does not read.
+    // One read of the run's definition: the classification below and the
+    // form's checks at the end judge by the same snapshot.
+    let run_playbook = crate::progress::load_run_playbook(run_dir);
+    let (publish, snapshot, formed) = match &run_playbook {
         Some(playbook) => {
             let gate = playbook.node(node);
             let kind = gate.map(|n| &n.kind);
             let publish = matches!(kind, Some(NodeKind::Publish { .. }));
+            let formed = kind.is_some_and(apb_core::schema::NodeKind::needs_review_detail);
             if !publish && !matches!(kind, Some(NodeKind::HumanReview { .. })) {
                 return Err(EngineError::NotFound(format!(
                     "node `{node}` is not a human_review or publish node of this run's playbook `{}`",
@@ -144,7 +160,10 @@ fn check_review_target(
                     )?;
                 }
                 if !publish {
-                    return check_bound_decision(run_dir, gate, cmd, nonce, poster);
+                    let stamps = check_bound_decision(run_dir, gate, cmd, nonce, poster)?;
+                    // The form's checks hold for a stamped gate too.
+                    check_form(run_dir, gate, cmd, fields)?;
+                    return Ok(stamps);
                 }
             }
             if !publish && nonce.is_some() {
@@ -152,14 +171,33 @@ fn check_review_target(
                     "node `{node}` is a human_review node; a nonce answers a publish node only"
                 )));
             }
-            (publish, true)
+            (publish, true, formed)
         }
         None => {
             if consent || nonce.is_some() {
                 refuse_step_consent()?;
             }
+            // Field values are checked against the gate's definition: a
+            // post that carries them waits for a definition that reads,
+            // never lands unchecked for the drive to refuse later.
+            if !fields.is_empty() {
+                return Err(EngineError::Conflict(format!(
+                    "the playbook of node `{node}` cannot be read right now; decide again"
+                )));
+            }
             match crate::event::read_all(run_dir) {
-                Ok(events) => (crate::publish::latest_plan(&events, node).is_some(), false),
+                // A request whose journal holds its form detail is a form
+                // gate's: its checks need the definition too.
+                Ok(events) if crate::review::form::detail_of(&events, node).is_some() => {
+                    return Err(EngineError::Conflict(format!(
+                        "the playbook of node `{node}` cannot be read right now; decide again"
+                    )));
+                }
+                Ok(events) => (
+                    crate::publish::latest_plan(&events, node).is_some(),
+                    false,
+                    false,
+                ),
                 Err(_) if consent || nonce.is_some() => {
                     return Err(EngineError::Conflict(format!(
                         "the journal of node `{node}` cannot be read right now; decide again"
@@ -180,9 +218,9 @@ fn check_review_target(
     }
 
     let unreadable = |what: &str| -> Result<Stamps, EngineError> {
-        if publish {
+        if publish || formed {
             Err(EngineError::Conflict(format!(
-                "the {what} of publish node `{node}` cannot be read right now; decide again"
+                "the {what} of node `{node}` cannot be read right now; decide again"
             )))
         } else {
             Ok(Stamps::nonce(nonce.clone()))
@@ -192,7 +230,7 @@ fn check_review_target(
         return unreadable("journal");
     };
     let open = crate::event::review_open_count(&events, node);
-    let decided = crate::event::review_decided_count(&events, node);
+    let consumed = crate::event::review_consumed_count(&events, node);
     if open == 0 {
         return Err(EngineError::Conflict(format!(
             "node `{node}` has no review decision pending"
@@ -209,23 +247,140 @@ fn check_review_target(
     // The journal alone cannot see a decision that is already sitting in the
     // channel and has not been folded into a `ReviewDecided` event yet, so
     // requested-vs-decided would accept a second decision for the same open
-    // request. The drive consumes the `decided`-th record for the node
-    // (`scheduler::review_gate`, `Consume::Nth`), which is exactly the count
-    // this reads back: everything past that is queued and unconsumed. Once
-    // the queue already answers every outstanding request, another decision
-    // is not an answer, it is a stale extra a cyclic gate would consume on
-    // its NEXT visit without anyone confirming it.
+    // request. The drive takes the record at the node's consumed count
+    // (`scheduler::review_gate`, `Consume::Nth`: one per decision and one per
+    // entry a scope re-ask set aside, `review_consumed_count`), which is
+    // exactly the count this reads back: everything past that is queued and
+    // unconsumed. Once the queue already answers every outstanding request,
+    // another decision is not an answer, it is a stale extra a cyclic gate
+    // would consume on its NEXT visit without anyone confirming it.
     let unconsumed = queued
         .iter()
         .filter(|e| e.cmd.node == node)
         .count()
-        .saturating_sub(decided);
+        .saturating_sub(consumed);
     if unconsumed >= open {
         return Err(EngineError::Conflict(format!(
             "a decision is already queued for node `{node}`"
         )));
     }
-    Ok(Stamps::default())
+    if let Some(gate) = run_playbook.as_ref().and_then(|p| p.node(node)) {
+        check_form(run_dir, gate, cmd, fields)?;
+    }
+    // The channel is stamped on every gate's entry, so the decision is
+    // journaled with `via` and a scenario's scripted one stays apart from
+    // a person's on an ordinary gate too.
+    Ok(Stamps {
+        channel: poster.channel,
+        ..Stamps::default()
+    })
+}
+
+/// The post-time checks of a gate's form (people-in-the-loop D2/D3), run
+/// for every `human_review` gate, stamped ones included, once the request
+/// is known to be open:
+///
+/// - an option `max_scope` withholds above the scope is refused, not
+///   hidden: every channel refuses it, the engine's own decisions
+///   included, so an enforced recommendation of a withheld option waits
+///   for a person;
+/// - the values a decision carries are checked against the gate's
+///   `fields` and the request's rendered defaults.
+///
+/// Fail closed while the open request has no `review_detail` (an older
+/// journal; the drive journals the detail before it waits): no option
+/// `max_scope` may withhold is accepted, and the values are checked
+/// against the definition with no defaults. A gate without `fields`
+/// takes no values.
+///
+/// Every refusal it returns passes the run's redactor first
+/// ([`crate::review::form::refusal_text`]): a gate or field name, an
+/// option word and a withheld reason are definition text, and a
+/// hand-written definition may carry anything.
+fn check_form(
+    run_dir: &Path,
+    gate: &apb_core::schema::Node,
+    cmd: &ReviewCommand,
+    fields: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Result<(), EngineError> {
+    check_form_unscrubbed(run_dir, gate, cmd, fields).map_err(|e| {
+        let redactor = crate::run_redact::RunRedactor::for_run_dir(run_dir);
+        let scrub = |s: String| crate::review::form::refusal_text(&redactor, &s);
+        match e {
+            EngineError::Invalid(s) => EngineError::Invalid(scrub(s)),
+            EngineError::Conflict(s) => EngineError::Conflict(scrub(s)),
+            other => other,
+        }
+    })
+}
+
+fn check_form_unscrubbed(
+    run_dir: &Path,
+    gate: &apb_core::schema::Node,
+    cmd: &ReviewCommand,
+    fields: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Result<(), EngineError> {
+    let node = gate.id.as_str();
+    let apb_core::schema::NodeKind::HumanReview {
+        fields: spec,
+        max_scope,
+        options,
+        ..
+    } = &gate.kind
+    else {
+        return Ok(());
+    };
+    if spec.is_empty() && !fields.is_empty() {
+        return Err(EngineError::Invalid(format!(
+            "gate `{node}` takes no fields"
+        )));
+    }
+    // A gate without a form feature journals no detail
+    // (`NodeKind::needs_review_detail`): nothing more to check.
+    if !gate.kind.needs_review_detail() {
+        return Ok(());
+    }
+    let events = crate::event::read_all(run_dir).map_err(|_| {
+        EngineError::Conflict(format!(
+            "the journal of gate `{node}` cannot be read right now; decide again"
+        ))
+    })?;
+    // A gate that uses a form feature and whose request has no detail yet
+    // (a write torn between the two lines, repaired by the drive's next
+    // look) fails closed: it is never read as a gate without the feature.
+    let Some(detail) = crate::review::form::detail_of(&events, node) else {
+        let may_withhold = max_scope.as_ref().is_some_and(|max| {
+            max.withhold_for(&apb_core::schema::effective_review_options(options))
+                .contains(&cmd.decision)
+        });
+        let what = if may_withhold {
+            format!(
+                "the scope of gate `{node}` is not recorded yet, so option `{}` may be withheld",
+                cmd.decision
+            )
+        } else {
+            format!("the form of gate `{node}` is not recorded yet")
+        };
+        return Err(EngineError::Conflict(format!("{what}; decide again")));
+    };
+    if detail.withheld.contains(&cmd.decision) {
+        let reason = detail.withheld_reason.clone().unwrap_or_default();
+        return Err(EngineError::Invalid(format!(
+            "option `{}` of gate `{node}` is withheld: {reason}",
+            cmd.decision
+        )));
+    }
+    if spec.is_empty() {
+        return Ok(());
+    }
+    apb_core::review_form::check_values(
+        spec,
+        &cmd.decision,
+        fields,
+        &crate::review::form::defaults_of(Some(&detail)),
+    )
+    .map(|_| ())
+    .map_err(|e| EngineError::Invalid(format!("gate `{node}`: {e}")))
 }
 
 /// Who posts a decision: the channel it came through, and whether it is the
@@ -408,11 +563,15 @@ pub fn passkey_stamp_ok(run_dir: &Path, e: &ReviewEntry, person_only: bool) -> b
     let engine_own = engine_own_entry(run_dir, e, person_only);
     let scripted = e.channel == Some(crate::decision_channel::DecisionChannel::Scenario)
         && crate::scenario::session::is_scenario(run_dir);
+    // What the challenge covers: the bare decision word without fields
+    // (every existing challenge unchanged), the decision bound to its
+    // field values with them (people-in-the-loop D3).
+    let material = apb_core::review_form::decision_material(&e.cmd.decision, &e.fields);
     passkey_proof::stamp_ok(
         run_dir,
         passkey_proof::Stamp {
             node: &e.cmd.node,
-            decision: &e.cmd.decision,
+            decision: &material,
             request: e.request,
             nonce: e.nonce.as_deref(),
             proof: e.passkey_proof.as_ref(),
@@ -642,6 +801,82 @@ pub fn post_decision_to(
             passkey: None,
             proof: None,
         },
+        std::collections::BTreeMap::new(),
+    )
+}
+
+/// A decision with field values, through `channel`, optionally with a
+/// verified passkey assertion: the one entry the CLI, MCP and the HTTP
+/// route use when a gate takes fields. The other `post_decision_*`
+/// functions call it with no fields.
+pub struct DecisionPost {
+    pub cmd: ReviewCommand,
+    pub nonce: Option<String>,
+    pub request: Option<u64>,
+    pub channel: DecisionChannel,
+    /// The values the person gave, by field name; checked against the
+    /// gate's `fields` when the decision is posted (people-in-the-loop D3).
+    pub fields: std::collections::BTreeMap<String, serde_json::Value>,
+    /// The credential id prefix and the assertion, from the dashboard
+    /// route only.
+    pub passkey: Option<(String, passkey_proof::PasskeyProof)>,
+}
+
+/// Posts [`DecisionPost`]: exactly what [`post_decision_via`] and
+/// [`post_decision_passkey`] do, by `p.passkey`, with the fields handed to
+/// [`append_decision`].
+pub fn post(run_dir: &Path, p: DecisionPost) -> Result<u64, EngineError> {
+    match &p.passkey {
+        Some(_) => {
+            if p.channel == DecisionChannel::HttpBearer {
+                return Err(EngineError::ChannelRefused {
+                    refusal: crate::decision_channel::CallerRefusal::PasskeyRequired,
+                    message: "a decision through an API key is never a person's, passkey assertion or not; a key-made client cannot decide a gate that needs a passkey. Sign in to the dashboard in a browser and decide there".to_string(),
+                });
+            }
+            crate::review::channel::refuse_publish_consent(
+                run_dir,
+                &p.cmd.node,
+                &p.cmd.decision,
+                p.channel,
+            )?;
+            crate::review::channel::refuse_own_run(
+                run_dir,
+                &apb_core::step_env::StepCaller::from_env(),
+            )?;
+        }
+        None => {
+            crate::review::channel::refuse_publish_consent(
+                run_dir,
+                &p.cmd.node,
+                &p.cmd.decision,
+                p.channel,
+            )?;
+            if p.channel != DecisionChannel::Scenario {
+                crate::review::channel::refuse_own_run(
+                    run_dir,
+                    &apb_core::step_env::StepCaller::from_env(),
+                )?;
+            }
+        }
+    }
+    let (passkey, proof) = match p.passkey {
+        Some((c, pr)) => (Some(c), Some(pr)),
+        None => (None, None),
+    };
+    append_decision(
+        run_dir,
+        p.cmd,
+        p.nonce,
+        p.request,
+        None,
+        Poster {
+            channel: Some(p.channel),
+            engine: false,
+            passkey,
+            proof,
+        },
+        p.fields,
     )
 }
 
@@ -661,24 +896,15 @@ pub fn post_decision_via(
     request: Option<u64>,
     channel: DecisionChannel,
 ) -> Result<u64, EngineError> {
-    crate::review::channel::refuse_publish_consent(run_dir, &cmd.node, &cmd.decision, channel)?;
-    if channel != DecisionChannel::Scenario {
-        crate::review::channel::refuse_own_run(
-            run_dir,
-            &apb_core::step_env::StepCaller::from_env(),
-        )?;
-    }
-    append_decision(
+    post(
         run_dir,
-        cmd,
-        nonce,
-        request,
-        None,
-        Poster {
-            channel: Some(channel),
-            engine: false,
+        DecisionPost {
+            cmd,
+            nonce,
+            request,
+            channel,
+            fields: std::collections::BTreeMap::new(),
             passkey: None,
-            proof: None,
         },
     )
 }
@@ -699,25 +925,15 @@ pub fn post_decision_passkey(
     passkey_credential: String,
     proof: passkey_proof::PasskeyProof,
 ) -> Result<u64, EngineError> {
-    if channel == DecisionChannel::HttpBearer {
-        return Err(EngineError::ChannelRefused {
-            refusal: crate::decision_channel::CallerRefusal::PasskeyRequired,
-            message: "a decision through an API key is never a person's, passkey assertion or not; a key-made client cannot decide a gate that needs a passkey. Sign in to the dashboard in a browser and decide there".to_string(),
-        });
-    }
-    crate::review::channel::refuse_publish_consent(run_dir, &cmd.node, &cmd.decision, channel)?;
-    crate::review::channel::refuse_own_run(run_dir, &apb_core::step_env::StepCaller::from_env())?;
-    append_decision(
+    post(
         run_dir,
-        cmd,
-        nonce,
-        request,
-        None,
-        Poster {
-            channel: Some(channel),
-            engine: false,
-            passkey: Some(passkey_credential),
-            proof: Some(proof),
+        DecisionPost {
+            cmd,
+            nonce,
+            request,
+            channel,
+            fields: std::collections::BTreeMap::new(),
+            passkey: Some((passkey_credential, proof)),
         },
     )
 }
@@ -794,7 +1010,63 @@ pub(crate) fn post_engine_decision(
             passkey: None,
             proof: None,
         },
+        std::collections::BTreeMap::new(),
     )
+}
+
+/// Refuses field values the run's secret scrub would change, before
+/// anything of the post is written (people-in-the-loop D3): the channel
+/// line is the person's post as typed, so a value that holds a secret of
+/// the run, or is shaped like a credential, never reaches it; the drive
+/// scrubs again when it consumes. While the run's secret values cannot be
+/// read, a non-empty text value is refused the same way the run redactor
+/// withholds text. The refusal names the field (only a field the gate
+/// declares, by [`apb_core::review_form::nameable`]), never the value.
+fn refuse_secret_fields(
+    run_dir: &Path,
+    node: &str,
+    fields: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Result<(), EngineError> {
+    if fields.is_empty() {
+        return Ok(());
+    }
+    let redactor = crate::run_redact::RunRedactor::for_run_dir(run_dir);
+    let declared: Vec<String> = crate::progress::load_run_playbook(run_dir)
+        .and_then(|p| match p.node(node).map(|n| &n.kind) {
+            Some(apb_core::schema::NodeKind::HumanReview { fields, .. }) => {
+                Some(fields.iter().map(|f| f.name.clone()).collect())
+            }
+            _ => None,
+        })
+        .unwrap_or_default();
+    for (key, value) in fields {
+        let label = if declared.contains(key) && apb_core::review_form::nameable(key) {
+            format!("field `{key}`")
+        } else {
+            "a posted value".to_string()
+        };
+        let mut scrubbed = value.clone();
+        match redactor.secret_json(&mut scrubbed) {
+            Ok(()) if scrubbed == *value => {}
+            Ok(()) => {
+                return Err(EngineError::Invalid(crate::review::form::refusal_text(
+                    &redactor,
+                    &format!(
+                        "gate `{node}`: {label} holds a value this run keeps secret; it is not taken"
+                    ),
+                )));
+            }
+            // Nothing scrubs while the values do not read, so the refusal
+            // carries no text of the post or the run: the label only.
+            Err(_) if value.as_str().is_some_and(|s| !s.is_empty()) => {
+                return Err(EngineError::Invalid(format!(
+                    "{label}: this run's secret values cannot be read right now, so a text value is not taken (it may hold a value this run keeps secret); decide again later"
+                )));
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(())
 }
 
 /// Completes or cuts the unterminated tail a crashed poster left, before
@@ -829,8 +1101,10 @@ fn append_decision(
     request: Option<u64>,
     by: Option<crate::event::DecidedBy>,
     poster: Poster,
+    fields: std::collections::BTreeMap<String, serde_json::Value>,
 ) -> Result<u64, EngineError> {
     crate::driver::ensure_run_dir(run_dir)?;
+    refuse_secret_fields(run_dir, &cmd.node, &fields)?;
     // The check and the append under one lock: two posters (a person and
     // the engine's automatic decision, issue #165 Part 14.4) that both pass
     // the check would queue two decisions for one visit, and the second
@@ -844,7 +1118,7 @@ fn append_decision(
     let poster_channel = poster.channel;
     let poster_engine = poster.engine;
     let poster_proof = poster.proof.clone();
-    let stamps = check_review_target(run_dir, &cmd, nonce, poster)?;
+    let stamps = check_review_target(run_dir, &cmd, nonce, &fields, poster)?;
 
     // The passkey gate: while this machine holds at least one passkey, a
     // person-only gate and a bound approval take a decision only with a
@@ -904,6 +1178,7 @@ fn append_decision(
         channel: stamps.channel,
         passkey: entry_passkey,
         passkey_proof: poster_proof,
+        fields,
     };
     let line = serde_json::to_string(&entry).map_err(|e| EngineError::Yaml(e.to_string()))?;
 
@@ -939,7 +1214,7 @@ fn check_review_request(run_dir: &Path, node: &str, seq: u64) -> Result<(), Engi
         )));
     }
     let open = crate::event::review_open_count(&events, node);
-    let decided = crate::event::review_decided_count(&events, node);
+    let consumed = crate::event::review_consumed_count(&events, node);
     if open == 0 {
         // Closed: by a decision, or withdrawn without one.
         let decided_last = events.iter().rev().find_map(|e| match &e.payload {
@@ -1001,7 +1276,7 @@ fn check_review_request(run_dir: &Path, node: &str, seq: u64) -> Result<(), Engi
         .iter()
         .filter(|e| e.cmd.node == node)
         .count()
-        .saturating_sub(decided);
+        .saturating_sub(consumed);
     if queued >= open {
         return Err(EngineError::AlreadyAnswered(format!(
             "the review of node `{node}` at seq {seq} already has a decision queued"
@@ -1443,6 +1718,7 @@ mod tests {
             channel: Some(crate::decision_channel::DecisionChannel::Engine),
             passkey: None,
             passkey_proof: None,
+            fields: std::collections::BTreeMap::new(),
         };
         assert!(
             engine_own_entry(&rd, &entry(visit1), false),

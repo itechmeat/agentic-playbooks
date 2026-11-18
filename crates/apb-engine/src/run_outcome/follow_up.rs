@@ -488,6 +488,7 @@ mod tests {
             baseline: None,
             lists: Vec::new(),
             agent_summary: None,
+            fast_decisions: 0,
             follow_up: Some(f.clone()),
         };
         let sections = summary.sections();

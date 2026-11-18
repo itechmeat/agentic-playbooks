@@ -3,11 +3,25 @@ use std::fs;
 
 #[test]
 fn review_decide_writes_reviews_channel() {
+    // A concurrent test must not leave `APB_RUN_ID` set while this one
+    // posts (the guard reads the env at post time).
+    let _env = crate::common::env_lock();
+    let _step = StepEnv::set(None);
     let dir = tempfile::tempdir().unwrap();
     let run_dir = dir.path().join(".apb/runs/r1");
     fs::create_dir_all(&run_dir).unwrap();
 
-    let res = review_decide(dir.path(), "r1", "gate", "approved", "lgtm", None, None).unwrap();
+    let res = review_decide(
+        dir.path(),
+        "r1",
+        "gate",
+        "approved",
+        "lgtm",
+        None,
+        None,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap();
     assert!(res["posted_seq"].is_number());
 
     let channel = fs::read_to_string(run_dir.join("reviews.jsonl")).unwrap();
@@ -20,13 +34,37 @@ fn review_decide_writes_reviews_channel() {
 #[test]
 fn review_decide_unknown_run_is_not_found() {
     let dir = tempfile::tempdir().unwrap();
-    assert!(review_decide(dir.path(), "ghost", "gate", "approved", "", None, None).is_err());
+    assert!(
+        review_decide(
+            dir.path(),
+            "ghost",
+            "gate",
+            "approved",
+            "",
+            None,
+            None,
+            &std::collections::BTreeMap::new()
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn review_decide_rejects_path_traversal() {
     let dir = tempfile::tempdir().unwrap();
-    assert!(review_decide(dir.path(), "../evil", "gate", "approved", "", None, None).is_err());
+    assert!(
+        review_decide(
+            dir.path(),
+            "../evil",
+            "gate",
+            "approved",
+            "",
+            None,
+            None,
+            &std::collections::BTreeMap::new(),
+        )
+        .is_err()
+    );
 }
 
 const GATE: &str = r#"
@@ -51,18 +89,42 @@ edges:
 /// carries the distinction (not-found vs conflict) to the agent.
 #[test]
 fn review_decide_validates_the_node_against_the_run_snapshot() {
+    // A concurrent test must not leave `APB_RUN_ID` set while this one
+    // posts (the guard reads the env at post time).
+    let _env = crate::common::env_lock();
+    let _step = StepEnv::set(None);
     let dir = tempfile::tempdir().unwrap();
     let run_dir = dir.path().join(".apb/runs/r1");
     fs::create_dir_all(&run_dir).unwrap();
     fs::write(run_dir.join("playbook.yaml"), GATE).unwrap();
 
-    let err = review_decide(dir.path(), "r1", "ghost", "approved", "", None, None).unwrap_err();
+    let err = review_decide(
+        dir.path(),
+        "r1",
+        "ghost",
+        "approved",
+        "",
+        None,
+        None,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, apb_mcp::tools::ToolError::NotFound(_)),
         "a node that is not a gate must be not-found, got: {err:?}"
     );
 
-    let err = review_decide(dir.path(), "r1", "gate", "approved", "", None, None).unwrap_err();
+    let err = review_decide(
+        dir.path(),
+        "r1",
+        "gate",
+        "approved",
+        "",
+        None,
+        None,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, apb_mcp::tools::ToolError::Conflict(_)),
         "a gate with nothing pending must be a conflict, got: {err:?}"
@@ -76,7 +138,17 @@ fn review_decide_validates_the_node_against_the_run_snapshot() {
         String::new(),
     ))
     .unwrap();
-    let res = review_decide(dir.path(), "r1", "gate", "approved", "", None, None).unwrap();
+    let res = review_decide(
+        dir.path(),
+        "r1",
+        "gate",
+        "approved",
+        "",
+        None,
+        None,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap();
     assert_eq!(res["posted_seq"], serde_json::json!(0));
 }
 
@@ -169,6 +241,10 @@ fn parked_on_publish(run_dir: &std::path::Path) -> String {
 /// or stale is refused, the current one is queued with the decision.
 #[test]
 fn review_decide_answers_a_publish_gate_only_with_the_plans_nonce() {
+    // A concurrent test must not leave `APB_RUN_ID` set while this one
+    // posts (the guard reads the env at post time).
+    let _env = crate::common::env_lock();
+    let _step = StepEnv::set(None);
     let dir = tempfile::tempdir().unwrap();
     let run_dir = dir.path().join(".apb/runs/r1");
     let nonce = parked_on_publish(&run_dir);
@@ -182,8 +258,17 @@ fn review_decide_answers_a_publish_gate_only_with_the_plans_nonce() {
     assert_eq!(status["publish"][0]["awaiting_consent"], true);
     assert_eq!(status["publish"][0]["plan"]["nonce"], nonce);
 
-    let missing =
-        review_decide(dir.path(), "r1", "publish", "publish", "", None, None).unwrap_err();
+    let missing = review_decide(
+        dir.path(),
+        "r1",
+        "publish",
+        "publish",
+        "",
+        None,
+        None,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap_err();
     assert!(
         missing.to_string().contains(&nonce),
         "names the current plan: {missing}"
@@ -196,6 +281,7 @@ fn review_decide_answers_a_publish_gate_only_with_the_plans_nonce() {
         "",
         Some("publish-00000000000000000000000000000000"),
         None,
+        &std::collections::BTreeMap::new(),
     )
     .unwrap_err();
     assert!(
@@ -212,6 +298,7 @@ fn review_decide_answers_a_publish_gate_only_with_the_plans_nonce() {
         "ok",
         Some(&nonce),
         None,
+        &std::collections::BTreeMap::new(),
     )
     .unwrap();
     assert_eq!(res["posted_seq"], serde_json::json!(0));
@@ -292,7 +379,17 @@ fn review_decide_never_decides_a_person_only_gate() {
     let dir = tempfile::tempdir().unwrap();
     gated_run(dir.path(), "r1", PERSON_ONLY, true);
     for nonce in [None, Some("approval-0123")] {
-        let err = review_decide(dir.path(), "r1", "gate", "approve", "", nonce, None).unwrap_err();
+        let err = review_decide(
+            dir.path(),
+            "r1",
+            "gate",
+            "approve",
+            "",
+            nonce,
+            None,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap_err();
         let text = err.to_string();
         assert!(text.starts_with("refused (agent_channel): "), "{text}");
         assert!(text.contains("apb review r1 gate --decision"), "{text}");
@@ -311,13 +408,43 @@ fn a_run_step_decides_neither_a_person_only_gate_nor_its_own_run() {
     gated_run(dir.path(), "r1", PERSON_ONLY, true);
     gated_run(dir.path(), "r2", ORDINARY, false);
     let _step = StepEnv::set(Some("other"));
-    let err = review_decide(dir.path(), "r1", "gate", "approve", "", None, None).unwrap_err();
+    let err = review_decide(
+        dir.path(),
+        "r1",
+        "gate",
+        "approve",
+        "",
+        None,
+        None,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap_err();
     assert!(err.to_string().starts_with("refused (run_step): "), "{err}");
-    review_decide(dir.path(), "r2", "gate", "approve", "", None, None).unwrap();
+    review_decide(
+        dir.path(),
+        "r2",
+        "gate",
+        "approve",
+        "",
+        None,
+        None,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap();
     drop(_step);
     gated_run(dir.path(), "r3", ORDINARY, false);
     let _own = StepEnv::set(Some("r3"));
-    let err = review_decide(dir.path(), "r3", "gate", "approve", "", None, None).unwrap_err();
+    let err = review_decide(
+        dir.path(),
+        "r3",
+        "gate",
+        "approve",
+        "",
+        None,
+        None,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap_err();
     assert!(
         err.to_string().starts_with("refused (run_step_own_run): "),
         "{err}"
@@ -352,4 +479,106 @@ fn a_run_step_never_resolves_a_send_of_its_own_run() {
     );
     let events = fs::read_to_string(run.join("events.jsonl")).unwrap();
     assert_eq!(events.lines().count(), 2, "nothing was settled");
+}
+
+/// A fielded gate (people-in-the-loop D3 3.1): the values `review_decide`
+/// carries reach the engine's field check, the run proceeds on the decision,
+/// and the drive journals them in its `ReviewFields` event.
+const FIELDS_GATE: &str = r#"
+schema: 2
+id: gated
+name: Gated
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: gate
+    type: human_review
+    options: [approve, reject]
+    fields:
+      - { name: amount, type: number, required: [approve] }
+      - { name: remark, type: text, max_len: 200 }
+  - { id: ok, type: finish, outcome: success }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: ok, condition: { type: review_status, equals: approve } }
+"#;
+
+fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(value) = f() {
+            return value;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(20) {
+            panic!("timed out waiting for {what}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn review_decide_passes_fields() {
+    let _env = crate::common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    apb_core::registry::init_project(root).unwrap();
+    let pdir = root.join(".apb/playbooks/gated/1.0.0");
+    fs::create_dir_all(&pdir).unwrap();
+    fs::write(pdir.join("playbook.yaml"), FIELDS_GATE).unwrap();
+    fs::write(root.join(".apb/playbooks/gated/current"), "1.0.0").unwrap();
+
+    // The drive waits on the gate while the test posts the decision.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let driver_root = root.to_path_buf();
+    std::thread::spawn(move || {
+        let res = apb_engine::scheduler::run(
+            &driver_root,
+            "gated",
+            None,
+            apb_engine::scheduler::RunOptions::default(),
+        );
+        let _ = tx.send(res);
+    });
+    let run_dir = poll_until("the run directory", || {
+        let runs = root.join(".apb/runs");
+        fs::read_dir(&runs)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.is_dir())
+    });
+    poll_until("the gate's request", || {
+        let events = apb_engine::event::read_all(&run_dir).ok()?;
+        events
+            .iter()
+            .any(|e| matches!(&e.payload, apb_engine::event::EventPayload::ReviewRequested { node, .. } if node == "gate"))
+            .then_some(())
+    });
+    let run_id = run_dir.file_name().unwrap().to_str().unwrap().to_string();
+
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("amount".to_string(), serde_json::json!(1180.5));
+    let res = review_decide(root, &run_id, "gate", "approve", "", None, None, &fields).unwrap();
+    assert!(res["posted_seq"].is_number());
+
+    let result = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("run did not finish")
+        .expect("run ok");
+    assert_eq!(
+        result.outcome,
+        apb_engine::state::RunStatus::Succeeded,
+        "the decision consumed, the run proceeds"
+    );
+
+    // The journaled ReviewFields event carries the value the person gave.
+    let events = apb_engine::event::read_all(&run_dir).unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            apb_engine::event::EventPayload::ReviewFields { node, fields: f, .. }
+                if node == "gate" && f["amount"] == 1180.5
+        )),
+        "no ReviewFields event with amount 1180.5"
+    );
 }

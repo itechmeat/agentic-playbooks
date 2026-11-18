@@ -733,7 +733,12 @@ pub fn apply(root: &Path, plan: &MigrationPlan, backup_ts: u64) -> Result<(), Mi
         // Materialize the new version only if it does not exist yet (a
         // partial repeat of apply never overwrites it). But current is
         // ALWAYS moved - otherwise a repeated apply after a failure would
-        // leave current on schema 1.
+        // leave current on schema 1. The version is built in a staging
+        // directory (its content, the rewritten yaml and the diagram
+        // derived from it, people-in-the-loop D6) and published by one
+        // rename, so `dst_ver` existing means it is complete; one an older
+        // apb left without its diagram gets it from `move_current` before
+        // `current` names it.
         if !dst_ver.exists() {
             let rewritten = plan.rewritten.get(&(u.id.clone(), u.from_version.clone()));
             // The new version is a publication like any other: the launch
@@ -749,14 +754,18 @@ pub fn apply(root: &Path, plan: &MigrationPlan, backup_ts: u64) -> Result<(), Mi
                 key: crate::launch::floor::FloorKey::project_of(root, &u.id)?,
                 channel: crate::launch::floor::SaveChannel::Person,
             };
-            crate::launch::floor::publish(&authority, &id_dir, declared, || {
-                crate::fsutil::copy_tree(&src_ver, &dst_ver)?;
-                if let Some((_nv, yaml)) = rewritten {
-                    crate::fsutil::atomic_write(&dst_ver.join("playbook.yaml"), yaml.as_bytes())?;
-                }
-                Ok::<(), MigError>(())
-            })
-            .map_err(|e| MigError::Io(std::io::Error::other(e.to_string())))??;
+            let tmp = crate::versioning::staging_dir(&id_dir, &u.new_version);
+            let staged = stage_migrated(&src_ver, &tmp, rewritten.map(|(_nv, yaml)| yaml.as_str()));
+            let published = staged.and_then(|()| {
+                crate::launch::floor::publish(&authority, &id_dir, declared, || {
+                    std::fs::rename(&tmp, &dst_ver)
+                })
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+            });
+            if let Err(e) = published {
+                let _ = std::fs::remove_dir_all(&tmp);
+                return Err(MigError::Io(e));
+            }
         }
         current::move_current(
             &id_dir,
@@ -765,6 +774,19 @@ pub fn apply(root: &Path, plan: &MigrationPlan, backup_ts: u64) -> Result<(), Mi
         .map_err(|e| MigError::Io(e.into_io()))?;
     }
     Ok(())
+}
+
+/// Builds a migrated version in its staging directory `tmp`: the source
+/// version's content, then the definition it now stores (`rewritten`, else
+/// the source's own yaml) with the diagram derived from exactly those
+/// bytes (`versioning::stage_definition`).
+fn stage_migrated(src_ver: &Path, tmp: &Path, rewritten: Option<&str>) -> std::io::Result<()> {
+    crate::fsutil::copy_tree(src_ver, tmp)?;
+    let stored = match rewritten {
+        Some(yaml) => yaml.to_string(),
+        None => std::fs::read_to_string(tmp.join("playbook.yaml"))?,
+    };
+    crate::versioning::stage_definition(tmp, &stored)
 }
 
 #[cfg(test)]

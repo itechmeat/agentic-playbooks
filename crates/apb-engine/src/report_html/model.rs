@@ -23,6 +23,18 @@ pub const ANSWER_MAX_BYTES: usize = 64 * 1024;
 pub const JOURNAL_LINE_MAX_BYTES: usize = 4096;
 
 /// What the report shows, gathered once from the run directory.
+/// One review decision the report shows: the gate, the decision with the
+/// field values it carried (already scrubbed), the scope line of its
+/// request, and whether it went faster than the scope takes to read
+/// (people-in-the-loop D2/D3).
+pub(super) struct ReviewLine {
+    pub(super) node: String,
+    pub(super) decision: String,
+    pub(super) fields: std::collections::BTreeMap<String, serde_json::Value>,
+    pub(super) scope_line: Option<String>,
+    pub(super) fast: bool,
+}
+
 pub(super) struct Report {
     pub(super) run_id: String,
     pub(super) playbook: Option<String>,
@@ -31,6 +43,8 @@ pub(super) struct Report {
     pub(super) goal: Option<RunGoal>,
     pub(super) steps: Vec<Step>,
     pub(super) sends: Vec<RunIntent>,
+    /// The review decisions, with their requests' scope lines.
+    pub(super) reviews: Vec<ReviewLine>,
     pub(super) publish: Vec<crate::run_outcome::RunPublish>,
     pub(super) notify: Option<RunNotify>,
     pub(super) link: Option<String>,
@@ -105,6 +119,7 @@ impl Report {
         let journal_cut = view.events.len().saturating_sub(JOURNAL_MAX_EVENTS);
         let status = view.run_status;
         let sends = crate::run_outcome::outcome_intents(&view.events, now);
+        let reviews = review_lines(&view.events);
         let publish = crate::run_outcome::publish_from(&view.events, now);
         let notify = RunNotify::for_run(run_dir, &view.events, now);
         let known_problems = crate::known_problems::of_run(&view.events);
@@ -147,6 +162,7 @@ impl Report {
             playbook,
             status,
             sends,
+            reviews,
             publish,
             notify,
             link: crate::people::link::run_link(root, &run_id),
@@ -170,5 +186,140 @@ impl Report {
             external_data: crate::external_data::is_flagged(run_dir),
             run_id,
         })
+    }
+}
+
+/// The review decisions of the run, each with the scope line of its
+/// request and the fast flag (people-in-the-loop D2): a person's decision
+/// whose active run time since the request stayed below the scope's floor
+/// counts as decided without review.
+fn review_lines(events: &[crate::event::Event]) -> Vec<ReviewLine> {
+    use crate::event::EventPayload;
+    // One open request per visit: its seq, its ts, and the scope of the
+    // `review_detail` that followed it.
+    type OpenRequest = (
+        String,
+        u64,
+        u128,
+        Option<crate::review::scope::ReviewScope>,
+        std::collections::BTreeMap<String, serde_json::Value>,
+    );
+    let mut open: Vec<OpenRequest> = Vec::new();
+    let mut out = Vec::new();
+    // Decided without review by the one rule the run outcome and `apb
+    // stats` count by: a person's channel decision under its floor.
+    let fast_seqs = crate::run_stats::interventions::of_run(events)
+        .reviews
+        .fast_seqs;
+    for e in events {
+        match &e.payload {
+            EventPayload::ReviewRequested { node, .. } => {
+                open.push((node.clone(), e.seq, e.ts, None, Default::default()));
+            }
+            EventPayload::ReviewDetail {
+                node,
+                request,
+                scope,
+                ..
+            } => {
+                if let Some(d) = open
+                    .iter_mut()
+                    .rev()
+                    .find(|(n, seq, ..)| n == node && *seq == *request)
+                {
+                    d.3 = scope.clone();
+                }
+            }
+            EventPayload::ReviewFields {
+                node,
+                request,
+                fields,
+            } => {
+                if let Some(d) = open
+                    .iter_mut()
+                    .rev()
+                    .find(|(n, seq, ..)| n == node && *seq == *request)
+                {
+                    d.4 = fields.clone();
+                }
+            }
+            EventPayload::ReviewDecided { node, decision, .. } => {
+                let Some(pos) = open.iter().rposition(|(n, ..)| n == node) else {
+                    continue;
+                };
+                let (_, _, _, scope, fields) = &open[pos];
+                let fast = fast_seqs.contains(&e.seq);
+                out.push(ReviewLine {
+                    node: node.clone(),
+                    decision: decision.clone(),
+                    fields: fields.clone(),
+                    scope_line: scope.as_ref().map(crate::review::scope::scope_line),
+                    fast,
+                });
+                open.remove(pos);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::review_lines;
+    use crate::decision_channel::DecisionChannel;
+    use crate::event::{Event, EventPayload};
+    use crate::review::scope::ReviewScope;
+
+    fn journal(via: DecisionChannel) -> Vec<Event> {
+        let ev = |seq, ts, payload| Event { seq, ts, payload };
+        vec![
+            ev(
+                1,
+                1_000,
+                serde_json::from_value(serde_json::json!({
+                    "type": "review_requested", "node": "gate", "options": ["approve"]
+                }))
+                .unwrap(),
+            ),
+            ev(
+                2,
+                1_001,
+                EventPayload::ReviewDetail {
+                    node: "gate".into(),
+                    request: 1,
+                    scope: Some(ReviewScope {
+                        files: Some(40),
+                        ..Default::default()
+                    }),
+                    show: Vec::new(),
+                    fields: Vec::new(),
+                    withheld: Vec::new(),
+                    withheld_reason: None,
+                },
+            ),
+            ev(
+                3,
+                3_000,
+                EventPayload::ReviewDecided {
+                    node: "gate".into(),
+                    decision: "approve".into(),
+                    note: String::new(),
+                    plan_digest: None,
+                    decided_by: None,
+                    binding: None,
+                    via: Some(via),
+                },
+            ),
+        ]
+    }
+
+    /// The report marks a decision by the rule the outcome and `apb stats`
+    /// count by: a person's two-second approval of a 40-file scope is
+    /// decided without review, a scenario's scripted one never is.
+    #[test]
+    fn the_report_marks_fast_decisions_by_the_shared_rule() {
+        assert!(review_lines(&journal(DecisionChannel::Terminal))[0].fast);
+        assert!(!review_lines(&journal(DecisionChannel::Scenario))[0].fast);
     }
 }

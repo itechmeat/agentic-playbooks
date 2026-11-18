@@ -73,12 +73,18 @@ pub struct Analysis {
     pub tainted: BTreeMap<String, BTreeSet<Source>>,
     /// The followers that render untrusted text, in node order.
     pub followers: Vec<Follower>,
+    /// The output map the fixed point settled on: every node whose output
+    /// carries taint and where it comes from. A review gate's field
+    /// defaults read it (`text_reads_untrusted`).
+    pub outputs: BTreeMap<String, BTreeSet<Source>>,
 }
 
 /// The effects that mean a node can send outward.
 const OUTWARD_EFFECTS: [Effect; 3] = [Effect::Network, Effect::External, Effect::Irreversible];
 
-/// Whether the node's own output carries text taint can flow through.
+/// Whether the node's own output carries text taint can flow through. A
+/// review gate with typed fields outputs them (people-in-the-loop D3): a
+/// default over untrusted text taints the gate's output for its readers.
 fn carries_text(kind: &NodeKind) -> bool {
     matches!(
         kind,
@@ -92,7 +98,7 @@ fn carries_text(kind: &NodeKind) -> bool {
             prompt: Some(_),
             ..
         }
-    )
+    ) || matches!(kind, NodeKind::HumanReview { fields, .. } if !fields.is_empty())
 }
 
 /// Whether the node reads instructions (an agent that could follow them).
@@ -157,54 +163,7 @@ pub fn analyze(playbook: &Playbook) -> Analysis {
                 texts.push(t.clone());
             }
             for text in &texts {
-                for cap in crate::template::refs(text) {
-                    let parts: Vec<&str> = cap.split('.').collect();
-                    match parts.as_slice() {
-                        ["params", name]
-                            if playbook
-                                .params
-                                .iter()
-                                .any(|p| &p.name == name && p.untrusted) =>
-                        {
-                            sources.insert(Source::Param {
-                                name: (*name).to_string(),
-                            });
-                        }
-                        [
-                            "nodes",
-                            x,
-                            "output" | "report" | "rejected_output" | "seen",
-                            ..,
-                        ] => {
-                            if let Some(src) = output.get(*x) {
-                                sources.extend(src.iter().cloned());
-                            }
-                        }
-                        // The earlier run may have run another version
-                        // whose markers this definition cannot know.
-                        ["run", "previous_success", "nodes", x, ..] => {
-                            sources.insert(Source::EarlierRun {
-                                node: (*x).to_string(),
-                            });
-                        }
-                        // The recorded context holds params and node
-                        // outputs, so any untrusted input in the run
-                        // reaches it.
-                        ["run", "context" | "retro"] => {
-                            if any_untrusted_param {
-                                for p in playbook.params.iter().filter(|p| p.untrusted) {
-                                    sources.insert(Source::Param {
-                                        name: p.name.clone(),
-                                    });
-                                }
-                            }
-                            for src in output.values() {
-                                sources.extend(src.iter().cloned());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+                refs_sources(playbook, &output, any_untrusted_param, text, &mut sources);
             }
             // Rule 4: a list node's items come from a tainted node.
             if let Some(list) = &node.list
@@ -295,7 +254,91 @@ pub fn analyze(playbook: &Playbook) -> Analysis {
             accepted: node.accept_untrusted.clone(),
         });
     }
-    Analysis { tainted, followers }
+    Analysis {
+        tainted,
+        followers,
+        outputs: output,
+    }
+}
+
+/// The sources one template text reads, by rule 3's own match: params
+/// marked untrusted, `nodes.<x>.*` reads of a tainted output, the earlier
+/// run's nodes, and the recorded context. The one copy of the rule: the
+/// analysis loop and [`text_reads_untrusted`] both go through it.
+fn refs_sources(
+    playbook: &Playbook,
+    outputs: &BTreeMap<String, BTreeSet<Source>>,
+    any_untrusted_param: bool,
+    text: &str,
+    sources: &mut BTreeSet<Source>,
+) {
+    for cap in crate::template::refs(text) {
+        let parts: Vec<&str> = cap.split('.').collect();
+        match parts.as_slice() {
+            ["params", name]
+                if playbook
+                    .params
+                    .iter()
+                    .any(|p| &p.name == name && p.untrusted) =>
+            {
+                sources.insert(Source::Param {
+                    name: (*name).to_string(),
+                });
+            }
+            [
+                "nodes",
+                x,
+                "output" | "report" | "rejected_output" | "seen",
+                ..,
+            ] => {
+                if let Some(src) = outputs.get(*x) {
+                    sources.extend(src.iter().cloned());
+                }
+            }
+            // The earlier run may have run another version whose markers
+            // this definition cannot know.
+            ["run", "previous_success", "nodes", x, ..] => {
+                sources.insert(Source::EarlierRun {
+                    node: (*x).to_string(),
+                });
+            }
+            // The recorded context holds params and node outputs, so any
+            // untrusted input in the run reaches it.
+            ["run", "context" | "retro"] => {
+                if any_untrusted_param {
+                    for p in playbook.params.iter().filter(|p| p.untrusted) {
+                        sources.insert(Source::Param {
+                            name: p.name.clone(),
+                        });
+                    }
+                }
+                for src in outputs.values() {
+                    sources.extend(src.iter().cloned());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The sources of the untrusted references of `text`: what a review
+/// gate's field default renders (people-in-the-loop D3), for the V247
+/// warning and the gate view's untrusted mark.
+pub fn text_reads_untrusted(
+    playbook: &Playbook,
+    analysis: &Analysis,
+    text: &str,
+) -> BTreeSet<Source> {
+    let any_untrusted_param = playbook.params.iter().any(|p| p.untrusted);
+    let mut sources = BTreeSet::new();
+    refs_sources(
+        playbook,
+        &analysis.outputs,
+        any_untrusted_param,
+        text,
+        &mut sources,
+    );
+    sources
 }
 
 /// Why `node` can send outward, in the fixed order of the design: its

@@ -702,6 +702,10 @@ pub(crate) struct ReviewBody {
     assertion_auth_data: String,
     #[serde(default, rename = "assertionSignature")]
     assertion_signature: String,
+    /// The values the person gave, by field name; checked against the
+    /// gate's `fields` when the decision is posted (people-in-the-loop D3).
+    #[serde(default)]
+    fields: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// The answer to a gate's engine refusal: 404 for a node or request that
@@ -775,6 +779,9 @@ pub(crate) async fn post_review_handler(
     // While a passkey is enrolled on this machine, this gate takes its
     // decision only with a fresh assertion bound to exactly this run,
     // gate, request and option: the token `assert/verify` minted for it.
+    let mut nonce = body.nonce;
+    let mut request = body.request;
+    let mut passkey = None;
     if apb_engine::review::passkey_required(&run_dir, &cmd) {
         let Some(token) = body.passkey_token.as_deref() else {
             return (
@@ -792,8 +799,9 @@ pub(crate) async fn post_review_handler(
             run: id.clone(),
             node: cmd.node.clone(),
             decision: cmd.decision.clone(),
-            request: body.request,
-            nonce: body.nonce.clone(),
+            request,
+            nonce: nonce.clone(),
+            fields: body.fields.clone(),
         };
         let purpose = match crate::routes::passkeys::AssertPurpose::resolved_decision(
             root.as_path(),
@@ -802,8 +810,8 @@ pub(crate) async fn post_review_handler(
             Ok(p) => p,
             Err(why) => return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response(),
         };
-        let request = purpose.request_of();
-        let nonce = purpose.nonce_of();
+        request = purpose.request_of();
+        nonce = purpose.nonce_of();
         let digest = purpose.digest();
         let Some(credential) = state.passkeys.take_token(token, &digest) else {
             return (
@@ -820,23 +828,24 @@ pub(crate) async fn post_review_handler(
             authenticator_data: body.assertion_auth_data.clone(),
             signature: body.assertion_signature.clone(),
         };
-        match apb_engine::review::post_decision_passkey(
-            &run_dir, cmd, nonce, request, channel, credential, proof,
-        ) {
-            Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
-            Err(e) => gate_refusal(e),
-        }
-    } else {
-        match apb_engine::review::post_decision_via(
-            &run_dir,
+        passkey = Some((credential, proof));
+    }
+    // One entry point for both paths (people-in-the-loop D3): the plain
+    // post and the passkey-stamped one differ only in `passkey`, and both
+    // carry the fields the person gave.
+    match apb_engine::review::post(
+        &run_dir,
+        apb_engine::review::DecisionPost {
             cmd,
-            body.nonce,
-            body.request,
+            nonce,
+            request,
             channel,
-        ) {
-            Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
-            Err(e) => gate_refusal(e),
-        }
+            fields: body.fields,
+            passkey,
+        },
+    ) {
+        Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
+        Err(e) => gate_refusal(e),
     }
 }
 

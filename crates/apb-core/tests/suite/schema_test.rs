@@ -157,7 +157,9 @@ edges:
 fn human_review_prompt_parses_and_round_trips() {
     let playbook = Playbook::from_yaml(HUMAN_REVIEW_PROMPT_WF).unwrap();
     match &playbook.node("gate").unwrap().kind {
-        NodeKind::HumanReview { options, prompt } => {
+        NodeKind::HumanReview {
+            options, prompt, ..
+        } => {
             assert_eq!(options, &vec!["approve".to_string(), "reject".to_string()]);
             assert_eq!(
                 prompt.as_deref(),

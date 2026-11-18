@@ -99,6 +99,22 @@ edges:
   - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
 "#;
 
+/// A fielded gate: `amount` is required for `approved`, and that decision
+/// finishes the run (people-in-the-loop D3).
+const FIELDS_GATE: &str = r#"
+schema: 2
+id: gated
+name: Gated
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: gate, type: human_review, options: [approved, rejected], fields: [{ name: amount, type: number, required: [approved] }] }
+  - { id: ok, type: finish, outcome: success }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: ok, condition: { type: review_status, equals: approved } }
+"#;
+
 /// A run dir carrying the gate playbook's snapshot plus the given journal,
 /// built by hand under an existing project. The review-validation cases need
 /// exact journal shapes (a gate with an open request, a gate without one) that
@@ -187,6 +203,98 @@ async fn post_review_writes_channel() {
     let channel =
         fs::read_to_string(dir.path().join(".apb/runs/gate-1").join("reviews.jsonl")).unwrap();
     assert!(channel.contains("approved"));
+}
+
+/// The `fields` a review post carries reach the gate: the drive consumes
+/// the decision, the journaled `review_fields` event carries the values,
+/// and the run proceeds (people-in-the-loop D3).
+///
+/// The run starts inside the suite's config sandbox: other tests of this
+/// binary swap `APB_CONFIG_DIR` process-wide, and the sandbox's lock keeps
+/// them from doing so while this engine start resolves it.
+#[tokio::test]
+async fn a_review_post_carries_fields() {
+    let _cfg = crate::common::config_sandbox().await;
+    if let Err(why) = run_fielded_gate_once().await {
+        panic!("the fielded-gate run: {why}");
+    }
+}
+
+async fn run_fielded_gate_once() -> Result<(), String> {
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    let vdir = dir.path().join(".apb/playbooks/gated/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), FIELDS_GATE).unwrap();
+    fs::write(dir.path().join(".apb/playbooks/gated/current"), "1.0.0").unwrap();
+
+    // The drive waits at the gate while the route posts the decision.
+    let root = dir.path().to_path_buf();
+    let driver = tokio::task::spawn_blocking(move || {
+        apb_engine::run(&root, "gated", None, apb_engine::RunOptions::default())
+    });
+
+    // The run's gate opens its request; a drive that ended first failed to
+    // start (or finished too early to be decided), and says so.
+    let runs = dir.path().join(".apb/runs");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let run_id = loop {
+        if driver.is_finished() {
+            let result = driver
+                .await
+                .map_err(|e| format!("driver thread: {e}"))?
+                .map_err(|e| format!("run start: {e}"))?;
+            return Err(format!(
+                "the run ended (outcome {:?}) before its gate opened",
+                result.outcome
+            ));
+        }
+        let entry = fs::read_dir(&runs)
+            .ok()
+            .and_then(|d| d.flatten().find(|e| e.path().is_dir()));
+        if let Some(entry) = entry {
+            let text = fs::read_to_string(entry.path().join("events.jsonl")).unwrap_or_default();
+            if text.contains("\"review_requested\"") {
+                break entry.file_name().to_string_lossy().into_owned();
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("timed out waiting for the gate's request".to_string());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = post_json(
+        app,
+        &format!("/api/runs/{run_id}/review"),
+        serde_json::json!({
+            "node": "gate",
+            "decision": "approved",
+            "fields": { "amount": 1180.5 }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(json["posted_seq"].is_number());
+
+    let result = driver
+        .await
+        .map_err(|e| format!("driver thread: {e}"))?
+        .map_err(|e| format!("run: {e}"))?;
+    assert_eq!(
+        result.outcome,
+        apb_engine::state::RunStatus::Succeeded,
+        "approved routes to ok"
+    );
+    let events = fs::read_to_string(runs.join(&run_id).join("events.jsonl")).unwrap();
+    let fields_event = events
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v["type"] == "review_fields" && v["node"] == "gate")
+        .ok_or_else(|| "no review_fields event in the journal".to_string())?;
+    assert_eq!(fields_event["fields"]["amount"], serde_json::json!(1180.5));
+    Ok(())
 }
 
 /// issue #102.9: the run detail's `progress.pending_review` block carries the

@@ -116,8 +116,8 @@ pub enum DetailMode {
     /// ref), edge structure, and the supervisor interface. Excludes every
     /// node prompt body. The MCP default.
     Summary,
-    /// Full authoring payload: yaml + full playbook + layout, byte-identical
-    /// to the pre-summary behavior.
+    /// Full authoring payload: yaml + full playbook + the diagram + layout,
+    /// byte-identical to the pre-summary behavior plus the diagram.
     Full,
 }
 
@@ -141,16 +141,22 @@ pub fn playbook_get(
 ) -> Result<Value, ToolError> {
     let reg = open(root)?;
     let loaded = reg.load(id, version)?;
+    // Rendered from the YAML just loaded; the `playbook.mmd` beside the
+    // version (D6) is display only and never read back.
+    let diagram =
+        apb_core::diagram::mermaid(&loaded.playbook, &apb_core::scope::digest_str(&loaded.yaml));
     let mut out = match detail {
         DetailMode::Full => json!({
             "id": id,
             "version": loaded.version,
             "yaml": loaded.yaml,
             "playbook": loaded.playbook,
+            "diagram": diagram,
             "layout": loaded.layout,
         }),
         DetailMode::Summary => playbook_summary(id, &loaded),
     };
+    out["diagram"] = json!(diagram);
     add_candidate(root, id, &mut out);
     Ok(out)
 }

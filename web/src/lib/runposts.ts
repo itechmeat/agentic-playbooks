@@ -31,6 +31,9 @@ export interface PostTarget {
   request?: number
   /** A publish gate's plan nonce. */
   nonce?: string
+  /** The field values a fielded gate's decision carries
+   * (people-in-the-loop), typed by the panel. */
+  fields?: Record<string, unknown>
 }
 
 /** The target of a next action: its own run, node, request and nonce. */
@@ -107,6 +110,7 @@ export async function postDecision(
   const body: ReviewBody = { node: t.node, decision, note }
   if (t.nonce) body.nonce = t.nonce
   if (t.request !== undefined) body.request = t.request
+  if (t.fields && Object.keys(t.fields).length) body.fields = t.fields
   let original: unknown
   let postedSeq = 0
   const outcome: PostOutcome = await runDecisionWithPasskey(
@@ -121,7 +125,18 @@ export async function postDecision(
                 assertionSignature: b.assertionSignature,
               }
             : undefined
-          const got = await postReview(runId, b.node, b.decision, b.note ?? '', workspace, b.nonce, b.request, b.passkey_token, assertion)
+          const got = await postReview(
+            runId,
+            b.node,
+            b.decision,
+            b.note ?? '',
+            workspace,
+            b.nonce,
+            b.request,
+            b.passkey_token,
+            assertion,
+            ...(b.fields ? [b.fields] : []),
+          )
           postedSeq = got.posted_seq
           return { ok: true }
         } catch (e) {

@@ -474,6 +474,43 @@ fn a_request_left_open_by_a_crash_is_decided_on_resume() {
     );
 }
 
+/// The same crash on a gate with `max_scope`: the request is open without
+/// its `review_detail`. The resumed drive journals the detail before it
+/// posts the declared decision, so an `approve` within the limit is taken
+/// (the channel would refuse it while the scope is unrecorded) and the run
+/// does not stop on the missing detail.
+#[test]
+fn a_scoped_request_left_open_without_its_detail_is_decided_on_resume() {
+    let gate = HELD_GATE.replace(
+        "unattended: { decide: approve }",
+        "max_scope: { files: 3 }, unattended: { decide: approve }",
+    );
+    let p = Proj::new("ua", &playbook("ua", &gate, HELD_GATE_EDGES));
+    let (dir, id) = paused_at_hold(&p, "ua", unattended());
+    apb_engine::event::EventLog::open(&dir)
+        .unwrap()
+        .append(EventPayload::review_requested(
+            "gate",
+            vec!["approve".into(), "reject".into()],
+            String::new(),
+        ))
+        .unwrap();
+    let root = p.root();
+    let resumed = bounded(&p.root(), move || {
+        apb_engine::scheduler::resume_by(&root, &id, None, false, PauseBy::Operator).unwrap()
+    });
+    let ev = read_all(&dir).unwrap();
+    assert_eq!(resumed.outcome, RunStatus::Succeeded, "{ev:#?}");
+    let details = ev
+        .iter()
+        .filter(|e| matches!(e.payload, EventPayload::ReviewDetail { .. }))
+        .count();
+    assert_eq!(details, 1, "the detail of the open request, journaled once");
+    assert!(ev.iter().any(|e| matches!(&e.payload,
+        EventPayload::ReviewDecided { decision, decided_by, .. }
+            if decision == "approve" && *decided_by == Some(DecidedBy::Unattended))));
+}
+
 /// The declared decision cannot be written to the review channel at all:
 /// the run fails `hitl_required` naming the gate, instead of waiting for a
 /// decision that never comes.

@@ -1262,7 +1262,7 @@ pub fn create_draft_in_by(
     fs::create_dir_all(parent.join("playbooks"))?;
     let playbook_dir = parent.join("playbooks").join(id);
     let mut playbook = Playbook::from_yaml(yaml).map_err(schema_err)?;
-    playbook.version = "1.0.0".to_string();
+    playbook.version = DRAFT_VERSION.to_string();
     playbook.id = id.to_string();
 
     // Origin is passed explicitly: global draft with `scope: project` should
@@ -1277,33 +1277,134 @@ pub fn create_draft_in_by(
     // Atomic collision check first: create the playbook folder
     // non-recursively - if it already exists, it's a duplicate (no TOCTOU
     // between exists() and write), and nothing touches the floor. An empty
-    // folder runs nothing.
-    match fs::create_dir(&playbook_dir) {
-        Ok(()) => {}
+    // folder runs nothing. The one exception is a creation of this very
+    // draft a crash interrupted (`interrupted_draft`): the retry finishes it.
+    let resumed = match fs::create_dir(&playbook_dir) {
+        Ok(()) => None,
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            return Err(VersioningError::Conflict(format!(
-                "playbook `{id}` already exists in this scope"
-            )));
+            match interrupted_draft(&playbook_dir, &canonical) {
+                Some(state) => Some(state),
+                None => {
+                    return Err(VersioningError::Conflict(format!(
+                        "playbook `{id}` already exists in this scope"
+                    )));
+                }
+            }
         }
         Err(e) => return Err(e.into()),
+    };
+    if resumed != Some(DraftLeft::Published) {
+        // The draft is built in a staging directory, its yaml and the
+        // diagram derived from it together (people-in-the-loop D6), and
+        // published by one rename: no crash leaves a version directory
+        // without its diagram. The rename is the publication: the floor is
+        // checked and raised first, under the floor lock (see
+        // `crate::launch::floor::publish`).
+        let tmp = playbook_dir.join(temp_dir_name(DRAFT_VERSION));
+        let staged = stage_definition(&tmp, &canonical);
+        let published = staged.map_err(VersioningError::from).and_then(|()| {
+            floor::publish(&authority, &playbook_dir, playbook.agent_launch, || {
+                fs::rename(&tmp, playbook_dir.join(DRAFT_VERSION))
+            })
+            .map_err(VersioningError::from)
+        });
+        let published = match published {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e))
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
+                ) =>
+            {
+                Err(VersioningError::Conflict(format!(
+                    "playbook `{id}` already exists in this scope"
+                )))
+            }
+            Ok(Err(e)) => Err(e.into()),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = published {
+            let _ = remove_dir_all(&tmp);
+            if resumed.is_none() {
+                // Refused before anything was published: the empty folder
+                // this call made leaves again.
+                let _ = fs::remove_dir(&playbook_dir);
+            }
+            return Err(e);
+        }
     }
-    // The version's file is its publication: the floor is checked and raised
-    // first, under the floor lock (see `crate::launch::floor::publish`).
-    let published = floor::publish(&authority, &playbook_dir, playbook.agent_launch, || {
-        let vdir = playbook_dir.join("1.0.0");
-        fs::create_dir_all(&vdir)?;
-        atomic_write(&vdir.join("playbook.yaml"), canonical.as_bytes())?;
-        Ok::<(), VersioningError>(())
-    });
-    if published.is_err() {
-        // Refused before anything was written: the empty folder this call
-        // made leaves again.
-        let _ = fs::remove_dir(&playbook_dir);
+    // `move_current` gives the version its diagram again when it lacks it
+    // (a draft an older apb wrote and a crash left). `current` must still
+    // be unset, checked under the pointer lock: a writer that published
+    // and moved `current` after a crash left this draft keeps its move
+    // (`Stale`), the retry never moves `current` back.
+    let mut created = current::MoveCurrent::created(DRAFT_VERSION);
+    created.expected_from = Some(None);
+    current::move_current(&playbook_dir, &created).map_err(|e| e.into_versioning(id))?;
+    Ok(DRAFT_VERSION.to_string())
+}
+
+/// The version a draft is created at.
+const DRAFT_VERSION: &str = "1.0.0";
+
+/// What an interrupted creation of a draft left in its playbook directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DraftLeft {
+    /// Nothing published: the directory is empty or holds staging
+    /// leftovers only.
+    Nothing,
+    /// The draft version is published with exactly these bytes, and
+    /// `current` was never written.
+    Published,
+}
+
+/// Whether `playbook_dir` is what a crash during the creation of the
+/// draft `canonical` leaves: no `current`, and no entry but hidden ones
+/// (staging leftovers `.tmp-*`, the pointer lock), the pointer's intent and
+/// history files (`move_current` recovers them first) and the draft
+/// version holding exactly `canonical` (never a link). Anything else is
+/// another playbook.
+fn interrupted_draft(playbook_dir: &Path, canonical: &str) -> Option<DraftLeft> {
+    let meta = fs::symlink_metadata(playbook_dir).ok()?;
+    if !meta.is_dir() {
+        return None;
     }
-    published??;
-    current::move_current(&playbook_dir, &current::MoveCurrent::created("1.0.0"))
-        .map_err(|e| e.into_versioning(id))?;
-    Ok("1.0.0".to_string())
+    let mut left = DraftLeft::Nothing;
+    for entry in fs::read_dir(playbook_dir).ok()? {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        let name = name.to_str()?;
+        if name.starts_with('.') || name == current::INTENT_FILE || name == current::HISTORY_FILE {
+            continue;
+        }
+        if name != DRAFT_VERSION || !entry.file_type().ok()?.is_dir() {
+            return None;
+        }
+        let stored = fs::read(entry.path().join("playbook.yaml")).ok()?;
+        if stored != canonical.as_bytes() {
+            return None;
+        }
+        left = DraftLeft::Published;
+    }
+    Some(left)
+}
+
+/// Writes a version's definition into its staging directory `tmp`: the
+/// yaml and the diagram derived from exactly those bytes
+/// (people-in-the-loop D6). Every path that creates a version stages
+/// through it and publishes by one rename, so a version is never visible
+/// without its diagram; the diagram is never read back and sits outside
+/// every digest and bundle by construction.
+pub(crate) fn stage_definition(tmp: &Path, yaml: &str) -> io::Result<()> {
+    fs::create_dir_all(tmp)?;
+    atomic_write(&tmp.join("playbook.yaml"), yaml.as_bytes())?;
+    crate::diagram::write_beside(tmp, yaml)
+}
+
+/// A fresh staging directory name for `version` inside a playbook
+/// directory; listings skip it (`registry`).
+pub(crate) fn staging_dir(playbook_dir: &Path, version: &str) -> PathBuf {
+    playbook_dir.join(temp_dir_name(version))
 }
 
 /// Refuses `playbook` when it has validation errors in the store `parent`
@@ -1699,7 +1800,7 @@ fn stage_version(
     scripts: VersionScripts<'_>,
 ) -> Result<(), VersioningError> {
     fs::create_dir_all(tmp.join("scripts"))?;
-    atomic_write(&tmp.join("playbook.yaml"), validated_yaml.as_bytes())?;
+    stage_definition(tmp, validated_yaml)?;
     match scripts {
         VersionScripts::Imported(files) => write_imported_scripts(&tmp.join("scripts"), files)?,
         VersionScripts::CarryFrom(Some(base)) => {
@@ -1866,5 +1967,39 @@ mod tests {
         // Unfreezing lets a new version through again.
         fs::remove_file(pb_dir.join(crate::registry::FROZEN_MARKER)).unwrap();
         create_version(root, "implement-task", VALID, None, true).unwrap();
+    }
+
+    /// Shipped content goes through [`write_version_in`], into
+    /// [`commit_version_dir`] like every other version write, so it leaves
+    /// the derived diagram beside its `playbook.yaml` too
+    /// (people-in-the-loop D6).
+    #[test]
+    fn shipped_content_leaves_a_diagram() {
+        let _cfg = crate::test_config();
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("cfg");
+        fs::create_dir_all(parent.join("playbooks")).unwrap();
+
+        let version = write_version_in(
+            &parent,
+            crate::profile_store::PlaybookOrigin::Global,
+            "shipped-demo",
+            &ShippedVersion {
+                yaml: VALID,
+                version: "1.0.0",
+                scripts: &[],
+                created_by: "setup",
+            },
+            SaveChannel::Person,
+        )
+        .unwrap();
+
+        let vdir = parent.join("playbooks").join("shipped-demo").join(&version);
+        assert!(vdir.join("playbook.yaml").is_file());
+        assert_eq!(
+            crate::diagram::state_of(&vdir),
+            crate::diagram::DiagramState::Current,
+            "a shipped version must carry a current diagram"
+        );
     }
 }

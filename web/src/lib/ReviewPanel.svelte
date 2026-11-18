@@ -3,6 +3,7 @@
   import { authState } from './auth.svelte'
   import { scrollToSnapshot } from './results'
   import { refusalKey, reviewCommand, type ReviewEntry } from './rungates'
+  import { initialValues, invalidNumbers, toPayload } from './reviewform'
   import type { BoundSnapshot } from './api.gen'
   import UnattendedNote from './UnattendedNote.svelte'
 
@@ -36,8 +37,48 @@
     /** The run belongs to a workspace whose directory could not be found:
      * the command is shown without it, with a note to run it there. */
     projectDirMissing?: boolean
-    onDecide: (review: ReviewEntry, option: string) => void | Promise<void>
+    onDecide: (
+    review: ReviewEntry,
+    option: string,
+    fields?: Record<string, unknown>,
+  ) => void | Promise<void>
   } = $props()
+
+  // The values the person typed, per open request (`refusalKey`: run, node
+  // and request seq), over the request's rendered defaults: a looping
+  // gate's next request starts from its own defaults, never from what was
+  // typed for the last one. Only edited fields are held here.
+  let edits = $state<Record<string, Record<string, unknown>>>({})
+  const fieldValues = (pr: ReviewEntry): Record<string, unknown> => ({
+    ...initialValues(pr.fields ?? []),
+    ...(edits[refusalKey(pr)] ?? {}),
+  })
+  function setField(pr: ReviewEntry, name: string, value: unknown) {
+    const key = refusalKey(pr)
+    edits[key] = { ...(edits[key] ?? {}), [name]: value }
+  }
+  // Why the panel posted nothing for a request: a number that does not
+  // read. Whether a required field has a value is the server's one check:
+  // its refusal shows as the request's refusal.
+  let formProblems = $state<Record<string, string>>({})
+  function decide(pr: ReviewEntry, opt: string) {
+    const fields = pr.fields ?? []
+    if (!fields.length) {
+      void onDecide(pr, opt)
+      return
+    }
+    const key = refusalKey(pr)
+    const values = fieldValues(pr)
+    const bad = invalidNumbers(fields, values)
+    if (bad.length) {
+      formProblems[key] = `${bad.join(', ')}: not a number`
+      return
+    }
+    delete formProblems[key]
+    void onDecide(pr, opt, toPayload(fields, values, Object.keys(edits[key] ?? {})))
+  }
+  const requiredLabel = (required: string[] | undefined): string =>
+    required?.length ? ` (required for ${required.join(', ')})` : ''
 
   const authSnapshot = authState()
   // Keyless only once the status read answered: until then the buttons
@@ -56,6 +97,11 @@
       ...(s.omitted ? [`${s.omitted} omitted`] : []),
     ]
   }
+  // An option the gate's `max_scope` withholds above the scope: shown
+  // disabled, with the reason as its title and under the buttons.
+  function withheldOption(pr: ReviewEntry, opt: string): boolean {
+    return pr.withheld?.includes(opt) ?? false
+  }
 </script>
 
 {#if reviews.length}
@@ -73,6 +119,86 @@
         {/if}
         {#if pr.unattended}
           <UnattendedNote outcome={pr.unattended} testid="review-unattended" />
+        {/if}
+        {#if pr.scopeLine}
+          <p class="scope" data-testid="review-scope">scope: {pr.scopeLine}</p>
+        {/if}
+        {#if pr.show?.length}
+          <dl class="shown">
+            {#each pr.show as se, i (i)}
+              <div data-testid="review-shown">
+                <dt>{se.label}{se.untrusted ? ' (untrusted text)' : ''}</dt>
+                <dd>{se.text}</dd>
+              </div>
+            {/each}
+          </dl>
+        {/if}
+        {#if pr.fields?.length}
+          <div class="fields">
+            {#each pr.fields as f (f.name)}
+              {@const v = fieldValues(pr)[f.name]}
+              <label class="field" data-testid="review-field-input">
+                <span class="fname"
+                  >{f.name}{f.untrusted ? ' (untrusted text)' : ''}{requiredLabel(f.required)}</span
+                >
+                {#if f.kind === 'text'}
+                  <textarea
+                    data-testid="review-field-{f.name}"
+                    value={typeof v === 'string' ? v : ''}
+                    oninput={(e) => setField(pr, f.name, e.currentTarget.value)}
+                  ></textarea>
+                {:else if f.kind === 'number'}
+                  <!-- A text input: a browser's number input drops what it
+                       cannot take ("12abc" reads 12), so the panel reads the
+                       text as typed and names it when it is no number. -->
+                  <input
+                    type="text"
+                    inputmode="decimal"
+                    data-testid="review-field-{f.name}"
+                    value={v === null || v === undefined ? '' : String(v)}
+                    oninput={(e) => setField(pr, f.name, e.currentTarget.value)}
+                  />
+                {:else if f.kind === 'bool' && typeof f.default !== 'boolean'}
+                  <!-- A bool without a default has no value until the
+                       person chooses one: "not chosen" stays visible and
+                       choosable, and is posted as no value. -->
+                  <select
+                    data-testid="review-field-{f.name}"
+                    class:unset={typeof v !== 'boolean'}
+                    value={typeof v === 'boolean' ? String(v) : ''}
+                    onchange={(e) => {
+                      const c = e.currentTarget.value
+                      setField(pr, f.name, c === '' ? undefined : c === 'true')
+                    }}
+                  >
+                    <option value="">not chosen</option>
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                {:else if f.kind === 'bool'}
+                  <input
+                    type="checkbox"
+                    data-testid="review-field-{f.name}"
+                    checked={Boolean(v)}
+                    onchange={(e) => setField(pr, f.name, e.currentTarget.checked)}
+                  />
+                {:else}
+                  <select
+                    data-testid="review-field-{f.name}"
+                    value={typeof v === 'string' ? v : ''}
+                    onchange={(e) => setField(pr, f.name, e.currentTarget.value)}
+                  >
+                    <!-- Nothing chosen until the person chooses: an enum
+                         without a default never posts its first option. -->
+                    <option value="" disabled>choose</option>
+                    {#each f.options ?? [] as o, i (i)}
+                      <option value={o}>{o}</option>
+                    {/each}
+                  </select>
+                {/if}
+              </label>
+            {/each}
+          </div>
         {/if}
         {#if pr.binding}
           <div class="binding" data-testid="review-binding">
@@ -122,7 +248,9 @@
                   The run's project directory could not be found: run the command from that project.
                 </p>
               {/if}
-              {#each pr.options as opt (opt)}
+              <!-- A withheld option gets no command: it is listed as
+                   withheld below, with its reason. -->
+              {#each pr.options.filter((o) => !withheldOption(pr, o)) as opt (opt)}
                 <code class="mono" data-testid="review-cli-command">{reviewCommand(pr, opt, projectDir)}</code>
               {/each}
             {/if}
@@ -134,13 +262,24 @@
                 variant="outline"
                 size="sm"
                 data-testid="review-option"
-                onclick={() => onDecide(pr, opt)}
-                disabled={posting === `${pr.node}:${opt}`}
+                onclick={() => decide(pr, opt)}
+                disabled={posting === `${pr.node}:${opt}` || withheldOption(pr, opt)}
+                title={withheldOption(pr, opt) ? pr.withheldReason : undefined}
               >
                 {opt}
               </Button>
             {/each}
           </div>
+        {/if}
+        {#if pr.withheld?.length}
+          {#each pr.withheld as opt (opt)}
+            <p class="withheld" data-testid="review-withheld">
+              {opt} is withheld: {pr.withheldReason}
+            </p>
+          {/each}
+        {/if}
+        {#if formProblems[refusalKey(pr)]}
+          <p class="refusal" role="alert" data-testid="review-form-problem">{formProblems[refusalKey(pr)]}</p>
         {/if}
         {#if refusals[refusalKey(pr)]}
           <p class="refusal" role="alert" data-testid="review-refusal">{refusals[refusalKey(pr)]}</p>
@@ -246,5 +385,73 @@
   }
   .options :global(button) {
     height: 28px;
+  }
+  .scope {
+    margin: 0;
+    color: var(--muted-foreground);
+    font-size: 12px;
+    font-family: var(--font-mono, ui-monospace, monospace);
+  }
+  .withheld {
+    margin: 0;
+    color: var(--c-amber);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+  .shown {
+    margin: 2px 0;
+    font-size: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .shown div {
+    display: flex;
+    gap: 6px;
+    min-width: 0;
+  }
+  .shown dt {
+    color: var(--muted-foreground);
+    white-space: nowrap;
+  }
+  .shown dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .fields {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+  }
+  .field .fname {
+    color: var(--muted-foreground);
+    min-width: 10ch;
+  }
+  .field textarea,
+  .field input[inputmode='decimal'],
+  .field select {
+    flex: 1;
+    min-width: 0;
+    padding: 4px 6px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--background);
+    color: var(--foreground);
+    font: inherit;
+    font-size: 12px;
+  }
+  .field select.unset {
+    color: var(--muted-foreground);
+    border-style: dashed;
+  }
+  .field textarea {
+    min-height: 3em;
+    resize: vertical;
   }
 </style>

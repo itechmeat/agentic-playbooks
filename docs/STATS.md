@@ -54,8 +54,9 @@ Per playbook version:
 - **gate wait**: each `review_requested` to the `review_decided` of the same
   gate; **question wait**: each `question_asked` to its
   `question_answered`. Median and count. A request closed by
-  `review_withdrawn` (a supervisor moved the run off the gate) records no
-  wait, and a gate or question still open when the report is made is not in
+  `review_withdrawn` (a supervisor moved the run off the gate, or the gate
+  asked again because its scope changed while it waited) records no wait,
+  so the wait of a request asked again counts from that request, and a gate or question still open when the report is made is not in
   the figures, so a long wait only shows once it was answered.
 - **run duration**: `run_started` to the terminal event, leaving out the time the
   run spent paused (`run_paused` to the next `run_resumed`, issue #200). Median and count.
@@ -270,7 +271,9 @@ retro (`run_retro_context`, `{{run.retro}}`) all read the same fold
 
 | Category | Counted from | Over |
 |---|---|---|
-| `review` | every `review_requested` is a gate visit; its decision is `automatic` (an applied `review_triage` decision of the visit, which the engine journals just before the visit's `review_requested`, `decided_by: model` or `unattended`, or `via` the engine) or through the review channel; a `review_withdrawn` is `withdrawn` | gate visits; split by `channel`, `automatic`, `withdrawn`, `option:<name>` and `via:<surface>` |
+| `review` | every `review_requested` is a gate visit; its decision is `automatic` (an applied `review_triage` decision of the visit, which the engine journals just before the visit's `review_requested`, `decided_by: model` or `unattended`, or `via` the engine) or through the review channel; a `review_withdrawn` is `withdrawn`, except one with the `scope_changed` reason: the gate asked again at once because work landed while the request waited, so that request and the one asked after it are one visit, and its fast check is measured from the request decided | gate visits; split by `channel`, `automatic`, `withdrawn`, `fast`, `option:<name>` and `via:<surface>` |
+
+`reviews.fast` counts the channel decisions taken faster than their scope takes to read (`N decided without review` in the text, the review line's `fast` split); a scenario's scripted decision never counts: the active run time between the request and the decision stayed below a floor that grows with the scope the request's `review_detail` carries. Only a gate that uses `max_scope`, `fields` or `show` journals a `review_detail`; a decision of any other gate has no floor and never counts as fast. Report only: it changes no outcome, notification or routing.
 | `question` | `question_answered` by `answered_by`; `human` and `supervisor` are interventions, `unattended` an automatic answer, `timeout` neither; `question_abandoned` apart | questions asked |
 | `automatic` | applied `decision_made` of `completion_check`, `retry_advice`, `supervisor_triage`, `review_triage` and `routing`, once per use, node, list item, execution and attempt (a cached replay after a resume counts once; the same question in a later execution counts again). Judge answers are the playbook's own routing and are not counted | decisions asked; split `asked:<use>` and `applied:<use>` |
 | `operator` | pause, resume, abort and `retry_expedited` with `by: operator`. The abort a parent's stop propagates into a sub-playbook child (`run_aborted` with reason `parent aborted`, `by` the parent's actor) is the parent's operator action, never the child's: the child keeps it apart as the engine's `abort_propagated` | runs |

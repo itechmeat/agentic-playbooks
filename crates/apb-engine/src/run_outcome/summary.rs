@@ -244,6 +244,12 @@ pub struct OutcomeSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub agent_summary: Option<String>,
+    /// Gate decisions a person took faster than their scope takes to read
+    /// (`review::scope::fast_floor_ms` over active run time). Report
+    /// only: never a needs-look reason, notification filter or routing.
+    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
+    pub fast_decisions: u32,
 }
 
 /// What [`OutcomeSummary::build`] reads, gathered once.
@@ -258,6 +264,9 @@ struct Inputs<'a> {
     intents: Vec<RunIntent>,
     /// The publish nodes, folded once at the same `now` as `intents`.
     publish: Vec<super::RunPublish>,
+    /// Gate decisions taken faster than their scope takes to read
+    /// (people-in-the-loop D2), from the interventions fold.
+    fast_decisions: u32,
     lists: &'a [RunList],
     list_outcomes: Vec<ListOutcome>,
     /// The run's id: the run directory's name.
@@ -292,6 +301,9 @@ impl OutcomeSummary {
             calls: classified_calls(run_dir, &view.events),
             intents: outcome_intents(&view.events, now),
             publish: super::publish_from(&view.events, now),
+            fast_decisions: crate::run_stats::interventions::of_run(&view.events)
+                .reviews
+                .fast as u32,
             lists: &readout.lists,
             list_outcomes: list_outcomes(readout.playbook.as_ref(), &readout.lists),
             run_id: run_dir
@@ -407,6 +419,7 @@ impl Inputs<'_> {
             &verified,
             unverified.len(),
             needs_look.as_ref(),
+            self.fast_decisions,
         );
         OutcomeSummary {
             headline,
@@ -420,6 +433,7 @@ impl Inputs<'_> {
             follow_up: self.follow_up.cloned(),
             lists: self.list_outcomes,
             agent_summary: None,
+            fast_decisions: self.fast_decisions,
         }
     }
 
@@ -745,6 +759,7 @@ fn headline(
     verified: &[Evidence],
     unverified: usize,
     needs_look: Option<&NeedsLook>,
+    fast_decisions: u32,
 ) -> String {
     let mut parts = vec![format!("Run {}", status.as_str())];
     if !verified.is_empty() {
@@ -770,6 +785,13 @@ fn headline(
     }
     if let Some(n) = needs_look {
         parts.push(format!("needs a look ({})", n.line()));
+    }
+    if fast_decisions > 0 {
+        parts.push(format!(
+            "{} gate decision{} taken faster than their scope takes to read",
+            fast_decisions,
+            if fast_decisions == 1 { "" } else { "s" }
+        ));
     }
     parts.join("; ")
 }
@@ -901,5 +923,24 @@ mod green_check_tests {
     fn a_failed_node_keeps_the_look() {
         let events = events(vec![proved(false, Some("fail")), finished("w", "failed")]);
         assert_eq!(green_checks(&events), 1);
+    }
+}
+
+#[cfg(test)]
+mod fast_tests {
+    use super::headline;
+    use crate::state::RunStatus;
+
+    /// A decision taken without review is named in the headline and leaves
+    /// the run's outcome as it was (people-in-the-loop D2, report only).
+    #[test]
+    fn the_headline_names_a_fast_decision_and_keeps_the_outcome() {
+        let plain = headline(RunStatus::Succeeded, &[], 0, None, 0);
+        let fast = headline(RunStatus::Succeeded, &[], 0, None, 1);
+        assert!(fast.starts_with("Run succeeded"), "{fast}");
+        assert_eq!(
+            fast,
+            format!("{plain}; 1 gate decision taken faster than their scope takes to read")
+        );
     }
 }

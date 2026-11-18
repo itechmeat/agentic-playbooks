@@ -39,6 +39,7 @@ mod read_only;
 mod results;
 mod retry;
 mod review;
+mod review_form;
 pub(crate) mod templates;
 mod unattended;
 mod untrusted;
@@ -459,6 +460,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     concurrency::check_concurrency(playbook, &mut r); // V210, V211
     health::check_health(playbook, &mut r); // V212
     cloud_models::check_cloud_models(playbook, ctx, &mut r); // V220-V222
+    review_form::check_review_form(playbook, &mut r); // V243-V247
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10
