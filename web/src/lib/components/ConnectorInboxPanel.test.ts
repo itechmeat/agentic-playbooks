@@ -183,6 +183,25 @@ describe('ConnectorInboxPanel', () => {
     expect(body.replace(/<!--.*?-->/gs, '').trim()).toBe('')
   })
 
+  it('names the stored type of a typed event as text, and none for an untyped one', () => {
+    const { body } = render(ConnectorInboxPanel, {
+      props: {
+        name: 'echo-hooks',
+        inbox,
+        loaded: true,
+        failed: false,
+        events: [
+          { seq: 1, receivedAt: 1_700_000_000_000, body: {} },
+          { seq: 2, receivedAt: 1_700_000_000_001, type: 'issues<b>', body: {} },
+        ],
+        eventsAccount: 'main',
+      },
+    })
+    expect(body.split('class="event-type').length - 1).toBe(1)
+    expect(body).toContain('issues&lt;b>')
+    expect(body).not.toContain('issues<b>')
+  })
+
   it('escapes hostile text coming from an event body', () => {
     const hostile = { text: '<img src=x onerror=alert(1)>' }
     const { body } = render(ConnectorInboxPanel, {

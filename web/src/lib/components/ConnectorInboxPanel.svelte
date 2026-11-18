@@ -197,6 +197,11 @@
                         <span class="font-mono text-xs text-muted-foreground">
                           #{e.seq} {formatReceived(e.receivedAt)}
                         </span>
+                        {#if e.type !== undefined}
+                          <!-- Interpolated as text: the type comes from a
+                               request header the sender wrote. -->
+                          <span class="event-type">{e.type}</span>
+                        {/if}
                         <Button size="sm" variant="ghost" onclick={() => toggle(e.seq)}>
                           {isOpen(e.seq) ? 'Hide body' : 'Show body'}
                         </Button>
@@ -231,6 +236,14 @@
 {/if}
 
 <style>
+  /* The stored event type, the value a read's types filter matches. */
+  .event-type {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    padding: 0 0.375rem;
+    border: 1px solid var(--c-line);
+    color: var(--c-fg);
+  }
   /* Text a stranger wrote: an amber tint unlike apb's own output. */
   .stranger-text {
     border-color: color-mix(in oklab, var(--c-amber) 50%, transparent);

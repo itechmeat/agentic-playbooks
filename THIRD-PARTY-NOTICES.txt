@@ -1573,7 +1573,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 Creative Commons Zero v1.0 Universal (CC0-1.0)
 
 Used by:
-  notify 8.2.1 https://github.com/notify-rs/notify.git
+  notify 8.2.2 https://github.com/notify-rs/notify.git
 
 Creative Commons CC0 1.0 Universal
 
@@ -2226,7 +2226,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  uuid 1.29.0 https://github.com/uuid-rs/uuid
+  uuid 1.29.2 https://github.com/uuid-rs/uuid
 
 Copyright (c) 2014 The Rust Project Developers
 Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon
@@ -2314,7 +2314,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  lettre 0.11.23 https://github.com/lettre/lettre
+  lettre 0.11.24 https://github.com/lettre/lettre
 
 Copyright (c) 2014-2024 Alexis Mousset <contact@amousset.me>
 Copyright (c) 2019-2025 Paolo Barbolini <paolo@paolo565.org>
@@ -4934,7 +4934,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  ureq-proto 0.6.5 https://github.com/algesten/ureq-proto
+  ureq-proto 0.7.1 https://github.com/algesten/ureq-proto
 
 Copyright 2022 Martin Algesten
 
@@ -5229,7 +5229,7 @@ SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  ureq 3.5.0 https://github.com/algesten/ureq
+  ureq 3.5.2 https://github.com/algesten/ureq
 
 MIT License
 
@@ -5406,11 +5406,11 @@ SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  email-encoding 0.4.1 https://github.com/lettre/email-encoding
+  email-encoding 0.4.3 https://github.com/lettre/email-encoding
 
 MIT License
 
-Copyright (c) 2021-2024 Paolo Barbolini <paolo@paolo565.org>
+Copyright (c) 2021-2026 Paolo Barbolini <paolo@paolobarbolini.it>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -6254,7 +6254,6 @@ SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License (MIT)
-
 Used by:
   same-file 1.0.6 https://github.com/BurntSushi/same-file
 
@@ -6341,9 +6340,9 @@ THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  rust-embed-impl 8.13.0 https://pyrossh.dev/repos/rust-embed
-  rust-embed-utils 8.13.0 https://pyrossh.dev/repos/rust-embed
-  rust-embed 8.13.0 https://pyrossh.dev/repos/rust-embed
+  rust-embed-impl 8.14.0 https://pyrossh.dev/repos/rust-embed
+  rust-embed-utils 8.14.0 https://pyrossh.dev/repos/rust-embed
+  rust-embed 8.14.0 https://pyrossh.dev/repos/rust-embed
 
 The MIT License (MIT)
 
@@ -7319,7 +7318,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-@lucide/svelte 1.67.0
+@lucide/svelte 1.72.0
 License: ISC
 Source: https://github.com/lucide-icons/lucide
 
@@ -7422,7 +7421,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-@xyflow/svelte 1.7.0
+@xyflow/svelte 1.7.1
 License: MIT
 Source: https://github.com/xyflow/xyflow
 
@@ -7449,7 +7448,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-@xyflow/system 0.0.83
+@xyflow/system 0.0.84
 License: MIT
 Source: https://github.com/xyflow/xyflow
 
@@ -7476,7 +7475,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-bits-ui 2.20.2
+bits-ui 2.21.0
 License: MIT
 Source: https://github.com/huntabyte/bits-ui
 
@@ -7772,7 +7771,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-rolldown 1.2.15
+rolldown 1.2.19
 License: MIT
 Source: https://github.com/rolldown/rolldown
 
@@ -7887,7 +7886,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-shadcn-svelte 1.7.2
+shadcn-svelte 1.8.1
 License: MIT
 Source: https://github.com/huntabyte/shadcn-svelte
 
@@ -8009,8 +8008,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-svelte-toolbelt 0.10.6
+svelte-toolbelt 0.10.7
 License: MIT
+Source: https://github.com/huntabyte/svelte-toolbelt
 
 MIT License
 
@@ -8063,7 +8063,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-tabbable 6.5.0
+tabbable 6.5.2
 License: MIT
 Source: https://github.com/focus-trap/tabbable
 
@@ -8117,7 +8117,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-tailwind-variants 4.0.1
+tailwind-variants 4.0.2
 License: MIT
 Source: https://github.com/heroui-inc/tailwind-variants
 
@@ -8144,7 +8144,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-tailwindcss 4.3.3
+tailwindcss 4.3.5
 License: MIT
 Source: https://github.com/tailwindlabs/tailwindcss
 
@@ -8198,7 +8198,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-vite 8.3.5
+vite 8.3.8
 License: MIT
 Source: https://github.com/vitejs/vite
 

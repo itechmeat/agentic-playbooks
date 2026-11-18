@@ -323,3 +323,54 @@ cases:
             body: "<!-- apb-intent v1 run=r-1 node=triage attempt=1 nonce=abcdefghijklmnopqrstuvwx -->"
         outcome: found
         item_ref: "https://github.com/acme/site/issues/43"
+
+  # -- Receive (inbox, mirrors the whatsapp inbox cases) -----------------------
+
+  - function: inbox_read
+    args: { consumer: triage }
+    expect:
+      inbox:
+        op: read
+        seed:
+          - { provider_id: "gh-1", body: { action: "opened", number: 43 } }
+          - { provider_id: "gh-2", body: { action: "closed", number: 43 } }
+          - { provider_id: "gh-3", body: { action: "submitted", review: { state: "approved" } } }
+        events: [1, 2, 3]
+        cursor: 0
+
+  # A typed read with a body condition keeps the opened issues only; the
+  # push, the untyped delivery and the closed issue are counted in skipped.
+  - function: inbox_read
+    args: { consumer: triage, types: [issues], where: [{ path: action, equals: opened }] }
+    expect:
+      inbox:
+        op: read
+        seed:
+          - { provider_id: "gh-1", type: push, body: { ref: "refs/heads/main" } }
+          - { provider_id: "gh-2", type: issues, body: { action: "opened", number: 43 } }
+          - { provider_id: "gh-3", body: { action: "opened", number: 44 } }
+          - { provider_id: "gh-4", type: issues, body: { action: "closed", number: 43 } }
+        events: [2]
+        cursor: 0
+        skipped: 3
+
+  - function: inbox_ack
+    args: { consumer: triage, up_to_seq: 2 }
+    expect:
+      inbox:
+        op: ack
+        seed:
+          - { provider_id: "gh-1", body: {} }
+          - { provider_id: "gh-2", body: {} }
+        acked_up_to: 2
+
+  - function: inbox_peek_depth
+    args: { consumer: triage }
+    expect:
+      inbox:
+        op: peek_depth
+        seed:
+          - { provider_id: "gh-1", body: {} }
+          - { provider_id: "gh-2", body: {} }
+        acked: 1
+        pending: 1

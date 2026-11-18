@@ -80,6 +80,11 @@ pub struct InboxEvent {
     pub seq: u64,
     pub received_at: u64,
     pub provider_id: String,
+    /// The event's type as the connector's webhook block names it, cleaned
+    /// (`webhook::event_type`); absent for an untyped delivery and for every
+    /// event stored before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<String>,
     pub body: Value,
 }
 
@@ -117,6 +122,19 @@ pub enum Appended {
 pub struct InboxGap {
     pub from: u64,
     pub through: u64,
+}
+
+/// What a filtered read found.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilteredRead {
+    pub events: Vec<InboxEvent>,
+    /// The consumer's cursor after the read (moved past a leading run of
+    /// skipped events when `ack_skipped`).
+    pub cursor: u64,
+    /// The gap, computed from the cursor before anything moved.
+    pub gap: Option<InboxGap>,
+    /// Pending events the read did not return because they did not match.
+    pub skipped: u64,
 }
 
 /// Counts for the doctor and the dashboard panel. Carries no body.
@@ -273,7 +291,29 @@ impl Inbox {
         self.append_bounded(
             provider_id,
             body,
+            None,
             retention,
+            DEDUPE_RETENTION_MS,
+            DEDUPE_MAX_ENTRIES,
+            crate::clock::now_ms_u64(),
+        )
+    }
+
+    /// [`append_with`](Self::append_with) carrying the delivery's event type
+    /// (the webhook block's cleaned event type) with the default retention
+    /// envelope, dedupe window and clock. The dedupe identity does not
+    /// change: a redelivery is a duplicate whatever its type.
+    pub fn append_typed(
+        &self,
+        provider_id: &str,
+        event_type: Option<&str>,
+        body: &Value,
+    ) -> Result<Appended, InboxError> {
+        self.append_bounded(
+            provider_id,
+            body,
+            event_type,
+            &Retention::default(),
             DEDUPE_RETENTION_MS,
             DEDUPE_MAX_ENTRIES,
             crate::clock::now_ms_u64(),
@@ -294,6 +334,7 @@ impl Inbox {
         &self,
         provider_id: &str,
         body: &Value,
+        event_type: Option<&str>,
         retention: &Retention,
         dedupe_retention_ms: u64,
         dedupe_max_entries: usize,
@@ -317,6 +358,7 @@ impl Inbox {
             seq,
             received_at: now,
             provider_id: provider_id.to_string(),
+            event_type: event_type.map(str::to_string),
             body: body.clone(),
         };
         let line = serde_json::to_string(&event)
@@ -393,6 +435,95 @@ impl Inbox {
         let moved = *entry;
         self.write_cursors(&cursors)?;
         Ok(moved)
+    }
+
+    /// [`Inbox::read`] through `matches`: the pending events of `consumer`
+    /// that match, oldest first, at most `limit`.
+    ///
+    /// The events before the first match that do not match are skipped and,
+    /// when `ack_skipped`, acknowledged for this consumer only: its cursor
+    /// moves to the last of them. A non-matching event after a match is left
+    /// unacknowledged (the reader has not acked the match yet); it is skipped
+    /// again by the next read, once the match is acked. The gap is computed
+    /// exactly as `read` does, before the cursor moves, so a filter never
+    /// hides one.
+    ///
+    /// A move past a gap first hands the gap to `record_gap`, under the
+    /// lock, before the cursor file is written: the caller records it where
+    /// it must survive (a run's journal) and answers whether it did. On
+    /// `false` the cursor does not move, so the gap is found again by the
+    /// next read; a crash between the two leaves the gap recorded and the
+    /// cursor where it was. Not called when nothing moves or there is no gap.
+    ///
+    /// The matcher is a predicate rather than a `connector::event_filter`:
+    /// the filter type reads events (`explain`, `matches`), so a typed
+    /// parameter here would make the two files import each other. A caller
+    /// with an `EventFilter` passes `|e| filter.matches(e)`.
+    pub fn read_filtered(
+        &self,
+        consumer: &str,
+        limit: usize,
+        matches: &impl Fn(&InboxEvent) -> bool,
+        ack_skipped: bool,
+        record_gap: impl FnOnce(&InboxGap) -> bool,
+    ) -> Result<FilteredRead, InboxError> {
+        check_consumer(consumer)?;
+        // The whole read-and-move under one directory lock when it acks: a
+        // concurrent append or ack never interleaves with the cursor move.
+        // Without `ack_skipped` it reads without the lock, as `read` does.
+        let _lock = if ack_skipped {
+            std::fs::create_dir_all(&self.dir).map_err(|e| self.io(&e))?;
+            Some(lock_dir(&self.dir, INBOX_LOCK).map_err(|e| self.io(&e))?)
+        } else {
+            None
+        };
+        let all = self.read_events()?;
+        let cursor = self.cursor(consumer)?;
+        // The gap, exactly as `read` computes it, from the cursor before
+        // anything moved: a filter never hides one.
+        let gap = lost_prefix(cursor, all.first().map(|e| e.seq));
+        let mut out = Vec::new();
+        let mut skipped = 0u64;
+        // The last event before the first match, acked for this consumer only.
+        let mut skip_through = None;
+        // Whether a match was seen, returned or not: a skip after one is
+        // never acked, even when the limit kept the match out of `out`.
+        let mut seen_match = false;
+        for event in all.iter().filter(|e| e.seq > cursor) {
+            if matches(event) {
+                seen_match = true;
+                if out.len() < limit {
+                    out.push(event.clone());
+                }
+            } else {
+                skipped += 1;
+                if !seen_match {
+                    skip_through = Some(event.seq);
+                }
+            }
+        }
+        let mut cursor = cursor;
+        if ack_skipped
+            && let Some(target) = skip_through
+            && target > cursor
+            && gap.as_ref().is_none_or(record_gap)
+        {
+            // The cursor moves forward only, under the already-held lock (the
+            // rule of `ack`).
+            let mut cursors = self.read_cursors()?;
+            let entry = cursors.consumers.entry(consumer.to_string()).or_insert(0);
+            if target > *entry {
+                *entry = target;
+            }
+            cursor = *entry;
+            self.write_cursors(&cursors)?;
+        }
+        Ok(FilteredRead {
+            events: out,
+            cursor,
+            gap,
+            skipped,
+        })
     }
 
     /// Counts for one consumer, derived from the first and last stored events
@@ -803,4 +934,252 @@ fn lost_prefix(cursor: u64, first_stored: Option<u64>) -> Option<InboxGap> {
 fn check_consumer(consumer: &str) -> Result<(), InboxError> {
     super::common::validate_snake_name(consumer)
         .map_err(|e| InboxError::Name(consumer.to_string(), e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// One inbox in a fresh temp directory. The guard keeps the directory
+    /// alive for the test's duration.
+    struct TempInbox {
+        _dir: tempfile::TempDir,
+        inbox: Inbox,
+    }
+
+    fn temp_inbox() -> TempInbox {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let inbox = Inbox::at(dir.path(), "github", "main").expect("inbox");
+        TempInbox { _dir: dir, inbox }
+    }
+
+    /// The matcher the filtered reads use: the event's type is one of
+    /// `types`, exactly what an `EventFilter`'s type condition decides.
+    fn type_filter(types: &[&str]) -> impl Fn(&InboxEvent) -> bool {
+        let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+        move |e: &InboxEvent| {
+            e.event_type
+                .as_deref()
+                .is_some_and(|t| types.iter().any(|want| want == t))
+        }
+    }
+
+    /// A match the read does not return (a limit of 0) still stops the
+    /// acknowledgement: a skip after it is never acked past it.
+    #[test]
+    fn a_match_past_the_limit_is_never_acked_past() {
+        let t = temp_inbox();
+        t.inbox
+            .append_typed("p1", Some("push"), &json!({}))
+            .unwrap();
+        t.inbox
+            .append_typed("p2", Some("issues"), &json!({}))
+            .unwrap();
+        t.inbox
+            .append_typed("p3", Some("push"), &json!({}))
+            .unwrap();
+        let read = t
+            .inbox
+            .read_filtered("a", 0, &type_filter(&["issues"]), true, |_| true)
+            .expect("read");
+        assert!(read.events.is_empty());
+        assert_eq!(read.skipped, 2);
+        assert_eq!(read.cursor, 1, "only the skip before the match is acked");
+    }
+
+    /// A filtered read acks, for its own consumer only, the events before the
+    /// first match, and leaves a skip after an unacked match alone.
+    #[test]
+    fn a_filtered_read_acks_only_the_leading_skips() {
+        let t = temp_inbox();
+        t.inbox
+            .append("p1", &json!({ "kind": "push" }))
+            .expect("event 1");
+        t.inbox
+            .append_typed("p2", Some("issues"), &json!({ "kind": "issue" }))
+            .expect("event 2");
+        t.inbox
+            .append("p3", &json!({ "kind": "push" }))
+            .expect("event 3");
+        let filter = type_filter(&["issues"]);
+        let read = t
+            .inbox
+            .read_filtered("a", 10, &filter, true, |_| true)
+            .expect("read");
+        assert_eq!(read.events.len(), 1, "only the match is returned");
+        assert_eq!(read.events[0].provider_id, "p2");
+        assert_eq!(read.cursor, 1, "the cursor moved past the leading skip");
+        assert_eq!(read.skipped, 2, "both non-matching pending events");
+        assert_eq!(read.gap, None);
+
+        // The reader acks the match, and the next read moves past the trailing
+        // skip, which is now leading.
+        t.inbox.ack("a", 2).expect("ack the match");
+        let read = t
+            .inbox
+            .read_filtered("a", 10, &filter, true, |_| true)
+            .expect("second read");
+        assert!(read.events.is_empty());
+        assert_eq!(read.cursor, 3, "the trailing skip is now leading");
+        assert_eq!(read.skipped, 1);
+
+        // Without `ack_skipped` the cursor never moves.
+        t.inbox
+            .append("p4", &json!({ "kind": "push" }))
+            .expect("event 4");
+        let read = t
+            .inbox
+            .read_filtered("a", 10, &filter, false, |_| true)
+            .expect("third read");
+        assert_eq!(read.cursor, 3, "no move without ack_skipped");
+        assert_eq!(read.skipped, 1);
+    }
+
+    /// A consumer's filtered read and its acks never move another consumer's
+    /// cursor.
+    #[test]
+    fn a_filtered_read_leaves_other_consumers_alone() {
+        let t = temp_inbox();
+        t.inbox
+            .append("p1", &json!({ "kind": "push" }))
+            .expect("event 1");
+        t.inbox
+            .append_typed("p2", Some("issues"), &json!({ "kind": "issue" }))
+            .expect("event 2");
+        let filter = type_filter(&["issues"]);
+        let read = t
+            .inbox
+            .read_filtered("a", 10, &filter, true, |_| true)
+            .expect("read");
+        assert_eq!(read.cursor, 1);
+        assert_eq!(
+            t.inbox.cursor("b").expect("cursor"),
+            0,
+            "consumer b untouched"
+        );
+        let (events, cursor_b, _) = t.inbox.read("b", 10).expect("read b");
+        assert_eq!(events.len(), 2, "consumer b still reads every event");
+        assert_eq!(cursor_b, 0);
+    }
+
+    /// Retention dropped seqs 1..=3 before any consumer read them: the log
+    /// holds three untyped events, 4 to 6.
+    fn seed_after_a_drop(inbox: &Inbox) {
+        std::fs::create_dir_all(&inbox.dir).expect("dir");
+        for seq in 4..=6u64 {
+            let event = InboxEvent {
+                seq,
+                received_at: 0,
+                provider_id: format!("p{seq}"),
+                event_type: None,
+                body: json!({ "kind": "push" }),
+            };
+            let line = serde_json::to_string(&event).expect("line");
+            use std::io::Write;
+            let mut handle = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(inbox.dir.join(EVENTS_FILE))
+                .expect("open log");
+            writeln!(handle, "{line}").expect("write line");
+        }
+    }
+
+    /// A move past a gap hands the gap to `record_gap` while the cursor
+    /// file still holds the old cursor, and a refusal (the gap was not
+    /// recorded) moves nothing: the next read finds the same gap. The hook
+    /// is the crash point: what it sees on disk is what a crash there leaves.
+    #[test]
+    fn a_gap_is_recorded_before_the_cursor_moves_past_it() {
+        let t = temp_inbox();
+        seed_after_a_drop(&t.inbox);
+        let filter = type_filter(&["issues"]);
+        let mut seen = Vec::new();
+        let read = t
+            .inbox
+            .read_filtered("a", 10, &filter, true, |gap| {
+                seen.push((*gap, t.inbox.cursor("a").expect("cursor")));
+                false
+            })
+            .expect("read");
+        assert_eq!(
+            seen,
+            vec![(
+                InboxGap {
+                    from: 1,
+                    through: 3
+                },
+                0
+            )],
+            "the gap is offered while the stored cursor is still 0"
+        );
+        assert_eq!(read.cursor, 0, "an unrecorded gap moves no cursor");
+        assert_eq!(t.inbox.cursor("a").expect("cursor"), 0);
+
+        let read = t
+            .inbox
+            .read_filtered("a", 10, &filter, true, |_| true)
+            .expect("second read");
+        assert_eq!(
+            read.gap,
+            Some(InboxGap {
+                from: 1,
+                through: 3
+            })
+        );
+        assert_eq!(read.cursor, 6, "a recorded gap lets the cursor move");
+    }
+
+    /// The gap is computed from the cursor before anything moved, so a skip
+    /// that runs over the gap's range never hides it.
+    #[test]
+    fn a_filter_never_hides_a_gap() {
+        let t = temp_inbox();
+        seed_after_a_drop(&t.inbox);
+        // Every remaining event is skipped, and the read acks them.
+        let filter = type_filter(&["issues"]);
+        let read = t
+            .inbox
+            .read_filtered("a", 10, &filter, true, |_| true)
+            .expect("read");
+        assert!(read.events.is_empty());
+        assert_eq!(read.skipped, 3);
+        assert_eq!(read.cursor, 6, "every remaining event was acked");
+        assert_eq!(
+            read.gap,
+            Some(InboxGap {
+                from: 1,
+                through: 3
+            }),
+            "a skip over the gap's range never hides it"
+        );
+    }
+
+    /// A line stored before `event_type` existed reads as an untyped event.
+    #[test]
+    fn an_old_event_reads_untyped() {
+        let base = std::env::temp_dir().join(format!(
+            "apb-inbox-test-{}-{}",
+            std::process::id(),
+            crate::clock::now_ms_u64()
+        ));
+        let inbox = Inbox::at(&base, "github", "main").expect("inbox");
+        std::fs::create_dir_all(&inbox.dir).expect("dir");
+        let old = serde_json::json!({
+            "seq": 1,
+            "received_at": 1700000000000u64,
+            "provider_id": "abc",
+            "body": { "action": "opened" }
+        });
+        std::fs::write(
+            inbox.dir.join(EVENTS_FILE),
+            format!("{}\n", serde_json::to_string(&old).unwrap()),
+        )
+        .expect("write old line");
+        let events = inbox.read_events().expect("read");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, None);
+        std::fs::remove_dir_all(&base).ok();
+    }
 }

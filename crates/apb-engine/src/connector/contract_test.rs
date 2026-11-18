@@ -734,6 +734,25 @@ fn json_subset(expected: &Value, actual: &Value) -> bool {
     }
 }
 
+/// The filter a rendered read carries on its dry-run envelope (`types`,
+/// `where`), `None` for an unfiltered read.
+fn filter_of(
+    dry: &Value,
+) -> Result<Option<apb_core::connector::event_filter::EventFilter>, String> {
+    let mut value = serde_json::Map::new();
+    for key in ["types", "where"] {
+        if let Some(v) = dry["inbox"].get(key) {
+            value.insert(key.to_string(), v.clone());
+        }
+    }
+    if value.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_value(Value::Object(value))
+        .map(Some)
+        .map_err(|e| format!("the dry run carries an unreadable filter: {e}"))
+}
+
 /// Matches an `inbox` expectation. Fully offline and filesystem-free: the
 /// case's inline `seed` becomes an in-memory event list, and the op runs
 /// against it through the same argument validation
@@ -777,6 +796,7 @@ fn eval_inbox(function: &FunctionSpec, args: &Value, expected: &InboxExpect) -> 
         args,
         function.response_pick.clone(),
         true,
+        false,
     )
     .map_err(|e| format!("render failed: {}", e.message))?;
     let dry = match build {
@@ -802,19 +822,37 @@ fn eval_inbox(function: &FunctionSpec, args: &Value, expected: &InboxExpect) -> 
             seq: i as u64 + 1,
             received_at: 0,
             provider_id: s.provider_id.clone(),
+            event_type: s.event_type.clone(),
             body: s.body.clone(),
         })
         .collect();
 
     let envelope = match spec.op {
         InboxOp::Read => {
-            let mut pending: Vec<InboxEvent> = seeded
+            let pending: Vec<InboxEvent> = seeded
                 .iter()
                 .filter(|e| e.seq > expected.acked)
                 .cloned()
                 .collect();
-            pending.truncate(limit);
-            crate::connector::inbox::read_envelope(&pending, expected.acked)
+            match filter_of(&dry)? {
+                // A case reads with no acknowledgement, as a caller that may
+                // not move the cursor does: the skips are counted only.
+                Some(filter) => {
+                    let (mut kept, skipped): (Vec<InboxEvent>, Vec<InboxEvent>) =
+                        pending.into_iter().partition(|e| filter.matches(e));
+                    kept.truncate(limit);
+                    crate::connector::inbox::filtered_envelope(
+                        &kept,
+                        expected.acked,
+                        skipped.len() as u64,
+                    )
+                }
+                None => {
+                    let mut pending = pending;
+                    pending.truncate(limit);
+                    crate::connector::inbox::read_envelope(&pending, expected.acked)
+                }
+            }
         }
         InboxOp::Ack => crate::connector::inbox::ack_envelope(expected.acked.max(up_to_seq)),
         InboxOp::PeekDepth => {
@@ -848,6 +886,7 @@ fn eval_inbox(function: &FunctionSpec, args: &Value, expected: &InboxExpect) -> 
         ("cursor", expected.cursor),
         ("acked_up_to", expected.acked_up_to),
         ("pending", expected.pending),
+        ("skipped", expected.skipped),
     ] {
         let Some(want) = want else {
             continue;

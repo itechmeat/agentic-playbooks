@@ -144,16 +144,11 @@ pub(crate) async fn inbox_events_handler(
         .iter()
         .filter(|e| e.seq > min_cursor)
         .take(limit)
-        .map(|e| {
-            // The provider id is a dedupe identity, not information the
-            // operator needs, and leaving it out keeps one less
-            // provider-controlled string flowing into the page.
-            serde_json::json!({
-                "seq": e.seq,
-                "received_at": e.received_at,
-                "body": e.body,
-            })
-        })
+        // The row an `inbox_read` returns: the stored `type` when the
+        // delivery has one (the value a read's `types` matches, cleaned at
+        // ingest), never the provider id, a dedupe identity that would be one
+        // more provider-controlled string flowing into the page.
+        .map(apb_engine::connector::inbox::event_row)
         .collect();
     Json(serde_json::json!({
         "connector": name,

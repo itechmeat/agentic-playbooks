@@ -18,6 +18,12 @@ Otherwise you need a personal access token from your GitHub settings. A classic 
 
 Whatever you paste is written to a local file with owner-only permissions, and the account config next to it stores only a reference to it, never the value.
 
+## Receiving events
+
+The connector can also receive GitHub's webhooks instead of polling. In your repository or organization settings, add a webhook whose payload URL is your machine's ingest endpoint (`/hooks/github/<account>` on the port `apb ingest` serves), whose content type is `application/json`, and whose secret is the value you store as the account's `webhook_secret` field. GitHub signs every delivery with that secret under `X-Hub-Signature-256`, and the ingest listener verifies the signature before anything is stored; a delivery that does not verify is refused and nothing reaches the inbox.
+
+Each delivery is typed by the `X-GitHub-Event` header (`issues`, `pull_request`, `push`, `workflow_run` and the rest), and the stored event keeps that type. GitHub's signature covers the body only, not this header, so the type is as trustworthy as the delivery's transport; a reader that acts on a type should also check the body fields it relies on with `where`. `inbox_read` takes a `types` list so a reader that only wants new issues, say `types: [issues]`, does not see the pushes and status updates at all, and a `where` list filters the delivery body further; see the `inbox_read` function for the exact shapes. Deliveries are stored locally under the account and read with `inbox_read`, advanced with `inbox_ack`, and counted with `inbox_peek_depth`.
+
 ## What this connector can and cannot do
 
 It covers issue and pull request triage, releases, and Actions: reading, creating, and updating issues, adding and removing labels and assignees, comments, opening and merging pull requests, requesting reviewers, creating reviews, cutting releases, dispatching workflows, and reading run and check status.

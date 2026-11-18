@@ -214,6 +214,10 @@ pub struct ImapExpect {
 #[serde(deny_unknown_fields)]
 pub struct InboxSeed {
     pub provider_id: String,
+    /// The event type the ingest listener would have stored; absent is an
+    /// untyped event.
+    #[serde(default, rename = "type")]
+    pub event_type: Option<String>,
     #[serde(default)]
     pub body: Value,
 }
@@ -247,6 +251,10 @@ pub struct InboxExpect {
     /// Expected `pending` for an `op: peek_depth` case.
     #[serde(default)]
     pub pending: Option<u64>,
+    /// Expected `skipped` for a filtered `op: read` case (`types` or
+    /// `where` in its args), after the function's `response_pick`.
+    #[serde(default)]
+    pub skipped: Option<u64>,
 }
 
 /// The resolved, shape-typed view of an `Expectation`, borrowed from it.

@@ -14,6 +14,9 @@ pub mod common;
 pub mod config;
 pub mod contract;
 pub mod def;
+// Deliberately not glob re-exported: `EventFilter` names no site the store
+// layer needs, and callers use `event_filter::EventFilter`.
+pub mod event_filter;
 pub mod idempotency;
 // Deliberately not glob re-exported: `inbox::{read, depth}` would collide
 // with the `pub use store::*` glob below. Callers use `inbox::Inbox`.

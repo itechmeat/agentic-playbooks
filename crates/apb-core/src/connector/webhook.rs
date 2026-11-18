@@ -139,3 +139,126 @@ pub fn dedupe_id(body: &Value, raw: &[u8], path: Option<&str>) -> String {
     }
     crate::content::sha256_hex(raw)
 }
+
+/// The longest event type kept.
+pub const EVENT_TYPE_MAX: usize = 100;
+
+/// The event type of one verified delivery: the header's value when the
+/// block names a header, else the scalar at the block's path, cleaned by
+/// [`clean_event_type`]; `None` when the block names neither or the value
+/// does not clean.
+pub fn event_type(
+    body: &Value,
+    header: Option<&str>,
+    hook: &super::def::WebhookSpec,
+) -> Option<String> {
+    let raw = if hook.event_type_header.is_some() {
+        header.map(str::to_string)
+    } else {
+        hook.event_type_path
+            .as_deref()
+            .and_then(|path| super::common::scalar_at_path(body, path))
+    };
+    raw.as_deref().and_then(clean_event_type)
+}
+
+/// Trims; keeps a value of 1 to [`EVENT_TYPE_MAX`] characters, each of
+/// `[A-Za-z0-9._:/-]`; anything else is `None` (the value is
+/// provider-written and is shown on surfaces and in journals).
+pub fn clean_event_type(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > EVENT_TYPE_MAX {
+        return None;
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'))
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connector::def::WebhookSpec;
+    use serde_json::json;
+
+    fn hook_with(header: Option<&str>, path: Option<&str>) -> WebhookSpec {
+        WebhookSpec {
+            challenge: None,
+            verify_token: None,
+            signature: crate::connector::def::SignatureSpec {
+                scheme: crate::connector::def::SignatureScheme::HmacSha256Hex,
+                header: "X-Hub-Signature-256".to_string(),
+                prefix: "sha256=".to_string(),
+                secret: "{{secret.s}}".to_string(),
+            },
+            dedupe_path: None,
+            event_type_path: path.map(str::to_string),
+            event_type_header: header.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn event_type_comes_from_the_named_source() {
+        let body = json!({ "entry": [{ "changes": [{ "field": "messages" }] }] });
+        // Header only: the header's value.
+        let by_header = hook_with(Some("X-GitHub-Event"), None);
+        assert_eq!(
+            event_type(&body, Some("issues"), &by_header).as_deref(),
+            Some("issues")
+        );
+        // Header named but absent: None.
+        assert_eq!(event_type(&body, None, &by_header), None);
+        // Path only: the scalar at the path.
+        let by_path = hook_with(None, Some("entry.0.changes.0.field"));
+        assert_eq!(
+            event_type(&body, None, &by_path).as_deref(),
+            Some("messages")
+        );
+        // A path that does not resolve: None.
+        assert_eq!(
+            event_type(&body, None, &hook_with(None, Some("nope"))),
+            None
+        );
+        // Neither field: None whatever arrived.
+        let none = hook_with(None, None);
+        assert_eq!(event_type(&body, Some("issues"), &none), None);
+        // Surrounding whitespace around a header value is trimmed.
+        assert_eq!(
+            event_type(
+                &body,
+                Some("  issues  "),
+                &hook_with(Some("X-GitHub-Event"), None)
+            )
+            .as_deref(),
+            Some("issues")
+        );
+    }
+
+    #[test]
+    fn clean_event_type_refuses_spaces_and_long_values() {
+        assert_eq!(clean_event_type("issues").as_deref(), Some("issues"));
+        assert_eq!(
+            clean_event_type("  issues  ").as_deref(),
+            Some("issues"),
+            "surrounding whitespace is trimmed"
+        );
+        assert_eq!(
+            clean_event_type("pull_request.review").as_deref(),
+            Some("pull_request.review")
+        );
+        assert_eq!(clean_event_type("iss ues"), None, "interior space");
+        assert_eq!(clean_event_type(""), None);
+        assert_eq!(clean_event_type("   "), None);
+        assert_eq!(clean_event_type("é"), None, "a character outside the set");
+        assert_eq!(clean_event_type(&"a".repeat(101)), None, "too long");
+        assert_eq!(
+            clean_event_type(&"a".repeat(EVENT_TYPE_MAX)).as_deref(),
+            Some("a".repeat(EVENT_TYPE_MAX).as_str()),
+            "exactly the cap is kept"
+        );
+    }
+}

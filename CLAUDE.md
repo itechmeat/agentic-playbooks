@@ -91,7 +91,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   a notification (`connector/people.rs`), a
   function's send-once declaration and the connector's `identity`
   (`connector/idempotency.rs`) and the hidden send marker
-  (`connector/marker.rs`), the OAuth pure helpers (the token response,
+  (`connector/marker.rs`), the `types` and `where` filter of an inbox read,
+  whose `explain` never carries body text (`connector/event_filter.rs`), the
+  OAuth pure helpers (the token response,
   scopes, PKCE, the authorization URL, the callback;
   `connector/oauth.rs`) and the paging block with its manifest rules
   (`connector/paginate.rs`), profiles
@@ -1563,12 +1565,15 @@ merges, delete only paths you created, and stop only processes you started.
 - Profile and skill names: `[a-z0-9][a-z0-9-]*`, at most 64 chars; path segments
   are validated with `is_safe_segment` / `validate_profile_name`.
 - Search the code with zg (zvec-grep) over the live files:
-  `zg query --rg -F <symbol> <path>` or `zg query --fts <name>` annotate each
-  ripgrep hit with its enclosing symbol and line range; the semantic
-  `zg query "<question>"` is for orientation in unfamiliar code only. The index
-  lives in `.zvec-grep/` (git-ignored); rebuild it with `zg index` after a
+  `zg --rg -F <symbol> <path>` or `zg --fts <name>` list the hits of
+  each file with their line numbers; the semantic
+  `zg "<question>"` is for orientation in unfamiliar code only. The index
+  lives in `.zvec-grep/` (git-ignored); rebuild it with `zg --index` after a
   merge. Verify an edit (no `oldName` left) with plain `rg`/`git grep`, never
   through an index.
+  These are the zg 0.3.0 forms: every management command is a flag and a bare
+  word is search text, so the old `zg query --rg X` searches for "query" and
+  answers "No matches."; an index built by 0.2.x needs `zg --index --rebuild`.
 
 ## Claude-specific
 

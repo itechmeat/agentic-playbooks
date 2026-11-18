@@ -15,6 +15,7 @@
 //! <account>` and an outcome, never a payload.
 
 use apb_core::connector::def::{InboxOp, InboxSpec};
+use apb_core::connector::event_filter::EventFilter;
 use apb_core::connector::inbox::{Inbox, InboxEvent, InboxGap};
 use serde_json::{Value, json};
 
@@ -51,9 +52,26 @@ pub struct InboxCall {
     consumer: String,
     limit: usize,
     up_to_seq: u64,
+    /// Which events the read wants. Empty on `ack` and `peek_depth`, where a
+    /// filter is refused, and reads as today when empty.
+    filter: EventFilter,
     /// The effective `response_pick` projection; empty when the function
     /// declares none or `--full` bypasses it.
     response_pick: Vec<String>,
+    /// Whether a filtered read may ack the events it skipped: only a call
+    /// whose caller may also move the cursor (see [`build`]).
+    may_ack: bool,
+    /// The run journal a gap goes into before a filtered read moves the
+    /// cursor past it ([`InboxCall::journal_gaps_to`]); `None` for a
+    /// person's live call, which has no run.
+    gap_journal: Option<GapJournal>,
+}
+
+/// Where a call's gap is journaled: the run and the node that read.
+#[derive(Debug)]
+struct GapJournal {
+    run_dir: std::path::PathBuf,
+    node_id: String,
 }
 
 /// Either a dry-run description or a call to run, mirroring
@@ -66,6 +84,13 @@ pub enum InboxBuild {
 /// Validates the call arguments against the op and produces the call (or its
 /// dry-run description). Reads nothing: a dry run must not touch the store,
 /// and the live path defers every read to `send`.
+///
+/// `may_ack` says whether a filtered read may move the consumer's cursor
+/// past the events it skipped. The caller decides it from who calls: a
+/// node whose grant also covers the connector's `ack` function, or a
+/// person's live call. A read under a grant of read-only functions only,
+/// and every engine site (a check, a reconcile), passes `false`: such a
+/// read skips and reports `skipped` and the gap, and moves no cursor.
 pub fn build(
     spec: &InboxSpec,
     connector: &str,
@@ -73,6 +98,7 @@ pub fn build(
     args: &Value,
     response_pick: Vec<String>,
     dry_run: bool,
+    may_ack: bool,
 ) -> Result<InboxBuild, CallError> {
     let consumer = match args.get("consumer") {
         None | Some(Value::Null) => DEFAULT_CONSUMER.to_string(),
@@ -126,6 +152,37 @@ pub fn build(
         _ => 0,
     };
 
+    // A filter travels with a read only: on `ack` or `peek_depth` either key
+    // is refused, whatever its shape.
+    if spec.op != InboxOp::Read && (args.get("types").is_some() || args.get("where").is_some()) {
+        return Err(CallError::new(
+            CallErrorCode::InvalidArgs,
+            "only op `read` takes types or where",
+        ));
+    }
+    let mut filter_value = serde_json::Map::new();
+    for key in ["types", "where"] {
+        if let Some(v) = args.get(key) {
+            filter_value.insert(key.to_string(), v.clone());
+        }
+    }
+    let filter: EventFilter = if filter_value.is_empty() {
+        EventFilter::default()
+    } else {
+        match serde_json::from_value(Value::Object(filter_value)) {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(CallError::new(
+                    CallErrorCode::InvalidArgs,
+                    format!("`types` or `where`: {e}"),
+                ));
+            }
+        }
+    };
+    if let Err(problem) = filter.check() {
+        return Err(CallError::new(CallErrorCode::InvalidArgs, problem));
+    }
+
     let call = InboxCall {
         connector: connector.to_string(),
         account: account.to_string(),
@@ -133,19 +190,29 @@ pub fn build(
         consumer,
         limit,
         up_to_seq,
+        filter,
         response_pick,
+        may_ack,
+        gap_journal: None,
     };
     if dry_run {
+        let mut inbox = json!({
+            "op": call.op.as_str(),
+            "endpoint": call.endpoint(),
+            "consumer": call.consumer,
+            "limit": call.limit,
+            "up_to_seq": call.up_to_seq,
+        });
+        if !call.filter.types.is_empty() {
+            inbox["types"] = json!(call.filter.types);
+        }
+        if !call.filter.conditions.is_empty() {
+            inbox["where"] = json!(call.filter.conditions);
+        }
         return Ok(InboxBuild::DryRun(json!({
             "ok": true,
             "dry_run": true,
-            "inbox": {
-                "op": call.op.as_str(),
-                "endpoint": call.endpoint(),
-                "consumer": call.consumer,
-                "limit": call.limit,
-                "up_to_seq": call.up_to_seq,
-            },
+            "inbox": inbox,
         })));
     }
     Ok(InboxBuild::Call(Box::new(call)))
@@ -157,6 +224,18 @@ impl InboxCall {
     /// log can tell an inbox call from an HTTP one at a glance.
     pub fn endpoint(&self) -> String {
         format!("inbox://{}/{}", self.connector, self.account)
+    }
+
+    /// Names the run journal a gap this call finds goes into, and the node
+    /// that read. A filtered read that acks writes the gap there, synced,
+    /// before it moves the cursor past it, and moves nothing when the write
+    /// fails. Without it (a person's live call, which has no run) the gap is
+    /// only in the returned envelope.
+    pub fn journal_gaps_to(&mut self, run_dir: &std::path::Path, node_id: &str) {
+        self.gap_journal = Some(GapJournal {
+            run_dir: run_dir.to_path_buf(),
+            node_id: node_id.to_string(),
+        });
     }
 
     /// The smtp-only event extras every other kind reports as absent.
@@ -174,14 +253,41 @@ impl InboxCall {
         let mut gap = None;
         let body = match self.op {
             InboxOp::Read => {
-                let (events, cursor, lost) = store
-                    .read(&self.consumer, self.limit)
-                    .map_err(|e| CallError::new(CallErrorCode::Config, e.to_string()))?;
-                // The envelope keeps its fixed shape; the gap travels at the
-                // top level of the result, where no `response_pick` projection
-                // can hide it.
-                gap = lost;
-                read_envelope(&events, cursor)
+                // An empty filter reads as today; a filtered read skips the
+                // events that do not match and, when its caller may move the
+                // cursor and outside a read-only process, acks the leading
+                // ones for this consumer only.
+                let ack_skipped = !self.filter.is_empty()
+                    && self.may_ack
+                    && !apb_core::process_mode::is_read_only();
+                if self.filter.is_empty() {
+                    let (events, cursor, lost) = store
+                        .read(&self.consumer, self.limit)
+                        .map_err(|e| CallError::new(CallErrorCode::Config, e.to_string()))?;
+                    gap = lost;
+                    read_envelope(&events, cursor)
+                } else {
+                    let filter = &self.filter;
+                    // The gap is durable in the run journal before the
+                    // cursor moves past it, or the cursor stays.
+                    let record_gap = |gap: &InboxGap| match &self.gap_journal {
+                        Some(j) => {
+                            journal_gap(&j.run_dir, &self.connector, &self.account, &j.node_id, gap)
+                        }
+                        None => true,
+                    };
+                    let r = store
+                        .read_filtered(
+                            &self.consumer,
+                            self.limit,
+                            &|event| filter.matches(event),
+                            ack_skipped,
+                            record_gap,
+                        )
+                        .map_err(|e| CallError::new(CallErrorCode::Config, e.to_string()))?;
+                    gap = r.gap;
+                    filtered_envelope(&r.events, r.cursor, r.skipped)
+                }
             }
             InboxOp::Ack => {
                 let moved = store
@@ -232,11 +338,7 @@ pub fn read_envelope(events: &[InboxEvent], cursor: u64) -> Value {
     let mut bytes: usize = 0;
     let mut truncated = false;
     for event in events {
-        let row = json!({
-            "seq": event.seq,
-            "received_at": event.received_at,
-            "body": event.body,
-        });
+        let row = event_row(event);
         let size = serde_json::to_string(&row).map(|s| s.len()).unwrap_or(0);
         if !rows.is_empty() && bytes.saturating_add(size) > READ_BYTE_CAP {
             truncated = true;
@@ -246,6 +348,35 @@ pub fn read_envelope(events: &[InboxEvent], cursor: u64) -> Value {
         rows.push(row);
     }
     json!({ "events": rows, "cursor": cursor, "truncated": truncated })
+}
+
+/// [`read_envelope`] plus `"skipped"`: the pending events the read did not
+/// return because they did not match. The cursor is the one after the read,
+/// moved past a leading run of skipped events when it acked them.
+pub fn filtered_envelope(events: &[InboxEvent], cursor: u64, skipped: u64) -> Value {
+    let mut out = read_envelope(events, cursor);
+    out["skipped"] = json!(skipped);
+    out
+}
+
+/// One envelope event row: `seq`, `received_at`, `body`, and `type` when the
+/// event has one. `provider_id` stays out (a dedupe identity, not
+/// information), and so does the body of a type the reader did not ask for.
+/// The dashboard's events view lists the same rows.
+pub fn event_row(event: &InboxEvent) -> Value {
+    match &event.event_type {
+        Some(ty) => json!({
+            "seq": event.seq,
+            "received_at": event.received_at,
+            "type": ty,
+            "body": event.body,
+        }),
+        None => json!({
+            "seq": event.seq,
+            "received_at": event.received_at,
+            "body": event.body,
+        }),
+    }
 }
 
 /// `{ acked_up_to }`.
@@ -262,21 +393,27 @@ pub fn depth_envelope(pending: u64) -> Value {
 /// retention dropped), once per distinct gap of an inbox and account per run:
 /// later reads that cross the same gap stay silent, a gap that grew is a new
 /// one. Which node read first is recorded, but does not make a gap distinct.
-/// Best effort like the `connector_call` event: a journal failure never
-/// changes the already-computed call result.
+/// The line is synced before the append lock is released.
+///
+/// Returns whether the gap is in the journal (written now or already there).
+/// One rule for every read: a cursor moves past a gap only once this said
+/// `true`. An unfiltered read moves no cursor (its caller acks later, after
+/// this ran), so for it the answer only matters as best effort, like the
+/// `connector_call` event: a journal failure never changes its result. A
+/// filtered read that would ack asks first and keeps the cursor on `false`.
 pub(crate) fn journal_gap(
     run_dir: &std::path::Path,
     connector: &str,
     account: &str,
     node_id: &str,
     gap: &InboxGap,
-) {
+) -> bool {
     // `apb connector call` runs outside the drive, so the journal is opened
     // as a foreign writer (a torn last line from a concurrent append is
     // forgiven), and the "once per gap" check runs on a fresh read under the
     // append lock: two nodes reading the same gap at once journal it once.
     let Ok(mut log) = EventLog::open_foreign(run_dir) else {
-        return;
+        return false;
     };
     let payload = EventPayload::InboxGap {
         node_id: node_id.to_string(),
@@ -285,13 +422,15 @@ pub(crate) fn journal_gap(
         from: gap.from,
         through: gap.through,
     };
-    let _ = log.append_checked(payload, |events| {
-        !events.iter().any(|e| {
+    log.append_decided_synced(|events| {
+        let known = events.iter().any(|e| {
             matches!(
                 &e.payload,
                 EventPayload::InboxGap { connector: c, account: a, from, through, .. }
                     if c == connector && a == account && *from == gap.from && *through == gap.through
             )
-        })
-    });
+        });
+        (!known).then_some(payload)
+    })
+    .is_ok()
 }
