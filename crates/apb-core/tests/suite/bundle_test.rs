@@ -932,3 +932,48 @@ fn a_format_1_preview_over_an_unapproved_import_needs_the_approval() {
     let preview = apb_core::bundle::preview(b.path(), &old_format, b"raw").unwrap();
     assert!(preview.needs_script_approval);
 }
+
+/// The derived diagram (`playbook.mmd`, people-in-the-loop D6) never leaves
+/// with an export: a bundle carries the YAML, the layout and the scripts,
+/// and the diagram is derived again on the far side by the import.
+#[test]
+fn an_export_carries_no_diagram() {
+    let _cfg = crate::common::config_sandbox();
+    let a = tempfile::tempdir().unwrap();
+    seed(a.path());
+    // The exported-from version carries a diagram, current or not.
+    let version_dir = a.path().join(".apb/playbooks/va/1.0.0");
+    let yaml = fs::read_to_string(version_dir.join("playbook.yaml")).unwrap();
+    apb_core::diagram::write_beside(&version_dir, &yaml).unwrap();
+    assert_eq!(
+        apb_core::diagram::state_of(&version_dir),
+        apb_core::diagram::DiagramState::Current
+    );
+
+    let bundle = export_bundle(a.path(), "va", None).unwrap();
+    let json = bundle.to_json().unwrap();
+    assert!(
+        !json.contains("playbook.mmd"),
+        "an export must not carry the diagram: {json}"
+    );
+    assert!(
+        !json.contains("apb-diagram"),
+        "an export must not carry diagram text: {json}"
+    );
+
+    // And the import of the bundle writes a diagram of its own.
+    let b = tempfile::tempdir().unwrap();
+    init_project(b.path()).unwrap();
+    let assigned = import_bundle(b.path(), &bundle, true, None)
+        .unwrap()
+        .version;
+    let imported = b
+        .path()
+        .join(".apb/playbooks/va")
+        .join(&assigned)
+        .join("playbook.mmd");
+    assert!(
+        imported.is_file(),
+        "the imported version must carry a derived diagram"
+    );
+}

@@ -510,6 +510,7 @@ export const postReview = (
     assertionAuthenticatorData?: string
     assertionSignature?: string
   },
+  fields?: Record<string, unknown>,
 ) =>
   requestJson<{ posted_seq: number }>(`${run(id)}/review${qs({ workspace })}`, {
     method: 'POST',
@@ -520,6 +521,7 @@ export const postReview = (
       note,
       ...(nonce ? { nonce } : {}),
       ...(request !== undefined ? { request } : {}),
+      ...(fields && Object.keys(fields).length ? { fields } : {}),
       ...(passkeyToken ? { passkey_token: passkeyToken } : {}),
       ...(assertion?.assertionId ? { assertionId: assertion.assertionId } : {}),
       ...(assertion?.assertionClientDataJSON

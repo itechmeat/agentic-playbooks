@@ -867,6 +867,55 @@ pub enum EventPayload {
         #[serde(default)]
         reason: String,
     },
+    /// What the review request at seq `request` shows beside its options:
+    /// the scope of what the decision covers, the rendered `show:` entries
+    /// and field defaults, and the options withheld above `max_scope` with
+    /// the reason. Written in the same write as its `review_requested`
+    /// (`EventLog::append_pair`). Display, the form's defaults and the
+    /// channel's checks; an older apb skips it once the gate's
+    /// `node_finished` follows, and refuses to resume a run still waiting
+    /// at the gate. Additive variant.
+    ReviewDetail {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        request: u64,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        scope: Option<crate::review::views::ReviewScope>,
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "lenient_default"
+        )]
+        show: Vec<crate::review::views::ShownEntry>,
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "lenient_default"
+        )]
+        fields: Vec<crate::review::views::FieldView>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        withheld: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        withheld_reason: Option<String>,
+    },
+    /// The field values a decision of gate `node` carried, checked against
+    /// the gate's `fields` and scrubbed of the run's secret values, for the
+    /// request at seq `request`. Written right before its `review_decided`.
+    /// Safe to skip up to the gate's `node_finished`; an older apb never
+    /// continues such a run (run guard `review_fields`). Additive variant.
+    ReviewFields {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        request: u64,
+        #[serde(default)]
+        fields: BTreeMap<String, serde_json::Value>,
+    },
     WaitStarted {
         node: String,
         kind: String,
@@ -2846,10 +2895,40 @@ impl EventLog {
         self.append_inner(Build::Decided(Box::new(build)), true)
     }
 
+    /// Appends `first` and the event `second` makes of its seq in one
+    /// write under one lock, so no reader ever sees `first` without
+    /// `second`: a review request and its `review_detail`
+    /// (people-in-the-loop D2). A crash inside the write is a torn append
+    /// like any other: cut at the end of the first line, the request reads
+    /// alone and the drive's repair journals its detail; cut inside the
+    /// second line, the torn last line fails every strict read, exactly as
+    /// a torn single append does. Returns the first event. `first` is
+    /// never a checkpoint: a guard would have to follow it.
+    pub(crate) fn append_pair(
+        &mut self,
+        first: EventPayload,
+        second: impl FnOnce(u64) -> EventPayload,
+    ) -> Result<Event, EngineError> {
+        debug_assert!(!first.is_checkpoint(), "a paired event is no checkpoint");
+        match self.append_lines(Build::Plain(Box::new(first)), false, Some(Box::new(second)))? {
+            Some(event) => Ok(event),
+            None => unreachable!("an unconditional append always writes"),
+        }
+    }
+
     fn append_inner(
         &mut self,
         build: Build<'_>,
         durable: bool,
+    ) -> Result<Option<Event>, EngineError> {
+        self.append_lines(build, durable, None)
+    }
+
+    fn append_lines(
+        &mut self,
+        build: Build<'_>,
+        durable: bool,
+        follow: Option<Box<dyn FnOnce(u64) -> EventPayload + '_>>,
     ) -> Result<Option<Event>, EngineError> {
         apb_core::process_mode::guard()?;
         self.last_append = AppendMark::NotWritten;
@@ -2902,6 +2981,14 @@ impl EventLog {
             payload,
         };
         let mut lines = vec![event];
+        // A paired event follows its first in the same write.
+        if let Some(follow) = follow {
+            lines.push(Event {
+                seq: self.next_seq + 1,
+                ts,
+                payload: follow(self.next_seq),
+            });
+        }
         // While a deferral stays open, a checkpoint is never the journal's
         // last event: its guard follows in the same write, so an apb that
         // cannot honour the deferral refuses to continue the run.
@@ -2911,7 +2998,7 @@ impl EventLog {
                 .open_after(lines[0].payload.deferral_change())
         {
             lines.push(Event {
-                seq: self.next_seq + 1,
+                seq: self.next_seq + lines.len() as u64,
                 ts,
                 payload: EventPayload::DeferredRetryGuard { open },
             });
@@ -3292,6 +3379,37 @@ pub(crate) fn review_withdrawn_count(events: &[Event], node: &str) -> usize {
             |e| matches!(&e.payload, EventPayload::ReviewWithdrawn { node: n, .. } if n == node),
         )
         .count()
+}
+
+/// The reason prefix of a `review_withdrawn` the drive journals when a form
+/// gate's scope changed while its request waited
+/// (`scheduler::review_gate`): the decision found was not consumed, and the
+/// gate asked again at once on the measured scope. Readers tell it from a
+/// directive's withdrawal by this prefix: it skips the channel entry it
+/// left unconsumed ([`review_consumed_count`]), and the visit it closes
+/// continues in the request that follows it.
+pub const SCOPE_CHANGED_REASON: &str = "scope_changed";
+
+/// Whether a `review_withdrawn` reason is a scope re-ask
+/// ([`SCOPE_CHANGED_REASON`]).
+pub fn is_scope_changed(reason: &str) -> bool {
+    reason == SCOPE_CHANGED_REASON || reason.starts_with("scope_changed:")
+}
+
+/// How many entries of a gate's review channel the drive has passed under
+/// the count-based rule: one per `review_decided`, and one per scope
+/// re-ask, whose decision was set aside unconsumed. The drive takes the
+/// next entry at this index, and the channel's post check counts the
+/// queued ones past it.
+pub(crate) fn review_consumed_count(events: &[Event], node: &str) -> usize {
+    review_decided_count(events, node)
+        + events
+            .iter()
+            .filter(|e| {
+                matches!(&e.payload, EventPayload::ReviewWithdrawn { node: n, reason }
+                    if n == node && is_scope_changed(reason))
+            })
+            .count()
 }
 
 /// How many of a gate's review requests are still open: asked, and neither
@@ -5737,6 +5855,46 @@ mod deferral_tests {
             drop(EventLog::open_foreign(dir.path()).unwrap());
             let after = std::fs::read(dir.path().join("events.jsonl")).unwrap();
             assert_eq!(after, before, "nothing appended after the torn tail");
+        }
+
+        /// A review request and its `review_detail` go out in one write:
+        /// the detail names the request's seq, and a fault that cuts the
+        /// end of the write tears the detail with the request whole beside
+        /// it in the same buffer, never a request written alone.
+        #[test]
+        fn a_request_and_its_detail_are_one_write() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut log = EventLog::create(dir.path()).unwrap();
+            let request = || -> EventPayload {
+                serde_json::from_value(serde_json::json!({
+                    "type": "review_requested", "node": "gate", "options": ["approve"]
+                }))
+                .unwrap()
+            };
+            let detail = |seq: u64| EventPayload::ReviewDetail {
+                node: "gate".into(),
+                request: seq,
+                scope: None,
+                show: Vec::new(),
+                fields: Vec::new(),
+                withheld: vec!["approve".into()],
+                withheld_reason: None,
+            };
+            let first = log.append_pair(request(), detail).unwrap();
+            let events = read_all(dir.path()).unwrap();
+            assert_eq!(events.len(), 2);
+            assert!(matches!(
+                &events[1].payload,
+                EventPayload::ReviewDetail { request, .. } if *request == first.seq
+            ));
+            assert_eq!(events[1].seq, first.seq + 1);
+            log.fault_write_short = Some(5);
+            assert!(log.append_pair(request(), detail).is_err());
+            let lossy = read_all_lossy_tail(dir.path()).unwrap();
+            assert_eq!(lossy.len(), 3, "the second request whole, its detail torn");
+            // A torn detail is a torn last line like that of any single
+            // append: the strict read every resumer uses refuses it.
+            assert!(read_all(dir.path()).is_err());
         }
 
         /// A re-run that revives a waiting node closes its deferral in the

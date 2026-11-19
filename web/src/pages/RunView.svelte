@@ -805,7 +805,7 @@
         refusals={reviewRefusals}
         {projectDir}
         {projectDirMissing}
-        onDecide={(r, o) => decide(r, o)}
+        onDecide={(r, o, fields) => decide({ ...r, fields }, o)}
       />
 
       {#if supervisor}

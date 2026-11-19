@@ -613,6 +613,10 @@ pub struct ReviewDecideArgs {
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,
+    /// A gate with `fields` only: the values the person gave, by field name;
+    /// leave a field out to keep its default (`pending_review.fields[].default`).
+    #[serde(default)]
+    pub fields: BTreeMap<String, serde_json::Value>,
 }
 
 /// Answers a pending interactive question on a run (spec

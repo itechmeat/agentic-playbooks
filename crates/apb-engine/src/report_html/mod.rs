@@ -51,6 +51,7 @@ pub fn render(root: &Path, run_dir: &Path) -> Result<String, EngineError> {
             graph::run_graph(&w, &report),
             sections::goal(&w, report.goal.as_ref()),
             sections::steps(&w, &report.steps),
+            sections::reviews(&w, &report.reviews),
             sections::untrusted(&w, &report.untrusted),
             sections::lists(&w, &report.outcome),
             sections::route(&w, &report.graph),

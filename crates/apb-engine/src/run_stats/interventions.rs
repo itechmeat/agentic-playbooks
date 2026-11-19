@@ -7,10 +7,15 @@
 //! Categories:
 //!
 //! - **Planned review**: every `review_requested` is one gate visit, closed
-//!   by the next `review_decided` or `review_withdrawn` of its node. A
-//!   decision is `automatic` when an applied `review_triage` decision of
-//!   that visit or a `decided_by` says so, `channel` otherwise (through the
-//!   review channel: a person or whoever holds the channel).
+//!   by the next `review_decided` or `review_withdrawn` of its node; a
+//!   request withdrawn because its scope changed while it waited
+//!   (`scope_changed`) continues in the request asked right after it, so
+//!   that visit counts once and its decision is measured from the request
+//!   actually decided. A
+//!   decision is `automatic` when its own `decided_by` or channel says so
+//!   (or, for a decision that records neither, an applied `review_triage`
+//!   decision of that visit), `channel` otherwise (through the review
+//!   channel: a person or whoever holds the channel).
 //! - **Question**: answers per question asked, by `answered_by`; `human`
 //!   and `supervisor` answers are interventions, `unattended` an automatic
 //!   answer, `timeout` neither.
@@ -105,6 +110,13 @@ pub struct ReviewCounts {
     pub withdrawn: u64,
     /// Requests still open.
     pub open: u64,
+    /// Channel decisions taken faster than their scope takes to read
+    /// (`review::scope::fast_floor_ms` over active run time); report only.
+    pub fast: u64,
+    /// The seqs of the `review_decided` events counted in `fast`: the one
+    /// rule the HTML report marks a decision by. Not serialized.
+    #[serde(skip)]
+    pub fast_seqs: BTreeSet<u64>,
     /// Decisions an older binary wrote without saying who decided:
     /// neither `channel` nor `automatic` is known for the run then.
     pub unattributed: u64,
@@ -262,6 +274,12 @@ fn bump(map: &mut BTreeMap<String, u64>, key: &str) {
 struct OpenVisit {
     /// Applied `review_triage` decisions seen while it was open.
     triaged: bool,
+    /// The seq and ts of the `review_requested` that opened it (for the
+    /// fast check, people-in-the-loop D2).
+    request: (u64, u128),
+    /// The floor of the visit's `review_detail`, when one followed; a
+    /// visit without one is never fast.
+    floor_ms: Option<u64>,
 }
 
 /// One control entry's interrupt: the attempts it stopped, and whether the
@@ -291,16 +309,41 @@ pub fn interventions(
     // `review_requested` (the real journal order): held per node until the
     // visit opens.
     let mut pending_triage: BTreeSet<String> = BTreeSet::new();
+    // Gates whose open request a scope re-ask withdrew: their next request
+    // continues the same visit.
+    let mut reasked: BTreeSet<&str> = BTreeSet::new();
     let mut decisions: BTreeMap<(&str, &str, &str, u32, u32), bool> = BTreeMap::new();
     let mut items: BTreeSet<(&str, &str)> = BTreeSet::new();
     let mut interrupts: BTreeMap<String, InterruptHit> = BTreeMap::new();
     for e in events {
         match &e.payload {
             EventPayload::ReviewRequested { node, .. } => {
-                out.reviews.visits += 1;
+                // The request a scope re-ask opens continues the visit it
+                // withdrew: one visit, decided on this request.
+                if !reasked.remove(node.as_str()) {
+                    out.reviews.visits += 1;
+                }
                 visits.entry(node).or_default().push(OpenVisit {
                     triaged: pending_triage.remove(node),
+                    request: (e.seq, e.ts),
+                    floor_ms: None,
                 });
+            }
+            EventPayload::ReviewDetail {
+                node,
+                request,
+                scope,
+                ..
+            } => {
+                // The floor the visit's decision is measured against: the
+                // least active time its scope takes to read.
+                if let Some(q) = visits.get_mut(node.as_str())
+                    && let Some(visit) = q.last_mut()
+                    && visit.request.0 == *request
+                    && let Some(s) = scope
+                {
+                    visit.floor_ms = Some(crate::review::scope::fast_floor_ms(s));
+                }
             }
             EventPayload::DecisionMade {
                 use_site,
@@ -346,9 +389,16 @@ pub fn interventions(
                 };
                 let visit = v.remove(0);
                 bump(&mut out.reviews.options, decision);
-                let automatic = visit.triaged
-                    || matches!(decided_by, Some(DecidedBy::Unattended | DecidedBy::Model))
-                    || via.is_some_and(|c| !c.is_surface());
+                // Who decided is the consumed decision's own record: its
+                // `decided_by`, else its channel. An applied triage of the
+                // visit speaks only for a decision that records neither (an
+                // older writer's enforced recommendation): a recommendation
+                // `max_scope` withheld never decided, and the person who
+                // then decided through a surface is a person.
+                let automatic =
+                    matches!(decided_by, Some(DecidedBy::Unattended | DecidedBy::Model))
+                        || via.is_some_and(|c| !c.is_surface())
+                        || (visit.triaged && decided_by.is_none() && via.is_none());
                 if automatic {
                     out.reviews.automatic += 1;
                 } else if decided_by.is_some() {
@@ -361,12 +411,35 @@ pub fn interventions(
                     out.reviews.channel += 1;
                     let surface = via.map_or("not_recorded", |c| c.as_str());
                     bump(&mut out.reviews.via, surface);
+                    // Decided without review (people-in-the-loop D2): the
+                    // active run time since the request is below the floor
+                    // the scope's size sets. Report only.
+                    // A scenario's scripted decision stands in for a person
+                    // but reads nothing: never fast.
+                    if let Some(floor) = visit.floor_ms
+                        && *via != Some(crate::decision_channel::DecisionChannel::Scenario)
+                        && crate::pause::active_run_ms(
+                            events,
+                            visit.request.1,
+                            e.ts,
+                            apb_core::clock::now_ms(),
+                        ) < u128::from(floor)
+                    {
+                        out.reviews.fast += 1;
+                        out.reviews.fast_seqs.insert(e.seq);
+                    }
                 }
             }
-            EventPayload::ReviewWithdrawn { node, .. } => {
+            EventPayload::ReviewWithdrawn { node, reason } => {
                 if let Some(v) = visits.get_mut(node.as_str()).filter(|q| !q.is_empty()) {
                     v.remove(0);
-                    out.reviews.withdrawn += 1;
+                    // A scope re-ask is not a withdrawn visit: the gate asks
+                    // again at once, and that request carries the visit.
+                    if crate::event::is_scope_changed(reason) {
+                        reasked.insert(node.as_str());
+                    } else {
+                        out.reviews.withdrawn += 1;
+                    }
                 }
             }
             EventPayload::QuestionAsked { .. } => out.questions.asked += 1,
@@ -652,6 +725,7 @@ pub fn version_stats(runs: &[RunInterventions]) -> Option<InterventionStats> {
             attributed.then_some(r.reviews.automatic),
         );
         review_acc.split("withdrawn".into(), Some(r.reviews.withdrawn));
+        review_acc.split("fast".into(), Some(r.reviews.fast));
         for k in &review_keys {
             review_acc.split(
                 format!("option:{k}"),
@@ -783,7 +857,11 @@ pub fn lines(s: &InterventionStats) -> Vec<String> {
             .split
             .iter()
             .filter(|(_, k)| k.value > 0 || k.known_runs != k.runs)
-            .map(|(name, k)| format!("{} {}", apb_core::text::visible(name), k.text()))
+            .map(|(name, k)| match name.as_str() {
+                // People-in-the-loop D2: the words the run's own lines use.
+                "fast" => format!("{} decided without review", k.text()),
+                _ => format!("{} {}", apb_core::text::visible(name), k.text()),
+            })
             .collect();
         if !split.is_empty() {
             line.push_str(&format!(" ({})", split.join(", ")));
@@ -820,10 +898,14 @@ pub fn run_lines(r: &RunInterventions) -> Vec<String> {
     let channel = r
         .reviews_channel()
         .map_or(unknown.clone(), |c| c.to_string());
-    out.push(format!(
+    let mut reviews = format!(
         "  gate visits {}: through the review channel {channel}, automatic {}, withdrawn {}",
         r.reviews.visits, r.reviews.automatic, r.reviews.withdrawn
-    ));
+    );
+    if r.reviews.fast > 0 {
+        reviews.push_str(&format!(", {} decided without review", r.reviews.fast));
+    }
+    out.push(reviews);
     if r.questions.asked > 0 {
         out.push(format!(
             "  questions asked {}: {}",
@@ -869,6 +951,326 @@ mod tests {
     #[test]
     fn this_build_records_attribution() {
         assert!(attribution_known(Some(env!("CARGO_PKG_VERSION"))));
+    }
+
+    // --- decided without review (people-in-the-loop D2) ----------------
+
+    use crate::decision_channel::DecisionChannel;
+    use crate::event::CommittedArtifact;
+    use crate::review::scope::ReviewScope;
+
+    fn ev(seq: u64, ts: u128, payload: EventPayload) -> Event {
+        Event { seq, ts, payload }
+    }
+
+    fn requested(seq: u64, ts: u128) -> Event {
+        ev(
+            seq,
+            ts,
+            EventPayload::ReviewRequested {
+                node: "gate".into(),
+                options: vec!["approve".into(), "reject".into()],
+                title: None,
+                instruction: String::new(),
+                prompt: None,
+                recommendation: None,
+                plan_digest: None,
+                binding: None,
+                person_only: false,
+            },
+        )
+    }
+
+    fn detail(seq: u64, ts: u128, request: u64, scope: ReviewScope) -> Event {
+        ev(
+            seq,
+            ts,
+            EventPayload::ReviewDetail {
+                node: "gate".into(),
+                request,
+                scope: Some(scope),
+                show: Vec::new(),
+                fields: Vec::new(),
+                withheld: Vec::new(),
+                withheld_reason: None,
+            },
+        )
+    }
+
+    fn decided(seq: u64, ts: u128, by: Option<DecidedBy>, via: Option<DecisionChannel>) -> Event {
+        ev(
+            seq,
+            ts,
+            EventPayload::ReviewDecided {
+                node: "gate".into(),
+                decision: "approve".into(),
+                note: String::new(),
+                plan_digest: None,
+                decided_by: by,
+                binding: None,
+                via,
+            },
+        )
+    }
+
+    fn committed(seq: u64, ts: u128) -> Event {
+        ev(
+            seq,
+            ts,
+            EventPayload::ArtifactsCommitted {
+                node: "work".into(),
+                before: String::new(),
+                after: String::new(),
+                commits: vec![CommittedArtifact {
+                    sha: "s".into(),
+                    subject: String::new(),
+                    apb_run: None,
+                }],
+                omitted: 0,
+                branch: None,
+                attempt: None,
+                attempts: Vec::new(),
+            },
+        )
+    }
+
+    /// A request withdrawn because its scope changed while it waited and
+    /// the request asked right after it are one visit, not a withdrawn one
+    /// and a second; the fast check is measured from the request decided
+    /// (51 s after the first request, 2 s after the second, a 45 s floor).
+    #[test]
+    fn a_scope_reask_is_one_visit_measured_from_the_request_decided() {
+        let events = vec![
+            requested(1, 1_000),
+            detail(2, 1_001, 1, ReviewScope::default()),
+            committed(3, 40_000),
+            ev(
+                4,
+                50_000,
+                EventPayload::ReviewWithdrawn {
+                    node: "gate".into(),
+                    reason: format!(
+                        "{}: work landed while the request waited",
+                        crate::event::SCOPE_CHANGED_REASON
+                    ),
+                },
+            ),
+            requested(5, 50_001),
+            detail(
+                6,
+                50_002,
+                5,
+                ReviewScope {
+                    files: Some(40),
+                    ..Default::default()
+                },
+            ),
+            decided(7, 52_000, None, Some(DecisionChannel::Terminal)),
+        ];
+        let r = of_run(&events);
+        assert_eq!(r.reviews.visits, 1);
+        assert_eq!(r.reviews.withdrawn, 0);
+        assert_eq!(r.reviews.channel, 1);
+        assert_eq!(r.reviews.open, 0);
+        assert_eq!(r.reviews.fast, 1);
+    }
+
+    /// A person's decision two seconds after a request whose scope takes
+    /// 45 s to read counts as decided without review.
+    #[test]
+    fn a_quick_channel_decision_is_fast() {
+        let events = vec![
+            committed(1, 0),
+            requested(2, 1_000),
+            detail(
+                3,
+                1_001,
+                2,
+                ReviewScope {
+                    files: Some(40),
+                    ..Default::default()
+                },
+            ),
+            decided(4, 3_000, None, Some(DecisionChannel::Terminal)),
+        ];
+        let r = of_run(&events);
+        assert_eq!(r.reviews.channel, 1);
+        assert_eq!(r.reviews.fast, 1);
+    }
+
+    /// The same 40-file scope (a 45 s floor) decided a minute after the
+    /// request is a reviewed decision, not a fast one.
+    #[test]
+    fn a_decision_at_or_above_the_floor_is_not_fast() {
+        let floor = crate::review::scope::fast_floor_ms(&ReviewScope {
+            files: Some(40),
+            ..Default::default()
+        });
+        for after in [u128::from(floor), 60_000] {
+            let events = vec![
+                committed(1, 0),
+                requested(2, 1_000),
+                detail(
+                    3,
+                    1_001,
+                    2,
+                    ReviewScope {
+                        files: Some(40),
+                        ..Default::default()
+                    },
+                ),
+                decided(4, 1_000 + after, None, Some(DecisionChannel::Terminal)),
+            ];
+            let r = of_run(&events);
+            assert_eq!(r.reviews.channel, 1);
+            assert_eq!(r.reviews.fast, 0, "decided {after} ms after the request");
+        }
+    }
+
+    /// The spec scenario on the surfaces: `apb stats` over a run with a
+    /// two-second approval of a 40-file change reports one decision without
+    /// review, and the run's own lines say so too.
+    #[test]
+    fn stats_report_one_decision_without_review() {
+        let events = vec![
+            committed(1, 0),
+            requested(2, 1_000),
+            detail(
+                3,
+                1_001,
+                2,
+                ReviewScope {
+                    files: Some(40),
+                    ..Default::default()
+                },
+            ),
+            decided(4, 3_000, None, Some(DecisionChannel::Terminal)),
+        ];
+        let run = of_run(&events);
+        assert_eq!(run.reviews.fast_seqs, BTreeSet::from([4]));
+        let stats = version_stats(std::slice::from_ref(&run)).unwrap();
+        let text = lines(&stats).join("\n");
+        assert!(
+            text.contains("1 decided without review"),
+            "the stats lines: {text}"
+        );
+        assert!(
+            run_lines(&run)
+                .join("\n")
+                .contains(", 1 decided without review"),
+            "{:?}",
+            run_lines(&run)
+        );
+    }
+
+    /// Nine minutes fifty-eight seconds of a ten-minute visit were paused:
+    /// two seconds of reading left, still fast.
+    #[test]
+    fn a_pause_inside_a_visit_does_not_count_as_reading() {
+        let events = vec![
+            committed(1, 0),
+            requested(2, 1_000),
+            detail(3, 1_001, 2, ReviewScope::default()),
+            ev(
+                4,
+                2_000,
+                EventPayload::RunPaused {
+                    reason: "test".into(),
+                    by: Some(crate::pause::kind::PauseBy::Operator),
+                    mode: None,
+                    until: None,
+                    keep_lock: false,
+                },
+            ),
+            ev(
+                5,
+                599_000,
+                EventPayload::RunResumed {
+                    from_node: String::new(),
+                    by: Some(crate::pause::kind::PauseBy::Operator),
+                    explicit: false,
+                    launch: None,
+                    definition: None,
+                    apb: None,
+                    deadline: None,
+                },
+            ),
+            decided(6, 601_000, None, Some(DecisionChannel::Terminal)),
+        ];
+        let r = of_run(&events);
+        assert_eq!(r.reviews.channel, 1);
+        assert_eq!(r.reviews.fast, 1);
+    }
+
+    /// An enforced recommendation is an engine decision, never fast.
+    #[test]
+    fn an_engine_decision_is_never_fast() {
+        let events = vec![
+            committed(1, 0),
+            requested(2, 1_000),
+            detail(
+                3,
+                1_001,
+                2,
+                ReviewScope {
+                    files: Some(40),
+                    ..Default::default()
+                },
+            ),
+            decided(4, 3_000, Some(DecidedBy::Model), None),
+        ];
+        let r = of_run(&events);
+        assert_eq!(r.reviews.automatic, 1);
+        assert_eq!(r.reviews.channel, 0);
+        assert_eq!(r.reviews.fast, 0);
+    }
+
+    /// A model recommendation applied at the visit (here one `max_scope`
+    /// withheld, so it never decided) does not make the person's decision
+    /// that follows automatic: the consumed decision's own `decided_by` and
+    /// channel say who decided, and a quick one is decided without review.
+    #[test]
+    fn an_applied_recommendation_leaves_a_persons_decision_with_the_person() {
+        let triage: EventPayload = serde_json::from_value(serde_json::json!({
+            "type": "decision_made",
+            "use_site": "review_triage",
+            "node": "gate",
+            "applied": true
+        }))
+        .unwrap();
+        let events = vec![
+            committed(1, 0),
+            ev(2, 900, triage),
+            requested(3, 1_000),
+            detail(
+                4,
+                1_001,
+                3,
+                ReviewScope {
+                    files: Some(40),
+                    ..Default::default()
+                },
+            ),
+            decided(5, 3_000, None, Some(DecisionChannel::Terminal)),
+        ];
+        let r = of_run(&events);
+        assert_eq!(r.reviews.automatic, 0);
+        assert_eq!(r.reviews.channel, 1);
+        assert_eq!(r.reviews.fast, 1);
+    }
+
+    /// A visit whose journal carries no `review_detail` (an older writer)
+    /// is never fast, however quick the decision was.
+    #[test]
+    fn a_visit_without_detail_is_never_fast() {
+        let events = vec![
+            committed(1, 0),
+            requested(2, 1_000),
+            decided(3, 2_000, None, Some(DecisionChannel::Terminal)),
+        ];
+        let r = of_run(&events);
+        assert_eq!(r.reviews.channel, 1);
+        assert_eq!(r.reviews.fast, 0);
     }
 
     /// Keys come from the journal: a hidden character never reaches the

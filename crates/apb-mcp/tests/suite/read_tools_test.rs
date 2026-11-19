@@ -147,6 +147,32 @@ fn get_unknown_is_error() {
     );
 }
 
+/// The diagram is rendered from the YAML the tool just loaded; the
+/// `playbook.mmd` beside the version is never read back, so a hand-edited
+/// file on disk is ignored.
+#[test]
+fn playbook_get_carries_the_diagram_of_the_yaml() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let edited = "flowchart TD\n  n0[\"hand edited, never read back\"]\n";
+    fs::write(
+        dir.path()
+            .join(".apb/playbooks/implement-task/1.0.0/playbook.mmd"),
+        edited,
+    )
+    .unwrap();
+    let playbook = apb_core::schema::Playbook::from_yaml(VALID).unwrap();
+    let want = apb_core::diagram::mermaid(&playbook, &apb_core::scope::digest_str(VALID));
+    for detail in [DetailMode::Summary, DetailMode::Full] {
+        let v = playbook_get(dir.path(), "implement-task", None, detail).unwrap();
+        assert_eq!(
+            v["diagram"].as_str(),
+            Some(want.as_str()),
+            "detail mode {detail:?}: {v}"
+        );
+    }
+}
+
 /// The result snapshot tools (`run_results`, `run_result_read`) over
 /// snapshots written through the store's transaction and stamped in a
 /// hand-built journal.

@@ -8,7 +8,8 @@
 //! namespace empty and re-read the whole window; one that does not know
 //! the untrusted markers drops them and would run the node without the
 //! prompt section; one that does not know `deadline` would continue the
-//! run without its limit. A run whose definition uses any of them carries a `run_guard`
+//! run without its limit; one that does not know a gate's `fields`,
+//! `show` or `max_scope` would decide the gate as a plain one. A run whose definition uses any of them carries a `run_guard`
 //! naming them after every checkpoint, so such an apb refuses to continue
 //! it. A later release adds names here instead of a new guard.
 
@@ -48,11 +49,18 @@ pub enum GuardedFeature {
     /// (`concurrency:`); an older apb drops the block and would start
     /// overlapping runs.
     Concurrency,
+    /// A gate takes typed field values and shows rendered outputs
+    /// (`human_review.fields`, `show`); an older apb drops them and would
+    /// output the bare decision.
+    ReviewFields,
+    /// A gate withholds options above a scope limit (`max_scope`); an older
+    /// apb drops it and would offer every option.
+    ReviewMaxScope,
 }
 
 impl GuardedFeature {
     /// Every feature this binary knows, in declaration order.
-    pub const ALL: [GuardedFeature; 9] = [
+    pub const ALL: [GuardedFeature; 11] = [
         GuardedFeature::ApprovalBinding,
         GuardedFeature::PersonOnly,
         GuardedFeature::RequiredApproval,
@@ -62,6 +70,8 @@ impl GuardedFeature {
         GuardedFeature::UntrustedInput,
         GuardedFeature::Deadline,
         GuardedFeature::Concurrency,
+        GuardedFeature::ReviewFields,
+        GuardedFeature::ReviewMaxScope,
     ];
 
     /// The name a `run_guard` carries.
@@ -76,6 +86,8 @@ impl GuardedFeature {
             GuardedFeature::UntrustedInput => "untrusted_input",
             GuardedFeature::Deadline => "deadline",
             GuardedFeature::Concurrency => "concurrency",
+            GuardedFeature::ReviewFields => "review_fields",
+            GuardedFeature::ReviewMaxScope => "review_max_scope",
         }
     }
 
@@ -105,6 +117,20 @@ pub fn guarded_features(playbook: &Playbook) -> Vec<GuardedFeature> {
         }
         if node.writes.is_some() || node.max_changed_files.is_some() {
             used.insert(GuardedFeature::WriteScope);
+        }
+        if let crate::schema::NodeKind::HumanReview {
+            fields,
+            show,
+            max_scope,
+            ..
+        } = &node.kind
+        {
+            if !fields.is_empty() || !show.is_empty() {
+                used.insert(GuardedFeature::ReviewFields);
+            }
+            if max_scope.is_some() {
+                used.insert(GuardedFeature::ReviewMaxScope);
+            }
         }
     }
     // The namespace and the untrusted markers are per-playbook checks: a
@@ -139,7 +165,7 @@ mod tests {
     /// Each declaration names its own feature, a definition using several
     /// names each once in declaration order, and a definition using none
     /// needs no guard.
-    /// `deadline:` names `deadline`, and this binary knows nine features.
+    /// `deadline:` names `deadline`, and this binary knows eleven features.
     #[test]
     fn a_deadline_is_a_guarded_feature() {
         let pb = Playbook::from_yaml(
@@ -147,11 +173,47 @@ mod tests {
         )
         .unwrap();
         assert_eq!(guarded_features(&pb), vec![GuardedFeature::Deadline]);
-        assert_eq!(GuardedFeature::ALL.len(), 9);
+        assert_eq!(GuardedFeature::ALL.len(), 11);
         assert_eq!(
             GuardedFeature::parse("deadline"),
             Some(GuardedFeature::Deadline)
         );
+    }
+
+    /// Every gate whose request journals a `review_detail`
+    /// (`NodeKind::needs_review_detail`) makes the run carry the guard, so an
+    /// older apb never resumes a run waiting at it; a gate without a form
+    /// feature needs neither.
+    #[test]
+    fn a_gate_that_journals_a_detail_is_guarded() {
+        let gates = [
+            ("{ id: g, type: human_review }", false),
+            (
+                "{ id: g, type: human_review, options: [approve, reject] }",
+                false,
+            ),
+            (
+                "{ id: g, type: human_review, max_scope: { files: 3 } }",
+                true,
+            ),
+            (
+                "{ id: g, type: human_review, fields: [{ name: n, type: text }] }",
+                true,
+            ),
+            (
+                "{ id: g, type: human_review, show: [{ label: L, text: t }] }",
+                true,
+            ),
+        ];
+        for (gate, needs) in gates {
+            let pb = playbook(&format!("  - {gate}\n"));
+            let node = pb.node("g").unwrap();
+            assert_eq!(node.kind.needs_review_detail(), needs, "{gate}");
+            let guarded = guarded_features(&pb);
+            let names_form = guarded.contains(&GuardedFeature::ReviewFields)
+                || guarded.contains(&GuardedFeature::ReviewMaxScope);
+            assert_eq!(names_form, needs, "{gate}: {guarded:?}");
+        }
     }
 
     #[test]
@@ -259,13 +321,43 @@ mod tests {
         assert!(guarded_features(&plain).is_empty());
     }
 
-    /// `ALL` knows nine features, `concurrency` the last one.
+    /// `ALL` knows eleven features, `review_max_scope` the last one.
     #[test]
-    fn all_has_nine_entries_in_order() {
-        assert_eq!(GuardedFeature::ALL.len(), 9);
+    fn all_has_eleven_entries_in_order() {
+        assert_eq!(GuardedFeature::ALL.len(), 11);
         assert_eq!(
             GuardedFeature::ALL[GuardedFeature::ALL.len() - 1],
-            GuardedFeature::Concurrency
+            GuardedFeature::ReviewMaxScope
+        );
+    }
+
+    /// A gate with `fields` or `show` names `review_fields`; one with
+    /// `max_scope` names `review_max_scope`; the names round-trip.
+    #[test]
+    fn review_fields_and_max_scope_are_guarded() {
+        let fields = playbook(
+            "  - { id: g, type: human_review, fields: [{ name: amount, type: number }] }\n",
+        );
+        assert_eq!(
+            guarded_features(&fields),
+            vec![GuardedFeature::ReviewFields]
+        );
+        let show = playbook(
+            "  - { id: g, type: human_review, show: [{ label: L, text: \"{{nodes.w.output}}\" }] }\n",
+        );
+        assert_eq!(guarded_features(&show), vec![GuardedFeature::ReviewFields]);
+        let max_scope = playbook("  - { id: g, type: human_review, max_scope: { files: 5 } }\n");
+        assert_eq!(
+            guarded_features(&max_scope),
+            vec![GuardedFeature::ReviewMaxScope]
+        );
+        assert_eq!(
+            GuardedFeature::parse("review_fields"),
+            Some(GuardedFeature::ReviewFields)
+        );
+        assert_eq!(
+            GuardedFeature::parse("review_max_scope"),
+            Some(GuardedFeature::ReviewMaxScope)
         );
     }
 

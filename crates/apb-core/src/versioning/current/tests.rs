@@ -649,3 +649,101 @@ fn a_configured_secret_in_a_reason_is_never_kept() {
     let kept = history(&dir, 1).unwrap().entries[0].reason.clone().unwrap();
     assert_eq!(kept.chars().count(), REASON_MAX);
 }
+
+/// A move gives the version it makes current the diagram derived from
+/// exactly its `playbook.yaml` whatever was there: missing, stale or
+/// edited (the file is derived, an edit is overwritten), and leaves every
+/// other version alone.
+#[test]
+fn a_move_completes_the_diagram_of_its_target() {
+    use crate::diagram::{DIAGRAM_FILE, DiagramState, state_of, write_beside};
+    let (_t, dir) = project();
+    assert_eq!(state_of(&dir.join("1.1.0")), DiagramState::Missing);
+    move_current(&dir, &MoveCurrent::new("1.1.0", person())).unwrap();
+    assert_eq!(state_of(&dir.join("1.1.0")), DiagramState::Current);
+    assert_eq!(state_of(&dir.join(CANDIDATE)), DiagramState::Missing);
+    // A stale diagram (an older yaml's) is derived again.
+    let older = YAML.replace("name: p", "name: older");
+    write_beside(&dir.join("1.0.0"), &older).unwrap();
+    assert_eq!(state_of(&dir.join("1.0.0")), DiagramState::Stale);
+    move_current(&dir, &MoveCurrent::new("1.0.0", person())).unwrap();
+    assert_eq!(state_of(&dir.join("1.0.0")), DiagramState::Current);
+    // An edited one is written again: nobody maintains the file.
+    let mmd = dir.join("1.1.0").join(DIAGRAM_FILE);
+    let derived = fs::read_to_string(&mmd).unwrap();
+    fs::write(&mmd, format!("{derived}%% a note\n")).unwrap();
+    assert_eq!(state_of(&dir.join("1.1.0")), DiagramState::Edited);
+    move_current(&dir, &MoveCurrent::new("1.1.0", person())).unwrap();
+    assert_eq!(fs::read_to_string(&mmd).unwrap(), derived);
+}
+
+/// An entry at `playbook.mmd` that is not a regular file (a link, a FIFO)
+/// is replaced by a fresh regular file renamed over it, without being
+/// followed: what a link points at stays as it was. A directory at that
+/// name, empty or not, refuses the move with a message that names the
+/// file, and `current` stays where it was.
+#[test]
+fn a_move_replaces_what_is_not_a_regular_diagram_file() {
+    use crate::diagram::{DIAGRAM_FILE, DiagramState, state_of};
+    let (t, dir) = project();
+    let outside = t.path().join("outside.mmd");
+    fs::write(&outside, "kept\n").unwrap();
+    let mmd = dir.join("1.1.0").join(DIAGRAM_FILE);
+    let derived = |v: &str| {
+        crate::diagram::text_of(&fs::read_to_string(dir.join(v).join("playbook.yaml")).unwrap())
+            .unwrap()
+    };
+    let to = |v: &str| move_current(&dir, &MoveCurrent::new(v, person()));
+    // A link to a file outside the store.
+    std::os::unix::fs::symlink(&outside, &mmd).unwrap();
+    to("1.1.0").unwrap();
+    assert!(!fs::symlink_metadata(&mmd).unwrap().file_type().is_symlink());
+    assert_eq!(fs::read_to_string(&mmd).unwrap(), derived("1.1.0"));
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "kept\n");
+    // A FIFO, then an empty directory.
+    to("1.0.0").unwrap();
+    fs::remove_file(&mmd).unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&mmd)
+            .status()
+            .unwrap()
+            .success()
+    );
+    to("1.1.0").unwrap();
+    assert_eq!(state_of(&dir.join("1.1.0")), DiagramState::Current);
+    // A directory, empty or not, is refused: nothing moved, nothing left
+    // to recover, the directory as it was.
+    to("1.0.0").unwrap();
+    fs::remove_file(&mmd).unwrap();
+    fs::create_dir(&mmd).unwrap();
+    let refused = to("1.1.0").unwrap_err().to_string();
+    assert!(
+        refused.contains("1.1.0/playbook.mmd") && refused.contains("remove it and try again"),
+        "{refused}"
+    );
+    assert_eq!(read_current_pointer(&dir).as_deref(), Some("1.0.0"));
+    assert!(!intent_pending(&dir));
+    assert!(mmd.is_dir());
+    fs::write(mmd.join("inside"), "x").unwrap();
+    assert!(to("1.1.0").is_err());
+    assert_eq!(read_current_pointer(&dir).as_deref(), Some("1.0.0"));
+    assert!(mmd.join("inside").is_file());
+}
+
+/// A version whose `playbook.yaml` does not read as a playbook has no
+/// diagram to derive: `current` does not move to it.
+#[test]
+fn a_move_to_a_version_whose_diagram_cannot_be_derived_is_refused() {
+    let (_t, dir) = project();
+    fs::write(
+        dir.join("1.1.0").join("playbook.yaml"),
+        ": not: [a: playbook",
+    )
+    .unwrap();
+    let refused = move_current(&dir, &MoveCurrent::new("1.1.0", person()))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("cannot be derived"), "{refused}");
+    assert_ne!(read_current_pointer(&dir).as_deref(), Some("1.1.0"));
+}

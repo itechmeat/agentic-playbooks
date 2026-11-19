@@ -169,3 +169,89 @@ fn dry_run_writes_nothing() {
     assert!(!proj.path().join(".apb/profiles/main").exists());
     assert!(!proj.path().join(".apb/playbooks/a/1.0.1").exists());
 }
+
+/// The migrated version is a publication like any other: it leaves with the
+/// derived diagram beside its rewritten `playbook.yaml`
+/// (people-in-the-loop D6).
+#[test]
+fn a_migrated_version_has_a_diagram() {
+    let proj = tempfile::tempdir().unwrap();
+    init_project(proj.path()).unwrap();
+    seed_playbook(proj.path(), "a", &NAMED.replace("id: ID", "id: a"));
+    let mp = plan(proj.path()).unwrap();
+    apply(proj.path(), &mp, 111).unwrap();
+
+    assert_eq!(
+        apb_core::diagram::state_of(&proj.path().join(".apb/playbooks/a/1.0.1")),
+        apb_core::diagram::DiagramState::Current,
+        "the migrated version must carry a current diagram"
+    );
+    // The source version is untouched by the migration's diagram write.
+    assert!(
+        !proj
+            .path()
+            .join(".apb/playbooks/a/1.0.0/playbook.mmd")
+            .exists()
+    );
+}
+
+/// A retry of an interrupted migration completes the migrated version's
+/// diagram before `current` names it: whatever a crash left (the version
+/// with its rewritten yaml and no diagram, with the source's stale one, or
+/// only a staging leftover), the repeated apply ends with `current` at the
+/// migrated version and its diagram derived from exactly its yaml.
+#[test]
+fn a_retried_migration_completes_the_diagram() {
+    let _cfg = crate::common::config_sandbox();
+    // The bytes a migration stores, from one that went through.
+    let model = tempfile::tempdir().unwrap();
+    init_project(model.path()).unwrap();
+    seed_playbook(model.path(), "a", &NAMED.replace("id: ID", "id: a"));
+    apply(model.path(), &plan(model.path()).unwrap(), 111).unwrap();
+    let migrated =
+        fs::read_to_string(model.path().join(".apb/playbooks/a/1.0.1/playbook.yaml")).unwrap();
+
+    type Left = fn(&Path, &str);
+    let crashes: Vec<(&str, Left)> = vec![
+        ("the rewritten yaml without a diagram", |pb, yaml| {
+            fs::create_dir_all(pb.join("1.0.1")).unwrap();
+            fs::write(pb.join("1.0.1/playbook.yaml"), yaml).unwrap();
+        }),
+        (
+            "the source's diagram beside the rewritten yaml",
+            |pb, yaml| {
+                let source = fs::read_to_string(pb.join("1.0.0/playbook.yaml")).unwrap();
+                fs::create_dir_all(pb.join("1.0.1")).unwrap();
+                fs::write(pb.join("1.0.1/playbook.yaml"), yaml).unwrap();
+                fs::write(
+                    pb.join("1.0.1/playbook.mmd"),
+                    apb_core::diagram::text_of(&source).unwrap_or_default(),
+                )
+                .unwrap();
+            },
+        ),
+        ("a staging leftover", |pb, yaml| {
+            fs::create_dir_all(pb.join(".tmp-1.0.1-1")).unwrap();
+            fs::write(pb.join(".tmp-1.0.1-1/playbook.yaml"), yaml).unwrap();
+        }),
+    ];
+    for (what, leave) in crashes {
+        let proj = tempfile::tempdir().unwrap();
+        init_project(proj.path()).unwrap();
+        seed_playbook(proj.path(), "a", &NAMED.replace("id: ID", "id: a"));
+        let mp = plan(proj.path()).unwrap();
+        let pb = proj.path().join(".apb/playbooks/a");
+        leave(&pb, &migrated);
+        apply(proj.path(), &mp, 111).unwrap();
+        assert_eq!(
+            apb_core::diagram::state_of(&pb.join("1.0.1")),
+            apb_core::diagram::DiagramState::Current,
+            "{what}"
+        );
+        assert_eq!(
+            fs::read_to_string(pb.join("current")).unwrap().trim(),
+            "1.0.1",
+            "{what}"
+        );
+    }
+}

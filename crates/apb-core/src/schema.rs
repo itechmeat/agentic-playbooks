@@ -630,6 +630,24 @@ impl Node {
 }
 
 impl NodeKind {
+    /// Whether a gate's request journals a `review_detail` beside it: true
+    /// only for a `human_review` that uses a form feature (`fields`, `show`
+    /// or `max_scope`). Every other gate, a publish consent included,
+    /// writes its `review_requested` alone, exactly the journal an older
+    /// apb writes, so an older apb keeps resuming a run waiting at it. The
+    /// one decision the drive's writer and every reader share: a gate this
+    /// answers true for and whose detail is missing fails closed, it is
+    /// never read as a gate without the feature. Every gate it answers true
+    /// for carries the run guard (`review_fields` or `review_max_scope`,
+    /// `validate::guarded`), so an older apb never continues such a run.
+    pub fn needs_review_detail(&self) -> bool {
+        matches!(
+            self,
+            NodeKind::HumanReview { fields, show, max_scope, .. }
+                if !fields.is_empty() || !show.is_empty() || max_scope.is_some()
+        )
+    }
+
     /// The declared isolation of an `agent_task`; `None` for every other
     /// kind and when unset.
     pub fn isolation(&self) -> Option<&IsolationSpec> {
@@ -2127,6 +2145,17 @@ pub enum NodeKind {
         /// is surfaced literally, same as the option strings themselves.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+        /// Values the reviewer fills or corrects (people-in-the-loop D3). With
+        /// any, the gate's output is one JSON object: `decision` and every field.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fields: Vec<crate::review_form::ReviewField>,
+        /// Earlier outputs shown above the options, rendered once per request.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        show: Vec<crate::review_form::ShowEntry>,
+        /// Options the gate withholds when the decision's scope is larger
+        /// (people-in-the-loop D2). Absent: every option is offered.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_scope: Option<crate::review_form::MaxScope>,
     },
     Wait {
         wait_for: WaitFor,
@@ -2622,6 +2651,20 @@ pub fn template_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
             .collect::<Vec<_>>(),
         _ => Vec::new(),
     });
+    // A review gate's field defaults are templates over earlier outputs
+    // (people-in-the-loop D3): rendered once per request.
+    let field_defaults = playbook.nodes.iter().flat_map(|n| match &n.kind {
+        NodeKind::HumanReview { fields, .. } => fields
+            .iter()
+            .filter_map(|f| {
+                f.default
+                    .as_ref()
+                    .filter(|d| d.contains("{{"))
+                    .map(|d| (n.id.as_str(), d.as_str()))
+            })
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    });
     playbook
         .nodes
         .iter()
@@ -2641,6 +2684,25 @@ pub fn template_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
             Some((n.id.as_str(), text))
         })
         .chain(judge_state)
+        .chain(field_defaults)
+        .collect()
+}
+
+/// The `show` texts of a playbook's review gates as `(owner node id,
+/// text)` pairs (people-in-the-loop D3): shown to a person, never passed
+/// on, so they resolve like templates (V13) but are not part of a node's
+/// own prompt texts.
+pub fn review_show_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
+    playbook
+        .nodes
+        .iter()
+        .flat_map(|n| match &n.kind {
+            NodeKind::HumanReview { show, .. } => show
+                .iter()
+                .map(|s| (n.id.as_str(), s.text.as_str()))
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
         .collect()
 }
 

@@ -110,6 +110,7 @@
   import PlaybookEdge from '../lib/PlaybookEdge.svelte'
   import NodeSummary from '../lib/NodeSummary.svelte'
   import FitTop from '../lib/FitTop.svelte'
+  import DiagramText from '../lib/DiagramText.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
   import StatusBar, { type StatusItem } from '$lib/components/StatusBar.svelte'
   import { Button } from '$lib/components/ui/button'
@@ -292,6 +293,12 @@
   // writes a playbook, so the editor here is for reading, not for editing.
   let yamlText = $state<string>('')
   let showYaml = $state(false)
+  // --- people-in-the-loop (D6): the diagram text beside the graph ---
+  // The definition's Mermaid flowchart, the same text the run report
+  // carries, collapsed until opened. The detail payload carries it beside
+  // the definition; an older server omits it, so the block shows only
+  // when the field is here.
+  let diagramText = $state<string | null>(null)
   // Version history is a side trip, not the reason this page exists, so it
   // stays off the canvas until asked for.
   let showHistory = $state(false)
@@ -727,6 +734,10 @@
       meta = metaOf(detail.playbook, detail.effective_effects, detail.assumed_effects)
       publishOnly = detail.playbook.publish_only === true
       yamlText = detail.yaml
+      // Defensive read: `diagram` is new (people-in-the-loop D6); an older
+      // server leaves it out and the block stays hidden.
+      const diagram = (detail as { diagram?: unknown }).diagram
+      diagramText = typeof diagram === 'string' && diagram.length > 0 ? diagram : null
       name = detail.playbook.name || detail.id
       version = detail.version
       validation = detail.validation
@@ -1420,6 +1431,14 @@
         {/if}
         {#if layerCounts && !countsReport}
           <p class="layer-note">No run history to count yet.</p>
+        {/if}
+        <!-- people-in-the-loop (D6): the diagram text, the definition's
+             Mermaid flowchart as text, collapsed until opened, below the
+             layers bar in the same column so it never covers the layer
+             toggles. Plain text and a copy button; no diagram library
+             renders it. -->
+        {#if diagramText}
+          <DiagramText text={diagramText} />
         {/if}
       </div>
 

@@ -68,6 +68,9 @@
             {#if c.awaiting_consent && c.prompt}
               <pre class="guidance" data-testid="publish-guidance">{c.prompt}</pre>
             {/if}
+            {#if c.awaiting_consent && c.scopeLine}
+              <p class="muted scope" data-testid="publish-scope">scope: {c.scopeLine}</p>
+            {/if}
             {#if c.awaiting_consent && c.unattended}
               <UnattendedNote outcome={c.unattended} testid="publish-unattended" />
             {/if}
@@ -204,6 +207,12 @@
   }
   .muted {
     color: var(--muted-foreground);
+  }
+  .scope {
+    margin: 0;
+    font-size: 12px;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    overflow-wrap: anywhere;
   }
   .bad {
     color: var(--destructive);

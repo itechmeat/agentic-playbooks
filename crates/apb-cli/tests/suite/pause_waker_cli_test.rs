@@ -337,15 +337,23 @@ fn deadline_wakers(run_id: &str) -> Vec<u32> {
 
 /// Starts `wake` detached with `--deadline <deadline>` and pauses it as
 /// the engine does (no `until`, a budget pause); returns once the drained
-/// driver journaled the pause.
+/// driver journaled the pause. The parked driver of an earlier call in the
+/// same root may still hold the workdir for a moment after it journaled
+/// its pause, so a start refused `workdir busy` is tried again until it
+/// is let in.
 fn start_and_park(root: &Path, deadline: &str) -> (String, RunGuard) {
     fs::write(root.join("slow"), "").unwrap();
-    let out = crate::common::apb_std()
-        .args(["run", "wake", "--detach", "--deadline", deadline])
-        .env("APB_WAKER_POLL_MS", "50")
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let out = poll("the workdir to be free", || {
+        let out = crate::common::apb_std()
+            .args(["run", "wake", "--detach", "--deadline", deadline])
+            .env("APB_WAKER_POLL_MS", "50")
+            .current_dir(root)
+            .output()
+            .unwrap();
+        let busy =
+            !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("workdir busy");
+        (!busy).then_some(out)
+    });
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(
         out.status.success(),

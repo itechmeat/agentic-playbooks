@@ -16,10 +16,16 @@
 //!    holds a `playbook.yaml`, the caller's expectation of `current`, a
 //!    person never moves to the candidate, and every trial record the move
 //!    updates reads;
-//! 3. write the intent `current.intent.json`, then, for
-//!    [`move_current_writing_locked`] only, the target version itself
-//!    (shipped content apb installs), so the version and the move are one
-//!    operation;
+//! 3. give the target the diagram derived from exactly its
+//!    `playbook.yaml`, writing it again when it is missing, stale or edited
+//!    and replacing an entry at its name that is not a regular file by a
+//!    rename over it ([`crate::diagram::ensure_beside`]); a directory at
+//!    that name is not replaced, and a target whose diagram cannot be
+//!    derived or written is refused. Then write the intent
+//!    `current.intent.json`. For [`move_current_writing_locked`] the intent
+//!    comes first, then the target version itself (shipped content apb
+//!    installs), so the version and the move are one operation, and then
+//!    its diagram check;
 //! 4. end the trial of a candidate the move passes by (`superseded`);
 //! 5. write `current`;
 //! 6. when the target is the candidate: clear the pointer and record its
@@ -257,6 +263,10 @@ fn run(
     refuse_read_only()?;
     recover_locked(playbook_dir, held)?;
     let intent = plan(playbook_dir, req, write.is_some())?;
+    if write.is_none() {
+        // Before the intent: a refusal leaves nothing to recover.
+        require_diagram(playbook_dir, &intent.to)?;
+    }
     intent::write(playbook_dir, &intent)?;
     fault::after(Step::Intent)?;
     if let Some(write) = write {
@@ -273,6 +283,8 @@ fn run(
                 intent.to
             )));
         }
+        // A version this move wrote is checked once it exists.
+        require_diagram(playbook_dir, &intent.to)?;
     }
     if intent.supersede.is_some() {
         supersede_candidate_locked(
@@ -306,6 +318,27 @@ fn run(
         superseded_candidate: intent.supersede,
         audit_pending,
     })
+}
+
+/// The version `current` is about to name carries the diagram derived
+/// from exactly its `playbook.yaml` (people-in-the-loop D6): one an
+/// interrupted write, an older apb or a hand edit left missing, stale or
+/// changed is written again here, before anything points at it, and an
+/// entry at `playbook.mmd` that is not a regular file (a directory
+/// excepted) is replaced by a rename over it, without following it. Every writer of `current` passes this point. When that
+/// cannot be done, or the version's YAML does not read so no diagram can
+/// be derived, the move is refused and `current` stays where it was.
+fn require_diagram(playbook_dir: &Path, version: &str) -> Result<(), MoveError> {
+    match crate::diagram::ensure_beside(playbook_dir, version)? {
+        crate::diagram::DiagramState::Current => Ok(()),
+        _ => Err(MoveError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}@{version}: its playbook.yaml does not read as a playbook beneath the store, so its diagram (playbook.mmd) cannot be derived; `current` was not moved",
+                id_of(playbook_dir)
+            ),
+        ))),
+    }
 }
 
 /// Finishes or undoes a move a crash interrupted: with `current` at the

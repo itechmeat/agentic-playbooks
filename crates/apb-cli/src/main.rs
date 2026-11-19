@@ -26,6 +26,7 @@ mod demo;
 mod decide;
 // --- end issue #193 ---
 mod decisions;
+mod diagram;
 mod discover;
 mod doctor;
 // --- 0.24.0 eval suites ---
@@ -559,6 +560,10 @@ enum Command {
         /// already has an answer
         #[arg(long, value_name = "KIND:SEQ")]
         request: Option<crate::actions::RequestArg>,
+        /// A value for one of the gate's fields; repeat for more (the value
+        /// is read as the field's type).
+        #[arg(long = "field", value_name = "NAME=VALUE")]
+        field: Vec<String>,
     },
     /// The publish gate of a run: show the exact plan, consent to it by its
     /// nonce, or skip the push
@@ -611,6 +616,11 @@ enum Command {
     /// evaluates now and exits 3 on hold; a person's `clear`, `mute` and
     /// `unmute`
     Health(crate::health::HealthArgs),
+    /// The Mermaid flowchart of a playbook version (people-in-the-loop D6):
+    /// print it, write it with --out, or rewrite the playbook.mmd files
+    /// beside every playbook.yaml (--rebuild, --all). Display only: the
+    /// text is derived from the YAML on every call, never read back
+    Diagram(crate::diagram::DiagramArgs),
     /// Find step sequences your past agent sessions repeat (Claude Code and
     /// Codex history of the named projects) and offer them as playbook
     /// drafts; list or show stored results, save or decline a suggestion.
@@ -1312,6 +1322,7 @@ fn main() -> ExitCode {
             note,
             nonce,
             request,
+            field,
         }) => review_cmd(
             &root,
             &run_id,
@@ -1320,6 +1331,7 @@ fn main() -> ExitCode {
             &note,
             nonce.as_deref(),
             request,
+            field,
         ),
         Some(Command::Publish { action }) => crate::publish::publish_cmd(&root, action),
         Some(Command::Answer {
@@ -1361,6 +1373,7 @@ fn main() -> ExitCode {
         Some(Command::Discover(args)) => discover::discover_cmd(&root, args),
         // --- 0.23.0 stats (C3) ---
         Some(Command::Health(args)) => health::health_cmd(&root, args),
+        Some(Command::Diagram(args)) => diagram::diagram_cmd(&root, args),
         Some(Command::Stats {
             playbook,
             since,

@@ -858,6 +858,12 @@ pub(crate) async fn get_playbook(
                 "version": loaded.version,
                 "yaml": loaded.yaml,
                 "playbook": loaded.playbook,
+                // Rendered from the YAML just loaded; the `playbook.mmd`
+                // beside the version (D6) is display only, never read back.
+                "diagram": apb_core::diagram::mermaid(
+                    &loaded.playbook,
+                    &apb_core::scope::digest_str(&loaded.yaml),
+                ),
                 // What a run may touch as the run policy counts it: inferred
                 // from the nodes, plus the playbook's and each node's own
                 // declaration. The declared list alone can understate it.

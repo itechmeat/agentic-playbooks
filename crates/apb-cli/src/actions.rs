@@ -448,6 +448,7 @@ mod tests {
                     note,
                     nonce,
                     request,
+                    ..
                 } => {
                     assert_eq!((run_id.as_str(), node_id.as_str()), ("r-1", "-n1"));
                     assert_eq!(request.map(|r| r.seq), Some(7));

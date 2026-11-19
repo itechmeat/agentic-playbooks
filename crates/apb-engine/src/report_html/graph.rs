@@ -9,7 +9,10 @@
 //! or review edge carries its option label. Above [GRAPH_MAX_NODES] nodes
 //! the section says so instead of drawing. Nothing here runs: the drawing
 //! is one SVG element tree, every string from the playbook redacted and
-//! escaped like the rest of the page.
+//! escaped like the rest of the page. Beside the drawing the section
+//! carries the diagram text (people-in-the-loop D6): the definition's
+//! Mermaid flowchart as collapsible text, written whatever the drawing
+//! shows; a text has no layout limit.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -54,8 +57,10 @@ const LANE_CHANNEL_STEP: usize = 4;
 const BARYCENTER_PASSES: usize = 4;
 
 /// The Graph section: the definition the run actually executed (the shown
-/// segment's stored definition), laid out and drawn. A definition the run
-/// did not establish, or one too big to draw, says so in one line.
+/// segment's stored definition), laid out and drawn, with the diagram text
+/// of that definition beside the drawing. A definition the run did not
+/// establish says so in one line; one too big to draw says so in one line,
+/// and its diagram text is still written: a text has no layout limit.
 pub(super) fn run_graph(w: &Writer, report: &Report) -> Markup {
     let Some(pb) = report.definition.as_ref() else {
         return section(
@@ -74,7 +79,54 @@ pub(super) fn run_graph(w: &Writer, report: &Report) -> Markup {
         .filter_map(|n| n.status.clone().map(|s| (n.node.clone(), s)))
         .collect();
     let taken = taken_edges(report, pb);
-    section("Graph", draw(w, pb, &statuses, &taken))
+    let digest = shown_definition_digest(&report.graph);
+    section("Graph", graph_section(w, pb, &digest, &statuses, &taken))
+}
+
+/// The section body over one known definition: the drawn graph (or its
+/// too-big note) and, always, the diagram text beside it.
+fn graph_section(
+    w: &Writer,
+    pb: &Playbook,
+    digest: &str,
+    statuses: &BTreeMap<String, String>,
+    taken: &BTreeMap<usize, bool>,
+) -> Markup {
+    Markup::concat([draw(w, pb, statuses, taken), diagram_text(w, pb, digest)])
+}
+
+/// The digest of the shown segment's stored definition, in the
+/// `sha256:<hex>` shape [`apb_core::scope::digest_str`] writes: the segment
+/// view carries the unprefixed hex of the same bytes, which the store
+/// re-hashes on every read. Empty when the run journaled no digest (a
+/// definition the run did not establish; `run_graph` renders no block
+/// there).
+fn shown_definition_digest(graph: &crate::run_outcome::graph::RunGraph) -> String {
+    graph
+        .shown_segment
+        .and_then(|i| graph.segments.get(i))
+        .and_then(|s| s.digest.as_deref())
+        .map(|hex| format!("sha256:{hex}"))
+        .unwrap_or_default()
+}
+
+/// The diagram text beside the drawn graph: the definition's Mermaid
+/// flowchart (`apb_core::diagram::mermaid`) over the shown segment's
+/// stored definition, redacted and escaped like every other text of the
+/// page. Every label is redacted before Mermaid escapes it, so a
+/// registered value is matched in its raw spelling, and the whole text
+/// again after. Written above [GRAPH_MAX_NODES] too: a text has no layout
+/// limit.
+fn diagram_text(w: &Writer, pb: &Playbook, digest: &str) -> Markup {
+    let text = apb_core::diagram::mermaid_with(pb, digest, &|label| w.redact(label));
+    Markup::el(
+        "details",
+        Some("graph-diagram"),
+        Markup::concat([
+            Markup::el("summary", None, Markup::text("Diagram text")),
+            Markup::el("pre", None, w.text(&text)),
+        ]),
+    )
 }
 
 /// Which of `pb`'s edges the run traversed, keyed by position in
@@ -813,6 +865,126 @@ mod tests {
             "{svg}"
         );
         assert!(!svg.contains("<b>Bold</b>"), "{svg}");
+    }
+
+    /// A run graph whose shown segment is the stored definition `yaml`,
+    /// carrying the unprefixed hex the segment view carries.
+    fn graph_showing(yaml: &str) -> crate::run_outcome::graph::RunGraph {
+        let hex = apb_core::scope::digest_str(yaml)
+            .trim_start_matches("sha256:")
+            .to_string();
+        crate::run_outcome::graph::RunGraph {
+            segments: vec![crate::run_outcome::graph::DefinitionSegmentView {
+                index: 0,
+                from_seq: 0,
+                to_seq: None,
+                opened_by: "start".into(),
+                digest: Some(hex),
+                known: true,
+                reason: None,
+                mismatch_recorded: false,
+            }],
+            shown_segment: Some(0),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            traversals: Vec::new(),
+            judge_nodes: Vec::new(),
+            judge_edges: Vec::new(),
+            not_run: Vec::new(),
+            ended: true,
+        }
+    }
+
+    /// The section `run_graph` builds over a known definition: the drawn
+    /// graph with the diagram text beside it, under the section heading.
+    /// The digest goes through the run path's own reading of the shown
+    /// segment (`shown_definition_digest`).
+    fn rendered_graph_section(
+        pb: &Playbook,
+        yaml: &str,
+        statuses: &BTreeMap<String, String>,
+        taken: &BTreeMap<usize, bool>,
+    ) -> String {
+        let digest = shown_definition_digest(&graph_showing(yaml));
+        section("Graph", graph_section(&w(), pb, &digest, statuses, taken)).into_string()
+    }
+
+    /// The shown segment's hex reads back in the `sha256:<hex>` shape the
+    /// diagram's first line carries; no shown segment gives no digest.
+    #[test]
+    fn the_shown_digest_is_prefixed_once() {
+        let yaml = "schema: 2\n";
+        let graph = graph_showing(yaml);
+        assert_eq!(
+            shown_definition_digest(&graph),
+            apb_core::scope::digest_str(yaml)
+        );
+        let none = crate::run_outcome::graph::RunGraph {
+            shown_segment: None,
+            ..graph
+        };
+        assert_eq!(shown_definition_digest(&none), "");
+    }
+
+    #[test]
+    fn the_graph_section_carries_the_diagram_text() {
+        const MARKED: &str = "schema: 2\nid: m\nname: M\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: work, type: script, script: work.sh, runner: sh, title: \"<b>Bold</b> \\\"q\\\" y\" }\n  - { id: done, type: finish, outcome: success, prompt: sum up }\nedges:\n  - { from: s, to: work }\n  - { from: work, to: done }\n";
+        let p = pb(MARKED);
+        let out = rendered_graph_section(&p, MARKED, &BTreeMap::new(), &BTreeMap::new());
+        // The block sits beside the drawing, collapsed until opened.
+        assert!(out.contains("<details"), "{out}");
+        assert!(out.contains("<summary>Diagram text</summary>"), "{out}");
+        // The text is the definition's Mermaid flowchart, whose first line
+        // carries the YAML's digest.
+        assert!(out.contains("flowchart TD"), "{out}");
+        assert!(
+            out.contains(&format!(
+                "%% apb-diagram {} derived from playbook.yaml",
+                apb_core::scope::digest_str(MARKED)
+            )),
+            "{out}"
+        );
+        // Escaped like the node labels: the title reaches the page only
+        // through the page's escaping, over Mermaid's own (`#lt;` and
+        // `#quot;` are Mermaid's entities; a raw `<` or `"` never lands).
+        assert!(
+            out.contains("#lt;b#gt;Bold#lt;/b#gt; #quot;q#quot; y"),
+            "{out}"
+        );
+        assert!(!out.contains("<b>Bold</b>"), "{out}");
+        // A text has no layout limit: above GRAPH_MAX_NODES the block is
+        // still written, beside the too-big note the drawing leaves.
+        let big_yaml = big(GRAPH_MAX_NODES + 1);
+        let p = pb(&big_yaml);
+        let out = rendered_graph_section(&p, &big_yaml, &BTreeMap::new(), &BTreeMap::new());
+        assert!(out.contains("at most 80"), "{out}");
+        assert!(out.contains("<summary>Diagram text</summary>"), "{out}");
+        assert!(out.contains("flowchart TD"), "{out}");
+    }
+
+    /// A registered value with characters Mermaid escapes is redacted
+    /// before the escaping: neither its raw nor its escaped spelling
+    /// reaches the diagram text.
+    #[test]
+    fn a_secret_in_a_label_is_redacted_before_mermaid_escapes_it() {
+        let secret = "Zq7&vK2#mXp<L9w|R4t";
+        let yaml = format!(
+            "schema: 2\nid: m\nname: M\nversion: 1.0.0\nnodes:\n  - {{ id: s, type: start }}\n  - {{ id: work, type: script, script: work.sh, runner: sh, title: \"t {secret}\" }}\n  - {{ id: done, type: finish, outcome: success, prompt: sum up }}\nedges:\n  - {{ from: s, to: work }}\n  - {{ from: work, to: done }}\n"
+        );
+        let p = pb(&yaml);
+        let w = Writer::new(crate::redact::Redactor::new(
+            vec![apb_core::secret::Secret::new(secret)],
+            Path::new("/"),
+        ));
+        let out = diagram_text(&w, &p, "sha256:abc").into_string();
+        let escaped: String = secret
+            .replace('&', "#amp;")
+            .replace('#', "#35;")
+            .replace('<', "#lt;")
+            .replace('|', "#124;");
+        assert!(!out.contains("Zq7"), "{out}");
+        assert!(!out.contains(&escaped), "{out}");
+        assert!(out.contains("flowchart TD"), "{out}");
     }
 
     #[test]

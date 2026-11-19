@@ -535,8 +535,13 @@ mod retention_test;
 #[path = "suite/retry_test.rs"]
 mod retry_test;
 #[cfg(unix)]
+#[path = "suite/review_form_test.rs"]
+mod review_form_test;
+#[cfg(unix)]
 #[path = "suite/review_panel_test.rs"]
 mod review_panel_test;
+#[path = "suite/review_scope_test.rs"]
+mod review_scope_test;
 #[path = "suite/review_state_test.rs"]
 mod review_state_test;
 #[path = "suite/review_test.rs"]

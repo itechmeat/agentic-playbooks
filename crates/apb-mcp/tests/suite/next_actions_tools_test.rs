@@ -101,8 +101,27 @@ fn a_review_action_carries_its_request_and_a_second_decision_is_refused() {
     assert_eq!(a["arguments"]["request"], seq);
     assert_eq!(a["arguments"]["node"], "gate");
     assert_eq!(a["fill"][0]["options"], json!(["approved", "rejected"]));
-    tools::review_decide(root, "r", "gate", "approved", "", None, Some(seq)).unwrap();
-    let again = tools::review_decide(root, "r", "gate", "rejected", "", None, Some(seq));
+    tools::review_decide(
+        root,
+        "r",
+        "gate",
+        "approved",
+        "",
+        None,
+        Some(seq),
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap();
+    let again = tools::review_decide(
+        root,
+        "r",
+        "gate",
+        "rejected",
+        "",
+        None,
+        Some(seq),
+        &std::collections::BTreeMap::new(),
+    );
     assert!(
         matches!(again, Err(tools::ToolError::Conflict(_))),
         "{again:?}"

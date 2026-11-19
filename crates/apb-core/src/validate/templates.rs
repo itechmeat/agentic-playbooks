@@ -73,6 +73,11 @@ pub(crate) fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
     for (owner, text) in template_texts(playbook) {
         check_text(owner, text, r);
     }
+    // A review gate's `show` texts render for a person (people-in-the-loop
+    // D3): they resolve like every template, and are shown, never passed on.
+    for (owner, text) in crate::schema::review_show_texts(playbook) {
+        check_text(owner, text, r);
+    }
 }
 
 // The three text collectors live in `crate::schema` next to the node kinds

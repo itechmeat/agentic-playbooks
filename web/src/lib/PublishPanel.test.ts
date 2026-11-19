@@ -58,6 +58,11 @@ describe('PublishPanel', () => {
     expect(byTestId('publish-outside')).not.toBeNull()
   })
 
+  it('shows the scope of an open plan with the same label as the CLI', () => {
+    render({ gates: [{ node: 'ship', plan, scopeLine: '3 commits, 6 files, +41 -38 lines' }] })
+    expect(text('publish-scope')).toBe('scope: 3 commits, 6 files, +41 -38 lines')
+  })
+
   it('shows the node guidance as text above an open plan', () => {
     render({ gates: [{ node: 'ship', plan, prompt: 'Check <i>the</i> subjects.' }] })
     expect(text('publish-guidance')).toBe('Check <i>the</i> subjects.')

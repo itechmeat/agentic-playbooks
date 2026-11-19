@@ -182,6 +182,14 @@ pub(super) fn declared_fields<'a>(
             Some(f.clone())
         } else if let Some(f) = super::judge::judge_output_fields(n) {
             Some(f)
+        } else if let crate::schema::NodeKind::HumanReview { fields, .. } = &n.kind
+            && !fields.is_empty()
+        {
+            // A gate with fields outputs one JSON object: `decision` and
+            // every field (people-in-the-loop D3).
+            let mut names = vec!["decision".to_string()];
+            names.extend(fields.iter().map(|f| f.name.clone()));
+            Some(names)
         } else if matches!(
             n.kind,
             NodeKind::Playbook {

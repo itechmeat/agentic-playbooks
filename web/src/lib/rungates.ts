@@ -6,8 +6,10 @@ import type {
   CallerRefusal,
   NextAction,
   PendingHostTask,
+  FieldView,
   ReviewBinding,
   ReviewRecommendation,
+  ShownEntry,
   UnattendedOutcome,
 } from './api.gen'
 import type { RunDetail } from './types'
@@ -47,6 +49,16 @@ export interface ReviewEntry extends GateRequest {
   /** Only a person's channel decides this gate: the CLI at a terminal or a
    * dashboard with a signed-in session. */
   personOnly?: boolean
+  /** What the decision covers since the gate's previous decision, as the
+   * one scope line (people-in-the-loop). */
+  scopeLine?: string
+  /** The options `max_scope` withholds above the scope, with the reason. */
+  withheld?: string[]
+  withheldReason?: string
+  /** The rendered `show:` entries the gate displays above its options. */
+  show?: ShownEntry[]
+  /** The typed fields the gate takes, with their rendered defaults. */
+  fields?: FieldView[]
 }
 
 // A pending question as the question panel renders it. The panel always
@@ -126,7 +138,7 @@ export function runGates(detail: RunDetail): RunGates {
   return {
     reviews: p.pending_reviews
       .filter((r) => !r.publish)
-      .map(({ node, options, prompt, recommendation, binding, person_only }) => {
+      .map(({ node, options, prompt, recommendation, binding, person_only, scope_line, withheld, withheld_reason, show, fields }) => {
         const entry: ReviewEntry = { node, options, ...(prompt ? { prompt } : {}), ...req('decide_review', node) }
         const note = recommendationNote(recommendation)
         if (note) entry.recommendation = note
@@ -135,11 +147,26 @@ export function runGates(detail: RunDetail): RunGates {
           entry.nonce = binding.nonce
         }
         if (person_only) entry.personOnly = true
+        if (scope_line) entry.scopeLine = scope_line
+        if (withheld?.length) {
+          entry.withheld = withheld
+          entry.withheldReason = withheld_reason
+        }
+        if (show?.length) entry.show = show
+        if (fields?.length) entry.fields = fields
         return entry
       }),
-    publishes: p.pending_reviews.flatMap(({ node, publish, prompt }) =>
+    publishes: p.pending_reviews.flatMap(({ node, publish, prompt, scope_line }) =>
       publish
-        ? [{ node, plan: publish, ...(prompt ? { prompt } : {}), ...req('decide_publish', node) }]
+        ? [
+            {
+              node,
+              plan: publish,
+              ...(prompt ? { prompt } : {}),
+              ...(scope_line ? { scopeLine: scope_line } : {}),
+              ...req('decide_publish', node),
+            },
+          ]
         : [],
     ),
     questions: p.pending_questions.map(({ node, question, options }) => ({

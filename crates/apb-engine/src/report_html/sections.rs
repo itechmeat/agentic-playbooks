@@ -20,6 +20,11 @@ impl Writer {
         Writer { redactor }
     }
 
+    /// `text` redacted, not yet escaped.
+    pub(super) fn redact(&self, text: &str) -> String {
+        self.redactor.redact(text)
+    }
+
     pub(super) fn text(&self, text: &str) -> Markup {
         Markup::text(&self.redactor.redact(text))
     }
@@ -371,6 +376,50 @@ pub(super) fn sends(w: &Writer, sends: &[RunIntent]) -> Markup {
     }
     let lines: Vec<String> = sends.iter().map(RunIntent::line).collect();
     section("Sends", w.list(&lines))
+}
+
+/// The review decisions, each with the scope line of its request and a
+/// `decided without review` marker on a fast one (people-in-the-loop D2).
+pub(super) fn reviews(w: &Writer, reviews: &[super::model::ReviewLine]) -> Markup {
+    if reviews.is_empty() {
+        return Markup::concat([]);
+    }
+    let rows = reviews
+        .iter()
+        .map(|r| {
+            // The field values a decision carried, under the decision
+            // (people-in-the-loop D3); they are already scrubbed.
+            let decision = if r.fields.is_empty() {
+                r.decision.clone()
+            } else {
+                let values: Vec<String> = r
+                    .fields
+                    .iter()
+                    .map(|(k, v)| match v {
+                        serde_json::Value::Null => format!("{k}: none"),
+                        v => format!("{k}: {v}"),
+                    })
+                    .collect();
+                format!("{} ({})", r.decision, values.join(", "))
+            };
+            vec![
+                r.node.clone(),
+                decision,
+                r.scope_line
+                    .clone()
+                    .unwrap_or_else(|| "nothing to show".into()),
+                if r.fast {
+                    "decided without review".into()
+                } else {
+                    String::new()
+                },
+            ]
+        })
+        .collect();
+    section(
+        "Reviews",
+        w.table(&["Gate", "Decision", "Scope", "Speed"], rows),
+    )
 }
 
 /// The run's publish nodes, when it has any.

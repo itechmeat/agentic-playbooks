@@ -1,11 +1,17 @@
 use std::fs;
 use std::path::Path;
 
+use apb_core::content::TreeFile;
+use apb_core::diagram::{DiagramState, state_of};
+use apb_core::launch::floor::SaveChannel;
+use apb_core::profile_store::PlaybookOrigin;
 use apb_core::registry::{Registry, init_project};
 use apb_core::versioning::{
-    TrashEntry, VersioningError, create_patch_version, create_version,
-    create_version_with_override, delete_playbook, list_trash, next_minor_version,
-    next_patch_version, read_provenance, restore_from_trash, save_layout, version_diff,
+    ImportProvenance, ImportedScripts, TrashEntry, VersioningError, create_patch_version,
+    create_run_patch_version, create_version, create_version_with_override, create_with_scripts,
+    delete_playbook, list_trash, next_minor_version, next_patch_version, read_provenance,
+    restore_from_trash, save_definition, save_definition_by, save_imported, save_layout,
+    version_diff,
 };
 
 const VALID: &str = include_str!("../fixtures/valid.yaml");
@@ -812,4 +818,236 @@ fn a_save_without_a_definition_change_creates_no_version() {
         .unwrap();
     assert_eq!(saved.version, "3.0.0");
     assert!(!saved.unchanged);
+}
+
+/// Every write of a version leaves the derived diagram beside its
+/// `playbook.yaml`, and the diagram is `Current` from the first visible
+/// moment (people-in-the-loop D6): every path lands in
+/// `commit_version_dir` (or the draft's direct write) and writes
+/// `playbook.mmd` inside the same publication.
+#[test]
+fn every_version_write_leaves_a_diagram() {
+    let _cfg = crate::common::config_sandbox();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let id = "implement-task";
+    let pb_dir = dir.path().join(".apb/playbooks").join(id);
+    let assert_current = |version: &str, what: &str| {
+        assert_eq!(
+            state_of(&pb_dir.join(version)),
+            DiagramState::Current,
+            "{what} must leave a current diagram for {version}"
+        );
+    };
+    // Each write changes the name, so no save short-circuits as unchanged.
+    let named = |n: &str| VALID.replace("name: Implement Task", &format!("name: {n}"));
+
+    let v = create_version(dir.path(), id, &named("V create"), None, true).unwrap();
+    assert_current(&v, "create_version");
+
+    let v = create_version_with_override(
+        dir.path(),
+        id,
+        &named("V override"),
+        None,
+        Some("9.9.9"),
+        true,
+    )
+    .unwrap();
+    assert_current(&v, "create_version_with_override");
+
+    let saved = save_definition(dir.path(), id, &named("V save"), None, true).unwrap();
+    assert_current(&saved.version, "save_definition");
+
+    let saved = save_definition_by(
+        dir.path(),
+        id,
+        &named("V save by"),
+        None,
+        true,
+        SaveChannel::Person,
+    )
+    .unwrap();
+    assert_current(&saved.version, "save_definition_by");
+
+    let v = create_with_scripts(
+        dir.path(),
+        id,
+        &named("V scripts"),
+        "5.0.0",
+        &[TreeFile {
+            rel: "x.sh".to_string(),
+            bytes: b"echo hi\n".to_vec(),
+            executable: false,
+        }],
+    )
+    .unwrap();
+    assert_current(&v, "create_with_scripts");
+
+    let provenance = ImportProvenance {
+        bundle_digest: format!("sha256:{}", "0".repeat(64)),
+        file_name: None,
+        source_id: id.to_string(),
+        source_version: "1.0.0".to_string(),
+        source: None,
+        imported_at_ms: 1,
+        scripts: Vec::new(),
+        digest: String::new(),
+    };
+    let saved = save_imported(
+        dir.path(),
+        id,
+        &named("V import"),
+        None,
+        true,
+        ImportedScripts::Bundle(&[]),
+        &provenance,
+    )
+    .unwrap();
+    assert_current(&saved.version, "save_imported");
+
+    // The two patch paths fork from the seeded base version.
+    let v = create_patch_version(
+        dir.path(),
+        id,
+        "1.0.0",
+        &named("V patch"),
+        "run-42",
+        "improvement",
+    )
+    .unwrap();
+    assert_current(&v, "create_patch_version");
+
+    let v = create_run_patch_version(
+        dir.path(),
+        id,
+        "1.0.0",
+        &named("V run patch"),
+        "run-7",
+        "workaround",
+        false,
+    )
+    .unwrap();
+    assert_current(&v, "create_run_patch_version");
+
+    // A draft creates a playbook of its own in the project's store; its
+    // `parent` is the project's `.apb`.
+    let draft = |new_id: &str, n: &str| {
+        VALID
+            .replace("name: Implement Task", &format!("name: {n}"))
+            .replace("id: implement-task", &format!("id: {new_id}"))
+    };
+    let apb_dir = dir.path().join(".apb");
+    let v = apb_core::versioning::create_draft_in(
+        &apb_dir,
+        "fresh-draft",
+        &draft("fresh-draft", "V draft"),
+        PlaybookOrigin::Project,
+    )
+    .unwrap();
+    assert_eq!(v, "1.0.0");
+    assert_eq!(
+        state_of(&apb_dir.join("playbooks/fresh-draft/1.0.0")),
+        DiagramState::Current,
+        "create_draft_in must leave a current diagram"
+    );
+
+    let v = apb_core::versioning::create_draft_in_by(
+        &apb_dir,
+        "fresh-draft-2",
+        &draft("fresh-draft-2", "V draft 2"),
+        PlaybookOrigin::Project,
+        SaveChannel::Person,
+    )
+    .unwrap();
+    assert_eq!(v, "1.0.0");
+    assert_eq!(
+        state_of(&apb_dir.join("playbooks/fresh-draft-2/1.0.0")),
+        DiagramState::Current,
+        "create_draft_in_by must leave a current diagram"
+    );
+}
+
+/// A retry of a draft's creation after a crash completes it: whatever a
+/// crash at any point of the creation leaves (an empty playbook folder, a
+/// staging leftover, the version published without `current`, or, from an
+/// older apb, the yaml without its diagram), the retry ends with `current`
+/// at 1.0.0 and the diagram derived from exactly its yaml. Anything else
+/// in the folder is another playbook and stays a conflict.
+#[test]
+fn a_retried_draft_after_a_crash_is_completed_with_its_diagram() {
+    let _cfg = crate::common::config_sandbox();
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+    let apb_dir = dir.path().join(".apb");
+    let yaml = |id: &str| {
+        VALID
+            .replace("id: implement-task", &format!("id: {id}"))
+            .replace("name: Implement Task", "name: Draft")
+    };
+    let create = |id: &str| {
+        apb_core::versioning::create_draft_in(&apb_dir, id, &yaml(id), PlaybookOrigin::Project)
+    };
+    // The bytes a creation stores, read from one that went through.
+    create("model").unwrap();
+    let canonical = |id: &str| {
+        fs::read_to_string(apb_dir.join("playbooks/model/1.0.0/playbook.yaml"))
+            .unwrap()
+            .replace("id: model", &format!("id: {id}"))
+    };
+    let mmd_of = |id: &str| apb_core::diagram::text_of(&canonical(id)).unwrap();
+    type Left = fn(&Path, &str, &str);
+    let crashes: Vec<(&str, Left)> = vec![
+        ("an empty playbook folder", |_, _, _| {}),
+        ("a staging leftover", |pb, yaml, _| {
+            let tmp = pb.join(".tmp-1.0.0-1");
+            fs::create_dir_all(&tmp).unwrap();
+            fs::write(tmp.join("playbook.yaml"), yaml).unwrap();
+        }),
+        ("the yaml without its diagram", |pb, yaml, _| {
+            fs::create_dir_all(pb.join("1.0.0")).unwrap();
+            fs::write(pb.join("1.0.0/playbook.yaml"), yaml).unwrap();
+        }),
+        ("the version published without current", |pb, yaml, mmd| {
+            fs::create_dir_all(pb.join("1.0.0")).unwrap();
+            fs::write(pb.join("1.0.0/playbook.yaml"), yaml).unwrap();
+            fs::write(pb.join("1.0.0/playbook.mmd"), mmd).unwrap();
+        }),
+    ];
+    for (i, (what, leave)) in crashes.into_iter().enumerate() {
+        let id = format!("crashed-{i}");
+        let pb = apb_dir.join("playbooks").join(&id);
+        fs::create_dir_all(&pb).unwrap();
+        leave(&pb, &canonical(&id), &mmd_of(&id));
+        assert_eq!(create(&id).unwrap(), "1.0.0", "{what}");
+        assert_eq!(state_of(&pb.join("1.0.0")), DiagramState::Current, "{what}");
+        assert_eq!(
+            fs::read_to_string(pb.join("current")).unwrap().trim(),
+            "1.0.0",
+            "{what}"
+        );
+        assert_eq!(
+            apb_core::registry::list_versions(&pb).unwrap(),
+            vec!["1.0.0".to_string()],
+            "{what}"
+        );
+    }
+    // The creation's move requires `current` still unset, under the
+    // pointer lock: a writer that moved `current` after the check is
+    // never moved back (`Stale`, its pointer kept).
+    let moved = apb_dir.join("playbooks/crashed-0");
+    fs::write(moved.join("current"), "1.1.0").unwrap();
+    let mut created = apb_core::versioning::current::MoveCurrent::created("1.0.0");
+    created.expected_from = Some(None);
+    assert!(matches!(
+        apb_core::versioning::current::move_current(&moved, &created),
+        Err(apb_core::versioning::current::MoveError::Stale { .. })
+    ));
+    assert_eq!(fs::read_to_string(moved.join("current")).unwrap(), "1.1.0");
+    // Another playbook's folder is never taken over.
+    let other = apb_dir.join("playbooks/other");
+    fs::create_dir_all(other.join("1.0.0")).unwrap();
+    fs::write(other.join("1.0.0/playbook.yaml"), "something else").unwrap();
+    assert!(matches!(create("other"), Err(VersioningError::Conflict(_))));
+    assert!(matches!(create("model"), Err(VersioningError::Conflict(_))));
 }

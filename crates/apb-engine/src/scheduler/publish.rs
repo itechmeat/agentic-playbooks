@@ -184,11 +184,16 @@ pub(crate) fn step(r: &PublishRun<'_>, d: &mut GateDrive<'_>) -> Result<PublishS
             person_only: s.person_only,
         };
         // The request is open, so it is never declared again here.
-        let step = await_decision(d, consume, |_, _| {
-            Err(EngineError::Invalid(format!(
-                "publish node `{node}` has an open request"
-            )))
-        })?;
+        let step = await_decision(
+            d,
+            consume,
+            |_, _| {
+                Err(EngineError::Invalid(format!(
+                    "publish node `{node}` has an open request"
+                )))
+            },
+            || Ok(Default::default()),
+        )?;
         return decided(d, &node, plan_digest, step);
     }
 
@@ -256,10 +261,15 @@ pub(crate) fn step(r: &PublishRun<'_>, d: &mut GateDrive<'_>) -> Result<PublishS
         consumed: decided_for(&events, &node, &plan.digest),
         person_only: s.person_only,
     };
-    let step = await_decision(d, consume, |log, _| {
-        log.append(plan.event(&node, s.from))?;
-        Ok(request(&node, &s, &plan))
-    })?;
+    let step = await_decision(
+        d,
+        consume,
+        |log, _| {
+            log.append(plan.event(&node, s.from))?;
+            Ok(request(&node, &s, &plan))
+        },
+        || Ok(Default::default()),
+    )?;
     decided(d, &node, &plan.digest, step)
 }
 
@@ -390,6 +400,7 @@ fn request(node: &str, s: &Spec<'_>, plan: &Plan) -> GateRequest {
             person_only: s.person_only,
         },
         auto: None,
+        detail: crate::review::form::GateDetail::default(),
     }
 }
 

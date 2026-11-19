@@ -111,8 +111,8 @@ pub(crate) use journal::{
     Journal, attempt_started_count, current_visit_start_seq, last_attempt_session,
     node_finished_count, node_has_unanswered_channel_question, node_primary_invocation,
     node_started_count, question_active_ms, question_answered_count, question_asked_count,
-    questions_answered_before_seq, questions_asked_before_seq, review_decided_count,
-    review_open_count, wait_active_ms, wait_ended_count, wait_signalled_count, wait_started_count,
+    questions_answered_before_seq, questions_asked_before_seq, review_open_count, wait_active_ms,
+    wait_ended_count, wait_signalled_count, wait_started_count,
 };
 pub use listing::{RunFilter, RunListing, RunSummary, list_runs, list_runs_filtered};
 pub(crate) use live::{observe_live_channels, tick_live_observation};
@@ -223,16 +223,29 @@ fn dead_end_reason(
         playbook.node(node).map(|n| &n.kind),
         Some(NodeKind::HumanReview { .. })
     );
+    // A gate with fields outputs one JSON object; the dead-end message
+    // names the decision word, not the JSON.
+    let fielded = matches!(
+        playbook.node(node).map(|n| &n.kind),
+        Some(NodeKind::HumanReview { fields, .. }) if !fields.is_empty()
+    );
+    let word = if fielded {
+        state
+            .reviews
+            .get(node)
+            .map(|d| d.decision.as_str())
+            .unwrap_or(output)
+    } else {
+        output
+    };
     let ended = if review {
-        format!("decision `{output}`")
+        format!("decision `{word}`")
     } else {
         format!("status `{}`", status.as_str())
     };
     // Whether `e` could have been taken for this outcome but for its cap.
     let could_route = |e: &apb_core::schema::Edge| match &e.condition {
-        Some(apb_core::schema::EdgeCondition::ReviewStatus { equals }) => {
-            review && equals == output
-        }
+        Some(apb_core::schema::EdgeCondition::ReviewStatus { equals }) => review && equals == word,
         Some(apb_core::schema::EdgeCondition::NodeStatus { node: n, equals }) if n == node => {
             match equals {
                 apb_core::schema::StatusEq::Success => status == NodeStatus::Succeeded,
@@ -2368,7 +2381,10 @@ fn drive_inner(
             })?;
             node_unsnapshotted = true;
             (NodeStatus::Failed, reason)
-        } else if let NodeKind::HumanReview { options, prompt } = &node_kind {
+        } else if let NodeKind::HumanReview {
+            options, prompt, ..
+        } = &node_kind
+        {
             let current_id = current.clone();
             let unattended_decision = match cfg.unattended {
                 false => None,
@@ -2388,9 +2404,29 @@ fn drive_inner(
                     unattended::Review::Decide { option, note } => Some((option, note)),
                 },
             };
+            let form = review_gate::FormCtx {
+                playbook: &playbook,
+                run_dir,
+                run_id: &run_id,
+                state: &state,
+                cfg,
+                root,
+            };
             // A request already open from before (a drive that stopped
             // between the request and its decision) is decided now, or the
-            // run fails: an unattended gate never waits.
+            // run fails: an unattended gate never waits. A form gate's
+            // missing detail is journaled first, so the channel's checks
+            // read the measured scope, not the fail-closed refusal.
+            if unattended_decision.is_some() {
+                review_gate::journal_missing_detail(
+                    run_dir,
+                    &workdir,
+                    &mut *log,
+                    &playbook,
+                    &current,
+                    || review_gate::render_form(&form, &current_id),
+                )?;
+            }
             if let Some(decision) = &unattended_decision
                 && let Err(reason) = review_gate::post_unattended(run_dir, &current, decision)?
             {
@@ -2410,6 +2446,7 @@ fn drive_inner(
             let step = review_gate::await_decision(
                 &mut review_gate::GateDrive {
                     run_dir,
+                    workdir: &workdir,
                     log: &mut *log,
                     playbook: &playbook,
                     current: &mut current,
@@ -2420,7 +2457,7 @@ fn drive_inner(
                 consume,
                 |log, events| {
                     if let Some(decision) = unattended_decision {
-                        return Ok(review_gate::unattended_review_request(
+                        return review_gate::unattended_review_request(
                             run_dir,
                             events,
                             &playbook,
@@ -2428,7 +2465,8 @@ fn drive_inner(
                             options,
                             prompt.as_deref(),
                             decision,
-                        ));
+                            &form,
+                        );
                     }
                     review_gate::human_review_request(
                         root,
@@ -2440,8 +2478,10 @@ fn drive_inner(
                         options,
                         prompt.as_deref(),
                         events,
+                        &form,
                     )
                 },
+                || review_gate::render_form(&form, &current_id),
             )?;
             match step {
                 review_gate::GateStep::Decided(entry) => {
@@ -2456,11 +2496,71 @@ fn drive_inner(
                             outcome: stop_with_reason(log, &current, f.to_string(), &mut frontier)?,
                         });
                     }
+                    // The values a fielded gate's decision carries are
+                    // checked again when consumed and scrubbed of the
+                    // run's secret values (people-in-the-loop D3). A
+                    // failure - a hand-written channel line, a scrub
+                    // refused - ends the run.
+                    let values = if playbook
+                        .node(&current)
+                        .is_some_and(|n| n.kind.needs_review_detail())
+                    {
+                        match crate::review::form::settle(
+                            root,
+                            run_dir,
+                            &playbook,
+                            &current,
+                            &entry.cmd.decision,
+                            &entry.fields,
+                            &events,
+                        ) {
+                            Ok(v) => v,
+                            Err(reason) => {
+                                return Ok(RunResult {
+                                    run_id,
+                                    outcome: stop_with_reason(
+                                        log,
+                                        &current,
+                                        format!(
+                                            "{}: {reason}",
+                                            crate::review::form::FIELDS_REFUSED
+                                        ),
+                                        &mut frontier,
+                                    )?,
+                                });
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     steps += 1;
                     log.append(EventPayload::NodeStarted {
                         node: current.clone(),
                         attempt: 1,
                     })?;
+                    // The values are journaled right before the decision,
+                    // once per request: a drive that stopped between the
+                    // two settles the same entry again on resume.
+                    if let Some(fields) = &values {
+                        let journal = read_all(run_dir).ok();
+                        let open_seq = journal.as_deref().and_then(|events| {
+                            crate::review::open_request(events, &current).map(|(seq, _)| seq)
+                        });
+                        let request = entry.request.unwrap_or_else(|| open_seq.unwrap_or(0));
+                        let recorded = journal.as_deref().is_some_and(|events| {
+                            events.iter().any(|e| {
+                                matches!(&e.payload, EventPayload::ReviewFields { node, request: r, .. }
+                                    if *node == current && *r == request)
+                            })
+                        });
+                        if !recorded {
+                            log.append(EventPayload::ReviewFields {
+                                node: current.clone(),
+                                request,
+                                fields: fields.clone(),
+                            })?;
+                        }
+                    }
                     let mut decided = EventPayload::review_decided(
                         current.clone(),
                         entry.cmd.decision.clone(),
@@ -2481,7 +2581,15 @@ fn drive_inner(
                             .filter(|c| entry.by.is_none() && c.is_surface());
                     }
                     log.append(decided)?;
-                    (NodeStatus::Succeeded, entry.cmd.decision)
+                    // A gate with fields outputs one JSON object: the
+                    // decision and every field.
+                    let output = match &values {
+                        Some(fields) => {
+                            apb_core::review_form::gate_output(&entry.cmd.decision, fields)
+                        }
+                        None => entry.cmd.decision.clone(),
+                    };
+                    (NodeStatus::Succeeded, output)
                 }
                 review_gate::GateStep::Moved => continue,
                 // A scenario run's person is its scripted decision, posted
@@ -2519,6 +2627,7 @@ fn drive_inner(
                     &run,
                     &mut review_gate::GateDrive {
                         run_dir,
+                        workdir: &workdir,
                         log: &mut *log,
                         playbook: &playbook,
                         current: &mut current,

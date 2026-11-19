@@ -38,7 +38,18 @@ export function secureContextOk(): boolean {
 
 /** The assertion purpose payloads: exactly one key, as the server routes read. */
 export type AssertPurpose =
-  | { decision: { run: string; node: string; decision: string; request: number | null; nonce: string | null } }
+  | {
+      decision: {
+        run: string
+        node: string
+        decision: string
+        request: number | null
+        nonce: string | null
+        /** The field values the challenge covers (people-in-the-loop): the
+         * same values the review post sends. */
+        fields?: Record<string, unknown>
+      }
+    }
   | { enroll_new: Record<string, never> }
   | { remove: string }
 
@@ -48,6 +59,7 @@ export function decisionPurpose(
   decision: string,
   request?: number | null,
   nonce?: string | null,
+  fields?: Record<string, unknown>,
 ): AssertPurpose {
   return {
     decision: {
@@ -56,6 +68,7 @@ export function decisionPurpose(
       decision,
       request: request ?? null,
       nonce: nonce ?? null,
+      ...(fields && Object.keys(fields).length ? { fields } : {}),
     },
   }
 }
@@ -79,6 +92,8 @@ export interface ReviewBody {
   note?: string
   nonce?: string
   request?: number
+  /** The field values a fielded gate's decision carries. */
+  fields?: Record<string, unknown>
   passkey_token?: string
   /** The assertion the token was minted from, so the drive re-verifies it. */
   assertionId?: string
@@ -122,7 +137,7 @@ export async function runDecisionWithPasskey(
   if (first.status !== 403 || !first.message.includes('needs a passkey')) return first
   const secure = deps.secureContext ?? secureContextOk
   if (!secure()) return { ok: false, status: 403, message: PASSKEYS_MESSAGE }
-  const purpose = decisionPurpose(runId, body.node, body.decision, body.request, body.nonce)
+  const purpose = decisionPurpose(runId, body.node, body.decision, body.request, body.nonce, body.fields)
   const { challenge } = await deps.assertChallenge(purpose)
   const assertion = await deps.getAssertion(challenge)
   const { token } = await deps.verifyAssertion(purpose, challenge, assertion)

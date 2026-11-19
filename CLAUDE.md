@@ -30,7 +30,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
-  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`), `output_types` for the typed output field contract V167-V168, `write_scope` for a declared write scope V170-V172, `deadline` for a run's `deadline` V200, `concurrency` for the `concurrency:` block V210 and V211, `health` for the `health:` block V212, `previous_success` for the `run.previous_success` grammar, the `when_none` block and V176; `nodes` also holds V68, ids that start with `@`
+  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `review_form` for the form of a `human_review` (a malformed `max_scope` V243, `fields` V244, `show` V245, a required field without a default on a gate the engine may decide V246, a default over untrusted text V247), `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`), `output_types` for the typed output field contract V167-V168, `write_scope` for a declared write scope V170-V172, `deadline` for a run's `deadline` V200, `concurrency` for the `concurrency:` block V210 and V211, `health` for the `health:` block V212, `previous_success` for the `run.previous_success` grammar, the `when_none` block and V176; `nodes` also holds V68, ids that start with `@`
   are the engine's, V101, `audience` on a finish without a prompt, and
   V163, a `success_check` `scope` that names no glob or one that does not
   compile, and V173, a `prove_fails_first` proof that cannot mean anything), the
@@ -250,7 +250,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `records_invalid` on an entry declared a package that does not parse, the
   secret-shaped names, and `ResultTxn`, the staging transaction under the
   run's results lock with its run reservation), the sealed type of every resolved secret with its
-  constant-time comparison and labelled redaction (`secret.rs`), trust store
+  constant-time comparison and labelled redaction (`secret.rs`), the playbook-side types of a review gate's form (`review_form.rs`: `max_scope`, the typed
+  `fields` and the `show` entries, with the pure checks the channel and the drive share), the
+  derived diagram beside every version's YAML (`diagram.rs`: `playbook.mmd` written at every
+  version write, never read back), trust store
   (`trust.rs`), atomic state IO, symlinks and dir
   locks (`fsutil.rs`; `fsutil/beneath` the descriptor-relative reads and
   writes beneath one anchor: no link followed at any component, a regular
@@ -477,7 +480,11 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   view every reader counts from), the review channel's torn tail
   (`review.rs`: a torn last line of `reviews.jsonl` reads as a decision not
   yet written, a torn middle line still fails, a poster writes one whole
-  line and first repairs a tail a crashed poster left),
+  line and first repairs a tail a crashed poster left), the scope of a
+  review request and the fast floor (`review/scope.rs`), the gate's form
+  views and the consume-time check of a decision's field values
+  (`review/form.rs`), the two form events a form gate journals beside
+  its request and decision (`review_detail`, `review_fields`),
   the run deadline (`run_deadline.rs`: the deadline in force, the
   `DeadlineLatch` every work site checks through `refuses_work`, the
   graceful stop decided under the event lock (`stop_if_expired` over
@@ -802,7 +809,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   hook over `apb_core::save_nudge`, which prints the host's answer or
   nothing and always exits 0. `apb self-update` updates
   installer-based installs in place, then runs the hidden `apb
-  __reconcile-defaults` in the updated binary. `doctor.rs` is `apb doctor` (the
+  __reconcile-defaults` in the updated binary. `diagram.rs` is `apb diagram` (print a
+  version's flowchart text, `--out`, `--rebuild <id>|--all`), `doctor.rs` is `apb doctor` (the
   environment with the defaults and reviewer lines, `--agents`, `--run
   <id>`, `--probe-agent <id>`, `--json`). `apb intent list|resolve` shows a run's
   send intents and records a person's decision on an unknown one. `budget.rs`
@@ -1425,6 +1433,32 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   it last started, and routing reads each node's latest execution
   (`RunState::seqs`; liveness in `parallel/liveness.rs`). Concurrency is capped by `max_parallel`
   (`defaults.max_parallel`, then the run config, then the engine default 4).
+
+- **People in the loop** (spec
+  `docs/superpowers/specs/2026-11-18-people-in-the-loop-design.md`): the
+  request of a gate that uses a form feature (`max_scope`, `fields`,
+  `show`; `apb_core::schema::NodeKind::needs_review_detail`, the one decision the
+  writer and every reader share) journals, in the same write as the
+  request (`EventLog::append_pair`), what its decision covers since the
+  gate's previous decision (`review_detail`: commits, changed files and
+  lines, list items, connector writes, sends and result snapshots, counts
+  only; an open request without one fails closed until the resumed drive
+  writes it); a plain gate and a publish consent write the request alone,
+  the journal an older apb writes, so an older apb still resumes a run
+  waiting there,
+  `apb stats` and the run outcome report a person's decision taken faster
+  than its scope takes to read, a gate's `max_scope` refuses its withheld
+  options on every channel (stamped gates included) and again when the
+  drive consumes the decision, a form gate's decision is consumed only
+  while its scope measures as the request's (work that landed while it
+  waited withdraws the request `scope_changed` and asks again at once,
+  one gate visit in `apb stats`),
+  and a gate's typed `fields` output one JSON object the next nodes read as
+  `nodes.<gate>.output.<field>`, checked when posted and when consumed,
+  scrubbed of the run's secrets, covered by the passkey challenge, carried
+  by the run guard names `review_fields` and `review_max_scope`. The
+  derived `playbook.mmd` is written beside every version's YAML and never
+  read back.
 
 ## Commands
 

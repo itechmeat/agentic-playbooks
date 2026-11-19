@@ -1365,6 +1365,7 @@ impl WfMcp {
             nonce,
             request,
             workspace,
+            fields,
         }): Parameters<ReviewDecideArgs>,
     ) -> CallToolResult {
         let root = match self.effective_root(workspace.as_deref()) {
@@ -1379,6 +1380,7 @@ impl WfMcp {
             &note,
             nonce.as_deref(),
             request,
+            &fields,
         ))
     }
 
