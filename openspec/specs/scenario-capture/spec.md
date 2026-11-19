@@ -1,7 +1,7 @@
 # scenario-capture Specification
 
 ## Purpose
-TBD - created by archiving change run-feedback. Update Purpose after archive.
+A finished run can be captured as a scenario that replays what each execution reported and asserts what the run did, whole or refused, with nothing secret in the file.
 
 ## Requirements
 

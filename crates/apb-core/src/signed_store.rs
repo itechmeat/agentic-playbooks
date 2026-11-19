@@ -46,6 +46,44 @@ pub trait SignedDoc: Serialize + DeserializeOwned + Clone {
     fn set_mac(&mut self, mac: Option<String>);
     /// Sets the file's schema (a write stamps [`SignedDoc::SCHEMA`]).
     fn set_schema(&mut self, schema: u32);
+
+    /// Whether the file is read beneath the execution root without
+    /// following a link at any component, and only as a regular file with
+    /// one link: a file that is not is read as unsigned. Off by default.
+    const NO_LINKS: bool = false;
+
+    /// Whether a signed file belongs to the project at `root`: a file the
+    /// MAC covers but another project's store wrote does not count here.
+    /// Every file by default.
+    fn belongs_to(&self, _root: &Path) -> bool {
+        true
+    }
+}
+
+/// The most bytes a [`SignedDoc::NO_LINKS`] file is read up to.
+const NO_LINKS_CAP: u64 = 8 * 1024 * 1024;
+
+/// The bytes of `playbook`'s file read beneath `root` with no link
+/// followed: `Ok(None)` when there is none, `Err(None)` when an entry is
+/// there that is not a plain regular file (read as unsigned).
+fn read_no_links<T: SignedDoc>(
+    root: &Path,
+    scope: Scope,
+    playbook: &str,
+) -> Result<Option<Vec<u8>>, Option<io::Error>> {
+    use crate::fsutil::beneath::{Beneath, CappedRead, ReadRefusal};
+    let anchor = match Beneath::open(root) {
+        Ok(a) => a,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Some(e)),
+    };
+    let rel = format!(".apb/{}/{}/{playbook}.json", T::DIR, scope.as_str());
+    match anchor.read_regular_capped(&rel, NO_LINKS_CAP) {
+        Ok(CappedRead::Read { bytes, .. }) => Ok(Some(bytes)),
+        Ok(CappedRead::Refused(ReadRefusal::Missing)) => Ok(None),
+        Ok(CappedRead::Refused(_)) => Err(None),
+        Err(e) => Err(Some(e)),
+    }
 }
 
 /// The file as one read found it.
@@ -113,16 +151,12 @@ pub fn read<T: SignedDoc>(
     playbook: &str,
 ) -> Result<Loaded<T>, StoreError> {
     checked_id(playbook)?;
-    let raw = match std::fs::read(file::<T>(root, scope, playbook)) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok(Loaded {
-                file: T::fresh(scope, playbook),
-                signed: true,
-                unsigned_entries: 0,
-            });
-        }
-        Err(e) => return Err(e.into()),
+    let fresh = || {
+        Ok(Loaded {
+            file: T::fresh(scope, playbook),
+            signed: true,
+            unsigned_entries: 0,
+        })
     };
     let unsigned = |count: usize| {
         Ok(Loaded {
@@ -130,6 +164,20 @@ pub fn read<T: SignedDoc>(
             signed: false,
             unsigned_entries: count,
         })
+    };
+    let raw = if T::NO_LINKS {
+        match read_no_links::<T>(root, scope, playbook) {
+            Ok(Some(raw)) => raw,
+            Ok(None) => return fresh(),
+            Err(None) => return unsigned(0),
+            Err(Some(e)) => return Err(e.into()),
+        }
+    } else {
+        match std::fs::read(file::<T>(root, scope, playbook)) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return fresh(),
+            Err(e) => return Err(e.into()),
+        }
     };
     let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&raw) else {
         return unsigned(0);
@@ -160,7 +208,7 @@ pub fn read<T: SignedDoc>(
     };
     // The MAC covers the scope and id inside the file: a signed file put
     // under another playbook's name does not count for it.
-    if f.identity() != (scope.as_str(), playbook) {
+    if f.identity() != (scope.as_str(), playbook) || !f.belongs_to(root) {
         return unsigned(count);
     }
     Ok(Loaded {

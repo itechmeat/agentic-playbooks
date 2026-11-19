@@ -994,6 +994,8 @@ mod tests {
             })
             .collect();
         let manifest = crate::manifest::RunExecutionManifest {
+            probation_waived: false,
+            readiness_required: false,
             profiles: vec![crate::manifest::ManifestProfile {
                 scope: "project".into(),
                 name: "x".into(),

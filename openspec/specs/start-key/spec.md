@@ -1,7 +1,7 @@
 # start-key Specification
 
 ## Purpose
-TBD - created by archiving change routine-operations. Update Purpose after archive.
+A start key makes a start happen once per event: a repeat answers the run already started, another request under the key is refused, and the key store is signed.
 
 ## Requirements
 

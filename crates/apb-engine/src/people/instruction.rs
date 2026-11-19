@@ -34,25 +34,77 @@ pub fn review_instruction(
     review_instruction_for(node_id, title, options, prompt, false)
 }
 
-/// The decision mechanics of a gate only a person decides
-/// (`person_only`), or of one whose open request binds snapshots (`nonce`,
-/// the binding nonce an approving decision carries). A person-only gate
-/// names the terminal and the dashboard only: no agent channel decides it.
-pub fn gate_how_to_decide(node_id: &str, person_only: bool, nonce: Option<&str>) -> String {
+/// The `apb review` command of gate `node_id`: the one rendering every
+/// instruction, hint and printed line of a review decision shares. A gate
+/// whose decision must name its request (`crate::review::requires_request`:
+/// a form gate, a list pilot gate) carries `--request review:<seq>`, so
+/// the command printed is one the channel accepts; a bound request's
+/// approving decision carries its nonce.
+///
+/// `run_id` fills the run when the caller knows it, else `<run-id>`.
+pub fn review_command(
+    run_id: Option<&str>,
+    node_id: &str,
+    nonce: Option<&str>,
+    request: Option<u64>,
+) -> String {
+    let run = run_id.unwrap_or("<run-id>");
     let with_nonce = nonce.map(|n| format!(" --nonce {n}")).unwrap_or_default();
+    let with_request = request
+        .map(|seq| format!(" --request review:{seq}"))
+        .unwrap_or_default();
+    format!("apb review {run} {node_id} --decision <option>{with_nonce}{with_request}")
+}
+
+/// The decision mechanics of a gate only a person decides
+/// (`person_only`), of one whose open request binds snapshots (`nonce`,
+/// the binding nonce an approving decision carries), and of one whose
+/// decision names its request (`request`, the seq of the open request).
+/// A person-only gate names the terminal and the dashboard only: no agent
+/// channel decides it.
+pub fn gate_how_to_decide(
+    node_id: &str,
+    person_only: bool,
+    nonce: Option<&str>,
+    request: Option<u64>,
+) -> String {
+    let command = review_command(None, node_id, nonce, request);
     if person_only {
-        format!(
-            "Only a person decides this gate: run `apb review <run-id> {node_id} --decision <option>{with_nonce}` \
+        return format!(
+            "Only a person decides this gate: run `{command}` \
              at an interactive terminal outside a run step and type the option to confirm, or decide on the run page \
              of a dashboard where you are signed in. An agent cannot decide it: ask the person, then wait."
-        )
-    } else if let Some(n) = nonce {
-        format!(
-            "To decide, run `apb review <run-id> {node_id} --decision <option>{with_nonce}` \
-             or call the review_decide MCP tool with the same node and decision and nonce `{n}`."
-        )
+        );
+    }
+    let mut mcp = Vec::new();
+    if let Some(n) = nonce {
+        mcp.push(format!("nonce `{n}`"));
+    }
+    if let Some(seq) = request {
+        mcp.push(format!("request `{seq}`"));
+    }
+    if mcp.is_empty() {
+        return review_how_to_decide(node_id);
+    }
+    format!(
+        "To decide, run `{command}` \
+         or call the review_decide MCP tool with the same node and decision and {}.",
+        mcp.join(" and ")
+    )
+}
+
+/// The journaled instruction of a request that must be named, once its
+/// seq is known: the decision mechanics [`review_instruction_for`] wrote
+/// without a request are replaced by the same mechanics naming request
+/// `seq`. The text is apb's own; should the mechanics not be found, the
+/// request is named in a sentence of its own.
+pub fn name_request(instruction: &str, node_id: &str, person_only: bool, seq: u64) -> String {
+    let unnamed = gate_how_to_decide(node_id, person_only, None, None);
+    let named = gate_how_to_decide(node_id, person_only, None, Some(seq));
+    if instruction.contains(&unnamed) {
+        instruction.replacen(&unnamed, &named, 1)
     } else {
-        review_how_to_decide(node_id)
+        format!("{instruction} {named}")
     }
 }
 
@@ -79,7 +131,7 @@ pub fn review_instruction_for(
     format!(
         "The run is paused at the human-review gate \"{label}\" and needs your decision.{guidance} \
          Available decisions: {opts}. {}",
-        gate_how_to_decide(node_id, person_only, None)
+        gate_how_to_decide(node_id, person_only, None, None)
     )
 }
 

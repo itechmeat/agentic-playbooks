@@ -99,6 +99,7 @@ describe('start actions', () => {
       consent: { irreversible: [], effects: [] },
       start_actions: [start({ reason: 'the param target has no value', remedy: { remedy: 'provide_param', name: 'target' } })],
       launch: { policy: 'ask', sources: ['playbook `p` declares agent_launch'], floor: 'deny' },
+      readiness: { ready: true, items: [], probation: undefined },
     }
     const { body } = render(FitCard, { props: { report } })
     expect(body).toContain('data-testid="fit-launch"')

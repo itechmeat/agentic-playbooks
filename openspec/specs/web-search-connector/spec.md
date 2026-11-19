@@ -1,7 +1,7 @@
 # web-search-connector Specification
 
 ## Purpose
-TBD - created by archiving change google-connectors. Update Purpose after archive.
+apb ships a web-search connector, so a playbook can search the web through the connector layer like any other connector call.
 
 ## Requirements
 

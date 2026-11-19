@@ -1,7 +1,7 @@
 # run-deadline Specification
 
 ## Purpose
-TBD - created by archiving change routine-operations. Update Purpose after archive.
+A run can carry a deadline measured without pauses, and it ends the run in every state, after a restart too.
 
 ## Requirements
 

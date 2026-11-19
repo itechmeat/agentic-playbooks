@@ -1,7 +1,7 @@
 # write-scope Specification
 
 ## Purpose
-TBD - created by archiving change node-contracts. Update Purpose after archive.
+A node can declare the paths it may write; a change outside them or an incomplete comparison fails it at once.
 
 ## Requirements
 

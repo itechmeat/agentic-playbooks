@@ -1,7 +1,7 @@
 # google-calendar-connector Specification
 
 ## Purpose
-TBD - created by archiving change google-connectors. Update Purpose after archive.
+apb ships a Google Calendar connector that never duplicates a created event, reads busy intervals and treats writes that mail people as irreversible.
 
 ## Requirements
 

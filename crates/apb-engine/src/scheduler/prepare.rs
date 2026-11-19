@@ -512,14 +512,41 @@ fn empty_recall() -> apb_core::run_memory::Recall {
     }
 }
 
-fn unattended_start(root: &Path, opts: &mut RunOptions) -> Result<(), EngineError> {
-    if let Some(parent) = &opts.parent_run
-        && crate::manifest::read(&root.join(".apb/runs").join(parent))
-            .ok()
-            .flatten()
-            .is_some_and(|m| m.unattended)
-    {
-        opts.unattended = true;
+fn unattended_start(root: &Path, runs: &Path, opts: &mut RunOptions) -> Result<(), EngineError> {
+    if let Some(parent) = &opts.parent_run {
+        // The parent's mode comes from a record that exists
+        // (`manifest::recorded_mode`), never a default: a parent whose
+        // mode cannot be told refuses the child start, and so does an
+        // unattended parent whose manifest is gone, since the waiver and
+        // the readiness demand live only there.
+        let parent_dir = runs.join(parent);
+        let refused = |why: String| {
+            EngineError::Invalid(format!(
+                "{}: the parent run `{parent}`: {why}; the child start is refused",
+                crate::run_config::PROBATION_REQUIRED
+            ))
+        };
+        match crate::manifest::recorded_mode(&parent_dir) {
+            Ok(crate::manifest::RecordedMode::Attended) => {}
+            Ok(crate::manifest::RecordedMode::Unattended(Some(m))) => {
+                opts.unattended = true;
+                // The waiver and the readiness demand reach every child
+                // start of the tree through its parent's manifest; the
+                // manifest is write-once, so a resume changes neither.
+                if m.probation_waived {
+                    opts.waive_probation = true;
+                }
+                if m.readiness_required {
+                    opts.require_ready = true;
+                }
+            }
+            Ok(crate::manifest::RecordedMode::Unattended(None)) => {
+                return Err(refused(
+                    "it is unattended and its manifest is missing, so its probation waiver and readiness demand cannot be told".into(),
+                ));
+            }
+            Err(why) => return Err(refused(why)),
+        }
     }
     crate::gate::unattended::check_start(
         root,
@@ -679,7 +706,7 @@ pub(crate) fn prepare_placed(
         opts.params = sp.scenario.params.clone();
         opts.instruction = sp.scenario.instruction.clone();
     }
-    unattended_start(root, &mut opts)?;
+    unattended_start(root, &place.runs, &mut opts)?;
     external_data_start(place, &mut opts);
     let reg = Registry::open_dir(&t.definition_parent)?;
     let loaded = reg.load(id, version)?;
@@ -724,6 +751,46 @@ pub(crate) fn prepare_placed(
                 ))
             },
         )?;
+    }
+    // Probation (before-running-alone D5): an unattended start of this
+    // playbook, and of every sub-playbook the gate pinned, is admitted
+    // only when each one's project ledger holds enough eligible attended
+    // successes of this exact definition. One site, on the definition
+    // preparation itself loaded; no launch surface decides it on a
+    // definition of its own. Readiness second (below), so a waived start
+    // is not refused on its probation item there.
+    let pins = if opts.parent_run.is_none() {
+        opts.expected_children.as_ref()
+    } else {
+        None
+    };
+    // The PlaybookOrigin the validator derives below (and the manifest
+    // after it): the probation and readiness checks read the same one.
+    let origin = if t.origin_label == "global" {
+        PlaybookOrigin::Global
+    } else {
+        PlaybookOrigin::Project
+    };
+    if opts.unattended && scenario.is_none() {
+        crate::gate::unattended::check_probation(
+            root,
+            t.origin_label,
+            &loaded,
+            pins,
+            opts.waive_probation,
+            opts.overrides.as_ref().is_some_and(|o| !o.is_empty()),
+        )
+        .map_err(|refusal| {
+            EngineError::Invalid(format!(
+                "{}: {}",
+                crate::run_config::PROBATION_REQUIRED,
+                refusal["detail"].as_str().unwrap_or_default()
+            ))
+        })?;
+    }
+    if opts.unattended && opts.require_ready && scenario.is_none() {
+        crate::fit::readiness::start_check(root, t.origin_label, &loaded, origin, pins)
+            .map_err(EngineError::Invalid)?;
     }
     let mut playbook = loaded.playbook.clone();
     // A scenario never needs a real secret: a declared secret param holds a
@@ -786,14 +853,9 @@ pub(crate) fn prepare_placed(
         ov.apply(&mut playbook).map_err(EngineError::Invalid)?;
     }
 
-    // Gate: do not run an invalid playbook. We derive origin HERE (not just
-    // for the manifest below) - otherwise the validator would work with the default
-    // Project and would not catch a scope:project reference in a global playbook (V14).
-    let origin = if t.origin_label == "global" {
-        PlaybookOrigin::Global
-    } else {
-        PlaybookOrigin::Project
-    };
+    // The origin was derived above, before the probation and readiness
+    // checks; the validator works with it (V14 catches a scope:project
+    // reference in a global playbook) and so does the manifest below.
     let ctx = ValidationContext::for_registry(&reg, origin);
     let report = validate(&playbook, &ctx);
     let errors: Vec<String> = report
@@ -1447,6 +1509,11 @@ pub(crate) fn prepare_placed(
         .clone()
         .filter(|_| opts.depth == 0 && opts.parent_run.is_none());
     manifest.unattended = opts.unattended;
+    // True only for an unattended run: the waiver the start asked for, and
+    // the readiness demand (`--require-ready`), each reaching every child
+    // run of the tree through `unattended_start`.
+    manifest.probation_waived = opts.unattended && opts.waive_probation;
+    manifest.readiness_required = opts.unattended && opts.require_ready;
     manifest.candidate_trial = scenario.is_none()
         && !opts.external_data
         && opts.depth == 0

@@ -1,7 +1,7 @@
 # corrections-ledger Specification
 
 ## Purpose
-TBD - created by archiving change run-feedback. Update Purpose after archive.
+What people corrected in runs is collected per playbook into a signed, scrubbed ledger, grouped without a model, offered as a draft fix when it recurs and followed up per version once a person marks the fix.
 
 ## Requirements
 

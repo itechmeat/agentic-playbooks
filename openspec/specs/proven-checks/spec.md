@@ -1,7 +1,7 @@
 # proven-checks Specification
 
 ## Purpose
-TBD - created by archiving change node-contracts. Update Purpose after archive.
+A success check can be proven to fail before the work runs, once per effect scope and across a crash, so a check that was already green proves nothing.
 
 ## Requirements
 

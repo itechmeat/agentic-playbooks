@@ -1,7 +1,7 @@
 # review-channel Specification
 
 ## Purpose
-TBD - created by archiving change routine-health. Update Purpose after archive.
+The review channel survives a crash while a decision is written: a torn last line reads as a decision not yet written and the next poster repairs it.
 
 ## Requirements
 

@@ -337,3 +337,26 @@ fn unattended_refuses_other_shapes() {
         );
     }
 }
+
+/// The top-level `unattended:` block reads, and an unknown key in it is
+/// refused (before-running-alone D5).
+#[test]
+fn the_unattended_block_parses() {
+    let yaml = format!(
+        "{}\nunattended:\n  after_attended_successes: 3\n",
+        VALID.trim_end()
+    );
+    let playbook = Playbook::from_yaml(&yaml).unwrap();
+    assert_eq!(
+        playbook.unattended.map(|u| u.after_attended_successes),
+        Some(3)
+    );
+    let without = Playbook::from_yaml(VALID).unwrap();
+    assert_eq!(without.unattended, None);
+    let bad = format!(
+        "{}\nunattended:\n  after_attended_successes: 3\n  waive: true\n",
+        VALID.trim_end()
+    );
+    let err = Playbook::from_yaml(&bad).unwrap_err();
+    assert!(err.to_string().contains("waive"), "{err}");
+}

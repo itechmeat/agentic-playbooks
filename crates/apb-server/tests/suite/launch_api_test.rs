@@ -587,3 +587,31 @@ async fn a_held_playbook_is_refused_over_http() {
     );
     assert_eq!(runs(root), 0);
 }
+
+/// An unattended start under probation is a 422 whose text starts
+/// `probation_required` (the check lives in preparation, so the refusal
+/// comes from the start call itself).
+#[tokio::test]
+async fn an_unattended_start_under_probation_is_refused() {
+    let _cfg = crate::common::config_sandbox().await;
+    let dir = project("gated", "unattended:\n  after_attended_successes: 2\n");
+    let root = dir.path().to_path_buf();
+    let vdir = root.join(".apb/playbooks/gated/1.0.0/scripts");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("work.sh"), "echo ok\n").unwrap();
+    let app = build_router(AppState::new(root));
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/playbooks/gated/run",
+        None,
+        Some(json!({ "unattended": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let text = match &body {
+        Value::String(t) => t.clone(),
+        other => other.to_string(),
+    };
+    assert!(text.starts_with("probation_required"), "{text}");
+}

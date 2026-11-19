@@ -17,5 +17,13 @@
 {"seq":16,"ts":1790000000016,"type":"supervisor_action","action":"context_append","node":null,"detail":"note"}
 {"seq":17,"ts":1790000000017,"type":"run_progress","node_id":"review","done":1,"total":2,"label":null}
 {"seq":18,"ts":1790000000018,"type":"node_finished","node":"review","status":"succeeded","attempt":1,"output":"approve","artifacts":[]}
-{"seq":19,"ts":1790000000019,"type":"run_error","reason":"none"}
-{"seq":20,"ts":1790000000020,"type":"run_finished","outcome":"succeeded"}
+{"seq":19,"ts":1790000000019,"type":"node_started","node":"items","attempt":1}
+{"seq":20,"ts":1790000000020,"type":"list_started","node":"items","total":5,"filtered_out":0,"items_digest":"","batch_size":2,"parallel":2}
+{"seq":21,"ts":1790000000021,"type":"list_pilot","node":"items","round":1,"items":["a","b","c"]}
+{"seq":22,"ts":1790000000022,"type":"list_batch_started","node":"items","batch":1,"items":["a","b"]}
+{"seq":23,"ts":1790000000023,"type":"list_item_settled","node":"items","item":"a","state":"passed","round":1}
+{"seq":24,"ts":1790000000024,"type":"list_item_settled","node":"items","item":"b","state":"needs_look","round":1}
+{"seq":25,"ts":1790000000025,"type":"list_stopped","node":"items","reason":"stop_when","detail":"1 of 2 settled items need a look (stop_when: needs_look_at_least 1)"}
+{"seq":26,"ts":1790000000026,"type":"node_finished","node":"items","status":"failed","attempt":1,"output":"stopped","artifacts":[]}
+{"seq":27,"ts":1790000000027,"type":"run_error","reason":"none"}
+{"seq":28,"ts":1790000000028,"type":"run_finished","outcome":"succeeded"}

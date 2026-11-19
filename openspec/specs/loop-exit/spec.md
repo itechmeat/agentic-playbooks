@@ -1,7 +1,7 @@
 # loop-exit Specification
 
 ## Purpose
-TBD - created by archiving change loops-and-graphs. Update Purpose after archive.
+A loop can end when a visit finds no new items (`no_new_items`), with the seen keys read from earlier visits and the validator rules for the condition.
 
 ## Requirements
 

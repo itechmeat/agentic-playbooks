@@ -24,9 +24,32 @@ use std::path::Path;
 use apb_core::connector::resolve::ConnectorFacts;
 use apb_core::execution::{ExecutionMode, ExecutionRequest};
 use apb_core::schema::{Effect, NodeKind, Playbook};
+use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::run_config::{RunMode, UNATTENDED_UNSUPPORTED};
+use crate::run_config::{PROBATION_REQUIRED, RunMode, UNATTENDED_UNSUPPORTED};
+
+/// Where a probation stands for one definition in one project.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProbationView {
+    /// Successful attended runs (started without `--unattended`, not from
+    /// a run step) asked for: the largest of the playbook's and the two
+    /// `policy.yaml` files.
+    pub required: u32,
+    /// Eligible successful attended runs of this exact definition in this
+    /// project's probation ledger. Attended says how a run was started,
+    /// never that a person decided anything in it.
+    pub counted: u32,
+    /// `playbook`, `machine` or `project`: which asked for `required`.
+    pub source: String,
+    /// The machine's `policy.yaml` waives probation here (an unverifiable
+    /// ledger included).
+    pub waived: bool,
+    /// The ledger verified (or does not exist yet). False: nothing
+    /// counts, and an unattended start is refused unless waived.
+    pub ledger_ok: bool,
+}
 
 /// What an unattended start asks for.
 #[derive(Debug, Clone, Copy)]
@@ -105,6 +128,206 @@ fn step_refusal(root: &Path) -> Option<String> {
             "an unattended start is refused {from}: a step of an attended run does not take the person that run waits on out of the gates of another; start it attended, or start the outer run unattended"
         )
     })
+}
+
+fn source_label(src: apb_core::policy_file::PolicySource) -> &'static str {
+    match src {
+        apb_core::policy_file::PolicySource::Machine => "machine",
+        apb_core::policy_file::PolicySource::Project => "project",
+    }
+}
+
+/// The scope label of a pinned sub-playbook.
+fn pin_scope(pin: &crate::run_config::ChildExpectation) -> &'static str {
+    match pin.scope {
+        apb_core::profile::ProfileScope::Global => "global",
+        _ => "project",
+    }
+}
+
+/// The probation of the loaded definition `loaded` (scope label `scope`)
+/// for the project at `root`; `Ok(None)` when nothing asks for one: not
+/// the playbook, and neither `policy.yaml` file. `Err` names a
+/// `policy.yaml` that does not read: what it asks for cannot be known,
+/// so the caller fails closed.
+pub fn probation(
+    root: &Path,
+    scope: &str,
+    loaded: &apb_core::registry::LoadedPlaybook,
+) -> Result<Option<ProbationView>, String> {
+    let policies = apb_core::policy_file::Policies::load(root).map_err(|e| e.to_string())?;
+    Ok(probation_with(root, scope, loaded, &policies))
+}
+
+/// [`probation`] with the settings already read, once for a whole start.
+fn probation_with(
+    root: &Path,
+    scope: &str,
+    loaded: &apb_core::registry::LoadedPlaybook,
+    policies: &apb_core::policy_file::Policies,
+) -> Option<ProbationView> {
+    let playbook_required = loaded
+        .playbook
+        .unattended
+        .map(|u| u.after_attended_successes);
+    let floor = policies.probation_floor();
+    let (required, source) = match (playbook_required, floor) {
+        (Some(p), Some((f, src))) if f > p => (f, source_label(src)),
+        (Some(p), _) => (p, "playbook"),
+        (None, Some((f, src))) => (f, source_label(src)),
+        (None, None) => return None,
+    };
+    let waived = policies.waives_probation();
+    let ledger = apb_core::probation::read(
+        root,
+        apb_core::scope::Scope::parse(scope).unwrap_or(apb_core::scope::Scope::Project),
+        &loaded.playbook.id,
+    );
+    let (counted, ledger_ok) = match ledger {
+        Ok(loaded_ledger) if loaded_ledger.signed => {
+            let trust = loaded.trust_digest().ok();
+            let definition = crate::run_definitions::digest(loaded.yaml.as_bytes());
+            (
+                trust
+                    .map(|t| apb_core::probation::counted(&loaded_ledger.file, &t, &definition))
+                    .unwrap_or(0),
+                true,
+            )
+        }
+        _ => (0, false),
+    };
+    Some(ProbationView {
+        required,
+        counted,
+        source: source.to_string(),
+        waived,
+        ledger_ok,
+    })
+}
+
+/// The probation ledger file of playbook `id` under scope label `scope`.
+fn ledger_path(root: &Path, scope: &str, id: &str) -> std::path::PathBuf {
+    apb_core::signed_store::dir(
+        root,
+        <apb_core::probation::ProbationFile as apb_core::signed_store::SignedDoc>::DIR,
+        apb_core::scope::Scope::parse(scope).unwrap_or(apb_core::scope::Scope::Project),
+    )
+    .join(format!("{id}.json"))
+}
+
+fn probation_refusal(detail: String) -> Value {
+    json!({
+        "policy": PROBATION_REQUIRED,
+        "requirement": "attended_successes",
+        "detail": detail,
+    })
+}
+
+/// The refusal of one definition's probation, `None` when it passes:
+/// done, or waived by the start (`waive`, the typed confirmation) or by
+/// the machine's `policy.yaml` (`waived`), which passes an unverifiable
+/// ledger too.
+fn one_refusal(
+    p: Option<&ProbationView>,
+    waive: bool,
+    what: &str,
+    version: &str,
+    path: &Path,
+) -> Option<Value> {
+    let p = p?;
+    if waive || p.waived {
+        return None;
+    }
+    if !p.ledger_ok {
+        return Some(probation_refusal(format!(
+            "the probation ledger of {what} in this project ({}) does not verify, so its probation cannot be counted; move the file aside (the count starts again from zero) or waive probation at a terminal with --waive-probation",
+            path.display()
+        )));
+    }
+    (p.counted < p.required).then(|| {
+        probation_refusal(format!(
+            "{what} {version} runs unattended only after {} successful attended runs (started without --unattended) of this definition in this project; {} so far here (probation is counted per project from its probation ledger, also for a global playbook; runs started from a run step and runs that ended before this apb kept the ledger do not count). Run it attended in this project, or waive probation at a terminal with --waive-probation",
+            p.required, p.counted
+        ))
+    })
+}
+
+/// Refuses an unattended start whose probation, or the probation of a
+/// sub-playbook it pins, is not done and not waived. One check in
+/// preparation, on the definition preparation itself loaded; no launch
+/// surface decides it on a definition of its own. The settings are read
+/// once; a `policy.yaml` that does not read refuses (fail closed) unless
+/// the start is waived. A start that carries run overrides (`overridden`)
+/// runs another executor than the one its probation counted and is
+/// refused unless waived.
+pub fn check_probation(
+    root: &Path,
+    scope: &str,
+    loaded: &apb_core::registry::LoadedPlaybook,
+    pins: Option<&BTreeMap<String, crate::run_config::ChildExpectation>>,
+    waive: bool,
+    overridden: bool,
+) -> Result<(), Value> {
+    if waive {
+        return Ok(());
+    }
+    let policies = apb_core::policy_file::Policies::load(root).map_err(|e| {
+        probation_refusal(format!(
+            "{e}; the probation it may ask for cannot be known, so an unattended start is refused until it is fixed, or waive probation at a terminal with --waive-probation"
+        ))
+    })?;
+    if overridden && !policies.waives_probation() {
+        return Err(probation_refusal(
+            "an unattended start runs the definition its probation counted; start it without --overrides or waive probation at a terminal".into(),
+        ));
+    }
+    // The playbook itself.
+    let own = probation_with(root, scope, loaded, &policies);
+    if let Some(refusal) = one_refusal(
+        own.as_ref(),
+        false,
+        &format!("playbook `{}`", loaded.playbook.id),
+        &loaded.version,
+        &ledger_path(root, scope, &loaded.playbook.id),
+    ) {
+        return Err(refusal);
+    }
+    // Every pinned sub-playbook, in the parent's node order, each with
+    // its own definition, scope and ledger.
+    let Some(pins) = pins else {
+        return Ok(());
+    };
+    let mut ordered: Vec<(&String, &crate::run_config::ChildExpectation)> = loaded
+        .playbook
+        .nodes
+        .iter()
+        .filter_map(|n| pins.get_key_value(&n.id))
+        .collect();
+    for (k, v) in pins {
+        if !ordered.iter().any(|(o, _)| *o == k) {
+            ordered.push((k, v));
+        }
+    }
+    for (node, pin) in ordered {
+        let Some(child) = pin.load_definition(root) else {
+            return Err(probation_refusal(format!(
+                "sub-playbook `{}` (node `{node}`) cannot be read to count its probation; start the run again once it reads",
+                pin.id
+            )));
+        };
+        let child_scope = pin_scope(pin);
+        let view = probation_with(root, child_scope, &child, &policies);
+        if let Some(refusal) = one_refusal(
+            view.as_ref(),
+            false,
+            &format!("sub-playbook `{}` {}", pin.id, child.version),
+            &format!("(node `{node}`)"),
+            &ledger_path(root, child_scope, &pin.id),
+        ) {
+            return Err(refusal);
+        }
+    }
+    Ok(())
 }
 
 /// The execution request an unattended start resolves: the same, without a

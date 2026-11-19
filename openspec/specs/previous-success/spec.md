@@ -1,7 +1,7 @@
 # previous-success Specification
 
 ## Purpose
-TBD - created by archiving change recurring-routines. Update Purpose after archive.
+A playbook can read values from the earlier successful run of the same playbook through `run.previous_success`, read once, journaled, and refused when the history cannot be read.
 
 ## Requirements
 

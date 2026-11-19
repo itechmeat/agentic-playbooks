@@ -19,6 +19,9 @@
 //!   billed: ask                          # agent work whose cost is billed
 //!   unknown_basis: ask                   # agent work whose basis is not known
 //!   budget_counts_subscription: true     # a budget counts subscription equivalents
+//! unattended:
+//!   after_attended_successes: 3          # the least attended successes before a playbook runs alone
+//!   waive_probation: false               # machine file only: no probation on this machine
 //! ```
 //!
 //! The machine file sets them; a project file may only narrow them. The
@@ -52,6 +55,7 @@ pub struct PolicyFile {
     pub billing: crate::billing::section::BillingSection,
     pub runs: RunsSection,
     pub health: HealthSection,
+    pub unattended: UnattendedSection,
 }
 
 /// The `health:` section: which playbooks with a `health:` block this
@@ -63,6 +67,41 @@ pub struct HealthSection {
     /// `<id>` or `global:<id>`; absent: every playbook with a block;
     /// empty: none.
     pub playbooks: Option<Vec<String>>,
+}
+
+/// The `unattended:` section: the least attended successes before any
+/// playbook runs alone in a project here, and whether this machine waives
+/// probation (a machine file's setting only).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UnattendedSection {
+    /// The least attended successes before any playbook runs alone in a
+    /// project here (1 to 100); a project file may only raise the
+    /// machine's.
+    pub after_attended_successes: Option<u32>,
+    /// Machine file only: no probation on this machine (a CI runner that
+    /// never has attended runs). A person's file; nothing in apb writes it.
+    pub waive_probation: bool,
+}
+
+impl UnattendedSection {
+    fn validate(&self, source: PolicySource) -> Result<(), String> {
+        if let Some(n) = self.after_attended_successes
+            && !(1..=crate::readiness::MAX_PROBATION).contains(&n)
+        {
+            return Err(format!(
+                "unattended.after_attended_successes is {n}; use 1 to {}",
+                crate::readiness::MAX_PROBATION
+            ));
+        }
+        if self.waive_probation && source == PolicySource::Project {
+            return Err(
+                "unattended.waive_probation is a machine setting; a project cannot waive probation"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 impl HealthSection {
@@ -384,6 +423,34 @@ impl Policies {
         self.machine.health.watches(playbook) && self.project.health.watches(playbook)
     }
 
+    /// The least attended successes before any playbook runs alone in a
+    /// project here, with the file that set it: the larger of the two
+    /// files' values, a project only raising the machine's. `None` when
+    /// neither file asks for one.
+    pub fn probation_floor(&self) -> Option<(u32, PolicySource)> {
+        match (
+            self.machine.unattended.after_attended_successes,
+            self.project.unattended.after_attended_successes,
+        ) {
+            (None, None) => None,
+            (Some(m), None) => Some((m, PolicySource::Machine)),
+            (None, Some(p)) => Some((p, PolicySource::Project)),
+            (Some(m), Some(p)) => {
+                if p > m {
+                    Some((p, PolicySource::Project))
+                } else {
+                    Some((m, PolicySource::Machine))
+                }
+            }
+        }
+    }
+
+    /// Whether this machine waives probation: the machine file's flag only
+    /// (a project file that sets it does not read).
+    pub fn waives_probation(&self) -> bool {
+        self.machine.unattended.waive_probation
+    }
+
     /// The machine's `finished` filter narrowed by the project's.
     pub fn finished(&self) -> Vec<FinishOutcome> {
         let project = self.project.notify.finished();
@@ -413,7 +480,7 @@ pub fn parse(raw: &str) -> Result<PolicyFile, String> {
     parse_as(raw, PolicySource::Machine)
 }
 
-fn parse_as(raw: &str, source: PolicySource) -> Result<PolicyFile, String> {
+pub fn parse_as(raw: &str, source: PolicySource) -> Result<PolicyFile, String> {
     if raw.trim().is_empty() {
         return Ok(PolicyFile::default());
     }
@@ -427,6 +494,7 @@ fn parse_as(raw: &str, source: PolicySource) -> Result<PolicyFile, String> {
     file.launch.validate(source)?;
     file.runs.validate()?;
     file.health.validate()?;
+    file.unattended.validate(source)?;
     Ok(file)
 }
 

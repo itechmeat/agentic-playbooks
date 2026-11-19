@@ -32,10 +32,12 @@ pub(crate) mod nodes;
 mod output_types;
 mod outputs;
 mod params;
+mod pilot;
 mod previous_success;
 mod publish;
 mod quality;
 mod read_only;
+mod readiness;
 mod results;
 mod retry;
 mod review;
@@ -461,6 +463,8 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     health::check_health(playbook, &mut r); // V212
     cloud_models::check_cloud_models(playbook, ctx, &mut r); // V220-V222
     review_form::check_review_form(playbook, &mut r); // V243-V247
+    pilot::check_pilot(playbook, &mut r); // V240-V242
+    readiness::check_readiness(playbook, &mut r); // V249, V250
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10

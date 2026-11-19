@@ -185,8 +185,17 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   (`corrections/`: `mod` the types and the fold, `normalize` the key,
   `store` the `SignedDoc` impl), the follow-up check a playbook reads
   once after a successful run (`follow_up.rs`, with `validate/follow_up`
-  for V183 to V186), the
-  one supervisor policy reader (`candidate/policy.rs`), the pure statistics
+  for V183 to V186), the readiness rules a run-alone verdict
+  shares (`readiness.rs`: `has_deterministic_check`, the top-level
+  `unattended:` block, the boundary domains, `ungated_irreversible`; V249
+  and V250 live in `validate/readiness`), the signed probation ledger of
+  each playbook and project (`probation.rs`: `add` one entry per ended
+  run, `counted` the eligible attended successes of one digest pair, the
+  `SignedDoc` impl), a list's `pilot` slice and early stop (`list`'s
+  `PilotSpec`, `StopWhen` and the pilot options, `list::PilotUnattended`;
+  V240 to V242 live in `validate/pilot`), `policy_file`'s `unattended:`
+  section, and the scenario answer of a pilot gate (`scenario/validate`),
+one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   (`stats.rs`: rates, medians, the Wilson interval), copying a playbook into
   another scope's store (`scope_move.rs`, under the source's pointer lock,
   with a `scope_move` history line on the staged copy), schema 1->2 migrator
@@ -344,7 +353,17 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   into a host task, `dispatch` the one entry that sends a list node to its
   runner, `list/` the list runner: `source` the item load, `batch` the
   batches on the list's worker pool and each item's settlement, `check` the
-  item checks, `run` one visit's shared state), list mode's pure half
+  item checks, `run` one visit's shared state), `scheduler/list/pilot.rs` the
+  pilot steps (`step` the slice and its phases, `gate_due` the drive's
+  check) and the drive's pilot gate branch, `fit/readiness.rs` the
+  readiness section of the fit report (`assess`, `not_ready_detail`,
+  `start_check`), the two list events (`list_pilot`, `list_stopped`),
+  `probation.rs` the ledger's writer (the terminal observer's second
+  slot) and its doctor line, `terminal_hook`'s two observers, the
+  probation and readiness check of a patch (`scheduler/patch.rs`),
+  probation in `gate/unattended` (`ProbationView`, `probation`,
+  `check_probation`, `PROBATION_REQUIRED`, `NOT_READY`) and the pilot arm
+  of `next_action/unattended`, list mode's pure half
   (`list/`: `ledger` the journal fold of a visit, `prompt` the `## item`
   prompt section, `stamp` the item stamp on item-scoped events, `view` the
   surface view), `loop_seen` the rendered seen keys of `no_new_items`
@@ -1458,6 +1477,31 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `nodes.<gate>.output.<field>`, checked when posted and when consumed,
   scrubbed of the run's secrets, covered by the passkey challenge, carried
   by the run guard names `review_fields` and `review_max_scope`. The
+  pilot gate on a list node is a plain review request on the list node
+  whose pending block reads the slice from `ListFold` (`list_pilot`,
+  `list_stopped`; both guarded by the run guard `list_pilot`), an early
+  stop `stop_when` counts only the items settled outside the slice and is
+  read after a batch's own pause or stop; readiness in the fit report
+  (`apb_core::readiness`, `fit::readiness`) and probation over eligible
+  attended successes of the exact definition and scripts in the same
+  project are counted from the signed probation ledger the journal's
+  terminal observer writes once per run, after the terminal event and from
+  it (each sub-playbook on its own ledger, checked once in preparation on
+  the loaded definition together with `--require-ready` over the pinned
+  tree, and again on the definition of an in-run patch of an unattended
+  run), waived by a typed confirmation always asked at an interactive
+  terminal and inherited by every child run, or by the machine file, and
+  not held by an older apb; readiness proof is a check apb runs whose
+  failure fails something, and boundaries are judged per effect domain
+  (the network domain bounded only by an enforced isolation with
+  `network: none`), the irreversible-gate walk over failure transitions of
+  reached nodes; the pilot gate's decision names its request like a form
+  gate's, stamped with the seq checked on one journal read; and, carried
+  over from the review of #288, a decision on a form gate names its
+  request, is refused `decide_again` without it or with another request's
+  (also while the definition snapshot does not read under a form guard),
+  and is consumed only from an entry stamped for the open request
+  (`review::consumes_stamped`). The
   derived `playbook.mmd` is written beside every version's YAML and never
   read back.
 

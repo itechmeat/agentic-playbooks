@@ -1,7 +1,7 @@
 # prompt-templates Specification
 
 ## Purpose
-TBD - created by archiving change loops-and-graphs. Update Purpose after archive.
+Prompt templates render array and object fields as compact JSON.
 
 ## Requirements
 

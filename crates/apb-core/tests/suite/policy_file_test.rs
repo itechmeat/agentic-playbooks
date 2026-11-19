@@ -8,7 +8,7 @@ use apb_core::notify::{
     ProjectNotify, Settings, Toggle, Transition, effective,
 };
 use apb_core::policy_file::{
-    PlaybookKey, Policies, PolicyFile, PolicySource, doctor_line, parse, project_path,
+    PlaybookKey, Policies, PolicyFile, PolicySource, doctor_line, parse, parse_as, project_path,
 };
 
 use crate::common::config_sandbox;
@@ -290,4 +290,75 @@ fn a_settings_file_must_be_a_small_regular_file() {
         let err = apb_core::config::project_notify(root.path()).unwrap_err();
         assert!(err.contains("not a regular file"), "{err}");
     }
+}
+
+#[test]
+fn the_unattended_section_reads() {
+    let file = parse("unattended:\n  after_attended_successes: 3\n").unwrap();
+    assert_eq!(file.unattended.after_attended_successes, Some(3));
+    assert!(!file.unattended.waive_probation);
+    // A value outside 1 to 100 is refused.
+    let err = parse("unattended:\n  after_attended_successes: 0\n").unwrap_err();
+    assert!(
+        err.contains("unattended.after_attended_successes is 0; use 1 to 100"),
+        "{err}"
+    );
+    let err = parse("unattended:\n  after_attended_successes: 101\n").unwrap_err();
+    assert!(err.contains("use 1 to 100"), "{err}");
+    // An unknown key is refused (the strict reader).
+    let err = parse("unattended:\n  waive: true\n").unwrap_err();
+    assert!(err.contains("waive"), "{err}");
+}
+
+#[test]
+fn a_project_cannot_waive_probation() {
+    let err = parse_as(
+        "unattended:\n  waive_probation: true\n",
+        PolicySource::Project,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains(
+            "unattended.waive_probation is a machine setting; a project cannot waive probation"
+        ),
+        "{err}"
+    );
+    // The machine file sets it.
+    let file = parse("unattended:\n  waive_probation: true\n").unwrap();
+    assert!(file.unattended.waive_probation);
+}
+
+#[test]
+fn a_project_only_raises_the_probation_floor() {
+    let policies = |m: &str, p: &str| Policies {
+        machine: parse(m).unwrap(),
+        project: parse_as(p, PolicySource::Project).unwrap(),
+    };
+    assert_eq!(policies("", "").probation_floor(), None);
+    assert_eq!(
+        policies("unattended:\n  after_attended_successes: 3\n", "").probation_floor(),
+        Some((3, PolicySource::Machine))
+    );
+    assert_eq!(
+        policies("", "unattended:\n  after_attended_successes: 5\n").probation_floor(),
+        Some((5, PolicySource::Project))
+    );
+    // A project raises, never lowers.
+    assert_eq!(
+        policies(
+            "unattended:\n  after_attended_successes: 5\n",
+            "unattended:\n  after_attended_successes: 3\n"
+        )
+        .probation_floor(),
+        Some((5, PolicySource::Machine))
+    );
+    // The machine's waive flag is the only one read.
+    assert!(
+        policies("unattended:\n  waive_probation: true\n", "").waives_probation(),
+        "the machine file waives"
+    );
+    assert!(
+        !policies("", "unattended:\n  after_attended_successes: 2\n").waives_probation(),
+        "a project file sets no waiver"
+    );
 }

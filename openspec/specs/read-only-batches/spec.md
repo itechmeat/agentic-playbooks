@@ -1,7 +1,7 @@
 # read-only-batches Specification
 
 ## Purpose
-TBD - created by archiving change loops-and-graphs. Update Purpose after archive.
+Read-only nodes run in parallel batches only beside nodes that cannot write, and a change seen inside such a batch fails every member that saw it.
 
 ## Requirements
 

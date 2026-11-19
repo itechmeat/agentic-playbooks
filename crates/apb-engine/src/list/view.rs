@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use apb_core::list::verdict::ItemState;
 
@@ -34,6 +34,14 @@ pub struct RunList {
     /// How many batches the visit needs at its batch size.
     pub batches: u32,
     pub items: Vec<RunListItem>,
+    /// The visit's pilot, when the list runs one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub pilot: Option<PilotView>,
+    /// The visit ended early: the sentence its `list_stopped` carries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub stopped: Option<String>,
 }
 
 /// One item of a [`RunList`].
@@ -78,6 +86,14 @@ pub struct ListProgress {
     pub passed: u32,
     pub needs_look: u32,
     pub running: u32,
+    /// The visit's pilot, when the list runs one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub pilot: Option<PilotView>,
+    /// The visit ended early: the sentence its `list_stopped` carries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub stopped: Option<String>,
 }
 
 impl RunList {
@@ -116,6 +132,8 @@ impl RunList {
                 .iter()
                 .map(|(id, r)| RunListItem::of(id, r, open_sends.contains(id)))
                 .collect(),
+            pilot: PilotView::of(fold),
+            stopped: fold.stopped.as_ref().map(|(_, d)| d.clone()),
         }
     }
 }
@@ -177,7 +195,73 @@ impl ListProgress {
             passed: c.passed,
             needs_look: c.needs_look,
             running: c.running,
+            pilot: PilotView::of(fold),
+            stopped: fold.stopped.as_ref().map(|(_, d)| d.clone()),
         }
+    }
+}
+
+/// The pilot of a visit, as the surfaces show it: the slice of the latest
+/// `list_pilot`, how many of its items passed and need a look, how many
+/// items the visit holds outside the slice, and where the pilot stands.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PilotView {
+    pub round: u32,
+    pub items: Vec<String>,
+    pub passed: u32,
+    pub needs_look: u32,
+    /// Items of the visit outside the slice.
+    pub rest: u32,
+    /// `running`, `waiting`, `continued`, `revised` or `stopped`.
+    pub state: String,
+}
+
+impl PilotView {
+    /// The view of `fold`'s pilot; `None` when the visit has none.
+    pub fn of(fold: &ListFold) -> Option<PilotView> {
+        let pilot = fold.pilot.as_ref()?;
+        let passed = pilot
+            .items
+            .iter()
+            .filter(|id| {
+                fold.items
+                    .get(*id)
+                    .is_some_and(|r| r.state == Some(ItemState::Passed))
+            })
+            .count() as u32;
+        // Waiting only while the gate's request is open: a clean slice
+        // under `then: continue` never asks, and goes on to the rest of
+        // the items, which reads as continued. A visit with no item
+        // outside the slice goes on to nothing: once the node finished
+        // succeeded, it reads as continued too.
+        let outside_started = fold
+            .items
+            .iter()
+            .any(|(id, r)| !pilot.items.contains(id) && r.state.is_some());
+        let went_on = outside_started
+            || (fold.finished
+                && fold.finished_status.as_deref()
+                    == Some(crate::state::NodeStatus::Succeeded.as_str()));
+        let state = if pilot.open {
+            "waiting"
+        } else {
+            match pilot.decision.as_deref() {
+                Some(d) if d == apb_core::list::PILOT_CONTINUE => "continued",
+                Some(d) if d == apb_core::list::PILOT_REVISE => "revised",
+                Some(d) if d == apb_core::list::PILOT_STOP => "stopped",
+                None if fold.pilot_settled() && went_on => "continued",
+                _ => "running",
+            }
+        };
+        Some(PilotView {
+            round: pilot.round,
+            items: pilot.items.clone(),
+            passed,
+            needs_look: fold.pilot_needs_look(),
+            rest: fold.total.saturating_sub(pilot.items.len() as u32),
+            state: state.to_string(),
+        })
     }
 }
 

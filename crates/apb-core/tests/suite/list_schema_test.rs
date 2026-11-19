@@ -512,3 +512,214 @@ fn a_connector_check_is_its_own_site_and_an_eval_refuses_it() {
         "{refusals:?}"
     );
 }
+
+/// `GOOD` with lines added at the tail of its `list:` block.
+fn with_list_tail(extra: &str) -> String {
+    let yaml = GOOD.replace(
+        "        max_items: 100\n",
+        &format!("        max_items: 100\n{extra}"),
+    );
+    assert_ne!(yaml, GOOD, "the tail lines went in");
+    yaml
+}
+
+/// `(code, severity)` of every pilot-rule issue (V240-V242) of `yaml`.
+fn pilot_issues(yaml: &str) -> Vec<(String, Severity, String)> {
+    let p = Playbook::from_yaml(yaml).unwrap();
+    validate(&p, &ValidationContext::default())
+        .issues
+        .into_iter()
+        .filter(|i| matches!(i.code, "V240" | "V241" | "V242"))
+        .map(|i| (i.code.to_string(), i.severity, i.message.clone()))
+        .collect()
+}
+
+#[test]
+fn a_pilot_and_stop_when_parse() {
+    let yaml = with_list_tail(
+        "      pilot: { items: 3, then: continue, unattended: continue }\n      stop_when: { needs_look_share: 0.5, min_settled: 4 }\n",
+    );
+    let p = Playbook::from_yaml(&yaml).unwrap();
+    let spec = p.node("triage").and_then(|n| n.list()).unwrap();
+    let pilot = spec.pilot.expect("the pilot");
+    assert_eq!(pilot.items, 3);
+    assert_eq!(pilot.then, apb_core::list::PilotThen::Continue);
+    assert_eq!(pilot.unattended, apb_core::list::PilotUnattended::Continue);
+    let stop = spec.stop_when.expect("the stop rule");
+    assert_eq!(stop.needs_look_share, Some(0.5));
+    assert_eq!(stop.min_settled, Some(4));
+    // The defaults: then review, unattended fail, min_settled unset.
+    let plain = Playbook::from_yaml(&with_list_tail("      pilot: { items: 3 }\n")).unwrap();
+    let pilot = plain
+        .node("triage")
+        .and_then(|n| n.list())
+        .unwrap()
+        .pilot
+        .expect("the pilot");
+    assert_eq!(pilot.then, apb_core::list::PilotThen::Review);
+    assert_eq!(pilot.unattended, apb_core::list::PilotUnattended::Fail);
+    // Round trip.
+    let back = Playbook::from_yaml(&yaml_serde::to_string(&p).unwrap()).unwrap();
+    assert_eq!(
+        back.node("triage").and_then(|n| n.list()),
+        p.node("triage").and_then(|n| n.list())
+    );
+    assert_eq!(pilot_issues(&yaml), []);
+}
+
+#[test]
+fn stop_when_holds_on_a_count_or_a_share() {
+    use apb_core::list::StopWhen;
+    let count = StopWhen {
+        needs_look_at_least: Some(10),
+        needs_look_share: None,
+        min_settled: None,
+    };
+    assert_eq!(
+        count.holds(40, 10).as_deref(),
+        Some("10 of 40 settled items need a look (stop_when: needs_look_at_least 10)")
+    );
+    assert_eq!(count.holds(40, 9), None);
+    let share = StopWhen {
+        needs_look_at_least: None,
+        needs_look_share: Some(0.5),
+        min_settled: Some(4),
+    };
+    assert_eq!(
+        share.holds(3, 2),
+        None,
+        "before min_settled the share waits"
+    );
+    assert_eq!(
+        share.holds(4, 2).as_deref(),
+        Some("2 of 4 settled items need a look, 50% (stop_when: needs_look_share 0.5)")
+    );
+    assert_eq!(share.holds(4, 1), None);
+    // The default min_settled when a share is given without one.
+    let bare = StopWhen {
+        needs_look_at_least: None,
+        needs_look_share: Some(1.0),
+        min_settled: None,
+    };
+    assert_eq!(bare.holds(9, 9), None, "the default waits for 10 settled");
+    assert_eq!(
+        bare.holds(10, 10).as_deref(),
+        Some("10 of 10 settled items need a look, 100% (stop_when: needs_look_share 1)")
+    );
+}
+
+#[test]
+fn v240_pilot_items() {
+    // 0 and above the cap.
+    let issues = pilot_issues(&with_list_tail("      pilot: { items: 0 }\n"));
+    assert!(
+        issues.iter().any(|(c, s, m)| *c == "V240"
+            && *s == Severity::Error
+            && m == "list.pilot.items is 0; use 1 to 50"),
+        "{issues:?}"
+    );
+    let issues = pilot_issues(&with_list_tail("      pilot: { items: 51 }\n"));
+    assert!(
+        issues.iter().any(|(c, s, m)| *c == "V240"
+            && *s == Severity::Error
+            && m == "list.pilot.items is 51; use 1 to 50"),
+        "{issues:?}"
+    );
+    // Not below max_items: the pilot would be the whole list. A pilot at
+    // or above the cap names the cap first, so this one sits below it.
+    let issues = pilot_issues(
+        &with_list_tail("      pilot: { items: 10 }\n")
+            .replace("        max_items: 100\n", "        max_items: 10\n"),
+    );
+    assert!(
+        issues.iter().any(|(c, s, m)| *c == "V240"
+            && *s == Severity::Error
+            && m == "list.pilot.items 10 is not below list.items.max_items 10: the pilot would be the whole list"),
+        "{issues:?}"
+    );
+    // An inline list with at most pilot.items items.
+    let inline = GOOD.replace(
+        "      items:\n        from: { node: search, field: messages }\n        max_items: 100\n",
+        "      items:\n        inline: [a, b, c]\n",
+    );
+    let issues = pilot_issues(&with_list_tail("      pilot: { items: 3 }\n").replace(
+        "      items:\n        from: { node: search, field: messages }\n        max_items: 100\n",
+        "      items:\n        inline: [a, b, c]\n",
+    ));
+    assert!(
+        issues.iter().any(|(c, s, m)| *c == "V240"
+            && *s == Severity::Error
+            && m == "the list has 3 inline items; a pilot of 3 runs them all"),
+        "{issues:?}"
+    );
+    drop(inline);
+    // A pilot smaller than an inline list is fine.
+    let issues = pilot_issues(&with_list_tail("      pilot: { items: 2 }\n").replace(
+        "      items:\n        from: { node: search, field: messages }\n        max_items: 100\n",
+        "      items:\n        inline: [a, b, c]\n",
+    ));
+    assert!(issues.iter().all(|(c, ..)| *c != "V240"), "{issues:?}");
+}
+
+#[test]
+fn v241_stop_when_rules() {
+    let cases = [
+        (
+            "      stop_when: {}\n",
+            "list.stop_when sets no rule; give needs_look_at_least or needs_look_share",
+        ),
+        (
+            "      stop_when: { needs_look_at_least: 0 }\n",
+            "list.stop_when.needs_look_at_least is 0; use 1 or more",
+        ),
+        (
+            "      stop_when: { needs_look_share: 0 }\n",
+            "list.stop_when.needs_look_share is 0; use a share above 0 and at most 1",
+        ),
+        (
+            "      stop_when: { needs_look_share: 1.5 }\n",
+            "list.stop_when.needs_look_share is 1.5; use a share above 0 and at most 1",
+        ),
+        (
+            "      stop_when: { min_settled: 4 }\n",
+            "list.stop_when.min_settled needs needs_look_share",
+        ),
+        (
+            "      stop_when: { needs_look_share: 0.5, min_settled: 0 }\n",
+            "list.stop_when.min_settled is 0; use 1 or more",
+        ),
+    ];
+    for (line, message) in cases {
+        let issues = pilot_issues(&with_list_tail(line));
+        assert!(
+            issues
+                .iter()
+                .any(|(c, s, m)| *c == "V241" && *s == Severity::Error && m == message),
+            "{line}: {issues:?}"
+        );
+    }
+}
+
+#[test]
+fn v242_then_continue_without_check() {
+    let message = "list.pilot.then: continue goes on by itself when every pilot item passes, and without an item check every item passes; add a check or use then: review";
+    let yaml = with_check("").replace(
+        "        max_items: 100\n",
+        "        max_items: 100\n      pilot: { items: 3, then: continue }\n",
+    );
+    let issues = pilot_issues(&yaml);
+    assert!(
+        issues
+            .iter()
+            .any(|(c, s, m)| *c == "V242" && *s == Severity::Warning && m == message),
+        "{issues:?}"
+    );
+    // With a check, or with then: review, no warning.
+    let checked = with_list_tail("      pilot: { items: 3, then: continue }\n");
+    assert!(pilot_issues(&checked).iter().all(|(c, ..)| *c != "V242"));
+    let review = with_check("").replace(
+        "        max_items: 100\n",
+        "        max_items: 100\n      pilot: { items: 3 }\n",
+    );
+    assert!(pilot_issues(&review).iter().all(|(c, ..)| *c != "V242"));
+}

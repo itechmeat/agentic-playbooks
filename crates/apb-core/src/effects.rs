@@ -59,8 +59,9 @@ pub fn inferred(playbook: &Playbook) -> BTreeSet<Effect> {
     set
 }
 
-/// What one node adds to [`inferred`].
-fn node_inferred(n: &Node) -> BTreeSet<Effect> {
+/// What one node adds to [`inferred`], on top of its declared effects: the
+/// run policy and the readiness rule read the same inference.
+pub fn node_inferred(n: &Node) -> BTreeSet<Effect> {
     let mut set = BTreeSet::new();
     if !node_acts(n) {
         return set;

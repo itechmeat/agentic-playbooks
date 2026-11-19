@@ -169,6 +169,8 @@ mod tests {
                 item("a", "passed", None),
                 item("b\x1b[2J", "needs_look", Some("bad\nline")),
             ],
+            pilot: None,
+            stopped: None,
         };
         let filter = ItemFilter {
             node: Some("rows"),
@@ -202,6 +204,8 @@ mod tests {
             batch: 0,
             batches: 0,
             items: Vec::new(),
+            pilot: None,
+            stopped: None,
         };
         let filter = ItemFilter {
             node: None,
@@ -229,6 +233,8 @@ mod tests {
             batch: 1,
             batches: 2,
             items: vec![item("a", "passed", None), item("b", "pending", None)],
+            pilot: None,
+            stopped: None,
         };
         let pending = ItemFilter {
             node: None,

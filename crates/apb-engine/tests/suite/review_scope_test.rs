@@ -262,7 +262,7 @@ fn a_gate_shows_the_scope_of_its_commits() {
             note: String::new(),
         },
         None,
-        None,
+        open_seq(&run_dir),
         DecisionChannel::Terminal,
     )
     .unwrap();
@@ -364,7 +364,7 @@ fn work_landing_while_the_request_waits_asks_again_on_the_new_scope() {
             note: String::new(),
         },
         None,
-        None,
+        open_seq(&run_dir),
         DecisionChannel::Terminal,
     )
     .unwrap();
@@ -418,7 +418,7 @@ fn work_landing_while_the_request_waits_asks_again_on_the_new_scope() {
             note: String::new(),
         },
         None,
-        None,
+        open_seq(&run_dir),
         DecisionChannel::Terminal,
     )
     .unwrap_err();
@@ -431,7 +431,7 @@ fn work_landing_while_the_request_waits_asks_again_on_the_new_scope() {
             note: String::new(),
         },
         None,
-        None,
+        open_seq(&run_dir),
         DecisionChannel::Terminal,
     )
     .unwrap();
@@ -473,7 +473,7 @@ fn an_uncommitted_change_is_not_in_the_scope() {
             note: String::new(),
         },
         None,
-        None,
+        open_seq(&run_dir),
         DecisionChannel::Terminal,
     )
     .unwrap();
@@ -513,7 +513,7 @@ fn work_tree_attributes_do_not_change_the_line_counts() {
             note: String::new(),
         },
         None,
-        None,
+        open_seq(&run_dir),
         DecisionChannel::Terminal,
     )
     .unwrap();
@@ -540,7 +540,7 @@ fn the_detail_holds_counts_only() {
             note: String::new(),
         },
         None,
-        None,
+        open_seq(&run_dir),
         DecisionChannel::Terminal,
     )
     .unwrap();
@@ -563,7 +563,7 @@ fn a_second_visit_counts_since_the_first_decision() {
             note: String::new(),
         },
         None,
-        None,
+        open_seq(&run_dir),
         DecisionChannel::Terminal,
     )
     .unwrap();
@@ -582,7 +582,7 @@ fn a_second_visit_counts_since_the_first_decision() {
             note: String::new(),
         },
         None,
-        None,
+        open_seq(&run_dir),
         DecisionChannel::Terminal,
     )
     .unwrap();
@@ -620,7 +620,7 @@ fn a_withheld_option_is_refused_through_the_channel() {
             note: String::new(),
         },
         None,
-        None,
+        open_seq(&run_dir),
         DecisionChannel::Terminal,
     )
     .unwrap_err();
@@ -633,7 +633,7 @@ fn a_withheld_option_is_refused_through_the_channel() {
             note: String::new(),
         },
         None,
-        None,
+        open_seq(&run_dir),
         DecisionChannel::Terminal,
     )
     .unwrap();
@@ -768,7 +768,7 @@ fn a_person_only_gate_refuses_a_withheld_option_and_a_bad_value_when_posted() {
                     note: String::new(),
                 },
                 nonce: None,
-                request: None,
+                request: open_seq(&run_dir),
                 channel: DecisionChannel::Terminal,
                 fields: [("amount".to_string(), amount)].into(),
                 passkey: None,
@@ -840,7 +840,7 @@ fn an_open_request_without_its_detail_fails_closed_until_the_resume_writes_it() 
                 note: String::new(),
             },
             None,
-            None,
+            open_seq(&run_dir),
             DecisionChannel::Terminal,
         )
     };
@@ -890,7 +890,7 @@ fn a_scripted_decision_on_an_ordinary_gate_keeps_its_channel() {
             note: String::new(),
         },
         None,
-        None,
+        open_seq(&run_dir),
         DecisionChannel::Scenario,
     )
     .unwrap();
@@ -962,9 +962,560 @@ fn the_next_action_leaves_a_withheld_option_out() {
             note: String::new(),
         },
         None,
-        None,
+        open_seq(&run_dir),
         DecisionChannel::Terminal,
     )
     .unwrap();
     assert_eq!(wait_result(&rx).outcome, RunStatus::Failed);
+}
+
+/// The seq of the latest `review_requested` of `gate`.
+fn latest_request_seq(run_dir: &Path, gate: &str) -> u64 {
+    read_all(run_dir)
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|e| match &e.payload {
+            EventPayload::ReviewRequested { node, .. } if node == gate => Some(e.seq),
+            _ => None,
+        })
+        .expect("a review_requested")
+}
+
+/// The review channel entries of the run, whole.
+fn entries_of(run_dir: &Path) -> Vec<apb_engine::review::ReviewEntry> {
+    apb_engine::review::read_reviews_after(run_dir, None).unwrap()
+}
+
+/// The seq of the open request of `gate`, as every decision surface names
+/// it for a form gate.
+fn open_seq(run_dir: &Path) -> Option<u64> {
+    read_all(run_dir)
+        .ok()
+        .and_then(|events| apb_engine::review::open_request(&events, "gate").map(|(seq, _)| seq))
+}
+
+/// A late decision never answers the request the gate asked again with
+/// (carried-over decisions 2 and 5): a scope change withdrew request A and
+/// the gate asked again with B; a decision that names no request and one
+/// that names A are each refused `decide_again`, one naming B is accepted,
+/// and the run's single `review_decided` follows B.
+#[cfg(unix)]
+#[test]
+fn a_late_decision_does_not_answer_the_request_asked_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _lock = crate::common::env_lock();
+    seed(
+        tmp.path(),
+        &RESCOPE_PLAYBOOK.replace("max_scope: { files: 1 }", "max_scope: { files: 5 }"),
+        COMMIT_ONE,
+    );
+    crate::common::seed_main(tmp.path());
+    let prog = flaky_agent(tmp.path());
+    let _cmd = crate::common::EnvVar::set("APB_AGENT_CMD", &prog);
+    let rx = run_in_background(tmp.path());
+    let run_dir = latest_run_dir(tmp.path());
+    let _ = pending_of(&run_dir, "gate");
+    // The retry lands while request A waits. No decision is posted, so A
+    // stays open until the post below names it.
+    poll_until("the retry to commit", || {
+        read_all(&run_dir)
+            .ok()?
+            .iter()
+            .any(|e| {
+                matches!(&e.payload, EventPayload::NodeFinished { node, status, .. }
+                if node == "flaky" && status == "succeeded")
+            })
+            .then_some(())
+    });
+    let seq_a = latest_request_seq(&run_dir, "gate");
+    // A decision naming A: accepted while A is still open and stamped with
+    // it; the drive measures the scope again before consuming and asks
+    // again with B. The entry stamped A never answers B.
+    post_decision_via(
+        &run_dir,
+        ReviewCommand {
+            node: "gate".into(),
+            decision: "approve".into(),
+            note: String::new(),
+        },
+        None,
+        Some(seq_a),
+        DecisionChannel::Terminal,
+    )
+    .unwrap();
+    poll_until("the second request", || {
+        (requests_of(&run_dir, "gate") >= 2).then_some(())
+    });
+    let seq_b = latest_request_seq(&run_dir, "gate");
+    assert_ne!(seq_a, seq_b);
+    let post = |decision: &str, request: Option<u64>| {
+        post_decision_via(
+            &run_dir,
+            ReviewCommand {
+                node: "gate".into(),
+                decision: decision.into(),
+                note: String::new(),
+            },
+            None,
+            request,
+            DecisionChannel::Terminal,
+        )
+    };
+    let none_named = post("reject", None).unwrap_err();
+    assert!(
+        none_named.to_string().contains("decide_again"),
+        "{none_named}"
+    );
+    assert!(
+        none_named.to_string().contains(&format!("seq {seq_b}")),
+        "the refusal names the open request: {none_named}"
+    );
+    let naming_a = post("approve", Some(seq_a)).unwrap_err();
+    assert!(naming_a.to_string().contains("decide_again"), "{naming_a}");
+    post("approve", Some(seq_b)).unwrap();
+    let result = wait_result(&rx);
+    assert_eq!(result.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir).unwrap();
+    let decided: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::ReviewDecided { decision, .. } => Some(decision.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        decided,
+        vec!["approve"],
+        "one decision, the second request's"
+    );
+    assert_eq!(requests_of(&run_dir, "gate"), 2);
+}
+
+/// A form gate's decision names the request it answers: a post that names
+/// none is refused `decide_again`, naming the open request, and nothing is
+/// queued.
+#[test]
+fn a_form_gate_decision_without_a_request_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed(
+        tmp.path(),
+        &scope_playbook(", show: [{ label: Work, text: \"the commits so far\" }]"),
+        COMMIT_ONE,
+    );
+    let rx = run_in_background(tmp.path());
+    let run_dir = latest_run_dir(tmp.path());
+    let _ = pending_of(&run_dir, "gate");
+    let open = latest_request_seq(&run_dir, "gate");
+    let refused = post_decision_via(
+        &run_dir,
+        ReviewCommand {
+            node: "gate".into(),
+            decision: "approve".into(),
+            note: String::new(),
+        },
+        None,
+        None,
+        DecisionChannel::Terminal,
+    )
+    .unwrap_err();
+    let text = refused.to_string();
+    assert!(text.starts_with("conflict: decide_again:"), "{text}");
+    assert!(text.contains(&format!("seq {open}")), "{text}");
+    assert!(
+        entries_of(&run_dir).is_empty(),
+        "a refused decision is not queued"
+    );
+    // The named post is accepted and the run goes on.
+    post_decision_via(
+        &run_dir,
+        ReviewCommand {
+            node: "gate".into(),
+            decision: "approve".into(),
+            note: String::new(),
+        },
+        None,
+        Some(open),
+        DecisionChannel::Terminal,
+    )
+    .unwrap();
+    assert_eq!(wait_result(&rx).outcome, RunStatus::Succeeded);
+}
+
+/// The passkey variant: with a passkey enrolled on this machine, a plain
+/// (not person-only, unbound) form gate still takes a terminal post that
+/// names its request, and the drive consumes it.
+#[test]
+fn a_form_gate_decision_naming_its_request_is_consumed_with_a_passkey() {
+    let _guard = crate::common::env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    crate::review_form_test::enroll_real_passkey(&cfg.path().join("passkeys.yaml"));
+    let _var = crate::common::EnvVar::set("APB_CONFIG_DIR", cfg.path());
+    apb_core::run_origin::ensure_key().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    seed(
+        tmp.path(),
+        &scope_playbook(", show: [{ label: Work, text: \"the commits so far\" }]"),
+        COMMIT_ONE,
+    );
+    let rx = run_in_background(tmp.path());
+    let run_dir = latest_run_dir(tmp.path());
+    let _ = pending_of(&run_dir, "gate");
+    let open = latest_request_seq(&run_dir, "gate");
+    post_decision_via(
+        &run_dir,
+        ReviewCommand {
+            node: "gate".into(),
+            decision: "approve".into(),
+            note: String::new(),
+        },
+        None,
+        Some(open),
+        DecisionChannel::Terminal,
+    )
+    .unwrap();
+    assert_eq!(wait_result(&rx).outcome, RunStatus::Succeeded);
+}
+
+/// An entry no poster stamped (a hand-written line) never decides a form
+/// gate: the run keeps waiting until a stamped post lands, and `apb
+/// doctor --run` reports the entry under `reviews` as unstamped.
+#[test]
+fn an_unstamped_entry_never_decides_a_form_gate() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed(
+        tmp.path(),
+        &scope_playbook(", show: [{ label: Work, text: \"the commits so far\" }]"),
+        COMMIT_ONE,
+    );
+    let rx = run_in_background(tmp.path());
+    let run_dir = latest_run_dir(tmp.path());
+    let _ = pending_of(&run_dir, "gate");
+    let open = latest_request_seq(&run_dir, "gate");
+    // A line without a request stamp, appended by hand while the gate
+    // waits.
+    let hand = r#"{"seq":0,"node":"gate","decision":"approve","note":""}"#;
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(run_dir.join("reviews.jsonl"))
+        .unwrap()
+        .write_all(format!("{hand}\n").as_bytes())
+        .unwrap();
+    poll_until("the hand-written line to be ignored", || {
+        (!entries_of(&run_dir).is_empty()
+            && read_all(&run_dir)
+                .unwrap()
+                .iter()
+                .all(|e| !matches!(e.payload, EventPayload::ReviewDecided { .. })))
+        .then_some(())
+    });
+    assert!(
+        !read_all(&run_dir)
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::ReviewDecided { .. })),
+        "the unstamped entry is never consumed"
+    );
+    let report = apb_engine::run_doctor::diagnose_run(tmp.path(), &run_id_of(&run_dir)).unwrap();
+    let reviews = report
+        .iter()
+        .find(|c| c.subject == "reviews")
+        .expect("a reviews row");
+    assert!(
+        reviews.detail.contains("no request stamp"),
+        "{}",
+        reviews.detail
+    );
+    // A stamped post is consumed.
+    post_decision_via(
+        &run_dir,
+        ReviewCommand {
+            node: "gate".into(),
+            decision: "approve".into(),
+            note: String::new(),
+        },
+        None,
+        Some(open),
+        DecisionChannel::Terminal,
+    )
+    .unwrap();
+    assert_eq!(wait_result(&rx).outcome, RunStatus::Succeeded);
+}
+
+/// A plain gate keeps today's behaviour: a decision that names no request
+/// is accepted, its entry carries no request stamp, and the journal holds
+/// the request alone with no `review_detail`.
+#[test]
+fn a_plain_gate_takes_a_decision_without_a_request() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed(tmp.path(), &scope_playbook(""), COMMIT_ONE);
+    let rx = run_in_background(tmp.path());
+    let run_dir = latest_run_dir(tmp.path());
+    poll_until("pending review", || {
+        let view = RunView::load(&run_dir, &run_id_of(&run_dir)).ok()?;
+        view.progress?.pending_review.filter(|p| p.node == "gate")
+    });
+    post_decision_via(
+        &run_dir,
+        ReviewCommand {
+            node: "gate".into(),
+            decision: "approve".into(),
+            note: String::new(),
+        },
+        None,
+        None,
+        DecisionChannel::Terminal,
+    )
+    .unwrap();
+    assert_eq!(wait_result(&rx).outcome, RunStatus::Succeeded);
+    let entries = entries_of(&run_dir);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].request, None, "no request stamp on a plain gate");
+    assert!(
+        !read_all(&run_dir)
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::ReviewDetail { .. })),
+        "a plain gate journals no detail"
+    );
+}
+
+/// The engine's own decision on a form gate (an unattended run's declared
+/// outcome) names the request and its entry carries it with `by:
+/// unattended`.
+#[test]
+fn an_unattended_decision_on_a_form_gate_is_stamped() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed(
+        tmp.path(),
+        &scope_playbook(
+            ", show: [{ label: Work, text: \"the commits so far\" }], unattended: { decide: approve, note: ci }",
+        ),
+        COMMIT_ONE,
+    );
+    let res = run(
+        tmp.path(),
+        "rsc",
+        None,
+        RunOptions {
+            unattended: true,
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let run_dir = tmp.path().join(".apb/runs").join(&res.run_id);
+    let entries = entries_of(&run_dir);
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    let open = latest_request_seq(&run_dir, "gate");
+    assert_eq!(
+        entries[0].request,
+        Some(open),
+        "the entry names the request"
+    );
+    assert!(
+        matches!(
+            entries[0].by,
+            Some(apb_engine::event::DecidedBy::Unattended)
+        ),
+        "{:?}",
+        entries[0].by
+    );
+}
+
+/// While the run's definition snapshot does not read, a run whose run
+/// guard names a review form feature refuses a decision the same way
+/// (`decide_again`), instead of reading the gate as a plain one; with the
+/// snapshot back and the detail the resume journals, a post naming the
+/// request is consumed.
+#[test]
+fn an_unreadable_definition_under_a_form_guard_refuses() {
+    use apb_engine::pause::{PauseBy, PauseMode, PauseRequest, request_pause};
+    let tmp = tempfile::tempdir().unwrap();
+    seed(
+        tmp.path(),
+        &scope_playbook(", max_scope: { files: 1 }"),
+        COMMIT_TWO,
+    );
+    let rx = run_in_background(tmp.path());
+    let run_dir = latest_run_dir(tmp.path());
+    let run_id = run_id_of(&run_dir);
+    let _ = pending_of(&run_dir, "gate");
+    request_pause(
+        tmp.path(),
+        &run_id,
+        &PauseRequest {
+            reason: Some("crash point".into()),
+            by: Some(PauseBy::Operator),
+            mode: PauseMode::Drain,
+            ..PauseRequest::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(wait_result(&rx).outcome, RunStatus::Paused);
+    let journal = run_dir.join("events.jsonl");
+    let kept: String = fs::read_to_string(&journal)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.contains("\"type\":\"review_detail\""))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    fs::write(&journal, kept).unwrap();
+    let snapshot = run_dir.join("playbook.yaml");
+    let away = run_dir.join("playbook.yaml.away");
+    fs::rename(&snapshot, &away).unwrap();
+    let open = latest_request_seq(&run_dir, "gate");
+    let post = |decision: &str, request: Option<u64>| {
+        post_decision_via(
+            &run_dir,
+            ReviewCommand {
+                node: "gate".into(),
+                decision: decision.into(),
+                note: String::new(),
+            },
+            None,
+            request,
+            DecisionChannel::Terminal,
+        )
+    };
+    let refused = post("reject", None).unwrap_err();
+    assert!(refused.to_string().contains("decide_again"), "{refused}");
+    let named = post("reject", Some(open)).unwrap_err();
+    assert!(named.to_string().contains("decide_again"), "{named}");
+    assert!(
+        entries_of(&run_dir).is_empty(),
+        "nothing is queued while the snapshot does not read"
+    );
+    // The snapshot reads again; the resumed drive journals the detail and
+    // a post naming the request is consumed.
+    fs::rename(&away, &snapshot).unwrap();
+    let (tx, resumed) = mpsc::channel();
+    let root = tmp.path().to_path_buf();
+    let id = run_id.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(apb_engine::scheduler::resume(&root, &id, None).unwrap());
+    });
+    poll_until("the detail the resume journals", || {
+        let view = RunView::load(&run_dir, &run_id).ok()?;
+        view.progress?
+            .pending_review
+            .filter(|p| p.node == "gate" && p.scope_line.is_some())
+    });
+    post("reject", Some(open)).unwrap();
+    assert_eq!(wait_result(&resumed).outcome, RunStatus::Failed);
+}
+
+/// A run whose run guard names no review form feature keeps today's
+/// acceptance while its definition snapshot does not read: a decision on
+/// its plain gate is accepted.
+#[test]
+fn an_unreadable_definition_without_a_form_guard_accepts() {
+    use apb_engine::pause::{PauseBy, PauseMode, PauseRequest, request_pause};
+    let tmp = tempfile::tempdir().unwrap();
+    seed(tmp.path(), &scope_playbook(""), COMMIT_ONE);
+    let rx = run_in_background(tmp.path());
+    let run_dir = latest_run_dir(tmp.path());
+    let run_id = run_id_of(&run_dir);
+    poll_until("pending review", || {
+        let view = RunView::load(&run_dir, &run_id).ok()?;
+        view.progress?.pending_review.filter(|p| p.node == "gate")
+    });
+    request_pause(
+        tmp.path(),
+        &run_id,
+        &PauseRequest {
+            reason: Some("crash point".into()),
+            by: Some(PauseBy::Operator),
+            mode: PauseMode::Drain,
+            ..PauseRequest::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(wait_result(&rx).outcome, RunStatus::Paused);
+    let snapshot = run_dir.join("playbook.yaml");
+    let away = run_dir.join("playbook.yaml.away");
+    fs::rename(&snapshot, &away).unwrap();
+    post_decision_via(
+        &run_dir,
+        ReviewCommand {
+            node: "gate".into(),
+            decision: "approve".into(),
+            note: String::new(),
+        },
+        None,
+        None,
+        DecisionChannel::Terminal,
+    )
+    .unwrap();
+    fs::rename(&away, &snapshot).unwrap();
+    let (tx, resumed) = mpsc::channel();
+    let root = tmp.path().to_path_buf();
+    let id = run_id.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(apb_engine::scheduler::resume(&root, &id, None).unwrap());
+    });
+    assert_eq!(wait_result(&resumed).outcome, RunStatus::Succeeded);
+}
+
+/// A quick scenario's scripted decision on a form gate goes through the
+/// drive's own scripted post (`scheduler::scripted_review`), which names
+/// the open request: the answer is used and the run ends succeeded.
+#[test]
+fn a_scripted_decision_on_a_form_gate_names_its_request() {
+    use apb_core::scenario::{Scenario, ScenarioLevel};
+    use apb_engine::scenario::session::ScenarioPrep;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    apb_core::registry::init_project(root).unwrap();
+    let yaml = "schema: 2\nid: rsc\nname: RScope\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: gate, type: human_review, options: [approve, reject], show: [{ label: Work, text: \"the work so far\" }], fields: [{ name: note, type: text }] }\n  - { id: ok, type: finish, outcome: success }\n  - { id: no, type: finish, outcome: failure }\nedges:\n  - { from: start, to: gate }\n  - { from: gate, to: ok, condition: { type: review_status, equals: approve } }\n  - { from: gate, to: no, condition: { type: review_status, equals: reject } }\n";
+    let vdir = root.join(".apb/playbooks/rsc/1.0.0");
+    fs::create_dir_all(vdir.join("evals/scenarios")).unwrap();
+    fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
+    fs::write(root.join(".apb/playbooks/rsc/current"), "1.0.0").unwrap();
+    let scenario = "schema: 1\nid: rsc\nanswers:\n  gate:\n    - visit: 1\n      review: { decision: approve }\n";
+    fs::write(vdir.join("evals/scenarios/form.yaml"), scenario).unwrap();
+    let prep = ScenarioPrep {
+        scenario: yaml_serde::from_str::<Scenario>(scenario).unwrap(),
+        level: ScenarioLevel::Quick,
+        scenario_digest: "sha256:form".into(),
+        max_requests: 20,
+        sent: Default::default(),
+        external_data: false,
+    };
+    let quick = apb_engine::scheduler::run_scenario(root, "rsc", None, &prep).unwrap();
+    assert_eq!(quick.outcome, RunStatus::Succeeded, "{:?}", quick.halted);
+    assert!(
+        quick
+            .answers
+            .used
+            .iter()
+            .any(|a| a.node.as_deref() == Some("gate") && a.part.contains("review")),
+        "{:?}",
+        quick.answers.used
+    );
+    let ev = apb_engine::event::read_all(&quick.run_dir).unwrap();
+    let requested = ev
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::ReviewRequested { node, .. } if node == "gate" => Some(e.seq),
+            _ => None,
+        })
+        .expect("the form gate asked");
+    let decided = ev.iter().find_map(|e| match &e.payload {
+        EventPayload::ReviewDecided { node, decision, .. } if node == "gate" => {
+            Some(decision.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(decided.as_deref(), Some("approve"));
+    // The scripted entry named the request it answered.
+    let entries = apb_engine::read_reviews_after(&quick.run_dir, None).unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.cmd.node == "gate" && e.request == Some(requested)),
+        "{entries:?}"
+    );
 }

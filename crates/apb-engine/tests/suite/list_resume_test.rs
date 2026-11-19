@@ -362,6 +362,65 @@ fn a_supervisor_retry_reruns_only_the_items_that_need_a_look() {
     assert_eq!(last_state(&ev, "b").state, "passed");
 }
 
+/// A drive that died right after a retry's reopening `list_started`,
+/// before it requeued the items that need a look: the resume completes the
+/// requeue, so the item runs again instead of the visit ending as it was.
+#[test]
+fn a_crash_before_the_requeue_still_reruns_the_items_that_need_a_look() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let list = format!(
+        "items: {{ inline: [ {{ id: a }}, {{ id: b }} ] }}\nbatch: {{ size: 2, parallel: 1, retries: 0 }}\non_needs_look: fail\n{CHECK}"
+    );
+    seed(root, &playbook(&list, "", ""), &[]);
+    let _env = Env::set(&stub(root, ""), &[]);
+    crate::list_run_test::plan(root, "b", Some(1), "1");
+    let mut run = supervised(root);
+    let id = run.id.clone();
+    wait_failed(root, &id, 1);
+    request_pause(root, &id, &operator(PauseMode::Drain)).unwrap();
+    wait_status(root, &id, RunStatus::Paused);
+    run.driver.take().unwrap().join().unwrap();
+    // What a retry's drive that died after the reopening `list_started`
+    // leaves: the node started again, the visit reopened, nothing requeued.
+    let ev = events(root, &id);
+    let reopened = ev
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::ListStarted {
+                node,
+                total,
+                filtered_out,
+                items_digest,
+                batch_size,
+                parallel,
+                ..
+            } if node == "work" => Some(EventPayload::ListStarted {
+                node: node.clone(),
+                total: *total,
+                filtered_out: *filtered_out,
+                items_digest: items_digest.clone(),
+                batch_size: *batch_size,
+                parallel: *parallel,
+                reopened: true,
+            }),
+            _ => None,
+        })
+        .unwrap();
+    let mut log = apb_engine::event::EventLog::open(&run.run_dir).unwrap();
+    log.append(EventPayload::NodeStarted {
+        node: "work".into(),
+        attempt: 2,
+    })
+    .unwrap();
+    log.append(reopened).unwrap();
+    drop(log);
+    let res = resume(root, &id, None).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    assert_eq!((runs_of(root, "a"), runs_of(root, "b")), (1, 2));
+    assert_eq!(last_state(&events(root, &id), "b").state, "passed");
+}
+
 /// A run output that reads an item field of a list a supervisor retry
 /// reopened: the item the first execution passed is cited by that
 /// execution, its own settlement and its own attempt, and the item the

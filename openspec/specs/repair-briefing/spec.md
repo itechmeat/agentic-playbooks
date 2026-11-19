@@ -1,7 +1,7 @@
 # repair-briefing Specification
 
 ## Purpose
-TBD - created by archiving change loops-and-graphs. Update Purpose after archive.
+After a rejected attempt the next attempt is told the rejection reason and how far its repair should reach.
 
 ## Requirements
 

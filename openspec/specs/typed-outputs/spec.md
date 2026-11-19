@@ -1,7 +1,7 @@
 # typed-outputs Specification
 
 ## Purpose
-TBD - created by archiving change node-contracts. Update Purpose after archive.
+A node's declared output fields can carry types, and an attempt whose output does not match is rejected with a reason that never holds the value.
 
 ## Requirements
 

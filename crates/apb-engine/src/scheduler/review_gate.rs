@@ -30,8 +30,10 @@ pub(crate) enum Consume<'a> {
     /// The first decision stamped with the open request (and, on a bound
     /// request, with its binding nonce); for a person-only gate only one
     /// through a person's channel. Unstamped and refused entries are never
-    /// consumed: `apb doctor --run` lists them.
-    Stamped { person_only: bool },
+    /// consumed: `apb doctor --run` lists them. `passkey` says whether the
+    /// gate demands a passkey stamp (`is_stamped_gate`): a form gate
+    /// neither person-only nor bound does not.
+    Stamped { person_only: bool, passkey: bool },
 }
 
 /// The queued decision that answers gate `node`'s open request under
@@ -58,12 +60,15 @@ fn queued_decision(
                     && crate::review::passkey_stamp_ok(run_dir, e, *person_only)
             })
             .nth(*consumed),
-        Consume::Stamped { person_only } => {
+        Consume::Stamped {
+            person_only,
+            passkey,
+        } => {
             let Some((request, binding)) = crate::review::open_request(events, node) else {
                 return Ok(None);
             };
             for_node.find(|e| {
-                crate::review::answers_stamped(run_dir, e, request, binding, *person_only)
+                crate::review::answers_stamped(run_dir, e, request, binding, *person_only, *passkey)
             })
         }
     })
@@ -94,6 +99,7 @@ pub(crate) struct AutoDecision {
 }
 
 /// What one look at the gate found.
+#[derive(Debug)]
 pub(crate) enum GateStep {
     /// A decision answers the open request. Nothing is journaled yet: the
     /// caller records `ReviewDecided` in its own order.
@@ -170,11 +176,36 @@ pub(crate) fn await_decision(
         // without it: the scope since the gate's previous decision, the
         // rendered form, and the options withheld above `max_scope`. A gate
         // without a form feature writes its request alone.
+        // A gate whose decision must name its request (a form gate, a list
+        // pilot gate) writes the request into its own instruction, at the
+        // seq the append settles, so the command it shows is accepted.
+        let must_name = playbook
+            .node(current)
+            .is_some_and(crate::review::requires_request);
+        let gate_id = current.clone();
+        let name = move |event: &mut EventPayload, seq: u64| {
+            if !must_name {
+                return;
+            }
+            if let EventPayload::ReviewRequested {
+                instruction,
+                person_only,
+                ..
+            } = event
+            {
+                *instruction = crate::people::instruction::name_request(
+                    instruction,
+                    &gate_id,
+                    *person_only,
+                    seq,
+                );
+            }
+        };
         let requested = if needs_detail {
             let detail = detail_event(workdir, run_dir, &events, current, req.detail);
-            log.append_pair(req.event, detail)?.seq
+            log.append_pair(req.event, name, detail)?.seq
         } else {
-            log.append(req.event)?.seq
+            log.append_named(req.event, name)?.seq
         };
         // The engine's own decision (an enforced recommendation, or an
         // unattended run's declared outcome): posted through the review
@@ -403,11 +434,38 @@ pub(crate) fn post_unattended(
     ) {
         Ok(_) | Err(EngineError::AlreadyAnswered(_)) => Ok(Ok(())),
         Err(e) => Ok(Err(format!(
-            "{}: human_review `{gate}` could not record its unattended decision `{}`: {e}",
+            "{}: gate `{gate}` could not record its unattended decision `{}`: {e}",
             crate::run_config::HITL_REQUIRED,
             decision.0
         ))),
     }
+}
+
+/// The `review_decided` the drive journals for a consumed entry: who
+/// decided it, its binding nonce, and the channel a person's decision
+/// came through. The human review branch and the list pilot branch share
+/// it.
+pub(crate) fn decided_event(node: &str, entry: &ReviewEntry) -> EventPayload {
+    let mut decided = EventPayload::review_decided(
+        node.to_string(),
+        entry.cmd.decision.clone(),
+        entry.cmd.note.clone(),
+        None,
+    );
+    if let EventPayload::ReviewDecided {
+        decided_by,
+        binding,
+        via,
+        ..
+    } = &mut decided
+    {
+        *decided_by = entry.by;
+        *binding = entry.nonce.clone();
+        *via = entry
+            .channel
+            .filter(|c| entry.by.is_none() && c.is_surface());
+    }
+    decided
 }
 
 /// The request of a `human_review` visit: the instruction, and the review

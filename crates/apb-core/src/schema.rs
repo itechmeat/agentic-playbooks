@@ -213,6 +213,13 @@ pub struct Playbook {
     /// (see [`crate::health`]). Additive to schema 2; no migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<crate::health::HealthBlock>,
+    /// How the playbook may run alone (before-running-alone D5). Absent: no
+    /// probation from the playbook (`policy.yaml` may still ask for one).
+    /// An apb older than this change drops the block (see
+    /// `apb_core::readiness` and GUARDRAILS.md "Older apb binaries").
+    /// Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unattended: Option<crate::unattended_policy::UnattendedPolicy>,
     /// What `run.previous_success.*` renders when no earlier run of this
     /// playbook succeeded (see [`crate::previous_success`]). Additive to
     /// schema 2; no migration.

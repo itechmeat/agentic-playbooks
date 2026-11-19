@@ -315,6 +315,14 @@ fn approval_gate(
     Ok(approval::check_before(run_dir, playbook, node, &events).err())
 }
 
+/// Whether an unattended run fails at this pilot gate: `fail` declared, or
+/// `continue` with a slice item that needs a look (an engine decision to
+/// go on past a bad slice would undo what the pilot proves).
+fn pilot_unattended_fails(gate: &list::pilot::PilotGate) -> bool {
+    gate.spec.unattended == apb_core::list::PilotUnattended::Fail
+        || gate.fold.pilot_needs_look() > 0
+}
+
 /// [`stop_on_unhandled_failure`] with its reason given verbatim.
 fn stop_with_reason(
     log: &mut EventLog,
@@ -589,7 +597,8 @@ fn scripted_review(run_dir: &Path, node: &str) -> Result<bool, EngineError> {
         Resolution::Real | Resolution::Skip => Ok(false),
         Resolution::Answer(Answer::Review(a)) => {
             // The script answers the open request with its binding, as a
-            // person shown those snapshots would.
+            // person shown those snapshots would: named with the request's
+            // seq, like every other decision on a form gate.
             let events = read_all(run_dir)?;
             let open = crate::review::open_request(&events, node);
             crate::review::post_decision_via(
@@ -600,7 +609,7 @@ fn scripted_review(run_dir: &Path, node: &str) -> Result<bool, EngineError> {
                     note: a.note.unwrap_or_default(),
                 },
                 open.and_then(|(_, b)| b.map(|b| b.nonce.clone())),
-                None,
+                open.map(|(seq, _)| seq),
                 crate::decision_channel::DecisionChannel::Scenario,
             )?;
             Ok(true)
@@ -2435,11 +2444,13 @@ fn drive_inner(
                     outcome: unattended_stop(log, run_dir, &current, reason, &mut frontier)?,
                 });
             }
-            // A gate that binds snapshots or that only a person decides
+            // A gate that binds snapshots, that only a person decides, or
+            // whose decision must name the request it answers (a form gate)
             // consumes only entries stamped with its open request.
             let consume = match playbook.node(&current) {
-                Some(g) if crate::review::is_stamped_gate(g) => review_gate::Consume::Stamped {
+                Some(g) if crate::review::consumes_stamped(g) => review_gate::Consume::Stamped {
                     person_only: g.person_only,
+                    passkey: crate::review::is_stamped_gate(g),
                 },
                 _ => review_gate::Consume::Nth,
             };
@@ -2561,26 +2572,7 @@ fn drive_inner(
                             })?;
                         }
                     }
-                    let mut decided = EventPayload::review_decided(
-                        current.clone(),
-                        entry.cmd.decision.clone(),
-                        entry.cmd.note.clone(),
-                        None,
-                    );
-                    if let EventPayload::ReviewDecided {
-                        decided_by,
-                        binding,
-                        via,
-                        ..
-                    } = &mut decided
-                    {
-                        *decided_by = entry.by;
-                        *binding = entry.nonce.clone();
-                        *via = entry
-                            .channel
-                            .filter(|c| entry.by.is_none() && c.is_surface());
-                    }
-                    log.append(decided)?;
+                    log.append(review_gate::decided_event(&current, &entry))?;
                     // A gate with fields outputs one JSON object: the
                     // decision and every field.
                     let output = match &values {
@@ -2786,6 +2778,99 @@ fn drive_inner(
                 });
             }
             (status, output)
+        } else if let Some(gate) = {
+            // Only a list node with a pilot reads the journal here.
+            let piloted = playbook
+                .node(&current)
+                .and_then(|n| n.list())
+                .is_some_and(|l| l.pilot.is_some());
+            if piloted {
+                let events = read_all(run_dir)?;
+                list::pilot::gate_due(&playbook, &events, &current)
+            } else {
+                None
+            }
+        } {
+            // A list visit's pilot slice settled: the gate asks. No
+            // `node_started` or `node_finished` here: the list node's own
+            // dispatch writes them.
+            // An unattended run never waits at a pilot gate: it fails, or
+            // it decides `continue` over a clean slice.
+            let auto = if cfg.unattended {
+                if pilot_unattended_fails(&gate) {
+                    let reason = unattended::hitl("list pilot", &current);
+                    return Ok(RunResult {
+                        run_id,
+                        outcome: unattended_stop(log, run_dir, &current, reason, &mut frontier)?,
+                    });
+                }
+                if let Err(reason) = review_gate::post_unattended(
+                    run_dir,
+                    &current,
+                    &(apb_core::list::PILOT_CONTINUE.to_string(), String::new()),
+                )? {
+                    return Ok(RunResult {
+                        run_id,
+                        outcome: unattended_stop(log, run_dir, &current, reason, &mut frontier)?,
+                    });
+                }
+                Some(review_gate::AutoDecision {
+                    decision: apb_core::list::PILOT_CONTINUE.to_string(),
+                    note: String::new(),
+                    by: crate::event::DecidedBy::Unattended,
+                })
+            } else {
+                None
+            };
+            let gate_node = current.clone();
+            let step = review_gate::await_decision(
+                &mut review_gate::GateDrive {
+                    run_dir,
+                    workdir: &workdir,
+                    log: &mut *log,
+                    playbook: &playbook,
+                    current: &mut current,
+                    control_cursor: &mut control_cursor,
+                    prompt_overrides: &mut prompt_overrides,
+                    frontier: &mut frontier,
+                },
+                // A pilot gate is a `consumes_stamped` gate through
+                // `requires_request`, never person-only, never a passkey
+                // gate: never `Consume::Nth`.
+                review_gate::Consume::Stamped {
+                    person_only: false,
+                    passkey: false,
+                },
+                |_log, _events| Ok(list::pilot::request(&playbook, &gate_node, &gate, auto)),
+                || Ok(crate::review::form::GateDetail::default()),
+            )?;
+            match step {
+                review_gate::GateStep::Decided(entry) => {
+                    // A decision outside the options ends the run.
+                    if !apb_core::list::PILOT_OPTIONS.contains(&entry.cmd.decision.as_str()) {
+                        let reason = format!(
+                            "list `{current}`: `{}` is not a pilot option (continue, revise, stop)",
+                            entry.cmd.decision
+                        );
+                        return Ok(RunResult {
+                            run_id,
+                            outcome: stop_with_reason(log, &current, reason, &mut frontier)?,
+                        });
+                    }
+                    log.append(review_gate::decided_event(&current, &entry))?;
+                    // The next turn dispatches the list node, whose visit
+                    // is open: the runner reads the decision from the fold.
+                    continue;
+                }
+                review_gate::GateStep::Moved => continue,
+                // A scenario run's person is its scripted decision, posted
+                // through the channel every decision surface uses.
+                review_gate::GateStep::Waiting if scripted_review(run_dir, &current)? => continue,
+                review_gate::GateStep::Waiting => {
+                    std::thread::sleep(AWAIT_CONTROL_POLL);
+                    continue;
+                }
+            }
         } else if is_interactive(&playbook, &current) {
             // Interactive agent_task (spec 2026-07-20): the agent may ask the
             // user a question mid-run and the node parks until it is answered.

@@ -1931,3 +1931,64 @@ fn a_person_only_publish_takes_only_a_persons_consent() {
         ))
     );
 }
+
+/// A person-only publish node still checks the request a decision names:
+/// a post naming a seq that is not the open request is refused, and
+/// nothing is queued for the open one.
+#[test]
+fn a_person_only_publish_refuses_a_decision_naming_another_request() {
+    let _env = common::env_lock();
+    let f = Fixture::new();
+    let _home = f.isolate();
+    seed(&f, WORK, &[], ", person_only: true");
+    let rx = start(&f.root);
+    let dir = run_dir(&f.root);
+    let plan = asked(&dir, 1);
+    let open = read_all(&dir)
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|e| match &e.payload {
+            EventPayload::ReviewRequested { node, .. } if node == "publish" => Some(e.seq),
+            _ => None,
+        })
+        .unwrap();
+    let stale = apb_engine::review::post_decision_via(
+        &dir,
+        ReviewCommand {
+            node: "publish".into(),
+            decision: "publish".into(),
+            note: String::new(),
+        },
+        Some(plan.nonce.clone()),
+        Some(open.saturating_sub(1)),
+        apb_engine::decision_channel::DecisionChannel::Terminal,
+    );
+    assert!(
+        stale.is_err(),
+        "a decision naming another request: {stale:?}"
+    );
+    assert!(
+        !dir.join("reviews.jsonl").is_file()
+            || fs::read_to_string(dir.join("reviews.jsonl"))
+                .unwrap()
+                .trim()
+                .is_empty(),
+        "nothing is queued"
+    );
+    // Naming the open request is taken.
+    apb_engine::review::post_decision_via(
+        &dir,
+        ReviewCommand {
+            node: "publish".into(),
+            decision: "publish".into(),
+            note: String::new(),
+        },
+        Some(plan.nonce.clone()),
+        Some(open),
+        apb_engine::decision_channel::DecisionChannel::Terminal,
+    )
+    .unwrap();
+    let res = finished(&rx);
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+}

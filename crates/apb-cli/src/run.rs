@@ -557,6 +557,18 @@ pub(crate) struct RunArgs {
     /// with --supervise and --execution host
     #[arg(long, conflicts_with = "estimate")]
     pub unattended: bool,
+    /// Refuse an unattended start whose loaded definition, or a
+    /// sub-playbook it starts, the readiness report does not pass. The
+    /// refusal comes from run preparation on the version the gate
+    /// selected; without --unattended it exits 2.
+    #[arg(long, conflicts_with = "estimate")]
+    pub require_ready: bool,
+    /// Waive the probation of this unattended start and of every
+    /// sub-playbook it starts. Always asks the playbook id typed at an
+    /// interactive terminal, whatever the probation stands at; refused in
+    /// a run step and without one. Without --unattended it exits 2.
+    #[arg(long, conflicts_with = "estimate")]
+    pub waive_probation: bool,
     /// The run processes data from outside the operator (a third party's
     /// documents, messages or records): everything it produces stays in
     /// its run directory and nothing is kept for learning (no remembered
@@ -842,11 +854,54 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         estimate,
         remember,
         unattended,
+        require_ready,
+        waive_probation,
         external_data,
         deadline,
         start_key,
         start_key_reuse,
     } = args;
+    // The flags that belong to an unattended start are refused without
+    // one before anything else reads them.
+    if require_ready && !unattended {
+        eprintln!("--require-ready applies to an unattended start");
+        return ExitCode::from(2);
+    }
+    if waive_probation && !unattended {
+        eprintln!("--waive-probation applies to an unattended start");
+        return ExitCode::from(2);
+    }
+    if waive_probation {
+        // Inside a run step the waiver is refused: a step does not waive
+        // probation.
+        if let Some(from) = apb_core::step_env::StepCaller::from_env().describe() {
+            eprintln!("--waive-probation is refused {from}: a run step does not waive probation");
+            return ExitCode::from(2);
+        }
+        let id = sanitize_for_terminal(name.as_str(), 200);
+        let line = format!(
+            "--waive-probation lifts probation for `{id}` and for every sub-playbook this run starts, in this project"
+        );
+        let question = format!(
+            "Waive probation and start `{id}` unattended? Type the playbook id to confirm:"
+        );
+        match crate::consent::ask_typed(&[line], &question) {
+            None => {
+                eprintln!(
+                    "--waive-probation needs a person at an interactive terminal to type the playbook id; set unattended.waive_probation in the machine policy.yaml for a machine that runs alone"
+                );
+                return ExitCode::from(2);
+            }
+            Some(text) if text == name.as_str() => {}
+            Some(_) => {
+                eprintln!(
+                    "not confirmed: the text typed is not `{}`; nothing was started",
+                    sanitize_for_terminal(name.as_str(), 200)
+                );
+                return ExitCode::from(2);
+            }
+        }
+    }
     let (name, version) = (name.as_str(), version.as_deref());
     // A deadline argument that does not parse is refused before anything.
     let deadline_ms = match deadline.as_deref().map(apb_engine::run_deadline::parse_arg) {
@@ -1199,6 +1254,8 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
     opts.cache = cache;
     opts.execution = request;
     opts.unattended = unattended;
+    opts.waive_probation = waive_probation;
+    opts.require_ready = require_ready;
     opts.eval = eval;
     opts.start_key = start_key;
     // The consent and the `expected_*` pins come from the run gate
@@ -1211,6 +1268,32 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         }
     };
     let version = start_version.as_deref();
+    // An unattended start warns when the version the gate selected is not
+    // ready to run alone: it decides nothing, and the refusal of
+    // --require-ready comes from preparation.
+    // The same reference the gate resolved (`gate_run`), at the version
+    // it selected.
+    if unattended {
+        let wref = apb_core::scope::PlaybookRef {
+            origin: apb_core::scope::Origin::Project { workspace_id: None },
+            id: name.to_string(),
+            version: version.map(str::to_string),
+        };
+        match apb_engine::fit::assess(root, &wref) {
+            Ok(report) => {
+                if let Some(d) = apb_engine::fit::not_ready_detail(&report.readiness) {
+                    eprintln!(
+                        "warning: not ready to run alone: {}",
+                        sanitize_for_terminal(&d, 400)
+                    );
+                }
+            }
+            Err(e) => eprintln!(
+                "warning: not ready to run alone: the fit report could not be made: {}",
+                sanitize_for_terminal(&e.to_string(), 400)
+            ),
+        }
+    }
     let resolved = apb_core::execution::resolve_for(root, &opts.execution);
     // What the resolution ignored (APB_EXECUTION=cli over --execution host,
     // a project that tried to set the mode) is said, never silent.
@@ -3089,9 +3172,16 @@ pub(crate) fn gate_detail_lines(
         ));
     }
     if !r.fields.is_empty() {
+        // The one rendering of the decide command: a form gate's names
+        // its open request, so the line a person copies is accepted.
         out.push(format!(
-            "    decide with: apb review {run_id} {} --decision <option> --field <name>=<value>",
-            clean(&r.node)
+            "    decide with: {} --field <name>=<value>",
+            apb_engine::people::instruction::review_command(
+                Some(run_id),
+                &clean(&r.node),
+                r.binding.as_ref().map(|b| b.nonce.as_str()),
+                r.request,
+            )
         ));
     }
     out
@@ -3589,6 +3679,8 @@ mod tests {
             withheld: Vec::new(),
             withheld_reason: None,
             requested_at: None,
+            request: None,
+            pilot: None,
             show: Vec::new(),
             fields: vec![field("note", true), field("plain", false)],
         };

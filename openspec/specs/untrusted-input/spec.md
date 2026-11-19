@@ -1,7 +1,7 @@
 # untrusted-input Specification
 
 ## Purpose
-TBD - created by archiving change recurring-routines. Update Purpose after archive.
+Text from outside is marked untrusted and keeps its taint wherever it flows, and the validator refuses an agent that renders such text while it can send outward or reach secrets.
 
 ## Requirements
 

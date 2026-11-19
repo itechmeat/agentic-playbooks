@@ -11,8 +11,12 @@
 
 mod batch;
 mod check;
+pub(super) mod pilot;
 mod run;
+mod sends;
 mod source;
+
+use std::collections::BTreeSet;
 
 use apb_core::list::items::{item_bytes, items_digest};
 use apb_core::list::verdict::{ItemState, NeedsLookReason};
@@ -109,6 +113,13 @@ pub(crate) fn execute(
             pause,
             events: Vec::new(),
         }),
+        // The pilot slice settled and a person decides: no `node_finished`,
+        // the drive goes back to the loop top, where the pilot gate branch
+        // takes it.
+        batch::End::PilotGate => Ok(AttemptOutcome::Halted { events: Vec::new() }),
+        // The visit ended early: the node fails with `stopped` in its
+        // output, whatever `on_needs_look` says.
+        batch::End::Stopped => compose(&run),
     }
 }
 
@@ -125,11 +136,17 @@ fn open_visit(run: &ListRun<'_, '_, '_>, filtered_out: u32) -> Result<Vec<Event>
     let fold = ListFold::of(&events, node);
     let same = fold.as_ref().filter(|f| f.items_digest == digest);
     if same.is_some_and(ListFold::is_open) {
-        settle_too_large(run, same)?;
-        return Ok(events);
+        // A drive that died between the visit's `list_started` and its
+        // first batch or pilot slice may have left the opening steps
+        // undone: they are completed before anything runs, against the
+        // journal as the first pass read it.
+        complete_opening(run, &events)?;
+        let events = read_all(run.ctx.run_dir)?;
+        settle_too_large(run, ListFold::of(&events, node).as_ref())?;
+        return read_all(run.ctx.run_dir);
     }
     let reopen = same.is_some_and(|f| retried_after_failure(&events, node, f.started_seq));
-    let sends = batch::ItemSends::of(&events, node);
+    let sends = sends::ItemSends::of(&events, node);
     run.ctx.journal.append(EventPayload::ListStarted {
         node: node.clone(),
         total: run.items.len() as u32,
@@ -139,20 +156,77 @@ fn open_visit(run: &ListRun<'_, '_, '_>, filtered_out: u32) -> Result<Vec<Event>
         parallel: run.workers as u32,
         reopened: reopen,
     })?;
-    if reopen {
-        let previous = same.expect("a reopen has a visit");
-        requeue_for_retry(run, previous, &sends)?;
-    } else {
-        if run.spec.rerun == RerunPolicy::NotPassed
-            && let Some(previous) = &fold
-        {
-            carry_passed(run, previous)?;
-        }
-        park_unknown_sends(run, &sends)?;
-    }
+    opening_steps(run, reopen, fold.as_ref(), &sends, &BTreeSet::new())?;
     let events = read_all(run.ctx.run_dir)?;
     settle_too_large(run, ListFold::of(&events, node).as_ref())?;
     Ok(events)
+}
+
+/// The opening steps of a visit, right after its `list_started`: a
+/// reopen requeues what needs a look; a new visit carries the passed items
+/// (`rerun: not_passed`) and parks the items with an unknown send.
+/// `previous` is the latest visit as the journal stood before the
+/// `list_started`, `sends` the sends as they stood then; an item in `done`
+/// already has a settlement in this visit and is left as it is.
+fn opening_steps(
+    run: &ListRun<'_, '_, '_>,
+    reopen: bool,
+    previous: Option<&ListFold>,
+    sends: &sends::ItemSends,
+    done: &BTreeSet<String>,
+) -> Result<(), EngineError> {
+    if reopen {
+        if let Some(previous) = previous {
+            requeue_for_retry(run, previous, sends, done)?;
+        }
+    } else {
+        if run.spec.rerun == RerunPolicy::NotPassed
+            && let Some(previous) = previous
+        {
+            carry_passed(run, previous, done)?;
+        }
+        park_unknown_sends(run, sends, done)?;
+    }
+    Ok(())
+}
+
+/// Completes the opening steps of the open visit a resumed drive finds,
+/// when no batch and no pilot slice was journaled since its latest
+/// `list_started` (the opening steps always come before either). Each
+/// step runs on the journal as it stood before that `list_started`, so
+/// it decides as the first pass did, and skips every item already
+/// settled since, so a step the first pass finished is not repeated.
+fn complete_opening(run: &ListRun<'_, '_, '_>, events: &[Event]) -> Result<(), EngineError> {
+    let node = run.node.id.as_str();
+    let Some(at) = events.iter().rposition(
+        |e| matches!(&e.payload, EventPayload::ListStarted { node: n, .. } if n == node),
+    ) else {
+        return Ok(());
+    };
+    let mut done = BTreeSet::new();
+    for e in &events[at + 1..] {
+        match &e.payload {
+            EventPayload::ListBatchStarted { node: n, .. }
+            | EventPayload::ListPilot { node: n, .. }
+            | EventPayload::ListStopped { node: n, .. }
+                if n == node =>
+            {
+                return Ok(());
+            }
+            EventPayload::ListItemSettled { node: n, item, .. } if n == node => {
+                done.insert(item.clone());
+            }
+            _ => {}
+        }
+    }
+    let reopen = matches!(
+        &events[at].payload,
+        EventPayload::ListStarted { reopened: true, .. }
+    );
+    let before = &events[..at];
+    let previous = ListFold::of(before, node);
+    let sends = sends::ItemSends::of(before, node);
+    opening_steps(run, reopen, previous.as_ref(), &sends, &done)
 }
 
 /// Whether a supervisor retried `node` after the visit starting at `seq`
@@ -185,10 +259,12 @@ fn retried_after_failure(events: &[Event], node: &str, seq: u64) -> bool {
 fn requeue_for_retry(
     run: &ListRun<'_, '_, '_>,
     previous: &ListFold,
-    sends: &batch::ItemSends,
+    sends: &sends::ItemSends,
+    done: &BTreeSet<String>,
 ) -> Result<(), EngineError> {
     for (id, rec) in &previous.items {
-        if rec.state != Some(ItemState::NeedsLook)
+        if done.contains(id)
+            || rec.state != Some(ItemState::NeedsLook)
             || rec.reason.as_deref() == Some(NeedsLookReason::ItemTooLarge.as_str())
             || sends.unknown(run.key(id)).is_some()
         {
@@ -209,10 +285,11 @@ fn requeue_for_retry(
 /// unknown needs a look at once and is never resent.
 fn park_unknown_sends(
     run: &ListRun<'_, '_, '_>,
-    sends: &batch::ItemSends,
+    sends: &sends::ItemSends,
+    done: &BTreeSet<String>,
 ) -> Result<(), EngineError> {
     for item in &run.items {
-        if sends.unknown(run.key(&item.id)).is_some() {
+        if !done.contains(&item.id) && sends.unknown(run.key(&item.id)).is_some() {
             run.settle(Settlement {
                 id: &item.id,
                 state: settled::NEEDS_LOOK,
@@ -228,8 +305,15 @@ fn park_unknown_sends(
 /// `rerun: not_passed`: items that passed in the previous visit with the
 /// same content are carried over as passed. One whose recorded content
 /// digest is missing or different runs again.
-fn carry_passed(run: &ListRun<'_, '_, '_>, previous: &ListFold) -> Result<(), EngineError> {
+fn carry_passed(
+    run: &ListRun<'_, '_, '_>,
+    previous: &ListFold,
+    done: &BTreeSet<String>,
+) -> Result<(), EngineError> {
     for item in &run.items {
+        if done.contains(&item.id) {
+            continue;
+        }
         let Some(rec) = previous.item(&item.id) else {
             continue;
         };
@@ -301,17 +385,26 @@ fn compose(run: &ListRun<'_, '_, '_>) -> Result<AttemptOutcome, EngineError> {
             })
         })
         .collect();
-    let output = json!({
-        "total": c.total,
-        "processed": c.processed,
-        "passed": c.passed,
-        "passed_with_note": c.passed_with_note,
-        "needs_look": c.needs_look,
-        "filtered_out": fold.filtered_out,
-        "items": items,
-    })
-    .to_string();
-    let failed = c.needs_look > 0 && run.spec.on_needs_look == apb_core::list::OnNeedsLook::Fail;
+    let mut output = serde_json::Map::new();
+    output.insert("total".into(), json!(c.total));
+    output.insert("processed".into(), json!(c.processed));
+    output.insert("passed".into(), json!(c.passed));
+    output.insert("passed_with_note".into(), json!(c.passed_with_note));
+    output.insert("needs_look".into(), json!(c.needs_look));
+    output.insert("filtered_out".into(), json!(fold.filtered_out));
+    output.insert("items".into(), json!(items));
+    // A visit that ended early: `stopped` in its output, the node fails
+    // whatever `on_needs_look` says.
+    if let Some((reason, detail)) = &fold.stopped {
+        output.insert(
+            "stopped".into(),
+            json!({"reason": reason, "detail": detail}),
+        );
+    }
+    let output = Value::Object(output).to_string();
+    let stopped = fold.stopped.is_some();
+    let failed = stopped
+        || (c.needs_look > 0 && run.spec.on_needs_look == apb_core::list::OnNeedsLook::Fail);
     Ok(AttemptOutcome::Finished {
         status: if failed {
             NodeStatus::Failed

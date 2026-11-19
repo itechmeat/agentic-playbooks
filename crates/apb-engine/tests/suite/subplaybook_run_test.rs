@@ -34,6 +34,9 @@ fn seed_run_dir(root: &Path, run_id: &str, playbook_yaml: Option<&str>, events_n
     let run_dir = root.join(".apb/runs").join(run_id);
     fs::create_dir_all(&run_dir).unwrap();
     fs::write(run_dir.join("events.jsonl"), events_ndjson).unwrap();
+    // Every run apb prepares has its `run.yaml`; a child takes its
+    // parent's mode from it.
+    fs::write(run_dir.join("run.yaml"), "unattended: false\n").unwrap();
     if let Some(pb) = playbook_yaml {
         fs::write(run_dir.join("playbook.yaml"), pb).unwrap();
     }

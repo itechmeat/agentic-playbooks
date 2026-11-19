@@ -1,7 +1,7 @@
 # mail-drafts-attachments Specification
 
 ## Purpose
-TBD - created by archiving change google-connectors. Update Purpose after archive.
+The mail connectors can save IMAP drafts and store attachments inside the run under safe names, within caps and without overwriting.
 
 ## Requirements
 

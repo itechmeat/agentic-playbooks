@@ -69,8 +69,8 @@ pub fn refuse_for_person_only(
         )
     } else {
         format!(
-            "Decide at an interactive terminal outside a run step with `apb review {run} {node} --decision <option>{}`, or on the run page of a dashboard where you are signed in.",
-            bound_args(run_dir, node)
+            "Decide at an interactive terminal outside a run step with `{}`, or on the run page of a dashboard where you are signed in.",
+            decide_command(run_dir, &run, node)
         )
     };
     Err(EngineError::ChannelRefused {
@@ -191,16 +191,22 @@ pub fn open_request<'e>(
     })
 }
 
-/// The ` --nonce <binding> --request review:<seq>` an approving decision
-/// on the open request of gate `node` carries when that request binds
-/// snapshots, so the command in a refusal is one that is accepted; empty
-/// otherwise, or when the journal does not read.
-fn bound_args(run_dir: &Path, node: &str) -> String {
+/// The `apb review` command of gate `node` of run `run` as the refusal
+/// prints it, through the one rendering every decide command shares
+/// (`people::instruction::review_command`): the open request is named
+/// (a decision naming the open request is accepted on any gate, and a
+/// form or pilot gate takes no other), and a request that binds
+/// snapshots adds the nonce an approving decision carries. Without an
+/// open request, or when the journal does not read, the plain command.
+fn decide_command(run_dir: &Path, run: &str, node: &str) -> String {
     let events = crate::event::read_all_lossy_tail(run_dir).unwrap_or_default();
-    match open_request(&events, node) {
-        Some((seq, Some(b))) => format!(" --nonce {} --request review:{seq}", b.nonce),
-        _ => String::new(),
-    }
+    let open = open_request(&events, node);
+    crate::people::instruction::review_command(
+        Some(run),
+        node,
+        open.and_then(|(_, b)| b).map(|b| b.nonce.as_str()),
+        open.map(|(seq, _)| seq),
+    )
 }
 
 /// The refusal of a decision or an answer `caller` posts to the run at

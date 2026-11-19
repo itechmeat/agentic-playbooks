@@ -519,11 +519,16 @@ fn a_child_ignores_its_own_block() {
         move || run(&root, "ck", None, keyed("acme"))
     });
     wait_started(root, "the parent's node");
+    // The parent run the child names: an attended run, as its `run.yaml`
+    // records (a child takes its parent's mode from a record that exists).
+    let parent_dir = root.join(".apb/runs/parent-of-ck");
+    fs::create_dir_all(&parent_dir).unwrap();
+    fs::write(parent_dir.join("run.yaml"), "unattended: false\n").unwrap();
     let child = std::thread::spawn({
         let root = root.to_path_buf();
         move || {
             let opts = RunOptions {
-                parent_run: Some("ck-parent".into()),
+                parent_run: Some("parent-of-ck".into()),
                 params: [("account".to_string(), "acme".to_string())]
                     .into_iter()
                     .collect(),

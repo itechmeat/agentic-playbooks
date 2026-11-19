@@ -1,7 +1,7 @@
 # cloud-model-catalog Specification
 
 ## Purpose
-TBD - created by archiving change near-ai-cloud-models. Update Purpose after archive.
+apb ships the NEAR AI Cloud model catalog, refreshes it on request, offers its models to the agents that reach them and checks a model against it on every authoring surface.
 
 ## Requirements
 

@@ -1081,6 +1081,7 @@ fn main() -> ExitCode {
     pipe::install();
     // Routine health observes every run end this process writes.
     apb_engine::health::install();
+    apb_engine::probation::install();
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == SANDBOX_EXEC) {
         let code = apb_engine::sandbox::scope::exec_main(&args[2..]);

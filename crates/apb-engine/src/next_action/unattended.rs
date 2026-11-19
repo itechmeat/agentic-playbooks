@@ -55,6 +55,31 @@ fn outcome(run: &Observation, a: &NextAction) -> Option<UnattendedOutcome> {
             }) => Some(UnattendedOutcome::AnswersDefault),
             _ => fails(HITL_REQUIRED),
         },
+        ActionCode::DecideReview
+            if node.is_some_and(|n| n.list().is_some_and(|l| l.pilot.is_some())) =>
+        {
+            // A list node's pilot gate: the pilot's own `unattended:`
+            // decides, and `continue` only over a clean slice.
+            match node
+                .and_then(|n| n.list())
+                .and_then(|l| l.pilot)
+                .map(|p| p.unattended)
+            {
+                Some(apb_core::list::PilotUnattended::Continue)
+                    if crate::event::read_all(&run.run_dir)
+                        .ok()
+                        .and_then(|events| {
+                            crate::list::ListFold::of(&events, a.target.node.as_deref()?)
+                        })
+                        .is_some_and(|fold| fold.pilot_needs_look() == 0) =>
+                {
+                    Some(UnattendedOutcome::Decides {
+                        option: apb_core::list::PILOT_CONTINUE.to_string(),
+                    })
+                }
+                _ => fails(HITL_REQUIRED),
+            }
+        }
         // The declared decision, when the drive's own recheck would let it
         // stand (a pinned child or a connector in reach may refuse it).
         ActionCode::DecideReview => match node.and_then(|n| n.unattended.as_ref()?.decide()) {

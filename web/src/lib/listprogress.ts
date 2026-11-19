@@ -1,4 +1,4 @@
-import type { RunList, RunListItem } from './api.gen'
+import type { PilotView, RunList, RunListItem } from './api.gen'
 import { UNRESOLVED_SEND_TEXT } from './consts.gen'
 import type { PlaybookNode } from './types'
 
@@ -54,6 +54,23 @@ export function listChips(l: RunList): ListChip[] {
 export function processedPercent(l: RunList): number {
   if (l.total <= 0) return 0
   return Math.min(100, Math.floor((l.processed / l.total) * 100))
+}
+
+const items = (n: number): string => `${n} item${n === 1 ? '' : 's'}`
+
+// The pilot line of a visit waiting at its pilot gate: the round, the
+// slice's size and counts, and the items left outside the slice. `null`
+// when the pilot is not waiting.
+export function pilotLine(p: PilotView): string | null {
+  if (p.state !== 'waiting') return null
+  const look = p.needs_look === 1 ? '1 needs a look' : `${p.needs_look} need a look`
+  return `pilot round ${p.round}: ${items(p.items.length)}, ${p.passed} passed, ${look}, ${items(p.rest)} left, waiting for a decision`
+}
+
+// The early stop of a visit, with its reason sentence.
+export function stoppedLine(stopped: string | null): string | null {
+  if (!stopped) return null
+  return `stopped early: ${stopped}`
 }
 
 // Pending items with no row yet: an item not admitted to a batch has none,

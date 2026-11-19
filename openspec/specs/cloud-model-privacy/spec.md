@@ -1,7 +1,7 @@
 # cloud-model-privacy Specification
 
 ## Purpose
-TBD - created by archiving change near-ai-cloud-models. Update Purpose after archive.
+Every NEAR AI Cloud catalog model carries a privacy class, shown for every executor of a resolved profile, and a chain that leaves its class is made visible.
 
 ## Requirements
 

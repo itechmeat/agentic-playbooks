@@ -730,13 +730,24 @@ fn dead_end_after(yaml: &str, decisions: &[&str]) -> (Vec<(Option<String>, Strin
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        apb_engine::review::post_review(
+        // The decision names the open request's seq, the way every
+        // decision surface does for a form gate.
+        let request = read_all(&rd)
+            .unwrap_or_default()
+            .iter()
+            .rfind(|e| {
+                matches!(&e.payload, EventPayload::ReviewRequested { node, .. } if node == "review")
+            })
+            .map(|e| e.seq);
+        apb_engine::review::post_decision_to(
             &rd,
             apb_engine::review::ReviewCommand {
                 node: "review".into(),
                 decision: decision.to_string(),
                 note: String::new(),
             },
+            None,
+            request,
         )
         .unwrap();
     }

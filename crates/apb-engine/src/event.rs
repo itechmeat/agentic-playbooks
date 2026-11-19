@@ -2161,6 +2161,33 @@ pub enum EventPayload {
         )]
         result: Option<apb_core::result_store::ResultStamp>,
     },
+    /// The pilot slice of a list visit (`list.pilot`): the ids run before
+    /// the pilot gate, in source order, and the pilot round (1 for the first
+    /// slice, one more after each `revise`). Written before the slice's first
+    /// `list_batch_started`. Safe to skip up to the node's `node_finished`
+    /// or a `run_paused`; a run that writes it carries the run guard
+    /// `list_pilot`. Additive variant.
+    ListPilot {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        round: u32,
+        #[serde(default)]
+        items: Vec<String>,
+    },
+    /// A list visit ended before every item ran: `reason` is `pilot` (the
+    /// pilot gate was answered `stop`) or `stop_when` (the early-stop rule
+    /// held), `detail` the sentence the surfaces show. Written before the
+    /// node's `node_finished`. Safe to skip like `list_pilot`. Additive
+    /// variant.
+    ListStopped {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        reason: String,
+        #[serde(default)]
+        detail: String,
+    },
     /// The known problems shown to the run's agents (see
     /// `crate::known_problems`), worked out once at start: each shown
     /// problem's stored texts (already scrubbed and capped) and the agent
@@ -2904,13 +2931,43 @@ impl EventLog {
     /// second line, the torn last line fails every strict read, exactly as
     /// a torn single append does. Returns the first event. `first` is
     /// never a checkpoint: a guard would have to follow it.
+    ///
+    /// `name` gets `first` and its seq before the write, as
+    /// [`Self::append_named`] does.
     pub(crate) fn append_pair(
         &mut self,
         first: EventPayload,
+        name: impl FnOnce(&mut EventPayload, u64),
         second: impl FnOnce(u64) -> EventPayload,
     ) -> Result<Event, EngineError> {
         debug_assert!(!first.is_checkpoint(), "a paired event is no checkpoint");
-        match self.append_lines(Build::Plain(Box::new(first)), false, Some(Box::new(second)))? {
+        match self.append_lines(
+            Build::Plain(Box::new(first)),
+            false,
+            Some(Box::new(second)),
+            Some(Box::new(name)),
+        )? {
+            Some(event) => Ok(event),
+            None => unreachable!("an unconditional append always writes"),
+        }
+    }
+
+    /// [`Self::append`] of an event that names its own seq: `name` gets
+    /// the payload and the seq the line is written at, settled under the
+    /// append lock, before the line goes out. A review request whose
+    /// decision must name it writes the request into its own instruction
+    /// so.
+    pub(crate) fn append_named(
+        &mut self,
+        payload: EventPayload,
+        name: impl FnOnce(&mut EventPayload, u64),
+    ) -> Result<Event, EngineError> {
+        match self.append_lines(
+            Build::Plain(Box::new(payload)),
+            false,
+            None,
+            Some(Box::new(name)),
+        )? {
             Some(event) => Ok(event),
             None => unreachable!("an unconditional append always writes"),
         }
@@ -2921,14 +2978,16 @@ impl EventLog {
         build: Build<'_>,
         durable: bool,
     ) -> Result<Option<Event>, EngineError> {
-        self.append_lines(build, durable, None)
+        self.append_lines(build, durable, None, None)
     }
 
+    #[allow(clippy::type_complexity)]
     fn append_lines(
         &mut self,
         build: Build<'_>,
         durable: bool,
         follow: Option<Box<dyn FnOnce(u64) -> EventPayload + '_>>,
+        name: Option<Box<dyn FnOnce(&mut EventPayload, u64) + '_>>,
     ) -> Result<Option<Event>, EngineError> {
         apb_core::process_mode::guard()?;
         self.last_append = AppendMark::NotWritten;
@@ -2975,6 +3034,10 @@ impl EventLog {
             "a run never finishes with a deferred retry open"
         );
         let ts = apb_core::clock::now_ms();
+        let mut payload = payload;
+        if let Some(name) = name {
+            name(&mut payload, self.next_seq);
+        }
         let event = Event {
             seq: self.next_seq,
             ts,
@@ -3428,6 +3491,15 @@ pub(crate) fn review_requested_count(events: &[Event], node: &str) -> usize {
             |e| matches!(&e.payload, EventPayload::ReviewRequested { node: n, .. } if n == node),
         )
         .count()
+}
+
+/// The `requires` of the latest `run_guard` of `events`, `None` when the
+/// run never journaled one.
+pub(crate) fn latest_run_guard(events: &[Event]) -> Option<&[String]> {
+    events.iter().rev().find_map(|e| match &e.payload {
+        EventPayload::RunGuard { requires } => Some(requires.as_slice()),
+        _ => None,
+    })
 }
 
 /// `AttemptFinished.usage` as optional data: a block that does not decode as
@@ -5880,7 +5952,7 @@ mod deferral_tests {
                 withheld: vec!["approve".into()],
                 withheld_reason: None,
             };
-            let first = log.append_pair(request(), detail).unwrap();
+            let first = log.append_pair(request(), |_, _| {}, detail).unwrap();
             let events = read_all(dir.path()).unwrap();
             assert_eq!(events.len(), 2);
             assert!(matches!(
@@ -5889,7 +5961,7 @@ mod deferral_tests {
             ));
             assert_eq!(events[1].seq, first.seq + 1);
             log.fault_write_short = Some(5);
-            assert!(log.append_pair(request(), detail).is_err());
+            assert!(log.append_pair(request(), |_, _| {}, detail).is_err());
             let lossy = read_all_lossy_tail(dir.path()).unwrap();
             assert_eq!(lossy.len(), 3, "the second request whole, its detail torn");
             // A torn detail is a torn last line like that of any single

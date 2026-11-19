@@ -16,7 +16,7 @@ pub const ITEM_GAP_CAP: usize = 30;
 
 /// One list node's visit, counted.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ListOutcome {
     pub node: String,
     pub total: u32,
@@ -39,6 +39,14 @@ pub struct ListOutcome {
     #[serde(skip)]
     #[cfg_attr(feature = "ts", ts(skip))]
     pub check_kind: Option<&'static str>,
+    /// The visit's pilot, when the list runs one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub pilot: Option<crate::list::view::PilotView>,
+    /// The visit ended early: the sentence its `list_stopped` carries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub stopped: Option<String>,
 }
 
 impl ListOutcome {
@@ -58,6 +66,14 @@ impl ListOutcome {
         let open = self.total.saturating_sub(self.processed);
         if open > 0 {
             line.push_str(&format!(", {open} of {} not processed yet", self.total));
+        }
+        if let Some(p) = &self.pilot
+            && p.state == "waiting"
+        {
+            line.push_str(&format!("; pilot round {} waits for a decision", p.round));
+        }
+        if let Some(detail) = &self.stopped {
+            line.push_str(&format!("; stopped early: {detail}"));
         }
         line
     }
@@ -133,6 +149,8 @@ pub fn list_outcomes(playbook: Option<&Playbook>, lists: &[RunList]) -> Vec<List
             check_kind: spec_of(playbook, &l.node)
                 .and_then(|s| s.check.as_ref()?.source())
                 .map(|c| c.kind()),
+            pilot: l.pilot.clone(),
+            stopped: l.stopped.clone(),
         })
         .collect()
 }
@@ -216,6 +234,47 @@ mod tests {
             unresolved_send: false,
             check_rejected,
         }
+    }
+
+    #[test]
+    fn the_line_names_a_waiting_pilot_and_an_early_stop() {
+        use crate::list::view::PilotView;
+        let mut o = ListOutcome {
+            node: "work".into(),
+            total: 5,
+            processed: 3,
+            passed: 3,
+            passed_with_note: 0,
+            needs_look: 0,
+            check_failed: 0,
+            check: None,
+            check_kind: None,
+            pilot: Some(PilotView {
+                round: 1,
+                items: Vec::new(),
+                passed: 3,
+                needs_look: 0,
+                rest: 2,
+                state: "waiting".into(),
+            }),
+            stopped: None,
+        };
+        assert!(
+            o.line().contains("; pilot round 1 waits for a decision"),
+            "{}",
+            o.line()
+        );
+        // A pilot that is not waiting names nothing.
+        o.pilot.as_mut().unwrap().state = "continued".into();
+        assert!(!o.line().contains("pilot"), "{}", o.line());
+        o.pilot = None;
+        o.stopped = Some("2 of 2 settled items need a look".into());
+        assert!(
+            o.line()
+                .contains("; stopped early: 2 of 2 settled items need a look"),
+            "{}",
+            o.line()
+        );
     }
 
     #[test]

@@ -467,3 +467,30 @@ fn a_starter_in_another_workspace_is_named_there() {
         "A's list covers A's runs only"
     );
 }
+
+/// A run a run step started is never eligible for probation: a run step
+/// is never a person, so its attended run is written `eligible: false`,
+/// while the same playbook started outside a step counts.
+#[test]
+fn a_step_started_run_is_never_eligible_for_probation() {
+    let mut step = Step::new();
+    let p = project();
+    let root = p.path();
+    let plain = start(root, "fix", None).unwrap();
+    let t = starter(root, "t-1", None, false);
+    step.enter(&t, "triage", Some(TOKEN));
+    let from_step = start(root, "fix", None).unwrap();
+    assert!(by_of(root, &from_step).is_some(), "started_by is recorded");
+    let ledger = apb_core::probation::read(root, apb_core::scope::Scope::Project, "fix").unwrap();
+    assert!(ledger.signed);
+    let eligible = |run: &str| {
+        ledger
+            .file
+            .entries
+            .iter()
+            .find(|e| e.run == run)
+            .map(|e| (e.outcome.clone(), e.eligible))
+    };
+    assert_eq!(eligible(&plain), Some(("succeeded".into(), true)));
+    assert_eq!(eligible(&from_step), Some(("succeeded".into(), false)));
+}

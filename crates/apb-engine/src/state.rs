@@ -834,7 +834,9 @@ impl RunState {
                 // A list visit's records; `crate::list::ListFold` folds them.
                 EventPayload::ListStarted { .. }
                 | EventPayload::ListBatchStarted { .. }
-                | EventPayload::ListItemSettled { .. } => {}
+                | EventPayload::ListItemSettled { .. }
+                | EventPayload::ListPilot { .. }
+                | EventPayload::ListStopped { .. } => {}
                 // The budget and its gate; `crate::budget::BudgetFold` folds
                 // them.
                 EventPayload::BudgetSet { .. }

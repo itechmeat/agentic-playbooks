@@ -82,6 +82,7 @@ extern "C" fn isolate_config() {
     }
     // Routine health observes every run end, as the `apb` binary does.
     apb_engine::health::install();
+    apb_engine::probation::install();
     let parent = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
     let _ = std::fs::create_dir_all(parent);
     let created = own_dir(parent, "apb-engine-test-xdg");
@@ -415,6 +416,8 @@ mod known_problems_test;
 mod launch_policy_test;
 #[path = "suite/lineage_test.rs"]
 mod lineage_test;
+#[path = "suite/list_pilot_test.rs"]
+mod list_pilot_test;
 #[cfg(unix)]
 #[path = "suite/list_resume_test.rs"]
 mod list_resume_test;
@@ -468,6 +471,8 @@ mod param_pattern_test;
 mod passkey_gate_test;
 #[path = "suite/previous_success_test.rs"]
 mod previous_success_test;
+#[path = "suite/probation_test.rs"]
+mod probation_test;
 #[cfg(unix)]
 #[path = "suite/process_group_test.rs"]
 mod process_group_test;

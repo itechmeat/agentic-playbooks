@@ -2,7 +2,7 @@
 // report keeps four sections apart (compatibility, setup, trust, consent),
 // and so does everything here: being ready and being trusted are two
 // separate facts, never one verdict.
-import type { FitItem, FitReport, LaunchRecord, LaunchView, TrustItem } from './api.gen'
+import type { FitItem, FitReport, LaunchRecord, LaunchView, ProbationView, ReadinessItem, TrustItem } from './api.gen'
 
 export type Tone = 'ok' | 'warn' | 'danger' | 'muted'
 
@@ -112,4 +112,34 @@ export function launchRecordLine(r: LaunchRecord): string {
   const how = r.confirmation ? `, confirmed by ${r.confirmation.replace(/_/g, ' ')}` : ''
   const sources = r.sources.length ? ` (${r.sources.join(', ')})` : ''
   return `${r.kind.replace(/_/g, ' ')} by ${r.initiator.replace(/_/g, ' ')}${how}; policy ${r.policy}${sources}`
+}
+
+// The "Running alone" block of the card: the readiness items a person
+// should read (the ones that do not hold), the ok ones collapsed into one
+// line, and the probation count when the playbook asks for one.
+export function readinessLines(r: FitReport): {
+  lines: string[]
+  okCount: number
+  ready: boolean
+  probation: string | null
+} {
+  const items: ReadinessItem[] = r.readiness?.items ?? []
+  const lines = items.filter((i) => !i.ok).map((i) => i.subject ? `${i.subject}: ${i.detail}` : i.detail)
+  const okCount = items.length - lines.length
+  const p = r.readiness?.probation
+  return { lines, okCount, ready: r.readiness?.ready ?? false, probation: p ? probationLine(p) : null }
+}
+
+// The probation count of a playbook that asks for one. "Attended" means
+// only started without --unattended: the line never claims a person.
+export function probationLine(p: ProbationView): string {
+  const count = `${p.counted} of ${p.required} attended run${p.required === 1 ? '' : 's'} counted in this project`
+  if (p.waived) {
+    const ledger = p.ledger_ok ? '' : ', its ledger does not verify'
+    return `probation: waived on this machine (${count}${ledger})`
+  }
+  if (!p.ledger_ok) {
+    return 'probation: the ledger of this playbook does not verify, so nothing counts until it is moved aside'
+  }
+  return `probation: ${count}`
 }

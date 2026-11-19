@@ -1931,3 +1931,39 @@ fn hold(root: &Path, id: &str) {
     )
     .unwrap();
 }
+
+/// An unattended start under probation is refused: the answer names
+/// `probation_required` and no run directory exists.
+#[test]
+fn an_unattended_start_under_probation_is_refused() {
+    let _env = crate::common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed_scripted(dir.path());
+    // The playbook asks for two attended successes it has not had.
+    let yaml = SCRIPTED.replace(
+        "version: 1.0.0\n",
+        "version: 1.0.0\nunattended:\n  after_attended_successes: 2\n",
+    );
+    fs::write(
+        dir.path()
+            .join(".apb/playbooks/scripted/1.0.0/playbook.yaml"),
+        yaml,
+    )
+    .unwrap();
+    let err = playbook_run(
+        dir.path(),
+        "scripted",
+        None,
+        apb_mcp::tools::StartArgs {
+            unattended: true,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("probation_required"), "{err}");
+    assert!(
+        !dir.path().join(".apb/runs").exists()
+            || fs::read_dir(dir.path().join(".apb/runs")).unwrap().count() == 0,
+        "no run directory"
+    );
+}

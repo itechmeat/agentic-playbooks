@@ -1,7 +1,7 @@
 # cloud-decision-provider Specification
 
 ## Purpose
-TBD - created by archiving change near-ai-cloud-models. Update Purpose after archive.
+A decision-model provider can name the NEAR AI Cloud catalog, which checks it when it loads and prices and classes its decisions.
 
 ## Requirements
 

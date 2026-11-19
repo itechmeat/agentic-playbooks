@@ -1,7 +1,7 @@
 # bounded-pagination Specification
 
 ## Purpose
-TBD - created by archiving change google-connectors. Update Purpose after archive.
+A connector function can declare paging, walked within bounds on its first host as one call and one journal event.
 
 ## Requirements
 

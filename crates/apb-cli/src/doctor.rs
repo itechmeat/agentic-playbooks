@@ -162,6 +162,15 @@ fn doctor_env(root: &Path, mut out: Out) -> ExitCode {
             &sanitize_for_terminal(&detail, SANDBOX_LINE_MAX),
         );
     }
+    // A probation ledger that does not verify refuses the unattended starts
+    // of its playbook until a person moves it aside.
+    if let Some(detail) = apb_engine::probation::doctor_line(root) {
+        out.line(
+            WARN,
+            "probation",
+            &sanitize_for_terminal(&detail, SANDBOX_LINE_MAX),
+        );
+    }
     // Routine health: the watched playbooks, which tripped, which hold.
     if let Some((warn, detail)) =
         apb_engine::health::doctor_line(root, apb_core::clock::now_ms_u64())

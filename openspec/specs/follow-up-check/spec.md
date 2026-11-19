@@ -1,7 +1,7 @@
 # follow-up-check Specification
 
 ## Purpose
-TBD - created by archiving change run-feedback. Update Purpose after archive.
+A playbook can read one follow-up check once after a successful run, in the baseline check's shape, where unknown is never met.
 
 ## Requirements
 

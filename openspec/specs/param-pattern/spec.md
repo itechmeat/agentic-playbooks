@@ -1,7 +1,7 @@
 # param-pattern Specification
 
 ## Purpose
-TBD - created by archiving change recurring-routines. Update Purpose after archive.
+A text param can declare an anchored pattern that every start and every remembered value must match.
 
 ## Requirements
 

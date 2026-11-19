@@ -181,6 +181,12 @@ fn run_id_of(run_dir: &Path) -> String {
     run_dir.file_name().unwrap().to_string_lossy().into_owned()
 }
 
+fn open_seq(run_dir: &Path) -> Option<u64> {
+    apb_engine::event::read_all(run_dir)
+        .ok()
+        .and_then(|events| apb_engine::review::open_request(&events, "gate").map(|(seq, _)| seq))
+}
+
 fn pending_of(run_dir: &Path, gate: &str) -> apb_engine::progress::PendingReview {
     poll_until("pending review", || {
         let view = RunView::load(run_dir, &run_id_of(run_dir)).ok()?;
@@ -188,7 +194,12 @@ fn pending_of(run_dir: &Path, gate: &str) -> apb_engine::progress::PendingReview
     })
 }
 
-fn cmd(fields: &[(&str, serde_json::Value)]) -> apb_engine::review::DecisionPost {
+/// A post on `gate` that names the open request's seq, the way every
+/// decision surface does for a form gate.
+fn cmd(run_dir: &Path, fields: &[(&str, serde_json::Value)]) -> apb_engine::review::DecisionPost {
+    let request = apb_engine::event::read_all(run_dir)
+        .ok()
+        .and_then(|events| apb_engine::review::open_request(&events, "gate").map(|(seq, _)| seq));
     apb_engine::review::DecisionPost {
         cmd: apb_engine::ReviewCommand {
             node: "gate".into(),
@@ -196,7 +207,7 @@ fn cmd(fields: &[(&str, serde_json::Value)]) -> apb_engine::review::DecisionPost
             note: String::new(),
         },
         nonce: None,
-        request: None,
+        request,
         channel: DecisionChannel::Terminal,
         fields: fields
             .iter()
@@ -230,10 +241,13 @@ fn fields_reach_the_next_prompt_and_an_output_field_edge() {
 
     apb_engine::review::post(
         &run_dir,
-        cmd(&[
-            ("amount", serde_json::json!(1180.5)),
-            ("remark", serde_json::json!("ok")),
-        ]),
+        cmd(
+            &run_dir,
+            &[
+                ("amount", serde_json::json!(1180.5)),
+                ("remark", serde_json::json!("ok")),
+            ],
+        ),
     )
     .unwrap();
     let result = wait_result(&rx);
@@ -285,15 +299,19 @@ fn a_value_of_the_wrong_type_is_refused_by_the_channel() {
     let rx = run_in_background(tmp.path());
     let run_dir = latest_run_dir(tmp.path());
     let _ = pending_of(&run_dir, "gate");
-    let refused = apb_engine::review::post(&run_dir, cmd(&[("amount", serde_json::json!("ten"))]))
-        .unwrap_err();
+    let refused = apb_engine::review::post(
+        &run_dir,
+        cmd(&run_dir, &[("amount", serde_json::json!("ten"))]),
+    )
+    .unwrap_err();
     assert!(
         refused.to_string().contains("gate `gate`")
             && refused.to_string().contains("is not a number"),
         "{refused}"
     );
     let unknown =
-        apb_engine::review::post(&run_dir, cmd(&[("total", serde_json::json!(1))])).unwrap_err();
+        apb_engine::review::post(&run_dir, cmd(&run_dir, &[("total", serde_json::json!(1))]))
+            .unwrap_err();
     assert!(
         unknown
             .to_string()
@@ -302,7 +320,7 @@ fn a_value_of_the_wrong_type_is_refused_by_the_channel() {
     );
     // A required field without a value and without a default? The amount
     // default fills it: approve with no fields at all is accepted.
-    apb_engine::review::post(&run_dir, cmd(&[])).unwrap();
+    apb_engine::review::post(&run_dir, cmd(&run_dir, &[])).unwrap();
     let result = wait_result(&rx);
     // The default 900 is the amount, and it routes to `small`.
     assert_eq!(result.outcome, RunStatus::Failed);
@@ -317,12 +335,15 @@ fn a_hand_written_entry_with_bad_fields_ends_the_run() {
     let rx = run_in_background(tmp.path());
     let run_dir = latest_run_dir(tmp.path());
     let _ = pending_of(&run_dir, "gate");
-    // A whole, well-formed channel line that the checks refuse.
+    // A whole, well-formed channel line that the checks refuse. It names
+    // the request it answers: a line without the stamp is never consumed.
+    let request = open_seq(&run_dir);
     let line = serde_json::json!({
         "seq": 0,
         "node": "gate",
         "decision": "approve",
         "note": "",
+        "request": request,
         "fields": { "amount": "ten" }
     });
     use std::io::Write as _;
@@ -370,7 +391,7 @@ fn a_secret_value_in_a_field_is_refused_before_the_channel_holds_it() {
         ("note", serde_json::json!(format!("see {secret} here"))),
         ("count", serde_json::json!(secret)),
     ] {
-        let refused = apb_engine::review::post(&run_dir, cmd(&[(key, value)]))
+        let refused = apb_engine::review::post(&run_dir, cmd(&run_dir, &[(key, value)]))
             .unwrap_err()
             .to_string();
         assert!(
@@ -383,9 +404,12 @@ fn a_secret_value_in_a_field_is_refused_before_the_channel_holds_it() {
         assert!(!reviews().contains(secret), "the channel holds the secret");
     }
     // A key the gate does not declare is not repeated either.
-    let refused = apb_engine::review::post(&run_dir, cmd(&[(secret, serde_json::json!(secret))]))
-        .unwrap_err()
-        .to_string();
+    let refused = apb_engine::review::post(
+        &run_dir,
+        cmd(&run_dir, &[(secret, serde_json::json!(secret))]),
+    )
+    .unwrap_err()
+    .to_string();
     assert!(
         refused.contains("a posted value holds a value this run keeps secret"),
         "{refused}"
@@ -394,7 +418,11 @@ fn a_secret_value_in_a_field_is_refused_before_the_channel_holds_it() {
         !refused.contains(secret) && !reviews().contains(secret),
         "{refused}"
     );
-    apb_engine::review::post(&run_dir, cmd(&[("note", serde_json::json!("all fine"))])).unwrap();
+    apb_engine::review::post(
+        &run_dir,
+        cmd(&run_dir, &[("note", serde_json::json!("all fine"))]),
+    )
+    .unwrap();
     let result = wait_result(&rx);
     assert_eq!(result.outcome, RunStatus::Succeeded);
     let raw = fs::read_to_string(run_dir.join("events.jsonl")).unwrap();
@@ -433,10 +461,12 @@ fn a_text_value_is_refused_while_the_runs_secrets_do_not_read() {
     let config = run_dir.join("run.yaml");
     let kept = fs::read(&config).unwrap();
     fs::write(&config, "params: [unclosed\n").unwrap();
-    let refused =
-        apb_engine::review::post(&run_dir, cmd(&[("note", serde_json::json!("plain words"))]))
-            .unwrap_err()
-            .to_string();
+    let refused = apb_engine::review::post(
+        &run_dir,
+        cmd(&run_dir, &[("note", serde_json::json!("plain words"))]),
+    )
+    .unwrap_err()
+    .to_string();
     assert!(
         refused.contains("field `note`: this run's secret values cannot be read"),
         "{refused}"
@@ -445,7 +475,11 @@ fn a_text_value_is_refused_while_the_runs_secrets_do_not_read() {
     let reviews = fs::read_to_string(run_dir.join("reviews.jsonl")).unwrap_or_default();
     assert!(!reviews.contains("plain words"), "{reviews}");
     fs::write(&config, kept).unwrap();
-    apb_engine::review::post(&run_dir, cmd(&[("note", serde_json::json!("plain words"))])).unwrap();
+    apb_engine::review::post(
+        &run_dir,
+        cmd(&run_dir, &[("note", serde_json::json!("plain words"))]),
+    )
+    .unwrap();
     assert_eq!(wait_result(&rx).outcome, RunStatus::Succeeded);
 }
 
@@ -509,7 +543,7 @@ edges:
         hits.is_empty(),
         "the review detail carries a part of the secret: {hits:?}"
     );
-    apb_engine::review::post(&run_dir, cmd(&[])).unwrap();
+    apb_engine::review::post(&run_dir, cmd(&run_dir, &[])).unwrap();
     assert_eq!(wait_result(&rx).outcome, RunStatus::Succeeded);
 }
 
@@ -579,7 +613,7 @@ edges:
         hits.is_empty(),
         "the review detail carries the token: {hits:?}"
     );
-    apb_engine::review::post(&run_dir, cmd(&[])).unwrap();
+    apb_engine::review::post(&run_dir, cmd(&run_dir, &[])).unwrap();
     assert_eq!(wait_result(&rx).outcome, RunStatus::Succeeded);
 }
 
@@ -614,10 +648,13 @@ edges:
     let run_dir = latest_run_dir(tmp.path());
     let _ = pending_of(&run_dir, "gate");
     let posts = [
-        cmd(&[("pick", serde_json::json!("other"))]),
-        cmd(&[("pick", serde_json::json!(token.to_uppercase()))]),
-        cmd(&[(token, serde_json::json!(1))]),
-        cmd(&[("count", serde_json::json!(token))]),
+        cmd(&run_dir, &[("pick", serde_json::json!("other"))]),
+        cmd(
+            &run_dir,
+            &[("pick", serde_json::json!(token.to_uppercase()))],
+        ),
+        cmd(&run_dir, &[(token, serde_json::json!(1))]),
+        cmd(&run_dir, &[("count", serde_json::json!(token))]),
     ];
     for post in posts {
         let refused = apb_engine::review::post(&run_dir, post)
@@ -631,14 +668,19 @@ edges:
         );
         assert!(refused.contains("gate `gate`"), "{refused}");
     }
-    let enum_refusal = apb_engine::review::post(&run_dir, cmd(&[("pick", serde_json::json!("x"))]))
-        .unwrap_err()
-        .to_string();
+    let enum_refusal =
+        apb_engine::review::post(&run_dir, cmd(&run_dir, &[("pick", serde_json::json!("x"))]))
+            .unwrap_err()
+            .to_string();
     assert!(
         enum_refusal.contains("field `pick`: is not one of the field's options"),
         "{enum_refusal}"
     );
-    apb_engine::review::post(&run_dir, cmd(&[("pick", serde_json::json!("plain"))])).unwrap();
+    apb_engine::review::post(
+        &run_dir,
+        cmd(&run_dir, &[("pick", serde_json::json!("plain"))]),
+    )
+    .unwrap();
     assert_eq!(wait_result(&rx).outcome, RunStatus::Succeeded);
 }
 
@@ -659,11 +701,15 @@ fn a_refused_value_is_not_journaled() {
     );
     let run_dir = latest_run_dir(tmp.path());
     let _ = pending_of(&run_dir, "gate");
+    // The line names the request it answers: a line without the stamp is
+    // never consumed.
+    let request = open_seq(&run_dir);
     let line = serde_json::json!({
         "seq": 0,
         "node": "gate",
         "decision": "approve",
         "note": "",
+        "request": request,
         "fields": { "count": secret }
     });
     use std::io::Write as _;
@@ -738,7 +784,11 @@ fn an_untrusted_default_is_marked_and_taints_readers() {
     assert!(note.untrusted, "{note:?}");
     // The shown entry over the same output is marked too.
     assert!(pending.show[0].untrusted, "{:?}", pending.show);
-    apb_engine::review::post(&run_dir, cmd(&[("note", serde_json::json!("mine"))])).unwrap();
+    apb_engine::review::post(
+        &run_dir,
+        cmd(&run_dir, &[("note", serde_json::json!("mine"))]),
+    )
+    .unwrap();
     let result = wait_result(&rx);
     assert_eq!(result.outcome, RunStatus::Succeeded);
 }
@@ -756,18 +806,57 @@ fn a_value_required_for_approve_only_is_checked_by_the_channel() {
     let run_dir = latest_run_dir(tmp.path());
     let pending = pending_of(&run_dir, "gate");
     assert!(pending.fields.iter().all(|f| f.default.is_none()));
-    let refused = apb_engine::review::post(&run_dir, cmd(&[])).unwrap_err();
+    let refused = apb_engine::review::post(&run_dir, cmd(&run_dir, &[])).unwrap_err();
     assert!(
         refused
             .to_string()
             .contains("field `amount` is required for this decision"),
         "{refused}"
     );
-    let mut reject = cmd(&[]);
+    let mut reject = cmd(&run_dir, &[]);
     reject.cmd.decision = "reject".into();
     apb_engine::review::post(&run_dir, reject).unwrap();
     // No amount: neither output_field edge matches.
     assert_eq!(wait_result(&rx).outcome, RunStatus::Failed);
+}
+
+/// A person-only form gate refuses an agent channel with the command a
+/// person runs instead, and that command names the open request: followed
+/// as printed (its request), the decision is accepted.
+#[test]
+fn a_person_only_form_gate_refusal_prints_a_command_that_is_accepted() {
+    let _guard = common::env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let _var = common::EnvVar::set("APB_CONFIG_DIR", cfg.path());
+    let tmp = tempfile::tempdir().unwrap();
+    let yaml = FIELDS_WF.replace(
+        "options: [approve, reject]\n    show:",
+        "options: [approve, reject]\n    person_only: true\n    show:",
+    );
+    seed(tmp.path(), &yaml);
+    let rx = run_in_background(tmp.path());
+    let run_dir = latest_run_dir(tmp.path());
+    let pending = pending_of(&run_dir, "gate");
+    let seq = open_seq(&run_dir).expect("the open request");
+    assert_eq!(pending.request, Some(seq));
+    let mut post = cmd(&run_dir, &[("amount", serde_json::json!(1180.5))]);
+    post.request = None;
+    post.channel = DecisionChannel::Mcp;
+    let refused = apb_engine::review::post(&run_dir, post)
+        .expect_err("an agent channel is refused")
+        .to_string();
+    let named = format!("--request review:{seq}");
+    assert!(refused.contains(&named), "{refused}");
+    let printed: u64 = refused
+        .split("--request review:")
+        .nth(1)
+        .and_then(|t| t.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|d| d.parse().ok())
+        .expect("a request seq in the printed command");
+    let mut post = cmd(&run_dir, &[("amount", serde_json::json!(1180.5))]);
+    post.request = Some(printed);
+    apb_engine::review::post(&run_dir, post).expect("the printed command is accepted");
+    assert_eq!(wait_result(&rx).outcome, RunStatus::Succeeded);
 }
 
 /// A passkey minted over the bare decision is not consumed when the
@@ -867,7 +956,7 @@ fn a_gate_without_fields_keeps_the_decision_word() {
     let rx = run_in_background(tmp.path());
     let run_dir = latest_run_dir(tmp.path());
     let _ = pending_of(&run_dir, "gate");
-    apb_engine::review::post(&run_dir, cmd(&[])).unwrap();
+    apb_engine::review::post(&run_dir, cmd(&run_dir, &[])).unwrap();
     let result = wait_result(&rx);
     assert_eq!(result.outcome, RunStatus::Succeeded);
     let events = read_all(&run_dir).unwrap();
@@ -893,7 +982,7 @@ fn a_gate_without_fields_keeps_the_decision_word() {
 
 const KEY_SEED: [u8; 32] = *b"0123456789abcdef0123456789abcdef";
 
-fn enroll_real_passkey(file: &Path) -> p256::ecdsa::SigningKey {
+pub(crate) fn enroll_real_passkey(file: &Path) -> p256::ecdsa::SigningKey {
     let signing = p256::ecdsa::SigningKey::from_bytes(&KEY_SEED.into()).unwrap();
     let vk = signing.verifying_key();
     let point = vk.to_sec1_point(false);
@@ -1015,7 +1104,7 @@ fn a_plain_gate_journals_its_request_alone() {
         "{waiting:?}"
     );
     assert!(!waiting.iter().any(|t| t == "review_detail"), "{waiting:?}");
-    apb_engine::review::post(&run_dir, cmd(&[])).unwrap();
+    apb_engine::review::post(&run_dir, cmd(&run_dir, &[])).unwrap();
     assert_eq!(wait_result(&rx).outcome, RunStatus::Succeeded);
     let all = event_types(&run_dir);
     assert!(
@@ -1060,7 +1149,7 @@ fn a_form_gate_without_its_detail_fails_closed() {
         .collect();
     assert_eq!(kept.len() + 1, journal.lines().count());
     fs::write(copy.join("events.jsonl"), format!("{}\n", kept.join("\n"))).unwrap();
-    let refused = apb_engine::review::post(&copy, cmd(&[])).unwrap_err();
+    let refused = apb_engine::review::post(&copy, cmd(&copy, &[])).unwrap_err();
     assert!(
         refused.to_string().contains("is not recorded yet"),
         "{refused}"
@@ -1069,12 +1158,13 @@ fn a_form_gate_without_its_detail_fails_closed() {
     // could not be checked, and the drive would refuse them later.
     fs::remove_file(copy.join("playbook.yaml")).unwrap();
     let unread =
-        apb_engine::review::post(&copy, cmd(&[("remark", serde_json::json!("ok"))])).unwrap_err();
+        apb_engine::review::post(&copy, cmd(&copy, &[("remark", serde_json::json!("ok"))]))
+            .unwrap_err();
     assert!(
         unread.to_string().contains("cannot be read right now"),
         "{unread}"
     );
     // The live run, with its detail, takes the same decision.
-    apb_engine::review::post(&run_dir, cmd(&[])).unwrap();
+    apb_engine::review::post(&run_dir, cmd(&run_dir, &[])).unwrap();
     let _ = wait_result(&rx);
 }
