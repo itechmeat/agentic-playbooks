@@ -25,6 +25,10 @@ export interface ConnectorInbox {
 export interface InboxEventRow {
   seq: number
   receivedAt: number
+  // The stored event type (what a read's `types` matches), absent for an
+  // untyped delivery. Sender influenced, cleaned to the allowed characters
+  // at ingest: rendered as text only.
+  type?: string
   body: unknown
 }
 

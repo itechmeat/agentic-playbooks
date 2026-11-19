@@ -323,6 +323,8 @@ export const fetchConnectorInbox = (name: string) =>
 interface InboxEventDto {
   seq: number
   received_at: number
+  // Absent for an untyped delivery.
+  type?: string
   body: unknown
 }
 
@@ -333,5 +335,10 @@ export const fetchConnectorInboxEvents = (name: string, account: string, limit =
   getJson<{ events: InboxEventDto[] }>(
     `${conn(name)}/inbox/${encodeURIComponent(account)}/events${qs({ limit: String(limit) })}`,
   ).then((d): InboxEventRow[] =>
-    d.events.map((e) => ({ seq: e.seq, receivedAt: e.received_at, body: e.body })),
+    d.events.map((e) => ({
+      seq: e.seq,
+      receivedAt: e.received_at,
+      ...(e.type === undefined ? {} : { type: e.type }),
+      body: e.body,
+    })),
   )

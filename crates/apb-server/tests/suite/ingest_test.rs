@@ -83,16 +83,27 @@ fn set_var(var: &str, value: impl AsRef<std::ffi::OsStr>) -> EnvGuard {
 /// Installs the fixture connector, its global account, and the two secrets,
 /// under a temp config dir. Returns the guards, which must be kept alive.
 fn setup(cfg: &Path) -> Vec<EnvGuard> {
+    setup_with(cfg, CONNECTOR_YAML, true)
+}
+
+/// [`setup`] over a different connector manifest, and without the challenge
+/// token when the manifest declares no challenge dialect.
+fn setup_with(cfg: &Path, connector_yaml: &str, with_challenge: bool) -> Vec<EnvGuard> {
     let cdir = cfg.join("connectors").join(CONNECTOR);
     std::fs::create_dir_all(&cdir).unwrap();
-    std::fs::write(cdir.join("connector.yaml"), CONNECTOR_YAML).unwrap();
+    std::fs::write(cdir.join("connector.yaml"), connector_yaml).unwrap();
 
     let adir = cfg.join("connector-config");
     std::fs::create_dir_all(&adir).unwrap();
+    let challenge_line = if with_challenge {
+        format!("    verify_token: \"{{{{env.{TOKEN_VAR}}}}}\"\n")
+    } else {
+        String::new()
+    };
     std::fs::write(
         adir.join(format!("{CONNECTOR}.yaml")),
         format!(
-            "accounts:\n  - name: {ACCOUNT}\n    default: true\n    verify_token: \"{{{{env.{TOKEN_VAR}}}}}\"\n    app_secret: \"{{{{env.{SECRET_VAR}}}}}\"\n"
+            "accounts:\n  - name: {ACCOUNT}\n    default: true\n{challenge_line}    app_secret: \"{{{{env.{SECRET_VAR}}}}}\"\n"
         ),
     )
     .unwrap();
@@ -103,6 +114,56 @@ fn setup(cfg: &Path) -> Vec<EnvGuard> {
         set_var(TOKEN_VAR, TOKEN),
     ]
 }
+
+/// A connector whose webhook block types deliveries by the `X-GitHub-Event`
+/// request header.
+const TYPED_HEADER_YAML: &str = r#"
+name: echo-hooks
+version: 0.1.0
+webhook:
+  signature:
+    scheme: hmac_sha256_hex
+    header: X-Hub-Signature-256
+    prefix: "sha256="
+    secret: "{{secret.app_secret}}"
+  event_type_header: X-GitHub-Event
+account_fields:
+  - name: app_secret
+    required: true
+    secret: true
+functions:
+  - name: inbox_read
+    description: Read pending inbound events
+    read_only: true
+    response_pick: [events, cursor]
+    inbox:
+      op: read
+"#;
+
+/// A connector whose webhook block types deliveries by a dot path into the
+/// body.
+const TYPED_BODY_YAML: &str = r#"
+name: echo-hooks
+version: 0.1.0
+webhook:
+  signature:
+    scheme: hmac_sha256_hex
+    header: X-Hub-Signature-256
+    prefix: "sha256="
+    secret: "{{secret.app_secret}}"
+  event_type_path: type
+account_fields:
+  - name: app_secret
+    required: true
+    secret: true
+functions:
+  - name: inbox_read
+    description: Read pending inbound events
+    read_only: true
+    response_pick: [events, cursor]
+    inbox:
+      op: read
+"#;
 
 fn signed(body: &[u8]) -> String {
     format!(
@@ -997,4 +1058,134 @@ async fn a_failing_secret_resolution_is_negatively_cached() {
         inbox_events(cfg.path()).is_empty(),
         "nothing is stored under an unresolvable secret"
     );
+}
+
+#[tokio::test]
+async fn a_delivery_stores_its_header_type() {
+    let _lock = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let _guards = setup_with(cfg.path(), TYPED_HEADER_YAML, false);
+    let app = build_ingest_router(fresh_state());
+
+    let body = br#"{"id":"evt-1","text":"hello"}"#;
+    let mut req = post(body, Some(&signed(body)));
+    req.headers_mut().insert(
+        "X-GitHub-Event",
+        axum::http::HeaderValue::from_static("issues"),
+    );
+    let (status, _) = send(app, req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let events = inbox_events(cfg.path());
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].event_type.as_deref(),
+        Some("issues"),
+        "the header names the stored type"
+    );
+}
+
+#[tokio::test]
+async fn a_delivery_stores_its_body_type() {
+    let _lock = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let _guards = setup_with(cfg.path(), TYPED_BODY_YAML, false);
+    let app = build_ingest_router(fresh_state());
+
+    let body = br#"{"id":"evt-1","type":"pull_request"}"#;
+    let (status, _) = send(app, post(body, Some(&signed(body)))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let events = inbox_events(cfg.path());
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].event_type.as_deref(),
+        Some("pull_request"),
+        "the body path names the stored type"
+    );
+}
+
+/// Installs the embedded official connector `name` under the temp config
+/// dir with one global account `main` whose secret fields resolve from the
+/// suite's env vars (`fields` names them, the first one the signing
+/// secret).
+fn setup_official(cfg: &Path, name: &str, fields: &str) -> Vec<EnvGuard> {
+    apb_core::connector::official::get(name)
+        .expect("an official connector")
+        .write_to(&cfg.join("connectors").join(name))
+        .unwrap();
+    let adir = cfg.join("connector-config");
+    std::fs::create_dir_all(&adir).unwrap();
+    std::fs::write(
+        adir.join(format!("{name}.yaml")),
+        format!("accounts:\n  - name: {ACCOUNT}\n    default: true\n{fields}"),
+    )
+    .unwrap();
+    vec![
+        set_var("APB_CONFIG_DIR", cfg),
+        set_var(SECRET_VAR, SECRET),
+        set_var(TOKEN_VAR, TOKEN),
+    ]
+}
+
+fn official_events(cfg: &Path, name: &str) -> Vec<apb_core::connector::inbox::InboxEvent> {
+    apb_core::connector::inbox::Inbox::at(&cfg.join("connector-inbox"), name, ACCOUNT)
+        .unwrap()
+        .read_events()
+        .unwrap()
+}
+
+/// The bundled github connector types a signed delivery by its
+/// `X-GitHub-Event` header.
+#[tokio::test]
+async fn the_bundled_github_connector_stores_the_event_header_type() {
+    let _lock = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let _guards = setup_official(
+        cfg.path(),
+        "github",
+        &format!(
+            "    api_base: https://api.github.com\n    token: \"{{{{env.{TOKEN_VAR}}}}}\"\n    webhook_secret: \"{{{{env.{SECRET_VAR}}}}}\"\n"
+        ),
+    );
+    let app = build_ingest_router(fresh_state());
+    let body = br#"{"action":"opened","issue":{"number":43}}"#;
+    let req = Request::post(format!("/hooks/github/{ACCOUNT}"))
+        .header("content-type", "application/json")
+        .header("X-Hub-Signature-256", signed(body))
+        .header("X-GitHub-Event", "issues")
+        .body(Body::from(body.to_vec()))
+        .unwrap();
+    let (status, text) = send(app, req).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let events = official_events(cfg.path(), "github");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type.as_deref(), Some("issues"));
+}
+
+/// The bundled whatsapp connector types a signed delivery by the change's
+/// `field` in the body.
+#[tokio::test]
+async fn the_bundled_whatsapp_connector_stores_the_change_field_type() {
+    let _lock = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let _guards = setup_official(
+        cfg.path(),
+        "whatsapp",
+        &format!(
+            "    base_url: https://graph.facebook.com\n    graph_version: v23.0\n    phone_number_id: \"100000000000000\"\n    waba_id: \"200000000000000\"\n    access_token: \"{{{{env.{TOKEN_VAR}}}}}\"\n    app_secret: \"{{{{env.{SECRET_VAR}}}}}\"\n"
+        ),
+    );
+    let app = build_ingest_router(fresh_state());
+    let body = br#"{"object":"whatsapp_business_account","entry":[{"id":"1","changes":[{"field":"messages","value":{"messages":[{"id":"wamid.AAA1","from":"15551234567"}]}}]}]}"#;
+    let req = Request::post(format!("/hooks/whatsapp/{ACCOUNT}"))
+        .header("content-type", "application/json")
+        .header("X-Hub-Signature-256", signed(body))
+        .body(Body::from(body.to_vec()))
+        .unwrap();
+    let (status, text) = send(app, req).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let events = official_events(cfg.path(), "whatsapp");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type.as_deref(), Some("messages"));
 }

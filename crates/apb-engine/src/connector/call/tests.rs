@@ -482,3 +482,59 @@ functions:
     let text = String::from_utf8_lossy(&decoded);
     assert!(text.contains("Subject: Re: plan"), "{text}");
 }
+
+// -- who may move an inbox cursor through a filtered read (spec
+// 2026-11-18-typed-inbox-reads) --
+
+const INBOX_DOC: &str = r#"
+name: hooks
+version: 0.1.0
+webhook:
+  signature: { scheme: hmac_sha256_hex, header: X-Sig, secret: "{{secret.s}}" }
+account_fields:
+  - name: s
+    secret: true
+functions:
+  - name: inbox_read
+    description: d
+    read_only: true
+    response_pick: [events]
+    inbox: { op: read }
+  - name: inbox_ack
+    description: d
+    inbox: { op: ack }
+"#;
+
+fn inbox_grant(functions: &[&str]) -> ManifestConnectorGrant {
+    ManifestConnectorGrant {
+        connector: "hooks".to_string(),
+        accounts: vec!["main".to_string()],
+        functions: functions.iter().map(|f| f.to_string()).collect(),
+        max_calls: None,
+        on_unknown: None,
+    }
+}
+
+/// Only a node whose grant covers the ack function moves a cursor: a grant
+/// of read-only functions only, a missing grant and every engine site (a
+/// check, a reconcile, a notice) never do.
+#[test]
+fn only_a_node_granted_the_ack_function_may_ack_skipped_events() {
+    let doc = ConnectorDoc::from_yaml(INBOX_DOC, "hooks").unwrap();
+    let full = inbox_grant(&["inbox_read", "inbox_ack"]);
+    let read_only = inbox_grant(&["inbox_read"]);
+    assert!(inbox_may_ack(CallOrigin::Node, &doc, Some(&full)));
+    assert!(!inbox_may_ack(CallOrigin::Node, &doc, Some(&read_only)));
+    assert!(!inbox_may_ack(CallOrigin::Node, &doc, None));
+    for origin in [
+        CallOrigin::Check,
+        CallOrigin::Reconcile,
+        CallOrigin::Notify,
+        CallOrigin::NotifyReconcile,
+    ] {
+        assert!(
+            !inbox_may_ack(origin, &doc, Some(&full)),
+            "an engine site never moves a cursor: {origin:?}"
+        );
+    }
+}

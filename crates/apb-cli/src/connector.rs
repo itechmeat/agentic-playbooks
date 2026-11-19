@@ -769,6 +769,16 @@ fn push_healthcheck_check(checks: &mut Vec<Check>, name: &str, loaded: &LoadedCo
     });
 }
 
+/// The ingest row's note on where a delivery's type comes from: the header
+/// or the body path the webhook block names, nothing when it names neither.
+fn event_type_detail(hook: &apb_core::connector::def::WebhookSpec) -> String {
+    match (&hook.event_type_header, &hook.event_type_path) {
+        (Some(h), _) => format!("; event type from header `{h}`"),
+        (None, Some(path)) => format!("; event type from body path `{path}`"),
+        (None, None) => String::new(),
+    }
+}
+
 /// Ingest rows for one connector: whether it can receive at all, and per
 /// account the exact callback URL and the pending inbox depth. Shown whether
 /// or not this machine runs a listener, because a connector's ability to
@@ -788,11 +798,12 @@ fn push_ingest_checks(
         Some(_) => "a verification challenge",
         None => "no verification challenge",
     };
+    let event_type = event_type_detail(hook);
     checks.push(Check {
         name: format!("connector `{name}`: ingest"),
         status: CheckStatus::Ok,
         detail: format!(
-            "receives signed deliveries on header `{}` with {challenge}; inbox functions: {}",
+            "receives signed deliveries on header `{}` with {challenge}{event_type}; inbox functions: {}",
             hook.signature.header,
             functions.join(", ")
         ),
@@ -1583,4 +1594,40 @@ Do not offer to run a playbook, and do not start one. Binding this connector to 
 "#,
         env_key = name.to_uppercase().replace('-', "_") + "_TOKEN"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apb_core::connector::def::{SignatureScheme, SignatureSpec, WebhookSpec};
+
+    fn hook(header: Option<&str>, path: Option<&str>) -> WebhookSpec {
+        WebhookSpec {
+            challenge: None,
+            verify_token: None,
+            signature: SignatureSpec {
+                scheme: SignatureScheme::HmacSha256Hex,
+                header: "X-Hub-Signature-256".to_string(),
+                prefix: "sha256=".to_string(),
+                secret: "{{secret.s}}".to_string(),
+            },
+            dedupe_path: None,
+            event_type_path: path.map(str::to_string),
+            event_type_header: header.map(str::to_string),
+        }
+    }
+
+    /// The ingest row says where a delivery's type comes from.
+    #[test]
+    fn the_ingest_row_names_the_event_type_source() {
+        assert_eq!(
+            event_type_detail(&hook(Some("X-GitHub-Event"), None)),
+            "; event type from header `X-GitHub-Event`"
+        );
+        assert_eq!(
+            event_type_detail(&hook(None, Some("entry.0.changes.0.field"))),
+            "; event type from body path `entry.0.changes.0.field`"
+        );
+        assert_eq!(event_type_detail(&hook(None, None)), "");
+    }
 }

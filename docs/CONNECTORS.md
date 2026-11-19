@@ -353,6 +353,7 @@ webhook:
     prefix: "sha256="
     secret: "{{secret.app_secret}}"
   dedupe_path: entry.0.id                 # optional dot path to the provider's own id
+  event_type_path: entry.0.changes.0.field  # optional dot path naming the event's type
 functions:
   - name: inbox_read
     description: Read pending inbound events without consuming them.
@@ -363,6 +364,20 @@ functions:
     description: Advance the consumer cursor after processing.
     inbox: { op: ack }
 ```
+
+The block may also name the event's type, by a request header
+(`event_type_header: X-GitHub-Event`) or by a dot path into the delivery body
+(`event_type_path: entry.0.changes.0.field`); at most one of the two, both
+literals. The ingest listener stores each verified delivery's type on its
+inbox event, cleaned to 1 to 100 characters of letters, digits and
+`. _ : / -`, and an event stored before the field existed reads as untyped.
+A connector that names a type by header needs no field in the body, which is
+how the github connector types its deliveries. A header type is not covered
+by the signature when the provider signs the body only (GitHub's
+`X-Hub-Signature-256` does): someone who holds a signed delivery could replay
+its body under another type once the dedupe window passed, so a reader that
+acts on a type alone should also check the body fields it relies on with
+`where`.
 
 The block and the inbox functions require each other: a manifest with one and
 not the other does not load. `verify_token` and `signature.secret` are the
@@ -377,13 +392,39 @@ reads the manifest directly, because hashing a connector folder per delivery
 would put unbounded work on a route strangers can call.
 
 The three ops: `read` returns
-`{events: [{seq, received_at, body}], cursor, truncated}` without moving
-anything, `ack` takes `up_to_seq` and moves a named consumer's cursor forward
+`{events: [{seq, received_at, type, body}], cursor, truncated}` without moving
+anything (`type` present only on a typed event), `ack` takes `up_to_seq` and
+moves a named consumer's cursor forward
 only, and `peek_depth` returns `{pending}`. Delivery is at-least-once with an
 explicit acknowledgement, because a reader that stops mid-thought must not
 lose what it was holding. A read takes an optional `consumer` (default
 `default`) and `limit` (default 50, capped at 500); different consumers keep
 independent cursors over the same events.
+
+A read may also filter. `types` keeps only events whose stored type is named
+(exact, case-sensitive; an untyped event never passes a `types` filter), and
+`where` is a list of `{path, equals}` conditions over the delivery body,
+compared like a list's `where`: the value at the dot path equals `equals`
+(a string, number, bool or null), a missing path never equals anything, and
+an object or array never matches. With a filter, the events before the first
+match that do not match are acknowledged for this consumer only (its cursor
+moves past them; other consumers are untouched), a non-matching event after a
+match the reader has not acknowledged yet stays pending, and the envelope
+gains `skipped`, the count of pending events the read did not return because
+they did not match. A filter never hides a gap: the gap is computed before
+any cursor moved, and in a run it is in the run journal before the cursor
+moves past it. When the journal cannot take it, the read moves no cursor and
+still returns the gap, and the next read tries again; a person's live call
+outside a run has no journal, so there the gap is only in the result.
+
+Only a caller that may move the cursor anyway moves it through a filtered
+read: a node whose grant also covers the connector's `ack` function, or a
+person's live call outside a run. A node granted read-only functions only
+(`functions: read_only`), every engine site (an item check, a baseline or
+follow-up read, the reconcile of a send) and a read-only process read with no
+acknowledgement: the skips are still counted in `skipped` and the gap is
+still reported, and the next read sees the skipped events again. So
+`inbox_read` stays a read-only function whatever its arguments.
 
 A read is also capped at 1 MiB of events, the same ceiling an HTTP response
 body has. Past it the newest events are left for the next read and
@@ -445,6 +486,8 @@ Accepted deliveries are capped per account at 600 appends in a rolling 60
 second window; beyond the cap a delivery is dropped with a 200 (so the
 provider stops retrying) and counted in a persisted per-account dropped
 counter, visible in `apb connector doctor` and the dashboard's inbox panel.
+The panel's event list shows each typed event's `type`, the value a
+`types` filter matches, as plain text.
 Deliveries only ever resolve against accounts defined in the global
 `connector-config`, never a project-scoped account, because the hook path
 carries no workspace segment.
@@ -946,7 +989,14 @@ keeps the normal approve flow.
 ### github
 
 Account fields: `api_base` (`https://api.github.com`, or your GHES API
-base) and `token` (secret). Prefer `token: "{{cmd:gh auth token}}"` when
+base), `token` (secret), and `webhook_secret` (secret, optional - required
+only on an account that receives webhook deliveries). The connector's
+`webhook` block verifies `X-Hub-Signature-256` against that secret and types
+each delivery by the `X-GitHub-Event` header (`issues`, `pull_request`,
+`push`, `workflow_run` and the rest); the three inbox functions
+(`inbox_read`, `inbox_ack`, `inbox_peek_depth`) read the stored deliveries,
+and `inbox_read` takes `types` and `where`. Register the hook URL
+`/hooks/github/<account>` with a `webhook_secret` set to receive. Prefer `token: "{{cmd:gh auth token}}"` when
 `gh auth login` has already run; otherwise `{{env.GITHUB_TOKEN}}` with a
 personal access token: classic PATs need `repo` (or `public_repo` for
 public repositories); fine-grained PATs need repository access with
@@ -1279,7 +1329,12 @@ install with a token; receiving has no polling endpoint on Meta's side and
 needs the server-mode plus webhook-ingest topology, a document-level
 `webhook` block (`challenge: meta_hub`, `hmac_sha256_hex` signature over
 `X-Hub-Signature-256`) whose `verify_token` and `app_secret` are the two
-account fields above. Covers send (`send_text`, `send_template`,
+account fields above. Each delivery is typed by the change's field
+(`entry.0.changes.0.field`: `messages` for inbound messages, reactions and
+delivery or read statuses alike, or another subscribed field such as
+`message_template_status_update`), and `inbox_read` takes `types` and
+`where`; a status update is told apart with `where` on
+`entry.0.changes.0.value.statuses.0.status`. Covers send (`send_text`, `send_template`,
 `send_media`, `mark_read`), template management (`list_templates`,
 `create_template`, `delete_template`), business profile
 (`get_business_profile`, `update_business_profile`), phone numbers

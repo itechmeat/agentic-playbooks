@@ -162,6 +162,39 @@ async fn the_events_endpoint_returns_bodies_only_when_asked() {
     assert_eq!(json["cursor"], 0);
 }
 
+/// A typed delivery names its stored type in the events view, the value a
+/// read's `types` filter matches; an untyped one carries no `type` key.
+#[tokio::test]
+async fn the_events_endpoint_names_the_stored_type() {
+    let _lock = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = set_var("APB_CONFIG_DIR", cfg.path());
+    apb_core::registry::init_project(root.path()).unwrap();
+    seed(cfg.path());
+    apb_core::connector::inbox::Inbox::at(
+        &cfg.path().join("connector-inbox"),
+        "echo-hooks",
+        "main",
+    )
+    .unwrap()
+    .append_typed("e4", Some("issues"), &serde_json::json!({ "text": "m4" }))
+    .unwrap();
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = get_json(app, "/api/connectors/echo-hooks/inbox/main/events").await;
+    assert_eq!(status, StatusCode::OK);
+    let events = json["events"].as_array().unwrap();
+    assert_eq!(events.len(), 4, "was: {json}");
+    assert!(
+        events[0].get("type").is_none(),
+        "an untyped delivery has no type: {json}"
+    );
+    assert_eq!(events[3]["seq"], 4);
+    assert_eq!(events[3]["type"], "issues", "was: {json}");
+    assert!(events[3].get("provider_id").is_none(), "was: {json}");
+}
+
 #[tokio::test]
 async fn unknown_names_and_traversal_are_404() {
     let _lock = crate::common::env_lock().await;

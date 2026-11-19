@@ -734,6 +734,18 @@ async fn post_hook_handler(
     };
 
     let id = webhook::dedupe_id(&parsed, &body, hook.dedupe_path.as_deref());
+    // The delivery's type, reached only after the signature verified, so an
+    // unsigned caller never gets this far. A type read from a header is not
+    // authenticated when the provider signs the body only (GitHub does):
+    // the docs tell a reader to check the body fields it relies on. The
+    // dedupe identity does not change: a redelivery is a duplicate whatever
+    // its type.
+    let type_header = hook
+        .event_type_header
+        .as_deref()
+        .and_then(|h| headers.get(h))
+        .and_then(|v| v.to_str().ok());
+    let event_type = webhook::event_type(&parsed, type_header, &hook);
     let Ok(store) = Inbox::open(&connector, &account) else {
         return flat(StatusCode::INTERNAL_SERVER_ERROR);
     };
@@ -774,7 +786,7 @@ async fn post_hook_handler(
         return flat(StatusCode::OK);
     }
 
-    match store.append(&id, &parsed) {
+    match store.append_typed(&id, event_type.as_deref(), &parsed) {
         Ok(Appended::Stored(_)) | Ok(Appended::Duplicate) => flat(StatusCode::OK),
         Err(e) => {
             // The error text names paths and io failures, never a body.

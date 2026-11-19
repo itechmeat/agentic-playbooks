@@ -232,6 +232,7 @@ fn an_oversize_read_is_capped_from_the_newest_end_and_flagged() {
             seq,
             received_at: 1_700_000_000_000,
             provider_id: format!("m{seq}"),
+            event_type: None,
             body: serde_json::json!({ "pad": filler }),
         })
         .collect();

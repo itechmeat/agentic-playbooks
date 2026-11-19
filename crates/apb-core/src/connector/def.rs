@@ -304,6 +304,21 @@ pub struct WebhookSpec {
     /// SHA-256 of the raw body.
     #[serde(default)]
     pub dedupe_path: Option<String>,
+    /// Dot path into the delivery body naming the event's type
+    /// (`entry.0.changes.0.field`). At most one of this and
+    /// `event_type_header`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_type_path: Option<String>,
+    /// A request header naming the event's type (`X-GitHub-Event`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_type_header: Option<String>,
+}
+
+impl WebhookSpec {
+    /// Whether the block names the event type, by path or by header.
+    pub fn names_event_type(&self) -> bool {
+        self.event_type_path.is_some() || self.event_type_header.is_some()
+    }
 }
 
 /// One inbox operation a function can perform (spec
@@ -1191,6 +1206,29 @@ fn validate_webhook_shape(connector: &str, hook: &WebhookSpec) -> Result<(), Con
             "connector `{connector}` webhook `dedupe_path` must be a dot path with non-empty segments"
         )));
     }
+    if hook.event_type_path.is_some() && hook.event_type_header.is_some() {
+        return Err(ConnectorError::Invalid(format!(
+            "connector `{connector}` webhook declares both event_type_path and event_type_header; keep one"
+        )));
+    }
+    if let Some(path) = &hook.event_type_path
+        && (path.trim().is_empty() || path.split('.').any(|s| s.trim().is_empty()))
+    {
+        return Err(ConnectorError::Invalid(format!(
+            "connector `{connector}` webhook `event_type_path` must be a dot path with non-empty segments"
+        )));
+    }
+    if let Some(header) = &hook.event_type_header
+        && (header.is_empty()
+            || header.len() > 64
+            || !header
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-'))
+    {
+        return Err(ConnectorError::Invalid(format!(
+            "connector `{connector}` webhook event_type_header must be a header name"
+        )));
+    }
     Ok(())
 }
 
@@ -1615,11 +1653,14 @@ fn validate_webhook_templates(
         Some(hook.signature.header.as_str()),
         Some(hook.signature.prefix.as_str()),
         hook.dedupe_path.as_deref(),
+        hook.event_type_path.as_deref(),
     ];
+    // `event_type_header` is not listed: the shape check already refuses
+    // anything but a header name there, braces included.
     for template in literals.into_iter().flatten() {
         if !placeholders(template)?.is_empty() {
             return Err(ConnectorError::Invalid(format!(
-                "connector `{connector}` webhook `header`, `prefix` and `dedupe_path` are literals and must not contain placeholders"
+                "connector `{connector}` webhook `header`, `prefix`, `dedupe_path` and `event_type_path` are literals and must not contain placeholders"
             )));
         }
     }
@@ -2846,6 +2887,113 @@ functions:
         // The signature block itself is mandatory: no unsigned mode exists.
         let unsigned = "name: echo-hooks\nversion: 0.1.0\nwebhook:\n  dedupe_path: id\nfunctions:\n  - name: f\n    description: d\n    inbox: { op: read }\n";
         assert!(ConnectorDoc::from_yaml(unsigned, "echo-hooks").is_err());
+    }
+
+    #[test]
+    fn a_webhook_with_both_event_type_fields_is_refused() {
+        let both = WEBHOOK_YAML.replace(
+            "  dedupe_path: entry.0.id",
+            "  dedupe_path: entry.0.id\n  event_type_path: entry.0.changes.0.field\n  event_type_header: X-GitHub-Event",
+        );
+        let err = ConnectorDoc::from_yaml(&both, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(
+                "connector `echo-hooks` webhook declares both event_type_path and event_type_header; keep one"
+            ),
+            "was: {err}"
+        );
+
+        // A path that is not a dot path with non-empty segments follows the
+        // `dedupe_path` rule.
+        let bad_path = WEBHOOK_YAML.replace(
+            "  dedupe_path: entry.0.id",
+            "  dedupe_path: entry.0.id\n  event_type_path: entry..field",
+        );
+        let err = ConnectorDoc::from_yaml(&bad_path, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("webhook `event_type_path` must be a dot path with non-empty segments"),
+            "was: {err}"
+        );
+
+        // A header name is 1 to 64 characters of [A-Za-z0-9-].
+        let bad_header = WEBHOOK_YAML.replace(
+            "  dedupe_path: entry.0.id",
+            "  dedupe_path: entry.0.id\n  event_type_header: X Git Hub",
+        );
+        let err = ConnectorDoc::from_yaml(&bad_header, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("webhook event_type_header must be a header name"),
+            "was: {err}"
+        );
+        let long_header = WEBHOOK_YAML.replace(
+            "  dedupe_path: entry.0.id",
+            "  dedupe_path: entry.0.id\n  event_type_header: X-GitHub-Event-X-GitHub-Event-X-GitHub-Event-X-GitHub-Event-X-GitHub-Event",
+        );
+        let err = ConnectorDoc::from_yaml(&long_header, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("webhook event_type_header must be a header name"),
+            "was: {err}"
+        );
+
+        // Each field alone parses, and `names_event_type` sees both.
+        let by_path = WEBHOOK_YAML.replace(
+            "  dedupe_path: entry.0.id",
+            "  dedupe_path: entry.0.id\n  event_type_path: entry.0.changes.0.field",
+        );
+        let doc = ConnectorDoc::from_yaml(&by_path, "echo-hooks").unwrap();
+        assert!(
+            doc.webhook
+                .as_ref()
+                .expect("webhook block")
+                .names_event_type()
+        );
+        let by_header = WEBHOOK_YAML.replace(
+            "  dedupe_path: entry.0.id",
+            "  dedupe_path: entry.0.id\n  event_type_header: X-GitHub-Event",
+        );
+        let doc = ConnectorDoc::from_yaml(&by_header, "echo-hooks").unwrap();
+        assert!(
+            doc.webhook
+                .as_ref()
+                .expect("webhook block")
+                .names_event_type()
+        );
+    }
+
+    #[test]
+    fn event_type_fields_refuse_placeholders() {
+        let with_path = WEBHOOK_YAML.replace(
+            "  dedupe_path: entry.0.id",
+            "  dedupe_path: entry.0.id\n  event_type_path: \"{{account.h}}\"",
+        );
+        let err = ConnectorDoc::from_yaml(&with_path, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("`event_type_path` are literals and must not contain placeholders"),
+            "a placeholder in the type path is refused as one: {err}"
+        );
+        // A placeholder in the header field is not a header name, refused
+        // by the shape check.
+        let with_header = WEBHOOK_YAML.replace(
+            "  dedupe_path: entry.0.id",
+            "  dedupe_path: entry.0.id\n  event_type_header: \"{{args.h}}\"",
+        );
+        let err = ConnectorDoc::from_yaml(&with_header, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("webhook event_type_header must be a header name"),
+            "a placeholder in the type header is refused by the shape check: {err}"
+        );
     }
 
     // -- inbox function kind (spec 2026-08-16-webhook-ingest-design) --

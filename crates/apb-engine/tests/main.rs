@@ -382,6 +382,8 @@ mod heartbeat_lost_test;
 #[cfg(unix)]
 #[path = "suite/host_mode_test.rs"]
 mod host_mode_test;
+#[path = "suite/inbox_filter_test.rs"]
+mod inbox_filter_test;
 #[path = "suite/inspect_wait_test.rs"]
 mod inspect_wait_test;
 #[path = "suite/instruction_precedence_test.rs"]

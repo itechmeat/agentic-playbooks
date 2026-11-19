@@ -557,6 +557,8 @@ fn prepare(
             max_secs,
             files: Some(req.run_dir),
             attachments_dir: Some(attachments_dir.as_str()),
+            may_ack: inbox_may_ack(ctx.origin, &target.doc, target.grant.as_ref()),
+            gap_journal: Some((req.run_dir, req.node_id)),
         },
     );
     match built {
@@ -624,6 +626,38 @@ struct CallMode<'a> {
     /// `attachments/<node>[/<item>]`, every segment through the file name
     /// sanitizer; the op appends the uid. Set only with `files`.
     attachments_dir: Option<&'a str>,
+    /// Whether a filtered inbox read may ack the events it skipped
+    /// ([`inbox_may_ack`]).
+    may_ack: bool,
+    /// The run journal and the node an inbox read's gap is journaled under
+    /// before a cursor moves past it; `None` for a live call, which has no
+    /// run.
+    gap_journal: Option<(&'a Path, &'a str)>,
+}
+
+/// Whether a filtered `inbox_read` of this call may move its consumer's
+/// cursor past the events it skipped: only a node's own call whose grant
+/// also covers the connector's `ack` function. A grant of read-only
+/// functions only never moves a cursor, and neither does an engine site (a
+/// check, a reconcile, a notice): the read still reports `skipped` and the
+/// gap.
+fn inbox_may_ack(
+    origin: CallOrigin,
+    doc: &ConnectorDoc,
+    grant: Option<&ManifestConnectorGrant>,
+) -> bool {
+    if origin != CallOrigin::Node {
+        return false;
+    }
+    let Some(grant) = grant else {
+        return false;
+    };
+    doc.functions.iter().any(|f| {
+        f.inbox
+            .as_ref()
+            .is_some_and(|s| s.op == apb_core::connector::def::InboxOp::Ack)
+            && grant.functions.iter().any(|g| g == &f.name)
+    })
 }
 
 /// The rendered HTTP shape of a function - method, the pre-auth URL (function
@@ -675,6 +709,8 @@ fn build_prepared(
         max_secs,
         files,
         attachments_dir,
+        may_ack,
+        gap_journal,
     } = mode;
     // The one deadline of the whole call: from here, the function's
     // `timeout_sec`, lowered by a caller's bound. Minting, the service
@@ -727,9 +763,13 @@ fn build_prepared(
                 function.response_pick.clone()
             },
             dry_run,
+            may_ack,
         )? {
             crate::connector::inbox::InboxBuild::DryRun(v) => Ok(Prepared::DryRun(v)),
-            crate::connector::inbox::InboxBuild::Call(call) => {
+            crate::connector::inbox::InboxBuild::Call(mut call) => {
+                if let Some((run_dir, node_id)) = gap_journal {
+                    call.journal_gaps_to(run_dir, node_id);
+                }
                 Ok(Prepared::Call(Box::new(PreparedCall::Inbox {
                     account: account_name,
                     call,
@@ -1079,6 +1119,8 @@ pub(crate) fn play_call_pinned(
                 max_secs: Some(max_secs),
                 files: None,
                 attachments_dir: None,
+                may_ack: false,
+                gap_journal: None,
             },
         )
     })
@@ -1130,6 +1172,9 @@ fn prepare_play_call(
             // A live call has no run: save_attachments is refused.
             files: None,
             attachments_dir: None,
+            // A person's live call may ack, as it may call the ack function.
+            may_ack: true,
+            gap_journal: None,
         },
     )
 }

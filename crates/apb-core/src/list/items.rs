@@ -237,7 +237,12 @@ fn scalar(v: Option<&Value>) -> Option<String> {
 }
 
 /// Whether a field's value matches `equals` (see [`apply_filter`]).
-fn field_equals(got: Option<&Value>, equals: &Value) -> bool {
+///
+/// `pub(crate)` so a body condition of an inbox read
+/// (`connector::event_filter`) compares the same way: `equals: null` needs
+/// the path present and null, a missing path never equals anything, and an
+/// object or array never matches.
+pub(crate) fn field_equals(got: Option<&Value>, equals: &Value) -> bool {
     match equals {
         Value::Null => matches!(got, Some(Value::Null)),
         _ => scalar(got).is_some_and(|g| scalar(Some(equals)) == Some(g)),

@@ -44,6 +44,13 @@ exceptions = [
 # Default policy: deny known unsound/vulnerable crates; warn on unmaintained.
 # yanked crates are always denied.
 yanked = "deny"
+# Advisories accepted after review, each with its reason.
+ignore = [
+    # chrono is marked unmaintained and no maintained release exists yet. It
+    # reaches apb only through imap and rmcp; apb does not use it directly.
+    # Remove this entry when those crates move off it.
+    { id = "RUSTSEC-2026-0543", reason = "transitive through imap and rmcp, no maintained release to move to yet" },
+]
 
 [bans]
 # No multiple versions of the same crate by default. Lint, do not block.

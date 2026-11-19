@@ -140,12 +140,13 @@ fn dedupe_is_time_based_and_survives_a_flood_within_the_window() {
     let t0 = 1_000_000u64;
 
     // Record "keep" at t0, then 500 distinct deliveries within the window.
-    box_.append_bounded("keep", &json!({"k": 0}), &keep, WINDOW_MS, CAP, t0)
+    box_.append_bounded("keep", &json!({"k": 0}), None, &keep, WINDOW_MS, CAP, t0)
         .unwrap();
     for i in 0..500u64 {
         box_.append_bounded(
             &format!("m{i}"),
             &json!({"i": i}),
+            None,
             &keep,
             WINDOW_MS,
             CAP,
@@ -161,8 +162,16 @@ fn dedupe_is_time_based_and_survives_a_flood_within_the_window() {
         "an id seen now is still deduped after many later distinct deliveries"
     );
     assert_eq!(
-        box_.append_bounded("keep", &json!({"k": 1}), &keep, WINDOW_MS, CAP, t0 + 900)
-            .unwrap(),
+        box_.append_bounded(
+            "keep",
+            &json!({"k": 1}),
+            None,
+            &keep,
+            WINDOW_MS,
+            CAP,
+            t0 + 900
+        )
+        .unwrap(),
         Appended::Duplicate,
         "a redelivery inside the window is refused"
     );
@@ -171,6 +180,7 @@ fn dedupe_is_time_based_and_survives_a_flood_within_the_window() {
     box_.append_bounded(
         "tick",
         &json!({}),
+        None,
         &keep,
         WINDOW_MS,
         CAP,
@@ -188,6 +198,7 @@ fn dedupe_is_time_based_and_survives_a_flood_within_the_window() {
             box_.append_bounded(
                 "keep",
                 &json!({"k": 2}),
+                None,
                 &keep,
                 WINDOW_MS,
                 CAP,
@@ -217,7 +228,7 @@ fn is_duplicate_honors_the_age_window_like_append_bounded() {
     let box_ = inbox(&dir);
     let t0 = 1_000_000u64;
 
-    box_.append_bounded("old", &json!({"k": 0}), &keep, WINDOW_MS, CAP, t0)
+    box_.append_bounded("old", &json!({"k": 0}), None, &keep, WINDOW_MS, CAP, t0)
         .unwrap();
 
     // Inside the window: a duplicate to the advisory check, exactly as it is to
@@ -238,7 +249,7 @@ fn is_duplicate_honors_the_age_window_like_append_bounded() {
     );
     assert!(
         matches!(
-            box_.append_bounded("old", &json!({"k": 1}), &keep, WINDOW_MS, CAP, past)
+            box_.append_bounded("old", &json!({"k": 1}), None, &keep, WINDOW_MS, CAP, past)
                 .unwrap(),
             Appended::Stored(_)
         ),
@@ -263,6 +274,7 @@ fn the_dedupe_index_size_cap_rolls_and_stores_only_digests() {
         box_.append_bounded(
             &format!("m{i}"),
             &json!({"i": i}),
+            None,
             &keep,
             NO_AGE_EVICTION,
             CAP,

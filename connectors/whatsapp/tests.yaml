@@ -186,6 +186,21 @@ cases:
         events: [1, 2]
         cursor: 0
 
+  # A typed read keeps only the named types and reports the rest in
+  # `skipped`, which the function's response_pick keeps.
+  - function: inbox_read
+    args: { consumer: worker, types: [messages] }
+    expect:
+      inbox:
+        op: read
+        seed:
+          - { provider_id: "wamid.AAA1", type: message_template_status_update, body: { event: "APPROVED" } }
+          - { provider_id: "wamid.AAA2", type: messages, body: { from: "15551234567", text: { body: "Hi" } } }
+          - { provider_id: "wamid.AAA3", body: { from: "15551234567" } }
+        events: [2]
+        cursor: 0
+        skipped: 2
+
   - function: inbox_read
     args: { consumer: worker }
     expect:
