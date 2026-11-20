@@ -202,6 +202,8 @@ mod tests {
             ..Default::default()
         };
         crate::run_config::write_run_config(&run_dir, &cfg).unwrap();
+        // A prepared run has its snapshot beside its config.
+        std::fs::write(run_dir.join("playbook.yaml"), "params: []\n").unwrap();
         let scrubbed = shown(crate::run_redact::RunRedactor::for_run(
             tmp.path(),
             &run_dir,

@@ -1,8 +1,8 @@
 //! A run's secret values never leave apb on a run surface that is not the
 //! executor (design: secrets of a run). One run declares `message` secret;
 //! its script nodes echo the value into a node output, into stderr and into
-//! the error that fails the run, and a sub-playbook node hands it to a child
-//! run as the child's instruction, which the child echoes again. Every MCP
+//! the error that fails the run, and a child run gets the echoed output as
+//! its own instruction and echoes it again. Every MCP
 //! run tool, every HTTP run route, the HTML report and the notice body are
 //! then checked for the value, for the parent and the child. The raw journal
 //! keeps it: redaction happens on read.
@@ -136,6 +136,80 @@ async fn no_http_run_route_answers_with_the_value() {
     assert_eq!(detail["redacted_params"], serde_json::json!(["message"]));
 }
 
+/// The manifest is the only record of a secret param once a patch dropped
+/// its unused declaration from the snapshot; when the manifest then does
+/// not read, the run's text is withheld (`[secrets_unresolved]`) on the run
+/// detail route and `run_status`, never shown as plain text.
+#[tokio::test]
+async fn an_unreadable_manifest_withholds_the_run_detail() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let (parent, _) = tokio::task::spawn_blocking({
+        let root = root.clone();
+        move || seed_secret_runs(&root)
+    })
+    .await
+    .unwrap();
+    let run_dir = root.join(".apb/runs").join(&parent);
+    let snapshot = fs::read_to_string(run_dir.join("playbook.yaml")).unwrap();
+    let dropped = snapshot.replace(
+        "params:\n  - { name: message, type: text, secret: true }\n",
+        "",
+    );
+    assert_ne!(dropped, snapshot, "the declaration was not dropped");
+    fs::write(run_dir.join("playbook.yaml"), dropped).unwrap();
+    fs::write(run_dir.join("manifest.yaml"), "secret_params: [unclosed\n").unwrap();
+    let app = build_router(AppState::new(root.clone()));
+    let (status, body) = get_text(app, &format!("/api/runs/{parent}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!holds(&body), "the run detail leaked the value");
+    assert!(
+        body.contains(apb_engine::run_redact::WITHHELD),
+        "the run's text is not withheld: {body}"
+    );
+    let status = apb_mcp::tools::run_status(&root, &parent)
+        .unwrap()
+        .to_string();
+    assert!(!holds(&status), "run_status leaked the value");
+    assert!(
+        status.contains(apb_engine::run_redact::WITHHELD),
+        "{status}"
+    );
+}
+
+/// A prepared legacy run (no manifest) whose `playbook.yaml` snapshot was
+/// removed: only the snapshot could say which of its `run.yaml` values is
+/// secret, so the run detail withholds its text.
+#[tokio::test]
+async fn a_prepared_run_without_its_snapshot_withholds_the_run_detail() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let run_id = tokio::task::spawn_blocking({
+        let root = root.clone();
+        move || crate::secret_runs::seed_rendering_run(&root, true)
+    })
+    .await
+    .unwrap();
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    assert!(!run_dir.join("manifest.yaml").exists());
+    fs::remove_file(run_dir.join("playbook.yaml")).unwrap();
+    let app = build_router(AppState::new(root.clone()));
+    let (status, body) = get_text(app, &format!("/api/runs/{run_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!holds(&body), "the run detail leaked the value");
+    assert!(
+        body.contains(apb_engine::run_redact::WITHHELD),
+        "the run's text is not withheld: {body}"
+    );
+    // The strict read refuses the same run.
+    let set = apb_engine::run_redact::secret_names_strict(&run_dir);
+    assert!(
+        matches!(&set, Err(r) if r.reason("").contains("playbook.yaml does not read")),
+        "{set:?}"
+    );
+    assert!(apb_engine::scheduler::resume_secret_preflight(&root, &run_id).is_err());
+}
+
 #[test]
 fn the_html_report_and_the_notice_body_carry_no_value() {
     let dir = tempfile::tempdir().unwrap();
@@ -219,5 +293,39 @@ async fn redaction_keeps_the_run_list_newest_first_with_its_durations() {
             entry.get("paused_ms").cloned().unwrap_or_default(),
             serde_json::json!(want.paused_ms)
         );
+    }
+}
+
+/// D10 test 7 (e), the dashboard: a resume with `confirm_irreversible: true`
+/// of a run that renders a secret param answers 409 before any consent is
+/// recorded; the manifest is unchanged (a schema-1 run gets none).
+#[tokio::test]
+async fn the_dashboard_refuses_a_rendering_run_before_it_records_a_consent() {
+    let _cfg = crate::common::config_sandbox().await;
+    // The installation key, so the runs are stamped as created here.
+    apb_core::run_origin::ensure_key().unwrap();
+    for legacy in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run_id = crate::secret_runs::seed_rendering_run(root, legacy);
+        let manifest = root.join(".apb/runs").join(&run_id).join("manifest.yaml");
+        let before = fs::read(&manifest).ok();
+        let app = build_router(AppState::new(root.to_path_buf()));
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/runs/{run_id}/resume"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"confirm_irreversible": true}"#))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&bytes);
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("secret_param_rendered"), "{body}");
+        assert_eq!(fs::read(&manifest).ok(), before, "legacy: {legacy}");
+        if legacy {
+            assert!(!manifest.exists());
+        }
     }
 }

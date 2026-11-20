@@ -466,6 +466,8 @@ async fn an_open_grading_session_reads_the_run_tree_anew_at_every_read() {
         ..Default::default()
     };
     apb_engine::run_config::write_run_config(&sibling, &secret).unwrap();
+    // A prepared run has its snapshot beside its config.
+    fs::write(sibling.join("playbook.yaml"), "params: []\n").unwrap();
     log.append(started("c-1")).unwrap();
     let hidden = result_text(&read().await);
     assert!(!hidden.contains("orchard-candle"), "{hidden}");

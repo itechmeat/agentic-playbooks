@@ -131,6 +131,15 @@ pub(crate) fn apply_patch(
     {
         return append_patch_rejected(log, reason);
     }
+    // A param once secret in this run stays secret, and a secret param is
+    // never rendered: the loaded version is judged by the run's full secret
+    // set (manifest and snapshot, read strictly) and the running
+    // definition's declarations, whatever wrote the version.
+    if let Some(refusal) =
+        crate::run_redact::run_secret_refusal(run_dir, Some(playbook), &loaded.playbook)
+    {
+        return append_patch_rejected(log, refusal.reason("the patched definition"));
+    }
 
     // An unattended run is held to the same checks its start passed, on
     // the replacement definition and the run's pinned children, before
@@ -231,10 +240,11 @@ pub(crate) fn apply_patch(
 
     let from_version = playbook.version.clone();
     let base = playbook.clone();
-    // The run's secret set only grows: the declarations of the snapshot the
-    // patch replaces and of the patched playbook both stay recorded, before
-    // the new snapshot can drop one.
-    crate::run_redact::keep_secret_declarations(run_dir, &[playbook, &loaded.playbook])?;
+    // The run's secret set only grows. Before the snapshot is replaced only
+    // the running definition's names are recorded (that snapshot declares
+    // them already), so a patch refused below never leaves the manifest
+    // calling a param secret the executing snapshot calls plain.
+    crate::run_redact::keep_secret_declarations(run_dir, &[playbook])?;
     // The launch policy is approved content: a supervisor's patch never
     // loosens what the run's snapshot declares.
     if loaded.playbook.agent_launch.unwrap_or_default() < playbook.agent_launch.unwrap_or_default()
@@ -267,6 +277,16 @@ pub(crate) fn apply_patch(
     // whatever it says.
     let definition = crate::run_definitions::store_best_effort(run_dir, loaded.yaml.as_bytes());
     snapshot_playbook(run_dir, &loaded.yaml)?;
+    // The names the patched definition newly declares secret, once its
+    // snapshot is written: from here every reader counts them through the
+    // snapshot, and the manifest keeps them after a later patch.
+    // Best effort: the snapshot is already replaced, so failing the patch
+    // here would leave a run executing a definition no `PatchApplied`
+    // names. Every reader takes the snapshot's declarations too, so a name
+    // this write misses still counts while this snapshot stands; what is
+    // lost is only the memory of it after a later patch, which the next
+    // patch's own first write restores from this snapshot.
+    keep_patched_declarations(run_dir, log, &version, &loaded.playbook);
     log.append(EventPayload::PatchApplied {
         version: version.clone(),
         classification: classification.clone(),
@@ -419,9 +439,65 @@ pub(crate) fn promote_applied_patch(
     Ok(())
 }
 
+/// The second manifest write of a patch, best effort: on failure the
+/// patch still goes through and the diagnostics say what the manifest
+/// missed (see `keep_secret_declarations` for why that is safe).
+fn keep_patched_declarations(run_dir: &Path, log: &EventLog, version: &str, patched: &Playbook) {
+    if let Err(e) = crate::run_redact::keep_secret_declarations(run_dir, &[patched]) {
+        secret_declarations_unkept(run_dir, log, version, &e.to_string());
+    }
+}
+
+/// The diagnostics kind of a patch whose second manifest write failed.
+pub const SECRET_DECLARATIONS_UNKEPT: &str = "secret_declarations_unkept";
+
+/// Records that the patched snapshot `version` is in place and journaled
+/// while the manifest did not take its secret declarations: the snapshot
+/// still declares them, so they count, and the run stays resumable. Never
+/// fails.
+fn secret_declarations_unkept(run_dir: &Path, log: &EventLog, version: &str, cause: &str) {
+    let after_seq = log.peek_next_seq().saturating_sub(1);
+    crate::diagnostics::writer::write_with(run_dir, |scrub| {
+        let mut fields = serde_json::Map::new();
+        fields.insert("version".into(), version.into());
+        fields.insert(
+            "state".into(),
+            "the patched snapshot is in place and declares its secret params; manifest.yaml does not record them".into(),
+        );
+        fields.insert("cause".into(), scrub.clip(cause, 300).into());
+        Some(crate::diagnostics::writer::Record {
+            kind: SECRET_DECLARATIONS_UNKEPT,
+            after_seq,
+            key: format!("{after_seq}|{version}"),
+            fields,
+        })
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The second manifest write failing (here: a directory where the
+    /// manifest goes) never fails the patch; the diagnostics record it.
+    #[test]
+    fn a_failed_second_manifest_write_is_recorded_not_raised() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("r1");
+        std::fs::create_dir_all(run_dir.join("manifest.yaml/blocked")).unwrap();
+        let log = EventLog::open(&run_dir).unwrap();
+        let patched = Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.1\nparams:\n  - { name: token, type: text, secret: true }\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+        )
+        .unwrap();
+        keep_patched_declarations(&run_dir, &log, "1.0.1", &patched);
+        let diagnostics =
+            std::fs::read_to_string(run_dir.join("diagnostics.jsonl")).unwrap_or_default();
+        assert!(
+            diagnostics.contains(SECRET_DECLARATIONS_UNKEPT) && diagnostics.contains("1.0.1"),
+            "{diagnostics}"
+        );
+    }
 
     const RUNNING: &str = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: review, type: script, script: s, runner: sh }\n  - { id: fix, type: finish, outcome: success }\n  - { id: ship, type: finish, outcome: success }\nedges:\n  - { from: start, to: review }\n  - { from: review, to: fix, condition: { type: judge, question: q, min_p: 0.7, on_unavailable: false } }\n  - { from: review, to: ship, fallback: true }\n";
 

@@ -227,17 +227,6 @@ pub fn analyze(playbook: &Playbook) -> Analysis {
     }
 
     // The followers, in node order.
-    // Every text a follower renders: its templates and a template-form
-    // `writes`, whose rendered globs reach its prompt (rule 8).
-    let reads_of = |id: &str| -> Vec<String> {
-        let mut texts = texts_of(id);
-        if let Some(n) = playbook.nodes.iter().find(|n| n.id == id)
-            && let Some(crate::schema::WriteScope::Template(t)) = &n.writes
-        {
-            texts.push(t.clone());
-        }
-        texts
-    };
     let mut followers = Vec::new();
     for node in &playbook.nodes {
         let Some(sources) = tainted.get(&node.id) else {
@@ -250,7 +239,7 @@ pub fn analyze(playbook: &Playbook) -> Analysis {
             node: node.id.clone(),
             sources: sources.clone(),
             outward: outward_reasons(playbook, node),
-            secrets: secret_entries(playbook, node, &reads_of(&node.id)),
+            secrets: secret_entries(playbook, node),
             accepted: node.accept_untrusted.clone(),
         });
     }
@@ -397,26 +386,12 @@ fn effect_name(e: &Effect) -> &'static str {
     }
 }
 
-/// What secrets `node` reaches, in the fixed order: the secret params its
-/// texts render, its connectors, and a declared `secrets` effect.
-fn secret_entries(
-    playbook: &Playbook,
-    node: &crate::schema::Node,
-    texts: &[String],
-) -> Vec<String> {
+/// What secrets `node` reaches, in the fixed order: its connectors and a
+/// declared `secrets` effect. A secret param is never among them: no text
+/// renders one (V340, and the same check wherever a run executes a
+/// definition).
+fn secret_entries(playbook: &Playbook, node: &crate::schema::Node) -> Vec<String> {
     let mut out = Vec::new();
-    let mut seen = BTreeSet::new();
-    for text in texts {
-        for cap in crate::template::refs(text) {
-            let parts: Vec<&str> = cap.split('.').collect();
-            if let ["params", name] = parts.as_slice()
-                && playbook.params.iter().any(|p| &p.name == name && p.secret)
-                && seen.insert((*name).to_string())
-            {
-                out.push(format!("secret param {name}"));
-            }
-        }
-    }
     for b in node.kind.connector_bindings() {
         out.push(format!("connector {} with its account", b.name));
     }
@@ -636,15 +611,13 @@ mod tests {
     #[test]
     fn the_secrets_entries() {
         let a = analyze(&playbook(
-            "  - { id: w, type: agent_task, prompt: \"{{params.body}} {{params.token}}\", connectors: [{ name: gh }], effects: [secrets] }\n",
-            "params:\n  - { name: body, type: text, untrusted: true }\n  - { name: token, type: text, secret: true }\n",
+            "  - { id: w, type: agent_task, prompt: \"{{params.body}}\", connectors: [{ name: gh }], effects: [secrets] }\n",
+            "params:\n  - { name: body, type: text, untrusted: true }\n",
         ));
-        // The node reads an untrusted param and a secret one.
         let w = a.followers.iter().find(|f| f.node == "w").unwrap();
         assert_eq!(
             w.secrets,
             [
-                "secret param token".to_string(),
                 "connector gh with its account".to_string(),
                 "declares effect secrets".to_string(),
             ]

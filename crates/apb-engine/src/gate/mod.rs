@@ -786,8 +786,13 @@ pub fn check_run(
         let current_trusted = loaded
             .trust_digest()
             .is_ok_and(|d| TrustStore::load().is_approved(&d));
-        let digest = definition_digest_of(&cand)?;
-        if current_trusted {
+        // A candidate is judged by the secret params `current` declares: one
+        // that drops such a declaration or renders a secret param is
+        // skipped for `current`, never taken (and never digested).
+        if let Some(refusal) = candidate_secret_refusal(&loaded, &cand) {
+            candidate_skipped = Some(format!("refused: {}", refusal.code()));
+        } else if current_trusted {
+            let digest = definition_digest_of(&cand)?;
             match check_run_loaded(
                 root,
                 wref,
@@ -956,6 +961,14 @@ impl Gate<'_> {
         };
         match (still, choice, candidate) {
             (true, launch::Choice::Candidate, Some(cand)) => {
+                // The same secret check as a waiting candidate's. A fixed
+                // choice has no fallback to `current`: the start is refused.
+                if let Some(refusal) = candidate_secret_refusal(current, &cand) {
+                    return Err(json!({
+                        "policy": refusal.code(),
+                        "detail": refusal.sentence(&format!("candidate {version}")),
+                    }));
+                }
                 let digest = definition_digest_of(&cand)?;
                 let trust = RunTrust {
                     playbook_trusted: true,
@@ -1096,6 +1109,21 @@ pub const CANDIDATE_SKIPPED_UNTRUSTED: &str = "untrusted";
 /// Why the candidate's own check refused: `untrusted` for a trust refusal
 /// (a profile bundle, a connector or a sub-playbook nobody approved), else
 /// `refused: <policy>`.
+/// The one secret check of a candidate at the gate, waiting or fixed by a
+/// retry: `cand` is judged by the secret params `current` declares (a
+/// candidate that drops such a declaration or renders a secret param is
+/// refused), through [`crate::run_redact::secret_render_refusal`].
+fn candidate_secret_refusal(
+    current: &apb_core::registry::LoadedPlaybook,
+    cand: &apb_core::registry::LoadedPlaybook,
+) -> Option<crate::run_redact::SecretRefusal> {
+    let current_secret: std::collections::BTreeSet<String> =
+        crate::run_redact::declared_secret(&current.playbook)
+            .into_iter()
+            .collect();
+    crate::run_redact::secret_render_refusal(&current_secret, &cand.playbook)
+}
+
 fn skip_reason(refusal: &Value) -> String {
     let policy = refusal
         .get("policy")

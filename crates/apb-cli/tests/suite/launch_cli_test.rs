@@ -483,6 +483,7 @@ fn a_supervised_driver_without_a_valid_handoff_is_the_cli_without_a_terminal() {
         consent: None,
         deadline_ms: None,
         start_key: None,
+        params: Default::default(),
     };
     let handshake = p.root().join("handshake");
     let drive = |via_shell: bool, handoff: Option<&Path>| {

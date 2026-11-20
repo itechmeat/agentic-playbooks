@@ -702,6 +702,10 @@ pub fn drive_run_from_dir(root: &Path, run_id: &str) -> Result<RunResult, Engine
         )));
     }
     let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)?;
+    // A snapshot the journal names no digest for (an older apb's start, a
+    // run directory made by hand) is checked like a resume's: it renders no
+    // secret param and keeps every declaration the run holds.
+    super::resume::secret_check(&run_dir, run_id, &playbook)?;
     let cfg = read_run_config(&run_dir)?;
     let mut log = EventLog::open(&run_dir)?;
 

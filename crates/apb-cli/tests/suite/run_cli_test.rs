@@ -591,6 +591,7 @@ fn drive_supervised_takes_its_consent_only_from_its_parents_handoff() {
             }),
             deadline_ms: None,
             start_key: None,
+            params: Default::default(),
         },
     )
     .unwrap();

@@ -1,8 +1,9 @@
 //! The CLI run surfaces never print a run's secret value (design: secrets
 //! of a run), on stdout or stderr: `apb run`, `apb resume`, `apb runs`,
 //! `apb runs <id>` in text and JSON, `apb wait` and the HTML report, for a
-//! run and its child. A host-mode run's task prompt is the one place the
-//! value is delivered, to the host that executes it.
+//! run and its child. A host-mode run's task never carries the value: the
+//! host reads it from the run's `run.yaml`. A resume of a run that renders a
+//! secret param is refused before any consent is recorded.
 
 use std::fs;
 use std::path::Path;
@@ -127,7 +128,7 @@ params:
   - { name: message, type: text, secret: true }
 nodes:
   - { id: start, type: start }
-  - { id: echo, type: agent_task, prompt: "Repeat this: {{params.message}}" }
+  - { id: echo, type: agent_task, prompt: "Repeat the `message` param. Read it from run.yaml in $APB_RUN_DIR." }
   - { id: done, type: finish, outcome: success }
 edges:
   - { from: start, to: echo }
@@ -174,7 +175,7 @@ fn without_delivery(mut value: Value) -> Value {
 }
 
 #[test]
-fn a_host_task_delivers_the_value_and_no_other_surface_shows_it() {
+fn a_host_task_never_carries_the_value_and_no_surface_shows_its_reply() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     seed_host(root);
@@ -193,7 +194,8 @@ fn a_host_task_delivers_the_value_and_no_other_surface_shows_it() {
         .trim()
         .to_string();
 
-    // Delivery: the prompt the host executes carries the value.
+    // No delivery: the prompt the host executes names where the value is,
+    // and the run's `run.yaml` holds it.
     let task = poll("the host task", || {
         let json = stdout_of(root, &["tasks", &run_id, "--json"]);
         serde_json::from_str::<Vec<Value>>(&json)
@@ -201,19 +203,24 @@ fn a_host_task_delivers_the_value_and_no_other_surface_shows_it() {
             .into_iter()
             .find(|t| t["node"] == "echo")
     });
-    assert!(
-        task["prompt"].as_str().is_some_and(holds),
-        "the host task prompt must deliver the value"
-    );
+    let prompt = task["prompt"].as_str().unwrap_or_default();
+    assert!(!holds(prompt), "the host task prompt carries the value");
+    assert!(prompt.contains("run.yaml"), "{prompt}");
     let status: Value =
         serde_json::from_str(&stdout_of(root, &["runs", &run_id, "--json"])).unwrap();
     assert!(
-        status["pending_tasks"].to_string().contains(SECRET),
-        "run_status must deliver the value in pending_tasks"
+        !status["pending_tasks"].to_string().contains(SECRET),
+        "pending_tasks carries the value"
     );
-    assert!(
-        !holds(&without_delivery(status).to_string()),
-        "run_status leaked the value outside pending_tasks"
+    assert!(!holds(&without_delivery(status).to_string()));
+    let config: yaml_serde::Value = yaml_serde::from_str(
+        &fs::read_to_string(root.join(".apb/runs").join(&run_id).join("run.yaml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        config["params"]["message"].as_str(),
+        Some(SECRET),
+        "the run's run.yaml holds the value"
     );
 
     // The host's reply echoes the value; once the run ends nothing shows it.
@@ -245,4 +252,101 @@ fn a_host_task_delivers_the_value_and_no_other_surface_shows_it() {
     let journal =
         fs::read_to_string(root.join(".apb/runs").join(&run_id).join("events.jsonl")).unwrap();
     assert!(holds(&journal), "the journal must keep the host reply");
+}
+
+/// `apb runs <id>` withholds a run's text when its manifest, the only
+/// record of a secret param whose unused declaration a patch dropped, does
+/// not read.
+#[test]
+fn apb_runs_withholds_a_run_whose_manifest_does_not_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (parent, _) = seed_secret_runs(root);
+    let run_dir = root.join(".apb/runs").join(&parent);
+    let snapshot = fs::read_to_string(run_dir.join("playbook.yaml")).unwrap();
+    fs::write(
+        run_dir.join("playbook.yaml"),
+        snapshot.replace(
+            "params:\n  - { name: message, type: text, secret: true }\n",
+            "",
+        ),
+    )
+    .unwrap();
+    fs::write(run_dir.join("manifest.yaml"), "secret_params: [unclosed\n").unwrap();
+    for args in [
+        vec!["runs", parent.as_str()],
+        vec!["runs", parent.as_str(), "--json"],
+    ] {
+        let out = stdout_of(root, &args);
+        assert!(!holds(&out), "apb {args:?} leaked the value");
+        assert!(out.contains("[secrets_unresolved]"), "apb {args:?}: {out}");
+    }
+}
+
+/// D10 test 7 (e), the CLI: `apb resume` with the bare consent of a run
+/// that renders a secret param is refused before the consent is recorded,
+/// so the manifest stays as it was (and a schema-1 run gets none).
+#[test]
+fn apb_resume_refuses_a_rendering_run_before_it_records_a_consent() {
+    for legacy in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run_id = crate::secret_runs::seed_rendering_run(root, legacy);
+        let manifest = root.join(".apb/runs").join(&run_id).join("manifest.yaml");
+        let before = fs::read(&manifest).ok();
+        let out = crate::common::apb_std()
+            .args(["resume", &run_id, "--confirm-irreversible=true"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains("secret_param_rendered"), "{stderr}");
+        assert_eq!(fs::read(&manifest).ok(), before, "legacy: {legacy}");
+        if legacy {
+            assert!(!manifest.exists());
+        }
+    }
+}
+
+/// D10 test 7 (e), MCP `run_resume` (here, where the `apb` binary serves
+/// a real MCP session): `confirm_irreversible: true` on a run that renders
+/// a secret param answers the conflict, and the manifest is unchanged.
+#[test]
+fn mcp_run_resume_refuses_a_rendering_run_before_it_records_a_consent() {
+    for legacy in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run_id = crate::secret_runs::seed_rendering_run(root, legacy);
+        // Stamped with the key of the `apb` binary's config dir (made by
+        // its first command), so MCP takes it as a run created here.
+        crate::common::apb_std()
+            .arg("runs")
+            .current_dir(root)
+            .output()
+            .unwrap();
+        apb_core::run_origin::stamp_in(
+            crate::common::sandbox_config_dir(),
+            &root.join(".apb/runs").join(&run_id),
+            &run_id,
+        )
+        .unwrap();
+        let manifest = root.join(".apb/runs").join(&run_id).join("manifest.yaml");
+        let before = fs::read(&manifest).ok();
+        let out = crate::common::mcp_call(
+            root,
+            "run_resume",
+            serde_json::json!({
+                "run_id": run_id,
+                "confirm_irreversible": true,
+                "acknowledge_untrusted": true,
+            }),
+        );
+        assert_eq!(out["result"]["isError"], true, "{out}");
+        assert!(out.to_string().contains("secret_param_rendered"), "{out}");
+        assert_eq!(fs::read(&manifest).ok(), before, "legacy: {legacy}");
+        if legacy {
+            assert!(!manifest.exists());
+        }
+    }
 }

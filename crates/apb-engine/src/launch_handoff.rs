@@ -51,6 +51,10 @@ pub enum Handoff {
         /// captured: never on the child's argv.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         start_key: Option<HandoffStartKey>,
+        /// The run's params: never on the child's argv, where any process
+        /// could read a secret param's value for the life of the run.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        params: std::collections::BTreeMap<String, String>,
     },
     /// An eval case: the decision bound to the definition under test.
     Eval { grant: HandoffGrant },
@@ -115,6 +119,21 @@ pub fn write(root: &Path, handoff: &Handoff) -> std::io::Result<PathBuf> {
         handoff: handoff.clone(),
     })
     .map_err(std::io::Error::other)?;
+    create_filled(&path, |f| {
+        f.write_all(&body)?;
+        f.sync_all()
+    })?;
+    Ok(path)
+}
+
+/// Creates `path` exclusively with mode 0600 and fills it through `fill`.
+/// Any error after the file was created removes it before the error is
+/// returned: a handoff may carry a run's params, and the caller of a
+/// failed write gets no path it could discard.
+fn create_filled(
+    path: &Path,
+    fill: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -122,10 +141,13 @@ pub fn write(root: &Path, handoff: &Handoff) -> std::io::Result<PathBuf> {
         use std::os::unix::fs::OpenOptionsExt as _;
         opts.mode(0o600);
     }
-    let mut f = opts.open(&path)?;
-    f.write_all(&body)?;
-    f.sync_all()?;
-    Ok(path)
+    let mut f = opts.open(path)?;
+    let filled = fill(&mut f);
+    drop(f);
+    if filled.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    filled
 }
 
 /// Removes a handoff nobody took.
@@ -263,6 +285,25 @@ fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A write that fails after the file was created leaves no file: the
+    /// params it may carry are gone with it.
+    #[test]
+    fn a_failed_fill_leaves_no_file() {
+        use std::io::Write as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("h.json");
+        let err = create_filled(&path, |f| {
+            f.write_all(b"{\"params\":{\"token\":\"violet hedgehog\"}}")?;
+            // A real error of the file system: a length no file may have.
+            f.set_len(u64::MAX)
+        })
+        .unwrap_err();
+        assert!(!err.to_string().is_empty());
+        assert!(!path.exists(), "the half-written handoff was left behind");
+        create_filled(&path, |f| f.write_all(b"{}")).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+    }
     use apb_core::launch::{LaunchPolicy, LaunchRecord};
 
     fn grant() -> Handoff {

@@ -566,11 +566,18 @@ fn overlay(env: &BTreeMap<String, String>, rep_dir: &Path) -> BTreeMap<String, S
         .collect()
 }
 
-/// `apb run --eval-settings FILE`: the settings `start_run` wrote.
+/// The settings file `start_run` writes in a repetition's directory.
+const SETTINGS_FILE: &str = "eval-settings.json";
+
+/// `apb run --eval-settings FILE`: the settings `start_run` wrote, taken
+/// once: the file is removed as soon as it is read, so the case params it
+/// carries never outlive it as a second copy beside the run's `run.yaml`
+/// (a removal that fails refuses the start).
 pub(crate) fn read_run_settings(
     path: &Path,
 ) -> Result<apb_engine::run_config::EvalRunSettings, String> {
     let raw = std::fs::read(path).map_err(|e| format!("`{}`: {e}", path.display()))?;
+    std::fs::remove_file(path).map_err(|e| format!("`{}`: {e}", path.display()))?;
     serde_json::from_slice(&raw).map_err(|e| format!("`{}`: {e}", path.display()))
 }
 
@@ -589,7 +596,7 @@ fn start_run(
 ) -> Result<Started, String> {
     // The case env never reaches this process: it goes to the engine as a
     // run setting, applied only where the run spawns agents and scripts.
-    let settings_file = rep_dir.join("eval-settings.json");
+    let settings_file = rep_dir.join(SETTINGS_FILE);
     let body = serde_json::to_vec(settings).map_err(|e| e.to_string())?;
     apb_core::fsutil::atomic_write_private(&settings_file, &body).map_err(|e| e.to_string())?;
     let exe = apb_core::fsutil::reexec_exe().map_err(|e| e.to_string())?;
@@ -617,9 +624,6 @@ fn start_run(
     }
     if let Some(i) = &lc.case.instruction {
         cmd.arg(format!("--instruction={i}"));
-    }
-    for (k, v) in &lc.case.params {
-        cmd.args(["--param", &format!("{k}={v}")]);
     }
     if let Some(f) = overrides_file {
         cmd.arg("--overrides").arg(f);
@@ -952,6 +956,19 @@ fn keep_repetition(
     kept_rep: &Path,
     keep_scratch: &std::sync::atomic::AtomicBool,
 ) -> Result<PathBuf, String> {
+    // The case run removes its settings file when it reads it; one it never
+    // read (a start that failed first) is not kept with its params.
+    match std::fs::remove_file(rep_dir.join(SETTINGS_FILE)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            keep_scratch.store(true, std::sync::atomic::Ordering::SeqCst);
+            return Err(format!(
+                "cannot remove {}: {e}; the repetition is kept in place, and the scratch directory is not removed",
+                rep_dir.join(SETTINGS_FILE).display()
+            ));
+        }
+    }
     let moved = kept_rep
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)
@@ -1411,6 +1428,7 @@ fn run_repetition(
         spawn_env,
         deadline_ms: Some(engine_deadline_ms(&limits)),
         doubles: doubled.then(|| lc.case.doubles.clone()),
+        params: lc.case.params.clone(),
     };
     let started = match start_run(
         cx.args,
@@ -2912,5 +2930,37 @@ mod tests {
 
         assert!(kept_rep.join("tree").is_dir());
         assert!(!scratch.exists(), "the scratch directory stayed");
+    }
+
+    /// A settings file the case run never took (a start that failed before
+    /// it read the file) is not kept with its params.
+    #[test]
+    fn a_kept_repetition_leaves_its_settings_file_behind() {
+        let t = tempfile::tempdir().unwrap();
+        let evals_home = t.path().join("evals");
+        let scratch = evals_home.join("scratch/eval-1");
+        let guard = ScratchGuard::new(&evals_home, &scratch).unwrap();
+        let rep_dir = scratch.join("case-1");
+        std::fs::create_dir_all(rep_dir.join("tree")).unwrap();
+        std::fs::write(rep_dir.join(SETTINGS_FILE), r#"{"params":{"token":"v"}}"#).unwrap();
+        let kept_rep = evals_home.join("kept/eval-1/case-1");
+
+        keep_repetition(&rep_dir, &kept_rep, &guard.keep).unwrap();
+        assert!(kept_rep.join("tree").is_dir());
+        assert!(
+            !kept_rep.join(SETTINGS_FILE).exists(),
+            "the settings were kept"
+        );
+    }
+
+    /// The case run takes its settings once: the file is gone once read.
+    #[test]
+    fn the_case_run_removes_its_settings_file_when_it_reads_it() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join(SETTINGS_FILE);
+        std::fs::write(&path, r#"{"params":{"token":"v"}}"#).unwrap();
+        let settings = read_run_settings(&path).unwrap();
+        assert_eq!(settings.params.get("token").map(String::as_str), Some("v"));
+        assert!(!path.exists());
     }
 }

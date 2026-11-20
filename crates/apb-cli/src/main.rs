@@ -856,6 +856,10 @@ enum Command {
         /// read once, deleted, checked against this process's own gate.
         #[arg(long = "launch-handoff", value_name = "FILE")]
         launch_handoff: Option<PathBuf>,
+        /// The run's params are in the launch handoff (never on argv): a
+        /// handoff this process does not take refuses the start.
+        #[arg(long = "params-in-handoff")]
+        params_in_handoff: bool,
         /// Handshake file: written with the run_id as soon as the run is
         /// prepared (before drive starts), so the parent process can report
         /// it and exit without waiting for the run itself to finish.
@@ -1480,6 +1484,7 @@ fn main() -> ExitCode {
             continued_from,
             worktree,
             launch_handoff,
+            params_in_handoff,
             handshake,
             budget,
             notify,
@@ -1494,6 +1499,7 @@ fn main() -> ExitCode {
             continued_from,
             worktree,
             launch_handoff.as_deref(),
+            params_in_handoff,
             &handshake,
             &budget,
             &notify,

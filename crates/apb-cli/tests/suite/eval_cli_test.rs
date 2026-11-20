@@ -684,6 +684,78 @@ fn the_env_overlay_reaches_the_agent_and_the_scripts() {
     assert!(cfg.contains("EVAL_PROBE"), "a run setting: {cfg}");
 }
 
+/// A case's params reach the case run through its private settings file,
+/// never its `apb run` argv: the run has them, and its `run.yaml` holds
+/// them once (under `params`, not again under the eval settings).
+#[test]
+fn case_params_reach_the_run_through_the_settings_file() {
+    let env = setup(&PLAYBOOK.replace(
+        "effects:",
+        "params:\n  - { name: token, type: text, secret: true }\neffects:",
+    ));
+    write(&env.stub, STUB);
+    let ev = env.project.path().join(".apb/playbooks/rev/evals");
+    write(
+        &ev.join("writes-report.yaml"),
+        &CASE.replace(
+            "repeat: 1\n",
+            "repeat: 1\nparams: { token: violet hedgehog }\n",
+        ),
+    );
+    let (code, v) = env.eval_json(&[]);
+    assert_eq!(code, 0, "{v:#}");
+    let rep = &v["result"]["cases"][0]["repetitions"][0];
+    let run_dir = Path::new(rep["run_dir"].as_str().unwrap());
+    let cfg = apb_engine::run_config::read_run_config(run_dir).unwrap();
+    assert_eq!(
+        cfg.params.get("token").map(String::as_str),
+        Some("violet hedgehog")
+    );
+    let text = fs::read_to_string(run_dir.join("run.yaml")).unwrap();
+    assert_eq!(text.matches("violet hedgehog").count(), 1, "{text}");
+    // Across the project, the config dir (the scratch directory and any
+    // kept repetition live there) and the run directory, only run.yaml
+    // files and the case file itself hold the value: no settings file.
+    let case = ev.join("writes-report.yaml");
+    let mut holders = Vec::new();
+    for top in [env.project.path(), env.cfg.path(), run_dir] {
+        holders.extend(files_with(top, b"violet hedgehog"));
+    }
+    holders.sort();
+    holders.dedup();
+    let stray: Vec<_> = holders
+        .iter()
+        .filter(|p| **p != case && p.file_name().is_none_or(|n| n != "run.yaml"))
+        .collect();
+    assert!(stray.is_empty(), "a second copy of the params: {stray:?}");
+    assert!(
+        holders.iter().any(|p| p.ends_with("run.yaml")),
+        "{holders:?}"
+    );
+}
+
+/// Every file under `dir` whose bytes hold `needle`, no link followed.
+fn files_with(dir: &Path, needle: &[u8]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let path = e.path();
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            out.extend(files_with(&path, needle));
+        } else if meta.is_file()
+            && fs::read(&path).is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle))
+        {
+            out.push(path);
+        }
+    }
+    out
+}
+
 // --- limits, interruption and cleanup ---------------------------------------
 
 /// Whether process `pid` exists.

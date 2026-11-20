@@ -975,3 +975,34 @@ fn a_review_note_is_scrubbed() {
     assert!(note.starts_with("ship it"), "{note}");
     assert!(c.redacted >= 1);
 }
+
+/// A param the run holds secret through its manifest (declared secret
+/// before a pre-change patch dropped the declaration) is left out of the
+/// scenario's params and warned, though the snapshot calls it plain.
+#[test]
+fn a_param_the_run_holds_secret_is_withheld_whatever_the_snapshot_says() {
+    let _lock = common::env_lock();
+    let body = "schema: 2\nid: cap\nname: cap\nversion: 1.0.0\ndefaults: { profile: main }\nparams:\n  - { name: note, type: text, default: plain-default }\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: agent_task, prompt: \"Fix {{run.instruction}}\", max_retries: 1 }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done, condition: { type: node_status, node: work, equals: success } }\n";
+    let env = project(body, &[]);
+    let _mode = common::EnvVar::set("CAP_MODE", "claim");
+    let mut o = opts("the parser");
+    o.params.insert("note".into(), "orchid lantern".into());
+    let dir = drive(&env, o);
+    let run_id = dir.file_name().unwrap().to_string_lossy().to_string();
+    apb_engine::manifest::add_secret_params(&dir, &run_id, ["note".to_string()]).unwrap();
+
+    let c = captured(&env, &dir, "held", &[]);
+    assert!(
+        !c.scenario.params.contains_key("note"),
+        "{:?}",
+        c.scenario.params
+    );
+    assert!(!c.yaml.contains("orchid lantern"), "{}", c.yaml);
+    assert!(
+        c.warnings
+            .iter()
+            .any(|w| w.contains("param `note` was withheld")),
+        "{:?}",
+        c.warnings
+    );
+}

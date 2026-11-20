@@ -893,14 +893,27 @@ fn amend(
     Ok(())
 }
 
+/// An error reading `manifest.yaml`, naming the file.
+fn manifest_io(e: std::io::Error) -> EngineError {
+    EngineError::Io(std::io::Error::new(e.kind(), format!("manifest.yaml: {e}")))
+}
+
 /// Reads the run manifest. `Ok(None)` means there is no manifest (the
-/// executor path without profiles).
+/// executor path without profiles): nothing at all at its path. Anything
+/// else there that cannot be read as a regular file (a directory, a link,
+/// dangling or not, a fifo, a file this process may not read) is an error,
+/// never "no manifest": the manifest may be the only record of a run's
+/// secret params.
 pub fn read(run_dir: &Path) -> Result<Option<RunExecutionManifest>, EngineError> {
+    use std::io::Read as _;
     let path = manifest_path(run_dir);
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let raw = std::fs::read_to_string(&path)?;
+    let mut file = match apb_core::fsutil::open_regular_no_follow(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(manifest_io(e)),
+    };
+    let mut raw = String::new();
+    file.read_to_string(&mut raw).map_err(manifest_io)?;
     let m = yaml_serde::from_str(&raw).map_err(|e| EngineError::Yaml(e.to_string()))?;
     Ok(Some(m))
 }

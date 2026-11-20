@@ -26,7 +26,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `continue_session`, declared output fields, node `workdir`, the run
   `worktree` and `cache.key`, `baseline` for V62-V67, `list` for the list
   rules V85-V89 and V93-V95, `budget` for V96-V98, `params` for the secret
-  param rules V99 and V100 and the search param rules V160-V162, `quality` for the `quality:` block and the
+  param rules V99 and V100, V340 (no string of a definition references a
+  secret param, over `secret_param_refs`, the one walk every check of a
+  definition shares) and the search param rules V160-V162, `quality` for the `quality:` block and the
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
@@ -598,7 +600,12 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   `apb_core::scrub::Scrubber`), the run-scoped redactor of a run's secret
   values and those of every run of its tree, ancestors, children and
   siblings (`run_redact.rs`: `RunRedactor`, `for_storing` the storage redactor
-  that withholds whenever a referenced secret is unresolved, `redact_text`
+  that withholds whenever a referenced secret is unresolved,
+  `secret_names_strict` the run's secret set read strictly,
+  `run_secret_refusal` the one secret check a patch, a forward patch, a
+  resume and a detached driver make over that set, with its typed
+  `SecretRefusal`, `secret_render_refusal` its judgement, which the gate's
+  candidate branch makes over `current`'s declarations, `redact_text`
   for text that leaves the machine, `redact_json` for structured answers;
   a read-only process missing a referenced connector secret, or any
   process that cannot read a run, config or journal of the tree, withholds

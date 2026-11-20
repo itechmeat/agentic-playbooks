@@ -302,6 +302,12 @@ pub struct EvalRunSettings {
     /// answered from them or refused; none reaches a service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doubles: Option<apb_core::eval_doubles::Doubles>,
+    /// The case's params, carried in the private settings file rather than
+    /// on the case run's argv (a secret param's value never sits on a
+    /// process's argv). The case run moves them into its own params before
+    /// the run config is written, so `run.yaml` holds them once.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
 }
 
 impl RunConfig {

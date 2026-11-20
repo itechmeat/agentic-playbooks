@@ -776,6 +776,51 @@ fn a_tree_at_the_operators_config_directory_is_refused() {
 /// once, with no retry. The twin is
 /// `a_planted_git_redirection_is_put_back_and_fails_the_attempt`, whose
 /// restorable change is retried.
+/// A `full` node cannot read the run's `run.yaml` (where a secret param's
+/// value lives), neither through `APB_RUN_DIR` nor through the project's
+/// `.apb` under the tree.
+#[test]
+fn a_full_node_cannot_read_the_runs_run_yaml() {
+    let _l = common::env_lock();
+    if !common::sandbox_or_skip(false) {
+        return;
+    }
+    let f = fixture(
+        "{ level: full, network: none }",
+        concat!(
+            "if cat .gitignore >/dev/null 2>&1; then c=read; else c=denied; fi\n",
+            "if cat \"$APB_RUN_DIR/run.yaml\" >/dev/null 2>&1; then r=read; else r=denied; fi\n",
+            "if cat \"$PWD\"/.apb/runs/*/run.yaml >/dev/null 2>&1; then t=read; else t=denied; fi\n",
+            "printf 'control=%s\\nrunyaml=%s\\ntreeyaml=%s\\n' \"$c\" \"$r\" \"$t\" > probe.txt\n",
+            "printf '{\"status\":\"success\"}' > \"$APB_STATUS_FILE\"; echo done",
+        ),
+    );
+    let _env = env(&f);
+    let res = run(&f.root, "iso", None, RunOptions::default()).unwrap();
+    let p = probe(&f.root);
+    assert_eq!(res.outcome, RunStatus::Succeeded, "{p:?}");
+    assert!(
+        f.root
+            .join(".apb/runs")
+            .join(&res.run_id)
+            .join("run.yaml")
+            .is_file()
+    );
+    // The same reader reads a file the sandbox shows: the denials below are
+    // the sandbox's, not a reader that cannot run.
+    assert_eq!(p.get("control").map(String::as_str), Some("read"), "{p:?}");
+    assert_eq!(
+        p.get("runyaml").map(String::as_str),
+        Some("denied"),
+        "{p:?}"
+    );
+    assert_eq!(
+        p.get("treeyaml").map(String::as_str),
+        Some("denied"),
+        "{p:?}"
+    );
+}
+
 #[test]
 fn a_success_check_that_breaks_the_repository_fails_the_node_at_once() {
     let _l = common::env_lock();

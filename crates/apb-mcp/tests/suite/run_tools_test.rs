@@ -1835,6 +1835,8 @@ fn runs_list_answers_a_search_filter_and_keeps_the_plain_array() {
             format!("params:\n  customer: {customer}\n"),
         )
         .unwrap();
+        // A prepared run has its snapshot beside its config.
+        std::fs::write(run.join("playbook.yaml"), "params: []\n").unwrap();
     }
     let plain = runs_list(root).unwrap();
     assert!(plain.is_array());

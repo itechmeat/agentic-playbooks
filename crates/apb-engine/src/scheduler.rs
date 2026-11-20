@@ -130,7 +130,8 @@ pub(crate) use resume::resume_detached_held;
 pub use resume::{
     PAUSE_SUPERSEDED, RELEASE_SUPERSEDED, RESUME_SUPERSEDED, ResumeRequest, RetryNow,
     record_run_error, resume, resume_by, resume_detached, resume_detached_by, resume_detached_req,
-    resume_detached_with, resume_held, resume_pause, resume_req, resume_with,
+    resume_detached_with, resume_held, resume_pause, resume_req, resume_secret_preflight,
+    resume_with,
 };
 pub(crate) use resume::{
     ResumeChoice, build_reprompt_override, check_environment_drift, resume_decision, resume_inner,
