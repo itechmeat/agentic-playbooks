@@ -153,7 +153,11 @@ fn the_html_report_and_the_notice_body_carry_no_value() {
                 }
                 _ => continue,
             };
-            let t = apb_engine::notify::transitions::TransitionId { kind, seq: e.seq };
+            let t = apb_engine::notify::transitions::TransitionId {
+                kind,
+                seq: e.seq,
+                reminder: 0,
+            };
             let notice =
                 apb_engine::notify::notice::Notice::build(root, &run_dir, run, &events, &t);
             assert!(

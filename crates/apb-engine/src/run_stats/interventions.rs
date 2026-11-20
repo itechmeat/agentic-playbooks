@@ -315,6 +315,10 @@ pub fn interventions(
     let mut decisions: BTreeMap<(&str, &str, &str, u32, u32), bool> = BTreeMap::new();
     let mut items: BTreeSet<(&str, &str)> = BTreeSet::new();
     let mut interrupts: BTreeMap<String, InterruptHit> = BTreeMap::new();
+    // Whether the open pause (the latest `run_paused` with no
+    // `run_resumed` between) is a park: its engine resume is not counted,
+    // as a live wait adds nothing.
+    let mut open_pause_park = false;
     for e in events {
         match &e.payload {
             EventPayload::ReviewRequested { node, .. } => {
@@ -449,10 +453,21 @@ pub fn interventions(
             EventPayload::RunPaused { by, reason, .. } => {
                 // The legacy resume marker of old journals is not a pause.
                 if !reason.starts_with("resume from ") {
-                    actor(&mut out, *by, "pause");
+                    open_pause_park = crate::pause::cause::is_park_event(reason, *by);
+                    // A park is the engine's own way to wait; a live wait
+                    // adds nothing to the counts either.
+                    if !open_pause_park {
+                        actor(&mut out, *by, "pause");
+                    }
                 }
             }
-            EventPayload::RunResumed { by, .. } => actor(&mut out, *by, "resume"),
+            EventPayload::RunResumed { by, .. } => {
+                let park_resume = open_pause_park && *by == Some(PauseBy::Engine);
+                open_pause_park = false;
+                if !park_resume {
+                    actor(&mut out, *by, "resume");
+                }
+            }
             EventPayload::RunAborted { by, reason, .. } => {
                 if reason == PROPAGATED_ABORT {
                     // The engine relaying a parent's stop: kept apart with
@@ -1073,6 +1088,64 @@ mod tests {
         assert_eq!(r.reviews.channel, 1);
         assert_eq!(r.reviews.open, 0);
         assert_eq!(r.reviews.fast, 1);
+    }
+
+    /// A park and the engine's automatic resume of it are no intervention
+    /// and no engine action: a live wait adds nothing to the counts either.
+    /// A person's resume of a park stays the person's, and a quota pause
+    /// with its engine resume still counts under `engine`.
+    #[test]
+    fn a_park_and_its_automatic_resume_are_no_intervention() {
+        let paused = |seq, ts, reason: &str, by: PauseBy| {
+            ev(
+                seq,
+                ts,
+                EventPayload::RunPaused {
+                    reason: reason.into(),
+                    by: Some(by),
+                    mode: Some(crate::pause::PauseMode::Drain),
+                    until: None,
+                    keep_lock: false,
+                },
+            )
+        };
+        let resumed = |seq, ts, by: PauseBy| {
+            ev(
+                seq,
+                ts,
+                EventPayload::RunResumed {
+                    from_node: "work".into(),
+                    by: Some(by),
+                    explicit: false,
+                    launch: None,
+                    definition: None,
+                    apb: None,
+                    deadline: None,
+                },
+            )
+        };
+        // Two parks, the first resumed by the engine (the waker), the
+        // second by the operator.
+        let events = vec![
+            paused(1, 100, "wait (pause)", PauseBy::Engine),
+            resumed(2, 200, PauseBy::Engine),
+            paused(3, 300, "wait (pause)", PauseBy::Engine),
+            resumed(4, 400, PauseBy::Operator),
+        ];
+        let r = of_run(&events);
+        assert_eq!(r.total, Some(1), "one intervention, the person's resume");
+        assert_eq!(r.engine.get("pause"), None, "no engine pause");
+        assert_eq!(r.engine.get("resume"), None, "no engine resume");
+        assert_eq!(r.operator.get("resume"), Some(&1));
+        assert_eq!(r.operator.get("pause"), None);
+        // A quota pause and its engine resume still count.
+        let quota = vec![
+            paused(1, 100, "quota (a/m)", PauseBy::Engine),
+            resumed(2, 200, PauseBy::Engine),
+        ];
+        let r = of_run(&quota);
+        assert_eq!(r.engine.get("pause"), Some(&1));
+        assert_eq!(r.engine.get("resume"), Some(&1));
     }
 
     /// A person's decision two seconds after a request whose scope takes

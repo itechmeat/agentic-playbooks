@@ -1221,6 +1221,13 @@ pub enum EventPayload {
         /// (`list:`). Absent everywhere else. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         item: Option<String>,
+        /// For a notification: the digest of the whole target it went to
+        /// (connector, account, function, recipient and the pinned
+        /// digests, `NotifyTargetRecord::digest`). A reminder goes only to
+        /// the target its notice was confirmed to. Absent on every other
+        /// send and on a notification an older apb recorded. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_digest: Option<String>,
     },
     /// What became of a send intent: `confirmed`, `not_sent` or `unknown`,
     /// and how that is known (`response`, `reconcile`, `key_replay`, `gate`,
@@ -2304,6 +2311,11 @@ pub enum EventPayload {
         by: Option<crate::pause::kind::PauseBy>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         problem: Option<String>,
+        /// The reminder cadence in force (active run milliseconds), from
+        /// the machine's `policy.yaml`; an older apb ignores it and sends
+        /// no reminder; reminders are best effort across binary versions.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remind_ms: Vec<u64>,
     },
     /// An ordinary retry of `node` waits `delay_ms` of active run time
     /// before it starts (`retry_delay`). Written right after the failed

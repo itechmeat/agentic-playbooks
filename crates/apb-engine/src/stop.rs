@@ -485,6 +485,9 @@ pub(crate) struct StopWatcher {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     fanout: Arc<CancelFanout>,
+    /// The polls the watcher completed, for the tests to wait on one.
+    #[cfg(test)]
+    polls: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// The flags a [`StopWatcher`] latches.
@@ -531,6 +534,10 @@ impl StopWatcher {
         let stop_c = Arc::clone(&stop);
         let dir = run_dir.to_path_buf();
         let fanout_thread = Arc::clone(&fanout);
+        #[cfg(test)]
+        let polls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        #[cfg(test)]
+        let polls_c = Arc::clone(&polls);
         let handle = std::thread::spawn(move || {
             // Keeps `cancel` registered with the fanout for the life of the
             // watcher thread; the drop that would unregister it never runs
@@ -564,7 +571,14 @@ impl StopWatcher {
                         // watch.
                         return;
                     }
-                    if entries.iter().any(|e| matches!(e.cmd, Control::Pause(_))) {
+                    // A park is not a pause in progress (design D6): the
+                    // scan alone decides it, and a discarded park halts
+                    // nothing. A park is posted only when nothing else runs,
+                    // so the watcher has nothing to halt for it.
+                    if entries
+                        .iter()
+                        .any(|e| matches!(&e.cmd, Control::Pause(r) if !r.is_park()))
+                    {
                         halt.store(true, Ordering::SeqCst);
                         // A `--now` pause (issue #200) also interrupts the
                         // work in flight, through its own fanout: `cancel`
@@ -579,6 +593,8 @@ impl StopWatcher {
                         // Abort may still be posted later in the same drive.
                     }
                 }
+                #[cfg(test)]
+                polls_c.fetch_add(1, Ordering::SeqCst);
                 let mut slept = Duration::ZERO;
                 while slept < WATCH_INTERVAL {
                     if stop_c.load(Ordering::Relaxed) {
@@ -593,6 +609,23 @@ impl StopWatcher {
             stop,
             handle: Some(handle),
             fanout,
+            #[cfg(test)]
+            polls,
+        }
+    }
+
+    /// Waits until the watcher completed a whole poll that began after
+    /// this call (two more polls than it had), to a bound.
+    #[cfg(test)]
+    fn wait_for_a_poll(&self) {
+        let target = self.polls.load(Ordering::SeqCst) + 2;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while self.polls.load(Ordering::SeqCst) < target {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the watcher did not poll"
+            );
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -648,6 +681,68 @@ mod tests {
             late.load(Ordering::SeqCst),
             "a flag registered after the fire must latch on registration"
         );
+    }
+
+    /// A park pending in the control file does not latch `halt` (design D6,
+    /// the stop watcher): the scan alone decides a park, and a discarded one
+    /// would otherwise stop every later batch and list of the same drive.
+    /// An operator's pause still sets it.
+    #[test]
+    fn a_park_does_not_halt_the_drive() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("r");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let halt = Arc::new(AtomicBool::new(false));
+        let watcher = StopWatcher::spawn(
+            &run_dir,
+            None,
+            StopFlags {
+                cancel: Arc::new(AtomicBool::new(false)),
+                halt: Arc::clone(&halt),
+                pause_now: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        post_control(
+            &run_dir,
+            Control::Pause(crate::pause::PauseRequest {
+                reason: Some(crate::pause::cause::wait_reason("pause")),
+                by: Some(crate::pause::kind::PauseBy::Engine),
+                mode: crate::pause::PauseMode::Drain,
+                until: Some(1_000),
+                keep_lock: false,
+            }),
+        )
+        .unwrap();
+        // A whole poll of the watcher read the posted park.
+        watcher.wait_for_a_poll();
+        assert!(!halt.load(Ordering::SeqCst), "a park halts nothing");
+        drop(watcher);
+        let halt = Arc::new(AtomicBool::new(false));
+        let watcher = StopWatcher::spawn(
+            &run_dir,
+            None,
+            StopFlags {
+                cancel: Arc::new(AtomicBool::new(false)),
+                halt: Arc::clone(&halt),
+                pause_now: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        post_control(
+            &run_dir,
+            Control::Pause(crate::pause::PauseRequest {
+                reason: Some("looking".into()),
+                by: Some(crate::pause::kind::PauseBy::Operator),
+                ..crate::pause::PauseRequest::default()
+            }),
+        )
+        .unwrap();
+        // The positive half waits on the flag itself, to a bound.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !halt.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(halt.load(Ordering::SeqCst), "an operator's pause halts");
+        drop(watcher);
     }
 
     /// A long run must not accumulate one dead flag per batch.

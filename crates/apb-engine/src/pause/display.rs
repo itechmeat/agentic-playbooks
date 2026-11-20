@@ -39,9 +39,55 @@ impl PauseInfo {
 
     /// `paused (reason, by operator, since 2026-10-15T20:00:00Z, until ...)`.
     /// The reason is returned as journaled; a terminal caller sanitizes it.
+    /// A park reads as the wait it is: "waiting on timer `<node>` until
+    /// <T>; a waker resumes the run then", with the kept lock named.
     pub fn line(&self) -> String {
+        if self.cause == Some(super::kind::PauseCause::Wait)
+            && let Some(node) = super::cause::parse_wait_reason(&self.reason)
+        {
+            let mut line = match self.until {
+                Some(until) => format!(
+                    "waiting on timer `{node}` until {}; a waker resumes the run then",
+                    iso(u128::from(until)),
+                ),
+                None => format!("waiting on timer `{node}`; a waker resumes the run then",),
+            };
+            if self.keep_lock {
+                line.push_str(", lock kept");
+            }
+            return line;
+        }
         let mut parts = vec![self.reason.clone()];
         parts.extend(self.details());
         format!("{} ({})", self.word(), parts.join(", "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::PauseInfo;
+    use super::super::kind::{PauseBy, PauseCause, PauseMode};
+
+    /// A park reads "waiting on timer ... until ...", with the kept lock
+    /// named, and `word()` stays `paused`.
+    #[test]
+    fn a_park_reads_waiting_on_timer() {
+        let info = PauseInfo {
+            reason: "wait (pause)".into(),
+            by: PauseBy::Engine,
+            mode: PauseMode::Drain,
+            since: Some(1_000),
+            until: Some(61_000),
+            keep_lock: true,
+            pausing: false,
+            cause: Some(PauseCause::Wait),
+        };
+        let line = info.line();
+        assert!(
+            line.starts_with("waiting on timer `pause` until ")
+                && line.contains("; a waker resumes the run then, lock kept"),
+            "{line}"
+        );
+        assert_eq!(info.word(), "paused");
     }
 }

@@ -137,13 +137,47 @@ pub fn run_waker(root: &Path, run_id: &str, seq: u64) -> Result<WakeOutcome, Eng
     let Some(mut lease) = take_lease(&run_dir, WakerFor::Pause(seq))? else {
         return Ok(WakeOutcome::Superseded);
     };
+    // Whether the pause this waker waits on is a park (design D2 5), read
+    // from the journal the loop reads; computed again whenever the loop
+    // reads the journal, so a quota pause's re-pause under a new seq is
+    // judged by its own cause.
+    let mut read_error_logged = false;
     loop {
         if !run_dir.is_dir() {
             return Ok(WakeOutcome::Superseded);
         }
-        let Some(until) = same_pause_until(&read_all(&run_dir)?, seq) else {
+        let events = read_all(&run_dir)?;
+        let Some(until) = same_pause_until(&events, seq) else {
             return Ok(WakeOutcome::Superseded);
         };
+        // The waker of a park (design D7): on every poll, a pending control
+        // entry wakes the run at once, once. The check only asks whether an
+        // entry is pending; it interprets, applies and moves nothing, and
+        // the resumed drive's first scan applies the entries in order. A
+        // read that fails (a line still being written, an I/O error) counts
+        // as nothing pending for this poll, is retried at the next one, and
+        // is logged once.
+        if pause_at_is_wait(&events, seq) {
+            let pending = match crate::control::read_control_cursor(&run_dir)
+                .and_then(|cursor| crate::control::read_control_after(&run_dir, cursor))
+            {
+                Ok(entries) => !entries.is_empty(),
+                Err(e) => {
+                    if !read_error_logged {
+                        eprintln!(
+                            "apb: warning: the park's waker could not read the run's control file: {e}"
+                        );
+                        read_error_logged = true;
+                    }
+                    false
+                }
+            };
+            if pending {
+                let woke = resume_while(root, run_id, WakeHold::Pause(seq));
+                drop(lease);
+                return woke;
+            }
+        }
         let now = apb_core::clock::now_ms();
         if now >= u128::from(until) {
             // A quota pause probes its executor first (design 6.6); a probe
@@ -185,8 +219,54 @@ pub fn run_waker(root: &Path, run_id: &str, seq: u64) -> Result<WakeOutcome, Eng
             drop(lease);
             return woke;
         }
+        #[cfg(any(test, feature = "testing"))]
+        polls::completed(&run_dir);
         sleep_toward(until, now);
     }
+}
+
+/// The polls a pause waker completed per run directory, for the tests to
+/// wait on one instead of sleeping.
+#[cfg(any(test, feature = "testing"))]
+pub mod polls {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    fn counts() -> &'static Mutex<HashMap<PathBuf, u64>> {
+        static COUNTS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+        COUNTS.get_or_init(Mutex::default)
+    }
+
+    pub(super) fn completed(run_dir: &Path) {
+        let mut counts = counts().lock().unwrap_or_else(|e| e.into_inner());
+        *counts.entry(run_dir.to_path_buf()).or_default() += 1;
+    }
+
+    /// The polls the waker of the run at `run_dir` completed so far.
+    pub fn count(run_dir: &Path) -> u64 {
+        counts()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(run_dir)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+/// Whether the `run_paused` at journal sequence `seq` is a park (design
+/// D2 5): an engine pause whose reason is a wait reason, read from the
+/// journal the waker already read.
+fn pause_at_is_wait(events: &[crate::event::Event], seq: u64) -> bool {
+    events
+        .iter()
+        .find(|e| e.seq == seq)
+        .is_some_and(|e| match &e.payload {
+            crate::event::EventPayload::RunPaused { reason, by, .. } => {
+                super::cause::is_park_event(reason, *by)
+            }
+            _ => false,
+        })
 }
 
 /// The lease of `wait`, as an engine error when its file cannot be opened.

@@ -150,7 +150,9 @@ pub(super) fn header(w: &Writer, title: &str, report: &Report) -> Markup {
         ]),
     );
     let meta = |label: &str, line: Option<String>| {
-        line.map(|l| Markup::el("p", Some("meta"), Markup::text(&format!("{label}: {l}"))))
+        // Every line from the run passes the run redactor (a pause reason
+        // is a person's or a supervisor's text).
+        line.map(|l| Markup::el("p", Some("meta"), w.text(&format!("{label}: {l}"))))
             .unwrap_or_default()
     };
     let previous = meta(
@@ -161,6 +163,7 @@ pub(super) fn header(w: &Writer, title: &str, report: &Report) -> Markup {
             .map(crate::run_view::previous_success_line),
     );
     let deadline = meta("deadline", report.deadline.clone());
+    let pause = meta("pause", report.pause.clone());
     let concurrency = meta("concurrency", report.concurrency.clone());
     let start_key = meta("start key", report.start_key.clone());
     let started_by = meta("started by", report.started_by.clone());
@@ -178,6 +181,7 @@ pub(super) fn header(w: &Writer, title: &str, report: &Report) -> Markup {
         head,
         previous,
         deadline,
+        pause,
         concurrency,
         start_key,
         started_by,

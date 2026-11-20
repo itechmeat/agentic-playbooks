@@ -58,6 +58,7 @@ mod finish_hooks;
 mod fork;
 mod goal;
 mod handoff;
+pub(crate) mod wait_park;
 // host execution mode (0.23.0)
 mod host;
 mod journal;
@@ -1002,6 +1003,9 @@ fn drive_inner(
     // person it does not have, once the members in flight reported back.
     let mut billing_stop: Option<(String, String)> = None;
     let notifier = crate::notify::send::Notifier::new(root, run_dir, &run_id);
+    // The last park this drive posted, so a discarded one is not posted
+    // again on every poll (`wait_park::ParkRetry`).
+    let mut park_retry = wait_park::ParkRetry::default();
 
     loop {
         supervisor::ensure_run_dir(run_dir)?;
@@ -2700,6 +2704,51 @@ fn drive_inner(
                 })?;
                 (NodeStatus::TimedOut, "wait timeout".into())
             } else {
+                // The wait park (routine operations): a long timer wait in a
+                // run that may release, with nothing else to run and no
+                // control pending, posts the engine's own pause and goes to
+                // the loop top, where the control scan applies it. The drive
+                // itself journals, locks or spawns nothing here.
+                let now = apb_core::clock::now_ms();
+                let timer_seconds = match wait_for {
+                    WaitFor::Timer { seconds } => *seconds,
+                    WaitFor::Webhook { .. } => 0,
+                };
+                // No due time, no park: a park never carries an unbounded
+                // `until`. A park the scan discarded is not posted again
+                // before the journal or the control channel changed, or
+                // `wait_park::PARK_RETRY` passed (`ParkRetry`).
+                let due =
+                    wait_park::due_at_ms(&events, &current, timer_seconds, *timeout_seconds, now)
+                        .filter(|_| !park_retry.holds(events.len(), control_cursor));
+                let pause = match due {
+                    Some(wake_at_ms) => wait_park::park_request(wait_park::ParkCheck {
+                        timer: matches!(wait_for, WaitFor::Timer { .. }),
+                        scripted: scripted.is_some(),
+                        scenario: crate::scenario::session::is_scenario(run_dir),
+                        alone: state.deferred.is_empty() && frontier.iter().all(|n| n == &current),
+                        controls_pending: !read_control_after(run_dir, control_cursor)?.is_empty(),
+                        may_release: deferred::may_release(cfg, mode, wake_at_ms, now),
+                        guarded: crate::event::latest_run_guard(&events)
+                            .is_some_and(|g| g.iter().any(|f| f == "wait_park")),
+                        node: &current,
+                        wake_at_ms,
+                        keep_lock: lock.is_some(),
+                    }),
+                    None => None,
+                };
+                if let Some(pause) = pause {
+                    // A park is optional: while the numbering lock stays
+                    // busy past its bound nothing is posted, and the wait
+                    // sleeps and decides again at its next poll.
+                    if let Some(seq) = crate::control::post_control_unless_busy(
+                        run_dir,
+                        crate::control::Control::Pause(pause),
+                    )? {
+                        park_retry.posted(events.len(), seq);
+                        continue;
+                    }
+                }
                 std::thread::sleep(AWAIT_CONTROL_POLL);
                 continue;
             }

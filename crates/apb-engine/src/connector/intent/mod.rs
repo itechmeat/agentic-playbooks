@@ -48,6 +48,8 @@ pub struct IntentDraft<'a> {
     pub attempt_seq: Option<u64>,
     pub timeout_sec: u64,
     pub now_ms: u64,
+    /// For a notification, the digest of its whole target.
+    pub target_digest: Option<&'a str>,
 }
 
 /// An intent admitted to go out: its id, the nonce it carries, and the
@@ -89,6 +91,7 @@ pub fn admitted(draft: &IntentDraft<'_>, admission: &Admission) -> Option<NewInt
             .saturating_add(DEADLINE_GRACE_MS),
         replay_of,
         resend_of,
+        target_digest: draft.target_digest.map(str::to_string),
     };
     Some(NewIntent {
         id,

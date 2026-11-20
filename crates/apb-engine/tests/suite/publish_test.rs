@@ -862,6 +862,7 @@ fn a_push_its_recorder_left_running_is_reconciled_only_after_its_deadline() {
         deadline_ms,
         replay_of: None,
         resend_of: None,
+        target_digest: None,
     })
     .unwrap();
     drop(log);
@@ -1536,6 +1537,7 @@ fn settled_push(
         deadline_ms: 1,
         replay_of: None,
         resend_of: None,
+        target_digest: None,
     })
     .unwrap();
     log.append(EventPayload::SendIntentSettled {

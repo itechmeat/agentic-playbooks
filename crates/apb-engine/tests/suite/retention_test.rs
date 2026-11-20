@@ -469,6 +469,7 @@ fn an_unknown_send_stays() {
             deadline_ms: 0,
             replay_of: None,
             resend_of: None,
+            target_digest: None,
         },
     );
     append(

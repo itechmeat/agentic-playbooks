@@ -236,6 +236,20 @@ author loops back to the producer and the gate for a fresh approval).
 
 ### Older apb binaries
 
+A run whose playbook has a timer wait journals a `run_guard` naming
+`wait_park`, so an apb that does not know the park refuses to resume or pause
+the run while the park is its open state and still reads and stops it. Its
+limit, in one sentence: once such an older apb stopped the run, a person's
+resume with that older apb counts the park as paused time, so the timer waits
+again and a run deadline may end the run. Sending control commands to one
+live run from two apb versions at once is not supported.
+
+With `notify.remind` in `policy.yaml`, an apb older than the reminders reads
+the file as invalid, and one that drives a run ignores the cadence and sends
+each notice only; reminders are best effort across binary versions and carry
+no run guard, and this apb sends the latest due reminder when it drives the
+run again.
+
 A run whose definition uses `approves`, `requires_approval` or
 `person_only` journals a `run_guard` record after every checkpoint and
 records `execution.mode: cli+guard` (or `host+guard` for a host run) in
@@ -260,9 +274,12 @@ must be this release or newer; `apb doctor` warns about other `apb`
 binaries on `PATH`.
 
 The run guard names cover `evidence`, a run's `deadline`, a `concurrency:`
-key, a gate's `fields`, `show` or `max_scope`, and a list node's
-`pilot` or `stop_when` (`list_pilot`), among the features each change
-added. A definition whose list block carries `pilot` or `stop_when` is
+key, a gate's `fields`, `show` or `max_scope`, a list node's
+`pilot` or `stop_when` (`list_pilot`) and a timer wait (`wait_park`),
+among the features each change added. A guard lists its names in one
+fixed order, the order the features were added (`GuardedFeature::ALL`),
+so a definition with both a pilot list and a timer wait carries
+`["list_pilot", "wait_park"]`. A definition whose list block carries `pilot` or `stop_when` is
 refused outright by apb 1.0.0-beta.1 and every later release without this
 change: their list block rejects unknown fields, so such a binary neither
 starts such a playbook nor resumes such a run and appends nothing to its

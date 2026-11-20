@@ -407,6 +407,18 @@ fn machine_cmd(root: &Path) -> ExitCode {
             outcome_text_with(&finished, ", ")
         );
     }
+    // The reminder cadence for an open review, question or host task (the
+    // machine's policy.yaml; a project may only turn it off).
+    let remind = policies.remind_ms();
+    if remind.is_empty() {
+        println!("reminders: off");
+    } else {
+        let list: Vec<String> = remind
+            .iter()
+            .map(|ms| apb_core::duration::format_duration_ms(*ms))
+            .collect();
+        println!("reminders: {}", list.join(", "));
+    }
     for (label, list) in [
         ("machine", &policies.machine.notify.playbooks),
         ("project", &policies.project.notify.playbooks),

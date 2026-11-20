@@ -30,7 +30,9 @@ use serde_json::{Map, Value};
 
 use super::notice::Notice;
 use super::record::NotifyTargetRecord;
-use super::transitions::{GATE, KeyWindow, REFUSED, TransitionId, due, retry_gap_ms, tries};
+use super::transitions::{
+    GATE, KeyWindow, REFUSED, TransitionId, due, due_reminder, reminder_open, retry_gap_ms, tries,
+};
 use super::{Active, NotifyState};
 use crate::connector::call::{CallContext, CallRequest, LiveTarget, TargetPins};
 use crate::connector::intent::{
@@ -56,8 +58,10 @@ const THROTTLE: Duration = Duration::from_secs(1);
 /// The longest refusal detail a retired transition keeps.
 const DETAIL_CAP: usize = 300;
 
-/// Sends the due notifications of one run.
-pub(crate) struct Notifier {
+/// Sends the due notifications of one run. The drive sweeps at every loop
+/// turn. Reachable outside the crate only through the `testing`
+/// re-export `notify::Notifier`.
+pub struct Notifier {
     root: PathBuf,
     run_dir: PathBuf,
     run_id: String,
@@ -66,7 +70,7 @@ pub(crate) struct Notifier {
 }
 
 impl Notifier {
-    pub(crate) fn new(root: &Path, run_dir: &Path, run_id: &str) -> Self {
+    pub fn new(root: &Path, run_dir: &Path, run_id: &str) -> Self {
         Notifier {
             root: root.to_path_buf(),
             run_dir: run_dir.to_path_buf(),
@@ -86,7 +90,7 @@ impl Notifier {
     /// Sends every transition due as of the journal `events`, for at most
     /// [`SWEEP_BUDGET_SECS`]. A sweep with nothing due reads nothing else:
     /// the drive loop runs one every turn.
-    pub(crate) fn sweep(&self, events: &[Event]) {
+    pub fn sweep(&self, events: &[Event]) {
         self.sweep_within(events, Duration::from_secs(SWEEP_BUDGET_SECS));
     }
 
@@ -121,7 +125,8 @@ impl Notifier {
             KeyWindow::new(f.send_once().map_or(0, |i| i.window_sec()), f.timeout_sec)
         });
         let started = Instant::now();
-        for t in due(events, &state, now_ms, window, retry_gap_ms(), &needs_look) {
+        let gap = retry_gap_ms();
+        for t in due(events, &state, now_ms, window, gap, &needs_look) {
             let left = budget.saturating_sub(started.elapsed()).as_secs();
             if left == 0 {
                 break;
@@ -132,17 +137,21 @@ impl Notifier {
                 events,
                 &t,
                 left.min(SEND_TIMEOUT_SECS),
+                now_ms,
+                window,
+                gap,
             );
         }
     }
 
-    /// The cheap check, over the run's own journal: whether anything may be
-    /// due a send at `at_ms`. An inherited subscription is checked as if
-    /// its parent had just been set up again, which lifts every trust
-    /// refusal, and the target's deduplication window counts as open: at
-    /// most what may be due.
+    /// The cheap check: whether anything may be due a send at `at_ms`. An
+    /// inherited subscription is read as it is in force (the parent's
+    /// current target and reminder cadence, not what the child's journal
+    /// copied at its start) and checked as if its parent had just been set
+    /// up again, which lifts every trust refusal; the target's
+    /// deduplication window counts as open: at most what may be due.
     fn may_be_due(&self, events: &[Event], at_ms: u64) -> bool {
-        let mut own = NotifyState::fold(events);
+        let mut own = NotifyState::in_force(&self.run_dir, events);
         if let Some(a) = own
             .active
             .as_mut()
@@ -207,6 +216,7 @@ impl Notifier {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn send(
         &self,
         active: &Active,
@@ -214,13 +224,48 @@ impl Notifier {
         events: &[Event],
         t: &TransitionId,
         timeout_secs: u64,
+        now_ms: u64,
+        window: KeyWindow,
+        gap_ms: u64,
     ) {
         let target = &active.target;
         let label = t.label();
+        // A reminder is admitted only while it is still due, decided over
+        // the journal as it is under the lock that appends its intent (the
+        // ordering boundary): the sweep's own slice may be stale. A notice
+        // is never rechecked: it reports a transition that happened, open
+        // or not.
+        // The due reminder is computed again from the locked journal and
+        // must be the one selected, under the same target and cadence: a
+        // person who turned reminders off, changed the cadence or the
+        // target in between gets no intent; the next sweep selects anew.
+        // The clock is read again there too: a threshold passed since the
+        // selection makes a later reminder the due one.
+        let reminder = t.reminder;
+        let predicate = move |locked: &[Event]| -> bool {
+            let now_ms = apb_core::clock::now_ms_u64().max(now_ms);
+            let in_force = NotifyState::in_force(&self.run_dir, locked);
+            let Some(active_now) = in_force.active else {
+                return false;
+            };
+            active_now.target == active.target
+                && active_now.remind_ms == active.remind_ms
+                && reminder_open(locked, &active_now, t)
+                && due_reminder(locked, &active_now, t, now_ms, window, gap_ms) == Some(reminder)
+        };
+        let still_due: Option<crate::connector::call::StillDue> =
+            (reminder > 0).then_some(&predicate as &dyn Fn(&[Event]) -> bool);
         let live = match live {
             Ok(live) => live,
             Err(why) => {
-                return self.record_unsent(target, &label, IdempotencyMode::None, REFUSED, why);
+                return self.record_unsent(
+                    target,
+                    &label,
+                    IdempotencyMode::None,
+                    REFUSED,
+                    why,
+                    still_due,
+                );
             }
         };
         let mode = live
@@ -231,7 +276,18 @@ impl Notifier {
         let Some(args) = args_for(
             live,
             target,
-            &Notice::build(&self.root, &self.run_dir, &self.run_id, events, t),
+            &Notice::build_with(
+                &self.root,
+                &self.run_dir,
+                &self.run_id,
+                events,
+                t,
+                // A reminder names the threshold of the cadence in force,
+                // the one its number was counted over.
+                (reminder > 0)
+                    .then(|| active.remind_ms.get(usize::from(reminder) - 1).copied())
+                    .flatten(),
+            ),
         ) else {
             return self.record_unsent(
                 target,
@@ -239,6 +295,7 @@ impl Notifier {
                 mode,
                 GATE,
                 "the function no longer names the args a notification fills",
+                still_due,
             );
         };
         let before = tries(&Ledger::fold(events), &label).len();
@@ -254,7 +311,7 @@ impl Notifier {
                 dry_run: false,
                 full: false,
             },
-            CallContext::notify(&label, pins_of(target)),
+            CallContext::notify(&label, pins_of(target), target.digest(), still_due),
             timeout_secs,
         );
         if ok || value.get("intent").is_some() || self.recorded_since(&label, before) {
@@ -262,6 +319,11 @@ impl Notifier {
             return;
         }
         let code = value["error"]["code"].as_str().unwrap_or_default();
+        if reminder > 0 && code == CallErrorCode::AttemptClosed.as_str() {
+            // The admission recheck found the reminder no longer due: it
+            // records nothing (design D9 item 5).
+            return;
+        }
         if code == CallErrorCode::InFlight.as_str() || code == CallErrorCode::UnknownEffect.as_str()
         {
             // An earlier try is still going out, or nobody knows what
@@ -274,7 +336,7 @@ impl Notifier {
             REFUSED
         };
         let detail = value["error"]["message"].as_str().unwrap_or("refused");
-        self.record_unsent(target, &label, mode, source, detail);
+        self.record_unsent(target, &label, mode, source, detail, still_due);
     }
 
     /// Whether the call path recorded a try of `label` itself (and settled
@@ -296,6 +358,7 @@ impl Notifier {
         mode: IdempotencyMode,
         source: &'static str,
         why: &str,
+        still_due: Option<crate::connector::call::StillDue>,
     ) {
         let key = IntentKey {
             node: NOTIFY_SITE.to_string(),
@@ -305,6 +368,7 @@ impl Notifier {
             label: label.to_string(),
             item: None,
         };
+        let digest = target.digest();
         let draft = IntentDraft {
             key: &key,
             mode,
@@ -312,12 +376,36 @@ impl Notifier {
             attempt_seq: None,
             timeout_sec: 0,
             now_ms: apb_core::clock::now_ms_u64(),
+            target_digest: Some(&digest),
         };
         let Some(new) = intent::admitted(&draft, &Admission::New { resend_of: None }) else {
             return;
         };
-        let recorded =
-            EventLog::open_foreign(&self.run_dir).and_then(|mut log| log.append(new.payload));
+        // A reminder's not-sent intent is appended under the journal lock
+        // with the same still-due recheck the send path decides by: a wait
+        // that closed before the append records nothing at all. A notice
+        // (no recheck) appends as before.
+        let recorded = match still_due {
+            Some(still_due) => {
+                let mut skipped = false;
+                let recorded = EventLog::open_foreign(&self.run_dir).and_then(|mut log| {
+                    log.append_decided_synced(|locked| {
+                        if !still_due(locked) {
+                            skipped = true;
+                            return None;
+                        }
+                        Some(new.payload.clone())
+                    })
+                });
+                if skipped {
+                    return;
+                }
+                recorded
+            }
+            None => EventLog::open_foreign(&self.run_dir)
+                .and_then(|mut log| log.append(new.payload))
+                .map(Some),
+        };
         if recorded.is_ok() {
             let _ = intent::settle(
                 &self.run_dir,
@@ -368,4 +456,200 @@ pub(crate) fn args_for(
         args.insert(subject.clone(), Value::String(notice.subject.clone()));
     }
     Some(Value::Object(args))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::{Event, EventLog, EventPayload};
+    use apb_core::connector::sites::NOTIFY_SITE;
+
+    /// A run directory whose journal is `events` (seqs in order), with a
+    /// playbook snapshot, and no connector installed: every live target
+    /// load fails, which is the not-sent path the tests exercise.
+    fn seeded_run(events: &[Event]) -> (tempfile::TempDir, PathBuf, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let run_dir = root.join(".apb/runs/r-n");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: gate, type: human_review }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: gate }\n  - { from: gate, to: f }\n",
+        )
+        .unwrap();
+        let mut log = EventLog::create(&run_dir).unwrap();
+        for e in events {
+            log.append(e.payload.clone()).unwrap();
+        }
+        drop(log);
+        // The journal's times are the test's: rewrite them in place.
+        let path = run_dir.join("events.jsonl");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let mut out = String::new();
+        for (i, line) in content.lines().enumerate() {
+            let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
+            v["ts"] = serde_json::json!(events[i].ts as u64);
+            out.push_str(&serde_json::to_string(&v).unwrap());
+            out.push('\n');
+        }
+        std::fs::write(&path, out).unwrap();
+        (dir, run_dir, "r-n".to_string())
+    }
+
+    /// The project root of a run directory laid out as `<root>/.apb/runs/<id>`.
+    fn root_of(run_dir: &Path) -> PathBuf {
+        run_dir
+            .ancestors()
+            .nth(3)
+            .expect("the run directory's layout")
+            .to_path_buf()
+    }
+
+    fn target() -> NotifyTargetRecord {
+        NotifyTargetRecord {
+            connector: "chat".into(),
+            account: "me".into(),
+            function: "send".into(),
+            to: "42".into(),
+            connector_digest: "sha256:c".into(),
+            account_digest: "sha256:a".into(),
+        }
+    }
+
+    fn ev(seq: u64, ts: u128, payload: EventPayload) -> Event {
+        Event { seq, ts, payload }
+    }
+
+    fn started() -> EventPayload {
+        EventPayload::RunStarted {
+            playbook: "p".into(),
+            version: "1.0.0".into(),
+            definition: None,
+            external_data: false,
+        }
+    }
+
+    fn subscribed() -> EventPayload {
+        EventPayload::NotifySet {
+            target: Some(target()),
+            on: vec!["review".into()],
+            source: "run".into(),
+            by: None,
+            problem: None,
+            remind_ms: vec![600_000],
+        }
+    }
+
+    fn review() -> EventPayload {
+        EventPayload::ReviewRequested {
+            node: "gate".into(),
+            options: vec!["approve".into(), "reject".into()],
+            title: None,
+            instruction: String::new(),
+            prompt: None,
+            recommendation: None,
+            plan_digest: None,
+            binding: None,
+            person_only: false,
+        }
+    }
+
+    fn notice_confirmed(label: &str) -> Vec<EventPayload> {
+        vec![
+            EventPayload::SendIntentRecorded {
+                intent: format!("i-{label}"),
+                nonce: format!("n-{label}"),
+                node: NOTIFY_SITE.into(),
+                attempt: None,
+                attempt_seq: None,
+                connector: "chat".into(),
+                function: "send".into(),
+                account: "me".into(),
+                mode: "none".into(),
+                label: label.into(),
+                pid: 1,
+                deadline_ms: 0,
+                replay_of: None,
+                resend_of: None,
+                item: None,
+                target_digest: None,
+            },
+            EventPayload::SendIntentSettled {
+                intent: format!("i-{label}"),
+                outcome: "confirmed".into(),
+                source: "response".into(),
+                detail: None,
+                effect_ref: None,
+                by: None,
+            },
+        ]
+    }
+
+    fn decided() -> EventPayload {
+        EventPayload::ReviewDecided {
+            node: "gate".into(),
+            decision: "approve".into(),
+            note: String::new(),
+            plan_digest: None,
+            decided_by: None,
+            binding: None,
+            via: None,
+        }
+    }
+
+    /// The journal as a sweep read it while the gate was open: subscribed
+    /// under a ten-minute cadence, the review open eleven minutes, its
+    /// notice confirmed.
+    fn stale_slice(now: u128) -> Vec<Event> {
+        let opened = now - 660_000;
+        let mut out = vec![
+            ev(0, opened, started()),
+            ev(1, opened, subscribed()),
+            ev(2, opened, review()),
+        ];
+        for (i, p) in notice_confirmed("notify:review.2").into_iter().enumerate() {
+            out.push(ev(3 + i as u64, opened + 1_000, p));
+        }
+        out
+    }
+
+    /// The reminder the sweep over `events` would send, as its label.
+    fn reminder_of(events: &[Event], now_ms: u64) -> Option<String> {
+        let state = NotifyState::fold(events);
+        let d = due(
+            events,
+            &state,
+            now_ms,
+            KeyWindow::default(),
+            30_000,
+            &|| false,
+        );
+        d.iter().find(|t| t.reminder > 0).map(|t| t.label())
+    }
+
+    /// The not-sent path of a closed wait whose live target does not
+    /// resolve (no connector installed here): the wait decided between the
+    /// sweep's read and the append, so no intent and no settlement are
+    /// recorded for the reminder (design D9 item 8; the args variant and
+    /// the send path are in `notify_remind_test`).
+    #[test]
+    fn a_closed_wait_gets_no_unsent_reminder() {
+        let now = apb_core::clock::now_ms_u64() as u128;
+        let stale = stale_slice(now);
+        let mut on_disk = stale.clone();
+        on_disk.push(ev(5, now - 500, decided()));
+        assert_eq!(
+            reminder_of(&stale, now as u64).as_deref(),
+            Some("notify:review.2.r1"),
+            "over the stale slice the reminder is due"
+        );
+        let (_dir, run_dir, run_id) = seeded_run(&on_disk);
+        Notifier::new(&root_of(&run_dir), &run_dir, &run_id).sweep(&stale);
+        let events = crate::event::read_all(&run_dir).unwrap();
+        assert_eq!(
+            events.len(),
+            on_disk.len(),
+            "no intent and no settlement of the reminder"
+        );
+    }
 }

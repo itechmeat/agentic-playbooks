@@ -1296,6 +1296,7 @@ mod tests {
                 replay_of: None,
                 resend_of: None,
                 item: None,
+                target_digest: None,
             },
         )
     }

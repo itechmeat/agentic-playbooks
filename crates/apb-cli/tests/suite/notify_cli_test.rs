@@ -27,6 +27,44 @@ fn apb_in(root: &Path, args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
+/// The machine's `policy.yaml` lives in the config sandbox this process's
+/// tests share: the two tests that write it hold this lock, so one's file
+/// is never the other's surprise.
+static POLICY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// [`POLICY_LOCK`], also after a test that held it failed: the failed
+/// test's [`MachinePolicy`] put the file back as it dropped, so the lock's
+/// poison says nothing about the file.
+fn policy_lock() -> std::sync::MutexGuard<'static, ()> {
+    POLICY_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The machine's `policy.yaml` in the shared config sandbox, written for one
+/// test and put back as it was when the guard drops, so later tests of this
+/// process never run under it.
+struct MachinePolicy {
+    path: std::path::PathBuf,
+    before: Option<Vec<u8>>,
+}
+
+impl MachinePolicy {
+    fn write(content: &str) -> Self {
+        let path = crate::common::sandbox_config_dir().join("policy.yaml");
+        let before = fs::read(&path).ok();
+        fs::write(&path, content).unwrap();
+        MachinePolicy { path, before }
+    }
+}
+
+impl Drop for MachinePolicy {
+    fn drop(&mut self) {
+        let _ = match &self.before {
+            Some(bytes) => fs::write(&self.path, bytes),
+            None => fs::remove_file(&self.path),
+        };
+    }
+}
+
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -267,6 +305,7 @@ fn a_broken_machine_config_does_not_stop_turning_a_run_off() {
 
 #[test]
 fn an_outcome_filter_is_checked_by_name_and_the_doctor_reads_the_policy_file() {
+    let _policy = policy_lock();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let out = apb_in(
@@ -454,4 +493,27 @@ fn a_refused_last_notification_is_sent_by_the_notify_waker() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     assert_eq!(service.bodies("/messages").len(), 2);
+}
+
+/// `apb notify` names the reminder cadence in force: the machine's
+/// `notify.remind`, emptied by the project's `remind: []`.
+#[test]
+fn notify_status_names_the_reminders() {
+    let _policy = policy_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let _machine = MachinePolicy::write("notify:\n  remind: [1h, 4h]\n");
+    let out = apb_in(dir.path(), &["notify"]);
+    assert!(out.status.success(), "{out:?}");
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("reminders: 1h, 4h"), "{stdout}");
+
+    // The project's `remind: []` turns them off.
+    fs::write(
+        dir.path().join(".apb/policy.yaml"),
+        "notify:\n  remind: []\n",
+    )
+    .unwrap();
+    let stdout = text(&apb_in(dir.path(), &["notify"]).stdout);
+    assert!(stdout.contains("reminders: off"), "{stdout}");
 }

@@ -212,6 +212,19 @@ impl Run {
         self.log.append(p.to_event()).unwrap().seq
     }
 
+    /// The engine park of the open timer wait on `node`, with its wake
+    /// time; its journal seq.
+    fn park(&mut self, node: &str, until: Option<u64>) -> u64 {
+        let p = crate::pause::PauseRequest {
+            reason: Some(crate::pause::cause::wait_reason(node)),
+            by: Some(crate::pause::PauseBy::Engine),
+            mode: crate::pause::PauseMode::Drain,
+            until,
+            keep_lock: false,
+        };
+        self.log.append(p.to_event()).unwrap().seq
+    }
+
     fn finish(&mut self, outcome: &str) {
         self.ev(json!({"type": "run_finished", "outcome": outcome}));
     }
@@ -603,6 +616,80 @@ fn a_paused_run_with_an_open_review_needs_input_when_followed() {
     assert!(codes(&a).contains(&ActionCode::ResumeRun));
     assert_eq!(a.stop, StopVerdict::NeedsInput);
     assert_eq!((fx.default_exit("r"), fx.follow_exit("r")), (4, 3));
+}
+
+/// A park keeps the resume action of every paused run, with the wait line
+/// and its automatic progress at `until`; the run's clock is not paused, so
+/// the wait's remaining time is shown running.
+#[test]
+fn a_park_offers_the_resume_with_its_until() {
+    let fx = Fx::new();
+    let mut r = fx.run("rp");
+    let until = now() + 3_600_000;
+    r.park("timer", Some(until));
+    let a = fx.observe("rp");
+    let resume = a
+        .actions
+        .iter()
+        .find(|a| a.code == ActionCode::ResumeRun)
+        .expect("a parked run offers the resume");
+    assert!(
+        resume.reason.starts_with("waiting on timer `timer` until ")
+            && resume
+                .reason
+                .contains("; a waker resumes it then (a resume before then only parks it again)"),
+        "{}",
+        resume.reason
+    );
+    assert_eq!(
+        resume.auto,
+        Some(AutoProgress::At {
+            at_ms: until,
+            outcome: AutoOutcome::ResumeAttempt,
+            assured: false,
+        }),
+        "the resume's automatic progress is `until`"
+    );
+}
+
+/// Once `until` passed by more than the release grace and no waker holds
+/// the park's lease, the resume says so.
+#[test]
+fn an_overdue_park_says_so() {
+    let fx = Fx::new();
+    let mut r = fx.run("ro");
+    let until = now() - 120_000;
+    r.park("timer", Some(until));
+    let a = fx.observe("ro");
+    let resume = a
+        .actions
+        .iter()
+        .find(|a| a.code == ActionCode::ResumeRun)
+        .expect("a parked run offers the resume");
+    assert!(
+        resume
+            .reason
+            .starts_with("the wait on timer `timer` was due at ")
+            && resume
+                .reason
+                .contains(" and no waker resumed it; resume it"),
+        "{}",
+        resume.reason
+    );
+}
+
+/// In an unattended run a park resumes its attempt at `until`, like a
+/// quota pause: the field describes the wait (an unattended run never
+/// parks).
+#[test]
+fn an_unattended_park_resumes_its_attempt() {
+    let fx = Fx::new();
+    let mut r = fx.run("ru");
+    r.park("timer", Some(now() + 3_600_000));
+    assert_eq!(
+        unattended_of(&fx, "ru", ActionCode::ResumeRun),
+        proceeds(AutoOutcome::ResumeAttempt)
+    );
 }
 
 #[test]

@@ -73,7 +73,12 @@ pub(super) fn collect(obs: &Observation) -> Vec<Wait> {
                 child_of: child_node(obs, &run.run_id),
                 clock: Clock {
                     now_ms: obs.now_ms,
-                    paused: run.status() == RunStatus::Paused,
+                    // A park is the engine's own way to wait (its cause is
+                    // `wait`): not paused time, so the wait's remaining
+                    // time is shown running.
+                    paused: run.status() == RunStatus::Paused
+                        && run.view.pause().and_then(|p| p.cause)
+                            != Some(crate::pause::PauseCause::Wait),
                     driver_alive: run.driver_alive(),
                 },
             };
@@ -621,6 +626,32 @@ impl RunCx<'_> {
         }
     }
 
+    /// The resume line of a park: the wait and its wake time, or, once the
+    /// wake time passed more than the release grace ago with no waker
+    /// holding the park's lease, the lost wake. `None` for any other pause.
+    fn park_line(&self, pause: Option<&crate::pause::PauseInfo>) -> Option<String> {
+        let p = pause?;
+        if p.cause != Some(crate::pause::PauseCause::Wait) {
+            return None;
+        }
+        let node = crate::pause::cause::parse_wait_reason(&p.reason)?;
+        let until = p.until?;
+        let at = apb_core::clock::iso_utc(until);
+        let now = self.clock.now_ms;
+        // An unknown pause seq names no lease: no waker can be holding it.
+        let lost = now > until.saturating_add(crate::pause::RELEASE_GRACE_MS)
+            && self.run.pause_seq.is_none_or(|seq| {
+                !crate::waker::Lease::held(&self.run.run_dir, crate::waker::WakerFor::Pause(seq))
+            });
+        Some(if lost {
+            format!("the wait on timer `{node}` was due at {at} and no waker resumed it; resume it")
+        } else {
+            format!(
+                "waiting on timer `{node}` until {at}; a waker resumes it then (a resume before then only parks it again)"
+            )
+        })
+    }
+
     /// The resume of a paused run or of one whose driver is dead.
     fn resume(&self, out: &mut Vec<Wait>) {
         if !self.run.stopped() {
@@ -643,7 +674,10 @@ impl RunCx<'_> {
             let line = if billing {
                 "the run is paused before agent work that is billed or of unknown basis; a person confirms it when resuming (the resume's refusal carries the nonce)".to_string()
             } else if self.run.status() == RunStatus::Paused {
-                "the run is paused; resume it".to_string()
+                // A park keeps the resume of every paused run, saying what
+                // it is: the wait, or the lost wake.
+                self.park_line(pause)
+                    .unwrap_or_else(|| "the run is paused; resume it".to_string())
             } else if let Some(r) = released {
                 format!(
                     "the run is released, {}",

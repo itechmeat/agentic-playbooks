@@ -60,6 +60,18 @@ pub struct PauseRequest {
 }
 
 impl PauseRequest {
+    /// Whether this request is a park: an engine pause whose reason is a
+    /// wait reason ([`cause::parse_wait_reason`]). The one predicate the
+    /// control scan, the stop watcher and `pending_pause` use for a
+    /// request; a journaled `run_paused` is judged by [`cause_of`] instead.
+    pub fn is_park(&self) -> bool {
+        self.by == Some(PauseBy::Engine)
+            && self
+                .reason
+                .as_deref()
+                .is_some_and(|r| cause::parse_wait_reason(r).is_some())
+    }
+
     /// The pause `supervisor_run_pause` posts.
     pub fn supervisor() -> Self {
         PauseRequest {
@@ -312,6 +324,23 @@ pub(crate) fn release_lost(
 mod tests {
     use super::clock::parked;
     use super::*;
+
+    /// `is_park` agrees with `cause_of` for the same requests: only the
+    /// engine's pause with a wait reason is a park.
+    #[test]
+    fn a_park_request_is_the_engines_wait_reason() {
+        let req = |by: PauseBy, reason: &str| PauseRequest {
+            reason: Some(reason.to_string()),
+            by: Some(by),
+            ..PauseRequest::default()
+        };
+        assert!(req(PauseBy::Engine, "wait (pause)").is_park());
+        assert!(req(PauseBy::Engine, "wait (a, b (c))").is_park());
+        assert!(!req(PauseBy::Operator, "wait (pause)").is_park());
+        assert!(!req(PauseBy::Supervisor, "wait (pause)").is_park());
+        assert!(!req(PauseBy::Engine, "quota (a/m)").is_park());
+        assert!(!req(PauseBy::Engine, "wait (a/b)").is_park());
+    }
 
     fn ev(ts: u128, payload: EventPayload) -> Event {
         Event {

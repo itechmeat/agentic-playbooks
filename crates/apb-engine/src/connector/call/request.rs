@@ -9,6 +9,11 @@ use serde_json::Value;
 
 use super::attempt::AttemptClaim;
 use crate::connector::result::{CallError, CallErrorCode};
+use crate::event::Event;
+
+/// Whether a reminder is still due, decided over the journal as it is
+/// under the lock that appends its send intent.
+pub type StillDue<'a> = &'a dyn Fn(&[Event]) -> bool;
 
 /// One connector call request, assembled by the CLI from its arguments and the
 /// run context env variables.
@@ -37,7 +42,7 @@ pub struct CallRequest<'a> {
 /// an item check, a run notification). The default is a node's call with no
 /// label and no claim. Only the engine makes its own calls (`origin` is not
 /// public).
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct CallContext<'a> {
     pub intent: Option<&'a str>,
     pub claim: AttemptClaim,
@@ -46,6 +51,13 @@ pub struct CallContext<'a> {
     /// subscription was set. The live connector and account must still
     /// match them.
     pub(super) pins: Option<TargetPins>,
+    /// For a notification: the digest of its whole target
+    /// (`NotifyTargetRecord::digest`), recorded on its send intent.
+    pub(super) target_digest: Option<String>,
+    /// For a reminder of an open wait: whether the reminder is still due,
+    /// decided over the journal as it is under the lock that appends its
+    /// send intent. The reminder is recorded and sent only while it holds.
+    pub still_due: Option<StillDue<'a>>,
 }
 
 /// The digests a live call target was approved with.
@@ -53,6 +65,15 @@ pub struct CallContext<'a> {
 pub(crate) struct TargetPins {
     pub connector: String,
     pub account: String,
+}
+
+impl std::fmt::Debug for CallContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallContext")
+            .field("intent", &self.intent)
+            .field("origin", &self.origin)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> CallContext<'a> {
@@ -63,6 +84,8 @@ impl<'a> CallContext<'a> {
             claim,
             origin: CallOrigin::Node,
             pins: None,
+            target_digest: None,
+            still_due: None,
         }
     }
 
@@ -76,17 +99,27 @@ impl<'a> CallContext<'a> {
             },
             origin: CallOrigin::Check,
             pins: None,
+            target_digest: None,
+            still_due: None,
         }
     }
 
     /// apb's notification of a person, under the engine-made `label`, to a
-    /// live target that must still match `pins`.
-    pub(crate) fn notify(label: &'a str, pins: TargetPins) -> Self {
+    /// live target that must still match `pins`; its send intent records
+    /// `target_digest`, the digest of the whole target.
+    pub(crate) fn notify(
+        label: &'a str,
+        pins: TargetPins,
+        target_digest: String,
+        still_due: Option<StillDue<'a>>,
+    ) -> Self {
         CallContext {
             intent: Some(label),
             claim: AttemptClaim::default(),
             origin: CallOrigin::Notify,
             pins: Some(pins),
+            target_digest: Some(target_digest),
+            still_due,
         }
     }
 }

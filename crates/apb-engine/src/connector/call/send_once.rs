@@ -193,6 +193,7 @@ fn decide(
     let req = input.req;
     let mut decided: Option<Decided> = None;
     let mut over_budget: Option<CallError> = None;
+    let mut over_due: Option<CallError> = None;
     let mut log = EventLog::open_foreign(req.run_dir).map_err(|e| journal_failed(&e))?;
     log.append_decided_synced(|events| {
         let binding = attempt::bind(events, req.node_id, &input.ctx.claim);
@@ -207,6 +208,21 @@ fn decide(
             now_ms,
         };
         let admission = ledger::admit(events, &query);
+        // A reminder of an open wait is rechecked over the journal as it is
+        // under this lock, on a new admission only: its wait may have
+        // closed, its target or cadence changed, reminders were turned off,
+        // or another sweep taken it since the sweep's own read. A replay, a reconcile or an already-sent intent
+        // is not rechecked: once admitted the send may already be out.
+        if matches!(admission, Admission::New { .. })
+            && let Some(still_due) = input.ctx.still_due
+            && !still_due(events)
+        {
+            over_due = Some(CallError::new(
+                CallErrorCode::AttemptClosed,
+                "this reminder is no longer due (its wait closed, its target or cadence changed, reminders were turned off, or another sweep took it); nothing was sent",
+            ));
+            return None;
+        }
         if matches!(admission, Admission::New { .. } | Admission::Replay { .. })
             && let Err(e) = (input.budget)(events)
         {
@@ -220,6 +236,7 @@ fn decide(
             attempt_seq: binding.attempt_seq,
             timeout_sec: input.function.timeout_sec,
             now_ms,
+            target_digest: input.ctx.target_digest.as_deref(),
         };
         let new = intent::admitted(&draft, &admission);
         let record = match &admission {
@@ -249,6 +266,9 @@ fn decide(
         journal_failed(&e)
     })?;
     if let Some(e) = over_budget {
+        return Err(e);
+    }
+    if let Some(e) = over_due {
         return Err(e);
     }
     decided.ok_or_else(|| journal_failed(&"the journal was not read"))
@@ -402,6 +422,8 @@ fn read_back(input: &GateInput<'_>, function: &str, args: Value) -> Result<(Valu
             claim: input.ctx.claim.clone(),
             origin: input.ctx.origin.read_back(),
             pins: input.ctx.pins.clone(),
+            target_digest: None,
+            still_due: None,
         },
     );
     if !ok {

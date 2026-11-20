@@ -4317,6 +4317,31 @@ an untrusted child blocks the parent, and a reference cycle is refused. Nesting
 is limited to 5 levels. Set expected_duration explicitly on a playbook node
 (validator V19 nudges you): the parent cannot sum the child's own estimates.
 
+## wait (a timer or a signal)
+
+A `wait` node stops the run until a timer fires or a signal arrives:
+
+```yaml
+nodes:
+  - { id: cooldown, type: wait, wait_for: { type: timer, seconds: 7200 }, timeout_seconds: 10800 }
+  - { id: ci, type: wait, wait_for: { type: webhook, key: ci }, timeout_seconds: 1800 }
+```
+
+- `wait_for: { type: timer, seconds: N }` ends successfully after N seconds of
+  active run time; `wait_for: { type: webhook, key: K }` ends when a signal
+  with that key arrives (`apb signal <run> <key>`).
+- `timeout_seconds` is required: past it the node fails (route the failure
+  with a `fallback` edge).
+
+A timer wait with more than a minute left pauses the run until it is due,
+when it is the only thing the run is doing (no other node ready or running,
+no deferred retry open, no control waiting): no driver and no agent runs (only the small pause waker waits), the busy lock of
+a write run stays parked, the pause waker resumes the run when it is due and
+`apb resume --all` after a restart. A webhook wait and every wait of an
+unattended, supervised, eval or child run keep their driver. A playbook with
+a timer wait carries the run guard `wait_park`, so an older apb refuses to
+resume or pause its runs while they wait on the timer.
+
 <!-- issue #192: forward patches and candidate trials -->
 ## Supervisor policy (supervisor.policy)
 

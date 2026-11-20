@@ -30,7 +30,7 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
-  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `review_form` for the form of a `human_review` (a malformed `max_scope` V243, `fields` V244, `show` V245, a required field without a default on a gate the engine may decide V246, a default over untrusted text V247), `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`), `output_types` for the typed output field contract V167-V168, `write_scope` for a declared write scope V170-V172, `deadline` for a run's `deadline` V200, `concurrency` for the `concurrency:` block V210 and V211, `health` for the `health:` block V212, `previous_success` for the `run.previous_success` grammar, the `when_none` block and V176; `nodes` also holds V68, ids that start with `@`
+  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `review_form` for the form of a `human_review` (a malformed `max_scope` V243, `fields` V244, `show` V245, a required field without a default on a gate the engine may decide V246, a default over untrusted text V247), `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`; `list_pilot` names a definition whose list uses `pilot` or `stop_when`, `wait_park` one with a timer wait, the names in this declaration order), `output_types` for the typed output field contract V167-V168, `write_scope` for a declared write scope V170-V172, `deadline` for a run's `deadline` V200, `concurrency` for the `concurrency:` block V210 and V211, `health` for the `health:` block V212, `previous_success` for the `run.previous_success` grammar, the `when_none` block and V176; `nodes` also holds V68, ids that start with `@`
   are the engine's, V101, `audience` on a finish without a prompt, and
   V163, a `success_check` `scope` that names no glob or one that does not
   compile, and V173, a `prove_fails_first` proof that cannot mean anything), the
@@ -43,7 +43,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   retention keys `keep_days`, `keep_last` and `keep_failed_days`,
   `RetentionSettings`, a project only lengthening the machine's), its
   `health:` section (`health.playbooks`, the playbooks this machine
-  watches, a project narrowing it, `Policies::health_watches`), and the
+  watches, a project narrowing it, `Policies::health_watches`), its
+  `notify.remind` (the reminder cadence for an open wait, the machine's
+  list, a project only turning it off), and the
   doctor line; nothing in apb writes it), the concurrency key's schema
   (`concurrency.rs`: the `concurrency:` block, `OnBusy`, the key and
   display limits, `SUPERSEDED`), the routine health rules (`health.rs`:
@@ -319,7 +321,16 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   multi-response HTTP stub. Knows nothing about runs.
 - `apb-engine` - execution. The drive loop (`scheduler.rs`) with its phases in
   `scheduler/` (`entry` start, handoff and dead-attempt reaping, `control_apply`
-  the control scan, `supervisor` heartbeat and wake park, `node` execution,
+  the control scan (a park applied only as the last entry of a pass at its
+  own node, else discarded, also right behind the entry any exit of a pass
+  ends at, and discarded when the run's event lock cannot be taken;
+  `control::post_control` numbers and appends under `control.jsonl.lock`,
+  a leaf below the event lock, the line with its newline in one write,
+  and only a stop that cannot take that lock appends without it),
+  `wait_park` the decision whether a long timer wait parks (the engine
+  pause it posts, never for a node id that is not a safe segment, and not
+  posted again after a discard until something changed or `PARK_RETRY`
+  passed), `supervisor` heartbeat and wake park, `node` execution,
   `stop_context` the stop a chain step reads after a failed attempt (a pause
   or abort ends the chain, a supervisor interrupt names itself),
   `journal` event-log folds, `status_file` the attempt verdict contract and its
@@ -455,7 +466,9 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   duration goes through (`pause.rs`; `pause/`: `kind` the journal-facing
   types, `request` the one pause entry point and what a paused drive leaves
   behind, `interrupt` the graceful kill registry of a `--now` pause,
-  `waker` the body of the pause waker (`--seq`, the resume at `until`) and
+  `waker` the body of the pause waker (`--seq`, the resume at `until`, and
+  the waker of a park resumes the run once when a control is pending at any
+  poll) and
   of the release waker (`--release`, the resume of a released run when its
   deferred retry is due), each resuming only while its pause or release
   (`WakeHold`) still holds the run, `resume_all` behind
@@ -463,7 +476,7 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   `display` the one text line of a pause, `quota` the quota pause policy and
   schedule, `probe` the wake-up probe of a quota pause, run by
   `scheduler/quota_probe`; `budget` the budget pause's reason and request,
-  `cause` the cause a quota, budget or billing pause's reason names,
+  `cause` the cause a quota, budget, billing or wait pause's reason names,
   `billing` the billing pause a spawn takes),
   the start key (`start_key.rs`: `lookup` every launch surface asks
   before its gate, `claim` taken in preparation before the tree lock and
@@ -527,7 +540,13 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   `send` the drive's sweep through the send ledger under `@notify`, `view`
   the block every surface reports, `trial` the test message of `apb notify
   test`, `retry` the notify waker's body (`--notify`) and the one sweep
-  `apb resume --all` gives an ended run), the detached `apb __pause-waker`
+  `apb resume --all` gives an ended run; reminders for an open review,
+  question or host task on the active run clock, one label each
+  (`notify:<kind>.<seq>.r<n>`), a re-asked request starting its own, every
+  reminder intent admitted under the journal lock only while its wait is
+  open, its notice's target is in force and its label is admitted
+  (`CallContext.still_due`, `record_unsent`), only to the target the notice
+  reached, best effort across binary versions), the detached `apb __pause-waker`
   processes (`waker.rs`: spawning the pause, release and notify wakers and
   the OS-locked lease that keeps one waker per wait under
   `runs/<id>/wakers/`), what every surface shows of a deferred retry, a
@@ -1347,6 +1366,19 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   `pause::probe_before_wake` before resuming; a probe that hits the quota
   re-pauses. Probe outcomes are `supervisor_action quota_probe` markers.
   Six quota pauses of a node without a success fail it.
+- A **wait park**: a timer wait with more than `release_after` left, in a run
+  that may release and carries the `wait_park` run guard, with nothing else
+  to run and no control pending, posts the engine's own pause (`wait
+  (<node>)`, `until`, `keep_lock` for a write run) like a quota pause; the
+  control scan applies it only as the last entry of its pass with nothing
+  else applied and at the node it names, under the run's event lock, and
+  discards it otherwise (also right behind the entry any exit of a pass ends
+  at), so a person's pause or stop or a patch is never held behind it; the
+  waker of a park that finds a control pending at any poll resumes the run
+  once. From there it is an ordinary engine pause with `until` (the pause
+  waker, `apb resume --all`, a person's pause and stop). The
+  paused-interval clock does not count it, the deadline does; no notify
+  transition and no reminder.
 - A **run budget** (`budget:` block, or a run argument over it per field)
   is a predictive stop, not a ceiling: `scheduler/budget_gate` weighs what is
   left (spent from the journal, unknown attempts imputed, parallel members'
@@ -1379,7 +1411,12 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   `host_task` and `supervisor` are opt-in transitions; their waits
   (`scheduler/host.rs`, `scheduler/supervisor.rs` `await_control`) run the
   same throttled sweep, and a notice's command comes only from
-  `next_action::command::render` for the notified request.
+  `next_action::command::render` for the notified request. With
+  `notify.remind` in `policy.yaml` an open review, question or host task
+  also gets one reminder after each listed duration of active run time,
+  under its own send-ledger label, never before its notice went out, only
+  to the target that notice reached, and never after it closed; a park is
+  never reminded.
 - **Moving `current`** goes through `apb_core::versioning::current`
   (`move_current`, or `move_current_locked` under the candidate lock a
   settlement already holds): an intent file, ordered writes, recovery,

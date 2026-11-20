@@ -45,10 +45,23 @@ impl Notice {
         events: &[Event],
         t: &TransitionId,
     ) -> Self {
+        Self::build_with(root, run_dir, run_id, events, t, None)
+    }
+
+    /// [`Notice::build`] of a reminder that names `after_ms`, the threshold
+    /// of the cadence in force it was counted over.
+    pub fn build_with(
+        root: &Path,
+        run_dir: &Path,
+        run_id: &str,
+        events: &[Event],
+        t: &TransitionId,
+        after_ms: Option<u64>,
+    ) -> Self {
         let actions = crate::next_action::observation::Observation::load(run_dir, run_id)
             .map(|obs| crate::next_action::next_actions(&obs).actions)
             .unwrap_or_default();
-        Self::compose(root, run_dir, run_id, events, t, &actions)
+        Self::compose_with(root, run_dir, run_id, events, t, &actions, after_ms)
     }
 
     /// [`Notice::build`] with the run's next actions as they read now.
@@ -60,10 +73,23 @@ impl Notice {
         t: &TransitionId,
         actions: &[NextAction],
     ) -> Self {
+        Self::compose_with(root, run_dir, run_id, events, t, actions, None)
+    }
+
+    /// [`Notice::compose`] of a reminder that names `after_ms`.
+    fn compose_with(
+        root: &Path,
+        run_dir: &Path,
+        run_id: &str,
+        events: &[Event],
+        t: &TransitionId,
+        actions: &[NextAction],
+        after_ms: Option<u64>,
+    ) -> Self {
         let playbook = playbook_name(events);
         let opened = events.iter().find(|e| e.seq == t.seq).map(|e| &e.payload);
         let command = command_for(actions, run_id, t, opened).map(|c| c.line());
-        let (subject, mut lines) = match t.kind {
+        let (mut subject, mut lines) = match t.kind {
             Transition::Review => review(&playbook, run_id, opened, command),
             Transition::Question => question(&playbook, run_id, command),
             Transition::Paused => paused(&playbook, run_id, opened, command),
@@ -79,6 +105,19 @@ impl Notice {
                 vec![format!("Run {run_id} of {playbook}.")],
             ),
         };
+        if t.reminder > 0 {
+            // A reminder of an open wait (design D9): the subject is
+            // prefixed, and one line names how long the run has actively
+            // waited: the threshold of the cadence in force the sweep
+            // counted the reminder over.
+            subject = format!("Reminder: {subject}");
+            if let Some(ms) = after_ms {
+                lines.push(format!(
+                    "Still waiting after {} of active run time.",
+                    apb_core::duration::format_duration_ms(ms)
+                ));
+            }
+        }
         lines.push(match crate::people::link::run_link(root, run_id) {
             Some(url) => format!("Open the run: {url}"),
             None => format!("Details: `apb runs {run_id}`."),
@@ -437,4 +476,71 @@ fn follow_up(playbook: &str, run: &str, opened: Option<&EventPayload>) -> (Strin
         lines.push(format!("Reason: {reason}"));
     }
     (format!("{playbook}: follow-up {verdict}"), lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reminder names the threshold its caller counted it over (the
+    /// cadence in force), never a cadence read back from the run's own
+    /// journal, which a child following its parent or a later change
+    /// would make a different list.
+    #[test]
+    fn a_reminder_names_the_threshold_it_was_counted_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join(".apb/runs/r");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let events = vec![
+            Event {
+                seq: 0,
+                ts: 1,
+                payload: EventPayload::NotifySet {
+                    target: None,
+                    on: vec!["review".into()],
+                    source: "run".into(),
+                    by: None,
+                    problem: None,
+                    remind_ms: vec![600_000],
+                },
+            },
+            Event {
+                seq: 1,
+                ts: 2,
+                payload: EventPayload::ReviewRequested {
+                    node: "gate".into(),
+                    options: vec!["approve".into()],
+                    title: None,
+                    instruction: String::new(),
+                    prompt: None,
+                    recommendation: None,
+                    plan_digest: None,
+                    binding: None,
+                    person_only: false,
+                },
+            },
+        ];
+        let t = TransitionId {
+            kind: Transition::Review,
+            seq: 1,
+            reminder: 1,
+        };
+        let notice = Notice::compose_with(
+            dir.path(),
+            &run_dir,
+            "r",
+            &events,
+            &t,
+            &[],
+            Some(4 * 3_600_000),
+        );
+        assert!(
+            notice
+                .text
+                .contains("Still waiting after 4h of active run time."),
+            "{}",
+            notice.text
+        );
+        assert!(notice.subject.starts_with("Reminder: "));
+    }
 }

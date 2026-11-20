@@ -114,6 +114,17 @@
 //! `origin: scenario` in its manifest; neither old binary lists it, shows
 //! it or resumes it.
 //!
+//! Rows W1 and W2 pin the journal of a run that never parks on a timer
+//! wait (the wait park change). W1: a script node, then a webhook wait
+//! that times out after 1 s and falls through to the failure finish; its
+//! journal is main's event-type sequence exactly, with no `run_guard`, no
+//! `run_paused` and no control entry, and both old binaries read the run.
+//! W2: the same with a timer wait of 1 s (under the release threshold, so
+//! it never parks); its journal with every `run_guard` line removed is
+//! main's sequence, and (added with the change) the guard lines it does
+//! carry name exactly `wait_park` and stand right after `run_provenance`
+//! and every checkpoint. The literal type sequences never change.
+//!
 //! Rows 3 and 4 run with a real notification subscription the new writer
 //! takes at start: a filtered end-of-run notice (`finished:failed`) and the
 //! `host_task` transition, sent through a connector of the case's config
@@ -4386,4 +4397,245 @@ fn g1_list_pilot_old_binaries_refuse_start_and_resume() {
     let output: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(output["passed"], Value::from(5), "row G1: {output}");
     assert_eq!(output["needs_look"], Value::from(0), "row G1: {output}");
+}
+
+// ------------------------------------------------- wait park: never parks
+
+/// Row W1's playbook: a script node, then a webhook wait with
+/// `timeout_seconds: 1` and no signal, routed on by its fallback to the
+/// failure finish (the shape of `WF_TIMEOUT` in the engine's
+/// `wait_test.rs`). A run of this shape never parks.
+const W1_WEBHOOK_TIMEOUT: &str = r#"schema: 1
+id: corpus-wait-webhook
+name: Journal corpus webhook timeout
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: script, script: "scripts/go.sh", runner: sh }
+  - { id: wait, type: wait, wait_for: { type: webhook, key: ci }, timeout_seconds: 1 }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: wait }
+  - { from: wait, to: ok, condition: { type: node_status, node: wait, equals: success } }
+  - { from: wait, to: no, fallback: true }
+"#;
+
+/// Row W2's playbook: the same with a timer wait of 1 s (under
+/// `release_after`), so it never parks either.
+const W2_SHORT_TIMER: &str = r#"schema: 1
+id: corpus-wait-timer
+name: Journal corpus short timer wait
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: script, script: "scripts/go.sh", runner: sh }
+  - { id: wait, type: wait, wait_for: { type: timer, seconds: 1 }, timeout_seconds: 60 }
+  - { id: ok, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: wait }
+  - { from: wait, to: ok }
+"#;
+
+const GO_SH: &str = "echo go\n";
+
+/// The journal's sequence of event `type`s.
+fn types_of(journal: &[Value]) -> Vec<&str> {
+    journal.iter().filter_map(|e| e["type"].as_str()).collect()
+}
+
+/// Row W1: a run that never parks writes the journal main writes, and the
+/// old binaries read the run. The literal below is the unchanged tree's
+/// sequence, by construction.
+#[test]
+fn w1_a_run_without_a_timer_wait_journals_as_main() {
+    let new = new_binary();
+    let mut case = Case::new("row W1");
+    case.seed_inline(
+        &new,
+        "corpus-wait-webhook",
+        W1_WEBHOOK_TIMEOUT,
+        &[("go.sh", GO_SH)],
+    );
+    let ran = case.run(&new, &["run", "corpus-wait-webhook"]);
+    assert_eq!(ran.code, Some(1), "row W1: the run fails: {ran:?}");
+    let run = only_run_id(&case);
+    let journal = case.journal(&run);
+    assert!(
+        !journal.iter().any(|e| e["type"] == "run_guard"),
+        "row W1: no run_guard: {}",
+        summary(&journal)
+    );
+    assert!(
+        !journal.iter().any(|e| e["type"] == "run_paused"),
+        "row W1: no run_paused: {}",
+        summary(&journal)
+    );
+    assert!(
+        !journal.iter().any(|e| e["type"] == "run_resumed"),
+        "row W1: no run_resumed: {}",
+        summary(&journal)
+    );
+    assert!(
+        control_file_is_empty(&case.run_dir(&run)),
+        "row W1: no control entry"
+    );
+    assert_eq!(
+        types_of(&journal),
+        W1_TYPES.to_vec(),
+        "row W1: actual sequence: {:?}",
+        types_of(&journal)
+    );
+    case.save();
+
+    for (tag, name) in [(BETA1, "row W1 (beta.1)"), (V025, "row W1 (0.25.0)")] {
+        let Some(old) = old_binary(tag, &case) else {
+            continue;
+        };
+        case.restore();
+        let ran = case.run(&old, &["runs", &run]);
+        assert!(
+            ran.ok() && ran.stdout.contains("failed"),
+            "{name}: {tag} reads the run: {ran:?}"
+        );
+    }
+}
+
+/// Whether the run's `control.jsonl` holds no entry: absent or empty. Any
+/// other read failure fails the row (a file that does not read is no proof
+/// that nothing was posted).
+fn control_file_is_empty(run_dir: &Path) -> bool {
+    match fs::read_to_string(run_dir.join("control.jsonl")) {
+        Ok(text) => text.trim().is_empty(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => panic!("control.jsonl does not read: {e}"),
+    }
+}
+
+/// Row W2: a short timer wait adds only its guard. The journal with every
+/// `run_guard` line removed is the unchanged tree's sequence, by
+/// construction, and the guard lines it carries name exactly `wait_park`
+/// and stand right after `run_provenance` and every checkpoint.
+#[test]
+fn w2_a_short_timer_wait_adds_only_its_guard() {
+    let new = new_binary();
+    let mut case = Case::new("row W2");
+    // The one-second timer never parks, whatever the caller's environment
+    // says about the release threshold.
+    case.env
+        .push(("APB_RELEASE_AFTER_MS", NO_RELEASE.to_string()));
+    case.seed_inline(
+        &new,
+        "corpus-wait-timer",
+        W2_SHORT_TIMER,
+        &[("go.sh", GO_SH)],
+    );
+    let ran = case.run(&new, &["run", "corpus-wait-timer"]);
+    assert!(ran.ok(), "row W2: the run succeeds: {ran:?}");
+    let run = only_run_id(&case);
+    let journal = case.journal(&run);
+    assert!(
+        !journal.iter().any(|e| e["type"] == "run_paused"),
+        "row W2: no run_paused: {}",
+        summary(&journal)
+    );
+    assert!(
+        !journal.iter().any(|e| e["type"] == "run_resumed"),
+        "row W2: no run_resumed: {}",
+        summary(&journal)
+    );
+    assert!(
+        control_file_is_empty(&case.run_dir(&run)),
+        "row W2: no control entry"
+    );
+    let without_guards: Vec<Value> = journal
+        .iter()
+        .filter(|e| e["type"] != "run_guard")
+        .cloned()
+        .collect();
+    assert_eq!(
+        types_of(&without_guards),
+        W2_TYPES.to_vec(),
+        "row W2: actual sequence: {:?}",
+        types_of(&without_guards)
+    );
+    w2_guard_lines(&journal);
+}
+
+/// Row W1's literal journal, the unchanged tree's sequence.
+const W1_TYPES: &[&str] = &[
+    "run_started",
+    "run_provenance",
+    "node_started",
+    "node_finished",
+    "edge_traversed",
+    "node_started",
+    "node_finished",
+    "edge_traversed",
+    "node_started",
+    "wait_started",
+    "wait_timeout",
+    "node_finished",
+    "edge_traversed",
+    "node_finished",
+    "run_finished",
+];
+/// Row W2's literal journal without its guard lines, the unchanged tree's
+/// sequence.
+const W2_TYPES: &[&str] = &[
+    "run_started",
+    "run_provenance",
+    "node_started",
+    "node_finished",
+    "edge_traversed",
+    "node_started",
+    "node_finished",
+    "edge_traversed",
+    "node_started",
+    "wait_started",
+    "wait_signalled",
+    "node_finished",
+    "edge_traversed",
+    "node_finished",
+    "run_finished",
+];
+
+/// The guard assertions of row W2, added with the wait park change: every
+/// `run_guard` names exactly `wait_park` and stands right after
+/// `run_provenance` or right after a checkpoint, and nowhere else.
+fn w2_guard_lines(journal: &[Value]) {
+    let is_checkpoint = |t: &str| {
+        matches!(
+            t,
+            "node_finished" | "run_paused" | "run_finished" | "run_aborted"
+        )
+    };
+    let guards: Vec<usize> = journal
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| (e["type"] == "run_guard").then_some(i))
+        .collect();
+    let expected: Vec<usize> = journal
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| {
+            let t = e["type"].as_str()?;
+            (t == "run_provenance" || is_checkpoint(t)).then_some(i + 1)
+        })
+        .collect();
+    assert_eq!(
+        guards,
+        expected,
+        "row W2: guard lines right after run_provenance and every checkpoint: {}",
+        summary(journal)
+    );
+    for e in journal.iter().filter(|e| e["type"] == "run_guard") {
+        assert_eq!(
+            e["requires"],
+            Value::from(["wait_park"]),
+            "row W2: a guard names exactly wait_park: {e}"
+        );
+    }
 }
