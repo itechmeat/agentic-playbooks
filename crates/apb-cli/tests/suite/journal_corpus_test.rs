@@ -109,6 +109,11 @@
 //! carries a `run_guard` naming `evidence` after `run_provenance`; both old
 //! binaries read the run, refuse to resume it and stop it.
 //!
+//! Row V1 covers eval doubles: a doubled eval run's directory (a manifest
+//! with account names only, `run.yaml` doubles, the `eval_doubles`
+//! provenance and guard) on which each old binary's `apb connector call`
+//! fails, sends nothing to a live service and runs no `{{cmd:...}}` helper.
+//!
 //! Row S1 covers scenario runs: a quick scenario run the new binary plays
 //! (`apb eval --level quick`) lives under `.apb/scenario-runs/` with
 //! `origin: scenario` in its manifest; neither old binary lists it, shows
@@ -4637,5 +4642,138 @@ fn w2_guard_lines(journal: &[Value]) {
             Value::from(["wait_park"]),
             "row W2: a guard names exactly wait_park: {e}"
         );
+    }
+}
+
+/// Row V1's playbook (eval doubles): one agent step bound to the
+/// `mock-tracker` fixture connector.
+const V1_DOUBLED: &str = "schema: 2\nid: corpus-doubled\nname: Journal corpus doubled eval\nversion: 1.0.0\ndefaults: { profile: corpus }\neffects: [network, external]\nnodes:\n  - { id: start, type: start }\n  - { id: look, type: agent_task, prompt: LOOK, connectors: [{ name: mock-tracker, accounts: [main], functions: [list_items] }] }\n  - { id: ok, type: finish, outcome: success }\nedges:\n  - { from: start, to: look }\n  - { from: look, to: ok }\n";
+
+const V1_CASE: &str = "schema: 1\nid: doubled\ninstruction: look\nfixture: { dir: fixtures/base }\nconnectors:\n  mock-tracker:\n    list_items:\n      - answer: { status: 200, body: { items: [] } }\nrepeat: 1\n";
+
+/// Row V1 (eval doubles; named V1 because row E1 is the result snapshots'
+/// row): the new binary runs a doubled eval case, whose stored run
+/// directory has a manifest with `doubled_accounts` and no account record,
+/// `run.yaml` doubles, and `run_provenance.eval_doubles` with the
+/// `eval_doubles` guard. Each old binary then runs `apb connector call` in
+/// that run against an account whose base URL is a live service and whose
+/// token comes from a `{{cmd:...}}` helper: the call fails, the service
+/// received nothing, and the helper never ran.
+#[test]
+fn rowv1_doubled_run_old_connector_call_sends_nothing() {
+    let new = new_binary();
+    let mut case = Case::new("row V1");
+    let ran = case.run(&new, &["init"]);
+    assert!(ran.ok(), "row V1: apb init: {ran:?}");
+    seed_corpus_profile(&case.root());
+    let service = crate::http_service::Service::spawn(Default::default());
+    let marker = case.dir.path().join("helper-ran");
+    let cfg = case.dir.path().join("home/.config/apb");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../apb-engine/tests/fixtures/connectors/mock-tracker/connector.yaml");
+    fs::create_dir_all(cfg.join("connectors/mock-tracker")).unwrap();
+    fs::copy(&fixture, cfg.join("connectors/mock-tracker/connector.yaml")).unwrap();
+    fs::create_dir_all(cfg.join("connector-config")).unwrap();
+    fs::write(
+        cfg.join("connector-config/mock-tracker.yaml"),
+        format!(
+            "accounts:\n  - name: main\n    default: true\n    base_url: {}\n    token: \"{{{{cmd:touch {}}}}}\"\n",
+            service.base_url,
+            marker.display()
+        ),
+    )
+    .unwrap();
+    for args in [
+        vec!["connector", "approve", "mock-tracker"],
+        vec!["connector", "approve", "mock-tracker", "--account", "main"],
+    ] {
+        let ran = case.run(&new, &args);
+        assert!(ran.ok(), "row V1: {}: {ran:?}", args.join(" "));
+    }
+    let pdir = case.root().join(".apb/playbooks/corpus-doubled");
+    fs::create_dir_all(pdir.join("1.0.0")).unwrap();
+    fs::write(pdir.join("1.0.0/playbook.yaml"), V1_DOUBLED).unwrap();
+    fs::write(pdir.join("current"), "1.0.0").unwrap();
+    fs::create_dir_all(pdir.join("evals/fixtures/base")).unwrap();
+    fs::write(pdir.join("evals/doubled.yaml"), V1_CASE).unwrap();
+    fs::write(pdir.join("evals/fixtures/base/a.txt"), "a\n").unwrap();
+    let stub = case.dir.path().join("doubled-agent.sh");
+    fs::write(
+        &stub,
+        "#!/bin/sh\nprintf 'done\\n```yaml\\nstatus: success\\nsummary: done\\n```\\n'\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    case.env.push(("APB_AGENT_CMD", stub.display().to_string()));
+    let ran = case.run(&new, &["eval", "corpus-doubled", "--yes", "--json"]);
+    assert!(ran.ok(), "row V1: apb eval: {ran:?}");
+    let v: Value = serde_json::from_str(&ran.stdout).unwrap();
+    let rep = &v["result"]["cases"][0]["repetitions"][0];
+    let run_dir = PathBuf::from(rep["run_dir"].as_str().expect("row V1: a stored run"));
+    let manifest: Value =
+        serde_json::to_value(apb_engine::manifest::read(&run_dir).unwrap().unwrap()).unwrap();
+    let conn = &manifest["connectors"][0];
+    assert_eq!(conn["accounts"], serde_json::json!([]), "row V1: {conn}");
+    assert_eq!(
+        conn["doubled_accounts"][0]["name"], "main",
+        "row V1: {conn}"
+    );
+    let settings = fs::read_to_string(run_dir.join("run.yaml")).unwrap();
+    assert!(settings.contains("doubles:"), "row V1: {settings}");
+    let journal = journal_at(&run_dir);
+    assert!(
+        journal
+            .iter()
+            .any(|e| e["type"] == "run_provenance" && e["eval_doubles"] == true),
+        "row V1: the provenance says doubled"
+    );
+    assert!(
+        journal.iter().any(|e| e["type"] == "run_guard"
+            && e["requires"]
+                .as_array()
+                .is_some_and(|r| r.iter().any(|f| f == "eval_doubles"))),
+        "row V1: the guard names eval_doubles: {journal:?}"
+    );
+    assert!(!marker.exists(), "row V1: the new binary ran no helper");
+    let Some((beta1, v025)) = old_readers(&case) else {
+        return;
+    };
+    for reader in [beta1, v025] {
+        let mut cmd = case.command(
+            &reader,
+            &[
+                "connector",
+                "call",
+                "mock-tracker",
+                "list_items",
+                "--args",
+                "{\"q\":\"x\"}",
+            ],
+        );
+        let out = cmd
+            .env("APB_RUN_DIR", &run_dir)
+            .env("APB_NODE_ID", "look")
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "row V1: {} the call fails: {}{}",
+            label(&reader),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            said.contains("is not in the connector snapshot"),
+            "row V1: {} fails on the account: {said}",
+            label(&reader)
+        );
+        assert!(
+            service.bodies("/items").is_empty(),
+            "row V1: {} sent nothing",
+            label(&reader)
+        );
+        assert!(!marker.exists(), "row V1: {} ran no helper", label(&reader));
     }
 }

@@ -231,6 +231,12 @@ pub enum EventPayload {
             deserialize_with = "lenient_option"
         )]
         concurrency: Option<ConcurrencyRecord>,
+        /// Whether the run is a doubled eval run: its eval settings carry
+        /// connector doubles, so every connector call of it is answered
+        /// from them. The run then carries the `eval_doubles` guard,
+        /// written with this event. Additive.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        eval_doubles: bool,
     },
     /// The `run.previous_success` window of a run that waited for its
     /// concurrency key, read once it got the key and before its first
@@ -3140,6 +3146,13 @@ fn syncs_before_release(durable: bool, payload: &EventPayload) -> bool {
 }
 
 impl EventLog {
+    /// Test seam: the next append leaves `short` bytes at the end of its
+    /// buffer unwritten and fails, as a writer that dies mid-write would.
+    #[cfg(test)]
+    pub(crate) fn fault_next_write(&mut self, short: usize) {
+        self.fault_write_short = Some(short);
+    }
+
     /// The nodes whose deferred retry is open, as of this handle's last
     /// append (or its open).
     #[cfg(test)]

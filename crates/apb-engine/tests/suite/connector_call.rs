@@ -150,6 +150,7 @@ fn seed_run_yaml(
 ) {
     let mut m = RunExecutionManifest::default();
     m.connectors.push(ManifestConnector {
+        doubled_accounts: Vec::new(),
         name: CONNECTOR.to_string(),
         digest: "sha256:test".to_string(),
         accounts,
@@ -241,6 +242,7 @@ fn write_stub(dir: &Path, name: &str, script: &str) -> String {
 fn seed_cmd_run(run_dir: &Path, account: ManifestAccount) {
     let mut m = RunExecutionManifest::default();
     m.connectors.push(ManifestConnector {
+        doubled_accounts: Vec::new(),
         name: "cmd-conn".to_string(),
         digest: "sha256:test".to_string(),
         accounts: vec![account],
@@ -1130,6 +1132,7 @@ functions:
     };
     let mut m = RunExecutionManifest::default();
     m.connectors.push(ManifestConnector {
+        doubled_accounts: Vec::new(),
         name: "q-conn".to_string(),
         digest: "sha256:test".to_string(),
         accounts: vec![acct],
@@ -1192,11 +1195,13 @@ functions:
 "#;
     let mut m = RunExecutionManifest::default();
     m.connectors.push(ManifestConnector {
+        doubled_accounts: Vec::new(),
         name: CONNECTOR.to_string(),
         digest: "sha256:test".to_string(),
         accounts: vec![account("https://unused.example")],
     });
     m.connectors.push(ManifestConnector {
+        doubled_accounts: Vec::new(),
         name: "other".to_string(),
         digest: "sha256:test".to_string(),
         accounts: vec![ManifestAccount {
@@ -1500,6 +1505,7 @@ functions:
     };
     let mut m = RunExecutionManifest::default();
     m.connectors.push(ManifestConnector {
+        doubled_accounts: Vec::new(),
         name: "tele".to_string(),
         digest: "sha256:test".to_string(),
         accounts: vec![acct],
@@ -1584,6 +1590,7 @@ functions:
 "#;
     let mut m = RunExecutionManifest::default();
     m.connectors.push(ManifestConnector {
+        doubled_accounts: Vec::new(),
         name: "tele".to_string(),
         digest: "sha256:test".to_string(),
         accounts: vec![ManifestAccount {
@@ -2035,6 +2042,7 @@ functions:
 fn seed_smtp_run(run_dir: &Path) {
     let mut m = RunExecutionManifest::default();
     m.connectors.push(ManifestConnector {
+        doubled_accounts: Vec::new(),
         name: CONNECTOR.to_string(),
         digest: "sha256:test".to_string(),
         accounts: vec![ManifestAccount {

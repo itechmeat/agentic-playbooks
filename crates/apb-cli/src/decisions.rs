@@ -77,7 +77,8 @@ pub(crate) enum ThresholdsAction {
         #[arg(long)]
         threshold: f64,
         /// The labelling rule the threshold was measured under, for a use
-        /// whose labels have rule versions (retry_advice: exec/1); only the
+        /// whose labels have rule versions (retry_advice: exec/1,
+        /// completion_check: reply/1); only the
         /// current rule is accepted
         #[arg(long)]
         rule: Option<String>,

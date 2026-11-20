@@ -1238,6 +1238,7 @@ mod tests {
                 on_busy: "refuse".into(),
                 queued: false,
             }),
+            eval_doubles: false,
         })
         .unwrap();
         apb_core::run_origin::stamp(&dir, id).unwrap();

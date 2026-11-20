@@ -19,7 +19,7 @@ use apb_core::connector::secrets;
 use apb_core::schema::Playbook;
 
 use crate::error::EngineError;
-use crate::manifest::{ManifestAccount, ManifestConnector, ManifestConnectorGrant};
+use crate::manifest::{DoubledAccount, ManifestAccount, ManifestConnector, ManifestConnectorGrant};
 
 /// The manifest pieces `snapshot_connectors` returns: the connectors to record
 /// under `manifest.connectors`, and the per-node grant map keyed by node id.
@@ -38,12 +38,19 @@ type SnapshotOutput = (
 /// gate's `RunPermit` and are never recomputed here - they are checked against
 /// the live resolution and any mismatch, missing, or extra key is a hard
 /// `EngineError::Invalid` naming the offending item and the kind of drift.
+///
+/// `doubled` marks a doubled eval run: every step runs as for any run, but
+/// each connector is recorded with no account in `accounts` and its
+/// accounts' names and default flags in `doubled_accounts`, so no binary,
+/// of this version or an older one, can resolve an account to call a
+/// service through the run's snapshot.
 pub fn snapshot_connectors(
     root: &Path,
     run_dir: &Path,
     playbook: &Playbook,
     expected_connectors: &BTreeMap<String, String>,
     expected_accounts: &BTreeMap<String, String>,
+    doubled: bool,
 ) -> Result<SnapshotOutput, EngineError> {
     // 1. Re-resolve against the live files. Resolution errors (a connector no
     // longer installed, broken account config, an allowlisted account/function
@@ -147,6 +154,22 @@ pub fn snapshot_connectors(
     // map of secret-field -> command line, and the account digest.
     let mut connectors = Vec::new();
     for (cname, resolved) in &output.connectors {
+        if doubled {
+            connectors.push(ManifestConnector {
+                name: cname.clone(),
+                digest: resolved.loaded.digest.clone(),
+                accounts: Vec::new(),
+                doubled_accounts: resolved
+                    .accounts
+                    .iter()
+                    .map(|a| DoubledAccount {
+                        name: a.name.clone(),
+                        default: a.default,
+                    })
+                    .collect(),
+            });
+            continue;
+        }
         let mut accounts = Vec::new();
         for account in &resolved.accounts {
             accounts.push(ManifestAccount {
@@ -162,6 +185,7 @@ pub fn snapshot_connectors(
             name: cname.clone(),
             digest: resolved.loaded.digest.clone(),
             accounts,
+            doubled_accounts: Vec::new(),
         });
     }
 
@@ -186,4 +210,95 @@ pub fn snapshot_connectors(
     }
 
     Ok((connectors, grants))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A doubled run's snapshot records each connector with no account in
+    /// `accounts` and only the names and default flags in
+    /// `doubled_accounts`: no field, no variable name, no command, so no
+    /// binary can resolve an account from it.
+    #[test]
+    fn a_doubled_snapshot_records_no_account() {
+        apb_core::process_mode::testing::in_plain_child(
+            "connector::run::tests::a_doubled_snapshot_records_no_account",
+            || {
+                let cfg = tempfile::tempdir().unwrap();
+                // SAFETY: a child process runs this one test on one thread.
+                unsafe { std::env::set_var("APB_CONFIG_DIR", cfg.path()) };
+                let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/connectors/mock-tracker/connector.yaml");
+                let dst = cfg.path().join("connectors/mock-tracker");
+                std::fs::create_dir_all(&dst).unwrap();
+                std::fs::copy(&src, dst.join("connector.yaml")).unwrap();
+                let root = tempfile::tempdir().unwrap();
+                let run = tempfile::tempdir().unwrap();
+                let accounts = config::project_config_path(root.path(), "mock-tracker");
+                std::fs::create_dir_all(accounts.parent().unwrap()).unwrap();
+                std::fs::write(
+                    &accounts,
+                    "accounts:\n  - name: main\n    default: true\n    base_url: https://unused.example\n    token: \"{{env.APB_DOUBLED_TOKEN_VAR}}\"\n",
+                )
+                .unwrap();
+                // A command-sourced secret is a global account's only.
+                let global = config::global_config_path("mock-tracker").unwrap();
+                std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+                std::fs::write(
+                    &global,
+                    "accounts:\n  - name: other\n    base_url: https://other.example\n    token: \"{{cmd:printf other-secret}}\"\n",
+                )
+                .unwrap();
+                std::fs::write(
+                    root.path().join(".apb/secrets.env"),
+                    "APB_DOUBLED_TOKEN_VAR=x\n",
+                )
+                .unwrap();
+                let pb = Playbook::from_yaml(
+                    "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: a, type: agent_task, prompt: hi, profile: x, connectors: [{ name: mock-tracker, functions: read_only }] }\nedges: []\n",
+                )
+                .unwrap();
+                let out = resolve_playbook(root.path(), &pb).unwrap();
+                let mut conns = BTreeMap::new();
+                let mut accts = BTreeMap::new();
+                for (name, r) in &out.connectors {
+                    conns.insert(name.clone(), r.loaded.digest.clone());
+                    for a in &r.accounts {
+                        accts.insert(format!("{name}/{}", a.name), account_digest(a));
+                    }
+                }
+                let (connectors, grants) =
+                    snapshot_connectors(root.path(), run.path(), &pb, &conns, &accts, true)
+                        .unwrap();
+                assert_eq!(connectors.len(), 1);
+                let c = &connectors[0];
+                assert!(c.accounts.is_empty(), "{c:?}");
+                let mut names: Vec<(String, bool)> = c
+                    .doubled_accounts
+                    .iter()
+                    .map(|a| (a.name.clone(), a.default))
+                    .collect();
+                names.sort();
+                assert_eq!(
+                    names,
+                    [("main".to_string(), true), ("other".to_string(), false)]
+                );
+                let text = serde_json::to_string(c).unwrap();
+                for absent in ["APB_DOUBLED_TOKEN_VAR", "printf", "unused.example", "cmd"] {
+                    assert!(!text.contains(absent), "`{absent}` in {text}");
+                }
+                // Grants keep their account names.
+                let mut granted = grants["a"][0].accounts.clone();
+                granted.sort();
+                assert_eq!(granted, ["main", "other"]);
+                // A run that is not doubled records its accounts as on main.
+                let (plain, _) =
+                    snapshot_connectors(root.path(), run.path(), &pb, &conns, &accts, false)
+                        .unwrap();
+                assert_eq!(plain[0].accounts.len(), 2);
+                assert!(plain[0].doubled_accounts.is_empty());
+            },
+        );
+    }
 }

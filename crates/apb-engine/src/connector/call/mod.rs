@@ -109,6 +109,9 @@ struct EventMeta {
     /// for every other call.
     pages: Option<u32>,
     scope: CallScope,
+    /// A doubled call's reservation, delivered as the last step of
+    /// `execute` (eval-doubles D1 "Answering a call"); `None` otherwise.
+    reservation: Option<crate::eval::doubles::Reservation>,
 }
 
 /// Runs the whole call pipeline for a node with no send label or attempt
@@ -153,8 +156,10 @@ fn execute_bounded(req: CallRequest, ctx: &CallContext, max_secs: Option<u64>) -
     match run(&req, ctx, max_secs) {
         Outcome::DryRun(value) => (value, true),
         Outcome::Answer(ok) => (ok.to_success_json(), true),
-        Outcome::Ok(ok, meta) => {
-            append_event(&req, &meta);
+        Outcome::Ok(ok, mut meta) => {
+            if let Some(refused) = journal_call(&req, &mut meta) {
+                return refused;
+            }
             if let CallOk::Inbox { gap: Some(gap), .. } = &ok {
                 crate::connector::inbox::journal_gap(
                     req.run_dir,
@@ -167,16 +172,61 @@ fn execute_bounded(req: CallRequest, ctx: &CallContext, max_secs: Option<u64>) -
             let mut value = ok.to_success_json();
             settle_send(&req, &meta, Ok(&ok), &mut value);
             add_warnings(&mut value, &meta.warnings);
-            (value, true)
+            deliver_double(&req, meta.reservation.take(), (value, true))
         }
-        Outcome::Executed(err, meta) => {
-            append_event(&req, &meta);
+        Outcome::Executed(err, mut meta) => {
+            if let Some(refused) = journal_call(&req, &mut meta) {
+                return refused;
+            }
             let mut value = err.to_json();
             let now_ok = settle_send(&req, &meta, Err(&err), &mut value);
             add_warnings(&mut value, &meta.warnings);
-            (value, now_ok)
+            deliver_double(&req, meta.reservation.take(), (value, now_ok))
         }
         Outcome::Gate(err) => (err.to_json(), false),
+    }
+}
+
+/// Journals the call. A real call keeps going when the journal cannot take
+/// the line (best effort, as before); a doubled call does not: the run
+/// journal is the record the eval's checks compare the capture with, so a
+/// doubled call it does not record is refused before its answer is handed
+/// out, its reservation left undelivered.
+fn journal_call(req: &CallRequest, meta: &mut EventMeta) -> Option<(Value, bool)> {
+    let journaled = append_event(req, meta);
+    if journaled || meta.reservation.is_none() {
+        return None;
+    }
+    drop(meta.reservation.take());
+    Some((
+        CallError::new(
+            CallErrorCode::Config,
+            "eval_call_unjournaled: the run journal could not record this doubled call; the answer was not handed out",
+        )
+        .to_json(),
+        false,
+    ))
+}
+
+/// The last step of a doubled call: its delivery recorded durably before
+/// the answer leaves, or `eval_call_delivery_unrecorded` in its place (the
+/// reservation stays undelivered). Every other call passes through.
+fn deliver_double(
+    req: &CallRequest,
+    reservation: Option<crate::eval::doubles::Reservation>,
+    answer: (Value, bool),
+) -> (Value, bool) {
+    let Some(reservation) = reservation else {
+        return answer;
+    };
+    #[cfg(any(test, feature = "testing"))]
+    crate::deadline_hooks::at(
+        crate::deadline_hooks::Hook::DoubleBeforeDeliver,
+        req.run_dir,
+    );
+    match crate::eval::doubles::deliver(req.run_dir, reservation) {
+        Ok(()) => answer,
+        Err(e) => (e.to_json(), false),
     }
 }
 
@@ -243,7 +293,9 @@ fn run(req: &CallRequest, ctx: &CallContext, max_secs: Option<u64>) -> Outcome {
     // it is read off the prepared call before dispatch consumes it.
     let http_like = matches!(prepared, PreparedCall::Http(_));
     let started = Instant::now();
-    let dispatched = prepared.dispatch();
+    // A doubled call's reservation outlives its dispatch: it is delivered
+    // at the end of `execute`.
+    let (dispatched, reservation) = prepared.dispatch();
     let duration_ms = started.elapsed().as_millis() as u64;
     let Dispatched {
         result,
@@ -279,6 +331,7 @@ fn run(req: &CallRequest, ctx: &CallContext, max_secs: Option<u64>) -> Outcome {
         warnings,
         pages,
         scope,
+        reservation,
     };
     match result {
         Ok(ok) => Outcome::Ok(ok, meta),
@@ -331,6 +384,13 @@ enum PreparedCall {
         account: String,
         call: Box<crate::connector::inbox::InboxCall>,
     },
+    /// A call of a doubled eval run, answered from the case's doubles: its
+    /// reservation holds the answer (or `double_unmatched`) and is
+    /// delivered at the end of `execute`. No network, no secret.
+    Double {
+        account: String,
+        reservation: crate::eval::doubles::Reservation,
+    },
 }
 
 impl PreparedCall {
@@ -342,7 +402,9 @@ impl PreparedCall {
             PreparedCall::Http(h) => h.deadline = h.deadline.min(lowered),
             PreparedCall::Smtp { call, .. } => call.cap_timeout(secs),
             PreparedCall::Imap { call, .. } => call.cap_deadline(lowered),
-            PreparedCall::Mock { .. } | PreparedCall::Inbox { .. } => {}
+            PreparedCall::Mock { .. }
+            | PreparedCall::Inbox { .. }
+            | PreparedCall::Double { .. } => {}
         }
     }
 
@@ -353,6 +415,7 @@ impl PreparedCall {
             PreparedCall::Smtp { account, .. } => account,
             PreparedCall::Imap { account, .. } => account,
             PreparedCall::Inbox { account, .. } => account,
+            PreparedCall::Double { account, .. } => account,
         }
     }
 
@@ -366,6 +429,7 @@ impl PreparedCall {
             PreparedCall::Smtp { call, .. } => call.endpoint(),
             PreparedCall::Imap { call, .. } => call.endpoint(),
             PreparedCall::Inbox { call, .. } => call.endpoint(),
+            PreparedCall::Double { .. } => "eval-double".to_string(),
         }
     }
 
@@ -373,7 +437,9 @@ impl PreparedCall {
     /// every other kind, which record neither.
     fn event_extra(&self) -> (Option<String>, Option<u32>) {
         match self {
-            PreparedCall::Mock { .. } | PreparedCall::Http(_) => (None, None),
+            PreparedCall::Mock { .. } | PreparedCall::Http(_) | PreparedCall::Double { .. } => {
+                (None, None)
+            }
             PreparedCall::Smtp { call, .. } => call.event_extra(),
             PreparedCall::Imap { call, .. } => call.event_extra(),
             PreparedCall::Inbox { call, .. } => call.event_extra(),
@@ -382,9 +448,11 @@ impl PreparedCall {
 
     /// Executes the call, returning the mapped result, the HTTP status when
     /// a response (or a mock status) was obtained, the pages a paginated
-    /// read attempted, and the call's warnings.
-    fn dispatch(self) -> Dispatched {
-        match self {
+    /// read attempted, and the call's warnings; with a doubled call's
+    /// reservation, which outlives the dispatch and is delivered at the end
+    /// of `execute`.
+    fn dispatch(self) -> (Dispatched, Option<crate::eval::doubles::Reservation>) {
+        let dispatched = match self {
             PreparedCall::Mock { status, body, .. } => {
                 // A mock body is complete by construction: no read happened,
                 // so no incompleteness can be reported, whatever the
@@ -424,6 +492,29 @@ impl PreparedCall {
                 pages: None,
                 warnings: Vec::new(),
             },
+            PreparedCall::Double { reservation, .. } => {
+                return (Self::answer_double(&reservation), Some(reservation));
+            }
+        };
+        (dispatched, None)
+    }
+
+    /// A doubled call's answer, through the same status table as a mock;
+    /// `double_unmatched` (or another refusal) with no status.
+    fn answer_double(reservation: &crate::eval::doubles::Reservation) -> Dispatched {
+        match &reservation.answer {
+            Ok(spec) => Dispatched {
+                result: map_status(spec.status, spec.body.clone(), None, None, false),
+                http_status: Some(spec.status),
+                pages: None,
+                warnings: Vec::new(),
+            },
+            Err(e) => Dispatched {
+                result: Err(e.clone()),
+                http_status: None,
+                pages: None,
+                warnings: Vec::new(),
+            },
         }
     }
 }
@@ -436,14 +527,27 @@ fn prepare(
     ctx: &CallContext,
     max_secs: Option<u64>,
 ) -> Result<Staged, CallError> {
+    // 0. Whether the run is a doubled eval run (eval-doubles D1), told
+    // once: every call of such a run is answered from its doubles, and a
+    // run whose settings do not read fails closed. A notification is a
+    // live call, which an eval run never sends.
+    let events = attempt::journal(req.run_dir);
+    // A run whose settings do not read says so, notification or not.
+    let doubles = crate::eval::doubles::of_run(req.run_dir, &events)?;
+    if ctx.origin.is_live() && doubles.is_some() {
+        return Err(CallError::new(
+            CallErrorCode::Permission,
+            "an eval run never sends notifications",
+        ));
+    }
+
     // 1, 2 and 4: where the call goes (the run's grant and snapshot, or a
     // live trust-checked target).
-    let target = target::resolve(req, ctx)?;
+    let target = target::resolve(req, ctx, doubles.as_ref())?;
 
     // 3. The attempt the call belongs to. A node's call from an attempt
     // that has ended, or that claims another attempt, is refused whatever
     // it calls: it would act, and be charged, in the current attempt's name.
-    let events = attempt::journal(req.run_dir);
     let binding = attempt::bind(&events, req.node_id, &ctx.claim);
     if ctx.origin.charges_budget() && !binding.open {
         return Err(send_once::attempt_closed(req));
@@ -559,6 +663,14 @@ fn prepare(
             attachments_dir: Some(attachments_dir.as_str()),
             may_ack: inbox_may_ack(ctx.origin, &target.doc, target.grant.as_ref()),
             gap_journal: Some((req.run_dir, req.node_id)),
+            double: doubles.as_ref().map(|doubles| DoubleSite {
+                run_dir: req.run_dir,
+                doubles,
+                site: req.node_id,
+                connector: req.connector,
+                function: req.function,
+                item: ctx.claim.item.as_deref(),
+            }),
         },
     );
     match built {
@@ -633,6 +745,50 @@ struct CallMode<'a> {
     /// before a cursor moves past it; `None` for a live call, which has no
     /// run.
     gap_journal: Option<(&'a Path, &'a str)>,
+    /// The doubles of a doubled eval run and where its call comes from;
+    /// `None` for every other call (a live call has no run).
+    double: Option<DoubleSite<'a>>,
+}
+
+/// What answering a doubled call needs beyond `build_prepared`'s own
+/// arguments.
+#[derive(Debug, Clone, Copy)]
+struct DoubleSite<'a> {
+    run_dir: &'a Path,
+    doubles: &'a apb_core::eval_doubles::Doubles,
+    site: &'a str,
+    connector: &'a str,
+    function: &'a str,
+    item: Option<&'a str>,
+}
+
+impl DoubleSite<'_> {
+    /// Reserves the call's answer (eval-doubles D1 "Answering a call"):
+    /// durable before the call is dispatched. Resolves no secret.
+    fn prepare(&self, account: String, root: &Path, args: &Value) -> Result<Prepared, CallError> {
+        let reservation = crate::eval::doubles::reserve(
+            self.run_dir,
+            root,
+            self.doubles,
+            &crate::eval::doubles::DoubledCall {
+                site: self.site,
+                connector: self.connector,
+                function: self.function,
+                account: &account,
+                item: self.item,
+                args,
+            },
+        )?;
+        #[cfg(any(test, feature = "testing"))]
+        crate::deadline_hooks::at(
+            crate::deadline_hooks::Hook::DoubleBeforeDispatch,
+            self.run_dir,
+        );
+        Ok(Prepared::Call(Box::new(PreparedCall::Double {
+            account,
+            reservation,
+        })))
+    }
 }
 
 /// Whether a filtered `inbox_read` of this call may move its consumer's
@@ -711,7 +867,13 @@ fn build_prepared(
         attachments_dir,
         may_ack,
         gap_journal,
+        double,
     } = mode;
+    // A dry run stays a dry run: nothing is reserved. Its preview names
+    // the call only: a doubled run's snapshot holds no account fields to
+    // render a request from.
+    let doubled_preview = dry_run && double.is_some();
+    let double = double.filter(|_| !dry_run);
     // The one deadline of the whole call: from here, the function's
     // `timeout_sec`, lowered by a caller's bound. Minting, the service
     // request, the refresh and retry after a 401, and every page share it.
@@ -734,6 +896,27 @@ fn build_prepared(
     // 5. Validate args against the function schema.
     if let Some(schema) = &function.args_schema {
         validate_args(schema, args)?;
+    }
+
+    if doubled_preview && function.inbox.is_none() {
+        return Ok(Prepared::DryRun(json!({
+            "ok": true,
+            "dry_run": true,
+            "doubled": true,
+            "connector": doc.name,
+            "account": account_name,
+            "note": "a doubled eval run answers this call from the case's doubles; no request is rendered",
+        })));
+    }
+
+    // 5b. A doubled eval run's call is answered from its doubles, after
+    // its args were checked as a real call checks them and before the
+    // function's own mock, which would answer it with no capture. An inbox
+    // function parses its arguments first (6b).
+    if let Some(double) = &double
+        && function.inbox.is_none()
+    {
+        return double.prepare(account_name, root, args);
     }
 
     // 6. Mock: return the canned response (mapped through the status table by
@@ -767,6 +950,10 @@ fn build_prepared(
         )? {
             crate::connector::inbox::InboxBuild::DryRun(v) => Ok(Prepared::DryRun(v)),
             crate::connector::inbox::InboxBuild::Call(mut call) => {
+                // A doubled run's inbox is the double.
+                if let Some(double) = &double {
+                    return double.prepare(account_name, root, args);
+                }
                 if let Some((run_dir, node_id)) = gap_journal {
                     call.journal_gaps_to(run_dir, node_id);
                 }
@@ -1013,9 +1200,23 @@ fn answer_live(prepare: impl FnOnce() -> Result<Prepared, CallError>) -> (Value,
     match prepare() {
         Ok(Prepared::DryRun(v)) => (v, true),
         Ok(Prepared::Call(prepared)) => {
-            let Dispatched {
-                result, warnings, ..
-            } = prepared.dispatch();
+            // A live call has no run, so it never holds a reservation.
+            let (
+                Dispatched {
+                    result, warnings, ..
+                },
+                None,
+            ) = prepared.dispatch()
+            else {
+                return (
+                    CallError::new(
+                        CallErrorCode::Config,
+                        "a call outside a run was answered as a doubled call; nothing was sent",
+                    )
+                    .to_json(),
+                    false,
+                );
+            };
             match result {
                 Ok(ok) => {
                     let mut value = ok.to_success_json();
@@ -1121,6 +1322,7 @@ pub(crate) fn play_call_pinned(
                 attachments_dir: None,
                 may_ack: false,
                 gap_journal: None,
+                double: None,
             },
         )
     })
@@ -1175,6 +1377,7 @@ fn prepare_play_call(
             // A person's live call may ack, as it may call the ack function.
             may_ack: true,
             gap_journal: None,
+            double: None,
         },
     )
 }
@@ -1206,28 +1409,30 @@ pub(crate) fn load_snapshot(run_dir: &Path, connector: &str) -> Result<Connector
 /// write failure must not change the call's already-computed result, so the
 /// error is dropped (the result was printed regardless). The call runs
 /// outside the drive, so the journal is opened as a foreign writer.
-fn append_event(req: &CallRequest, meta: &EventMeta) {
-    if let Ok(mut log) = EventLog::open_foreign(req.run_dir) {
-        let _ = log.append(EventPayload::ConnectorCall {
-            item: meta.scope.item.clone(),
-            node_id: req.node_id.to_string(),
-            connector: req.connector.to_string(),
-            function: req.function.to_string(),
-            account: meta.account.clone(),
-            url: meta.url.clone(),
-            outcome: meta.outcome.clone(),
-            http_status: meta.http_status,
-            duration_ms: meta.duration_ms,
-            smtp_subject: meta.smtp_subject.clone(),
-            smtp_recipients: meta.smtp_recipients,
-            response_complete: meta.response_complete,
-            pages: meta.pages,
-            attempt: meta.scope.attempt,
-            attempt_seq: meta.scope.attempt_seq,
-            intent: meta.scope.send.as_ref().map(|t| t.id.clone()),
-            origin: meta.scope.origin.journal_tag(),
-        });
-    }
+fn append_event(req: &CallRequest, meta: &EventMeta) -> bool {
+    let Ok(mut log) = EventLog::open_foreign(req.run_dir) else {
+        return false;
+    };
+    log.append(EventPayload::ConnectorCall {
+        item: meta.scope.item.clone(),
+        node_id: req.node_id.to_string(),
+        connector: req.connector.to_string(),
+        function: req.function.to_string(),
+        account: meta.account.clone(),
+        url: meta.url.clone(),
+        outcome: meta.outcome.clone(),
+        http_status: meta.http_status,
+        duration_ms: meta.duration_ms,
+        smtp_subject: meta.smtp_subject.clone(),
+        smtp_recipients: meta.smtp_recipients,
+        response_complete: meta.response_complete,
+        pages: meta.pages,
+        attempt: meta.scope.attempt,
+        attempt_seq: meta.scope.attempt_seq,
+        intent: meta.scope.send.as_ref().map(|t| t.id.clone()),
+        origin: meta.scope.origin.journal_tag(),
+    })
+    .is_ok()
 }
 
 /// The `auth` error of a function whose token lacks every scope it needs.
@@ -1304,6 +1509,7 @@ mod select_account_tests {
             on_unknown: None,
         };
         let mconn = ManifestConnector {
+            doubled_accounts: Vec::new(),
             name: "github".into(),
             digest: "sha256:c".into(),
             accounts: vec![maccount("work", false), maccount("personal", false)],
@@ -1335,6 +1541,7 @@ mod select_account_tests {
             on_unknown: None,
         };
         let mconn = ManifestConnector {
+            doubled_accounts: Vec::new(),
             name: "github".into(),
             digest: "sha256:c".into(),
             accounts: vec![maccount("work", false), maccount("personal", false)],
@@ -1366,6 +1573,7 @@ mod select_account_tests {
             on_unknown: None,
         };
         let mconn = ManifestConnector {
+            doubled_accounts: Vec::new(),
             name: "github".into(),
             digest: "sha256:c".into(),
             accounts: vec![maccount("work", true), maccount("personal", false)],
@@ -1393,6 +1601,7 @@ mod select_account_tests {
             on_unknown: None,
         };
         let mconn = ManifestConnector {
+            doubled_accounts: Vec::new(),
             name: "github".into(),
             digest: "sha256:c".into(),
             accounts: vec![maccount("work", true)],

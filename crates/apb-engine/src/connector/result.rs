@@ -36,6 +36,8 @@ pub enum CallErrorCode {
     /// The attempt this call claims to belong to has ended, so it may not
     /// send anything.
     AttemptClosed,
+    /// An eval run's call no double answers: nothing was sent.
+    DoubleUnmatched,
 }
 
 impl CallErrorCode {
@@ -55,6 +57,7 @@ impl CallErrorCode {
             CallErrorCode::UnknownEffect => "unknown_effect",
             CallErrorCode::InFlight => "in_flight",
             CallErrorCode::AttemptClosed => "attempt_closed",
+            CallErrorCode::DoubleUnmatched => "double_unmatched",
         }
     }
 }

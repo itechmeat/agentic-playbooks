@@ -71,6 +71,7 @@ fn run_with_manifest(
     let root = tempfile::tempdir().unwrap();
     let mut m = RunExecutionManifest::default();
     m.connectors.push(ManifestConnector {
+        doubled_accounts: Vec::new(),
         name: connector.to_string(),
         digest: "sha256:test".to_string(),
         accounts: vec![ManifestAccount {
@@ -1384,6 +1385,7 @@ fn run_inline(conflict: bool, base_url: &str) -> Run {
     let root = tempfile::tempdir().unwrap();
     let mut m = RunExecutionManifest::default();
     m.connectors.push(ManifestConnector {
+        doubled_accounts: Vec::new(),
         name: "conflictor".to_string(),
         digest: "sha256:test".to_string(),
         accounts: vec![ManifestAccount {

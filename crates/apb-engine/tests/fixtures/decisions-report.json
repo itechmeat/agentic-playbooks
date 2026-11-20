@@ -1,16 +1,249 @@
 {
-  "runs": 7,
-  "decisions": 7,
+  "runs": 14,
+  "decisions": 14,
   "median_attempt_ms": 60000,
   "groups": [
     {
       "use": "completion_check",
       "provider": "main",
       "model": "jev-1.13.0",
+      "rule": "reply/1",
       "provider_kind": null,
       "calibrated": true,
       "emulation": false,
-      "label_source": "downstream outcome: the next node failing, a supervisor retry, or a continue_from back",
+      "label_source": "the reply itself: a person approved it at the review gate that follows it and approves its result (keep); nothing in the journal says a reply was unfinished, so none is labelled act",
+      "decisions": 7,
+      "errors": 1,
+      "answered": 6,
+      "labelled": 0,
+      "label_coverage": 0.0,
+      "act_labels": 0,
+      "keep_labels": 0,
+      "unlabelled": {
+        "no person approved the reply at the gate that follows it": 6
+      },
+      "threshold": 0.15,
+      "threshold_source": "configured",
+      "all": {
+        "labelled": 0,
+        "accuracy": null,
+        "recall": null,
+        "majority_label": "keep",
+        "majority_accuracy": null,
+        "today_behaviour": "always complete",
+        "today_accuracy": null,
+        "regex": {
+          "items": 0,
+          "accuracy": null
+        },
+        "false_actions": {
+          "count": 0,
+          "of": 0,
+          "rate": null,
+          "ci95": null
+        }
+      },
+      "long_outputs": {
+        "labelled": 0,
+        "accuracy": null,
+        "recall": null,
+        "majority_label": "keep",
+        "majority_accuracy": null,
+        "today_behaviour": "always complete",
+        "today_accuracy": null,
+        "regex": {
+          "items": 0,
+          "accuracy": null
+        },
+        "false_actions": {
+          "count": 0,
+          "of": 0,
+          "rate": null,
+          "ci95": null
+        }
+      },
+      "output_length_unknown": 0,
+      "brier": null,
+      "ece": null,
+      "would_change": null,
+      "table": [
+        {
+          "threshold": 0.05,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.1,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.15,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.2,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.25,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.3,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.35,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.4,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.45,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.5,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.55,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.6,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.65,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.7,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.75,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.8,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.85,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.9,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        },
+        {
+          "threshold": 0.95,
+          "coverage": null,
+          "accuracy": null,
+          "recall": null,
+          "false_action_rate": null,
+          "false_action_ci95": null
+        }
+      ],
+      "suggested_threshold": null,
+      "false_action_target": 0.05,
+      "savings": null,
+      "cost_usd": 0.0006,
+      "latency_ms_total": 4200,
+      "eligible": false,
+      "eligibility": [
+        "no stored threshold for main/jev-1.13.0 (apb decisions thresholds set)",
+        "0 labelled, needs 50",
+        "accuracy not above the majority class",
+        "accuracy not above today's behaviour (always complete)",
+        "no decision labelled keep to measure false actions"
+      ],
+      "notes": []
+    },
+    {
+      "use": "retry_advice",
+      "provider": "main",
+      "model": "jev-1.13.0",
+      "rule": "exec/1",
+      "provider_kind": null,
+      "calibrated": true,
+      "emulation": false,
+      "label_source": "the next same-executor attempt of the node: failed is act, succeeded is keep",
       "decisions": 7,
       "errors": 1,
       "answered": 6,
@@ -19,9 +252,9 @@
       "act_labels": 2,
       "keep_labels": 3,
       "unlabelled": {
-        "no downstream outcome yet": 1
+        "no further attempt of the node followed": 1
       },
-      "threshold": 0.15,
+      "threshold": 0.6,
       "threshold_source": "configured",
       "all": {
         "labelled": 5,
@@ -29,7 +262,7 @@
         "recall": 0.5,
         "majority_label": "keep",
         "majority_accuracy": 0.6,
-        "today_behaviour": "always complete",
+        "today_behaviour": "always retry the same executor",
         "today_accuracy": 0.6,
         "regex": {
           "items": 5,
@@ -51,7 +284,7 @@
         "recall": 0.5,
         "majority_label": "act",
         "majority_accuracy": 0.6667,
-        "today_behaviour": "always complete",
+        "today_behaviour": "always retry the same executor",
         "today_accuracy": 0.3333,
         "regex": {
           "items": 3,
@@ -77,31 +310,31 @@
       "table": [
         {
           "threshold": 0.05,
-          "coverage": 0.0,
-          "accuracy": 0.6,
-          "recall": 0.0,
-          "false_action_rate": 0.0,
+          "coverage": 1.0,
+          "accuracy": 0.4,
+          "recall": 1.0,
+          "false_action_rate": 1.0,
           "false_action_ci95": [
-            0.0,
-            0.5615
+            0.4385,
+            1.0
           ]
         },
         {
           "threshold": 0.1,
-          "coverage": 0.2,
-          "accuracy": 0.8,
-          "recall": 0.5,
-          "false_action_rate": 0.0,
+          "coverage": 0.8,
+          "accuracy": 0.6,
+          "recall": 1.0,
+          "false_action_rate": 0.6667,
           "false_action_ci95": [
-            0.0,
-            0.5615
+            0.2077,
+            0.9385
           ]
         },
         {
           "threshold": 0.15,
-          "coverage": 0.4,
-          "accuracy": 0.6,
-          "recall": 0.5,
+          "coverage": 0.6,
+          "accuracy": 0.8,
+          "recall": 1.0,
           "false_action_rate": 0.3333,
           "false_action_ci95": [
             0.0615,
@@ -110,9 +343,9 @@
         },
         {
           "threshold": 0.2,
-          "coverage": 0.4,
-          "accuracy": 0.6,
-          "recall": 0.5,
+          "coverage": 0.6,
+          "accuracy": 0.8,
+          "recall": 1.0,
           "false_action_rate": 0.3333,
           "false_action_ci95": [
             0.0615,
@@ -121,9 +354,9 @@
         },
         {
           "threshold": 0.25,
-          "coverage": 0.4,
-          "accuracy": 0.6,
-          "recall": 0.5,
+          "coverage": 0.6,
+          "accuracy": 0.8,
+          "recall": 1.0,
           "false_action_rate": 0.3333,
           "false_action_ci95": [
             0.0615,
@@ -132,9 +365,9 @@
         },
         {
           "threshold": 0.3,
-          "coverage": 0.4,
-          "accuracy": 0.6,
-          "recall": 0.5,
+          "coverage": 0.6,
+          "accuracy": 0.8,
+          "recall": 1.0,
           "false_action_rate": 0.3333,
           "false_action_ci95": [
             0.0615,
@@ -143,9 +376,9 @@
         },
         {
           "threshold": 0.35,
-          "coverage": 0.4,
-          "accuracy": 0.6,
-          "recall": 0.5,
+          "coverage": 0.6,
+          "accuracy": 0.8,
+          "recall": 1.0,
           "false_action_rate": 0.3333,
           "false_action_ci95": [
             0.0615,
@@ -154,9 +387,9 @@
         },
         {
           "threshold": 0.4,
-          "coverage": 0.4,
-          "accuracy": 0.6,
-          "recall": 0.5,
+          "coverage": 0.6,
+          "accuracy": 0.8,
+          "recall": 1.0,
           "false_action_rate": 0.3333,
           "false_action_ci95": [
             0.0615,
@@ -209,9 +442,9 @@
         },
         {
           "threshold": 0.65,
-          "coverage": 0.6,
-          "accuracy": 0.8,
-          "recall": 1.0,
+          "coverage": 0.4,
+          "accuracy": 0.6,
+          "recall": 0.5,
           "false_action_rate": 0.3333,
           "false_action_ci95": [
             0.0615,
@@ -220,9 +453,9 @@
         },
         {
           "threshold": 0.7,
-          "coverage": 0.6,
-          "accuracy": 0.8,
-          "recall": 1.0,
+          "coverage": 0.4,
+          "accuracy": 0.6,
+          "recall": 0.5,
           "false_action_rate": 0.3333,
           "false_action_ci95": [
             0.0615,
@@ -231,9 +464,9 @@
         },
         {
           "threshold": 0.75,
-          "coverage": 0.6,
-          "accuracy": 0.8,
-          "recall": 1.0,
+          "coverage": 0.4,
+          "accuracy": 0.6,
+          "recall": 0.5,
           "false_action_rate": 0.3333,
           "false_action_ci95": [
             0.0615,
@@ -242,9 +475,9 @@
         },
         {
           "threshold": 0.8,
-          "coverage": 0.6,
-          "accuracy": 0.8,
-          "recall": 1.0,
+          "coverage": 0.4,
+          "accuracy": 0.6,
+          "recall": 0.5,
           "false_action_rate": 0.3333,
           "false_action_ci95": [
             0.0615,
@@ -253,9 +486,9 @@
         },
         {
           "threshold": 0.85,
-          "coverage": 0.6,
-          "accuracy": 0.8,
-          "recall": 1.0,
+          "coverage": 0.4,
+          "accuracy": 0.6,
+          "recall": 0.5,
           "false_action_rate": 0.3333,
           "false_action_ci95": [
             0.0615,
@@ -264,9 +497,9 @@
         },
         {
           "threshold": 0.9,
-          "coverage": 0.6,
-          "accuracy": 0.8,
-          "recall": 1.0,
+          "coverage": 0.4,
+          "accuracy": 0.6,
+          "recall": 0.5,
           "false_action_rate": 0.3333,
           "false_action_ci95": [
             0.0615,
@@ -275,20 +508,20 @@
         },
         {
           "threshold": 0.95,
-          "coverage": 0.8,
-          "accuracy": 0.6,
-          "recall": 1.0,
-          "false_action_rate": 0.6667,
+          "coverage": 0.2,
+          "accuracy": 0.8,
+          "recall": 0.5,
+          "false_action_rate": 0.0,
           "false_action_ci95": [
-            0.2077,
-            0.9385
+            0.0,
+            0.5615
           ]
         }
       ],
-      "suggested_threshold": 0.1,
+      "suggested_threshold": 0.95,
       "false_action_target": 0.05,
       "savings": {
-        "threshold": 0.15,
+        "threshold": 0.6,
         "avoidable_attempts": 1,
         "median_attempt_ms": 60000,
         "saved_ms": 60000,
@@ -304,7 +537,7 @@
         "no stored threshold for main/jev-1.13.0 (apb decisions thresholds set)",
         "5 labelled, needs 50",
         "accuracy not above the majority class",
-        "accuracy not above today's behaviour (always complete)",
+        "accuracy not above today's behaviour (always retry the same executor)",
         "false-action rate 33.3% not under the 5.0% target"
       ],
       "notes": []

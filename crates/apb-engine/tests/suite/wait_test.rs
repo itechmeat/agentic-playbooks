@@ -921,6 +921,7 @@ fn seed_waiting(root: &Path, run_id: &str) -> PathBuf {
             deadline: None,
             start_key: None,
             concurrency: None,
+            eval_doubles: false,
         },
         EventPayload::RunGuard {
             requires: vec!["wait_park".into()],

@@ -399,10 +399,14 @@ pooled with a decision model. With no matching decision the report prints
 
 | Use | Label |
 |---|---|
-| `completion_check` | acting was right when, before the node starts again, a supervisor retried it, the run was moved back to it or to a node that ran before it (`run_continue_from`, a patch or migration `continue_from`), or the next node to start after it failed; wrong when the next node succeeded, or the node was the last and the run succeeded. Unlabelled when another attempt of the same visit followed (its outcome is not this attempt's), when above shadow the check's own anomaly wake came first (the outcome may be the decision's doing), and otherwise until the run shows an outcome |
+| `completion_check` | wrong to act (flag the reply) when a person approved the reply at the review gate that follows it, and that gate approves the reply's result (`approves.results` names the node; one of its approving options). A person's approval is one recorded through a person's channel (`terminal` or `dashboard_session`); a decision through MCP, a run step or any other surface, one with no recorded channel, and one taken after a patch while the gate waited label nothing. A decision about a list item's reply (`decision_made.item`) stays unlabelled: the list's `node_finished` and its gate's approval are the list's, not the item's. Nothing labels acting right: a reply that asks a question back stops before the check runs, and a later node failing, a supervisor retry or a move back say something went wrong later, not that the reply was unfinished. Labelled under rule `reply/1`; thresholds stored under the old labels never enforce. With no acting-right label the report cannot measure recall, and it suggests no threshold and never marks the use eligible; the figures it shows describe approved replies only |
 | `review_triage` | acting (deciding on the recommendation) was right when the person chose the recommended option at the same gate visit (`gate_visit`, the decision's `attempt`), wrong when they chose another. Unlabelled while the visit is undecided or was withdrawn, and when the model decided the gate itself (`decided_by: model`, or an `auto:` note in an older journal). A recommendation the reviewer was shown (advise or enforce) is labelled, but reported on its own line, "shown to the reviewer", and kept out of every figure: agreement with advice one has seen is a biased label. Only shadow decisions measure the model |
 | `retry_advice` | acting (switching executor or stopping) was right when the next attempt of the node on the same executor failed too, wrong when it succeeded. Unlabelled when no further attempt followed, when the next attempt ran on another executor (a fallback), and when an enforced advice changed what ran next. "Same executor" is decided under a labelling rule chosen per decision from its journal alone: `exec/1` when both attempts journal their chain position (`attempt_started.exec`): a CLI attempt is the same executor when its binding and step are, a host attempt and a CLI attempt never are, two host attempts when both attempts' tasks reported one model and it is the same one, unknown (unlabelled) otherwise, and the hint is never read as the model that ran; `exec/0` for an older journal: the same agent and model, as before. `apb decisions report` keeps one row per rule, so the two are never pooled |
 | other uses | not labelled yet: their decisions journal the join keys (`decision_made.join`: `wake_seq`, tier), and each use gets its labeller in a later release |
+
+Each use's label answers that use's own question: the review triage is
+labelled by the same gate visit's decision and retry advice by the next
+same-executor attempt of the same visit, never by a later node.
 
 Unlabelled decisions stay out of every accuracy figure and are listed with the
 reason.
@@ -425,7 +429,8 @@ apb decisions thresholds list [--json]
 ```
 
 `set` writes `<config_dir>/decisions-thresholds.yaml` (its own file with its
-own `version`; numbers and names only). A threshold applies to exactly one
+own `version`; numbers and names only) for a use without rule versions, and
+`<config_dir>/decisions-thresholds-v2.yaml` for one with them (below). A threshold applies to exactly one
 `(use, provider, model)`: a new model id, another provider or another use
 never inherits it, and the report says a new shadow period is needed. Code
 reads it through one lookup,
@@ -435,17 +440,28 @@ no_threshold`. The value is on the use's own scale (for the completion check,
 the `final_result` cut: flag below it). Without a stored threshold, use sites
 keep their `uses.<name>.thresholds` defaults.
 
-A use whose labels have rule versions (`retry_advice`, rule `exec/1`) keeps
+A use whose labels have rule versions (`retry_advice`, rule `exec/1`, and
+`completion_check`, rule `reply/1`) keeps
 its thresholds in `<config_dir>/decisions-thresholds-v2.yaml` instead, each
 entry with the `rule` its labels were measured under, and is looked up only
 there and only under its current rule: a threshold in the legacy file, or one
 measured under `exec/0`, never enforces it, so after an upgrade
 `retry_advice` enforcement refuses `no_threshold` until a threshold is
-measured and set again. `set --use retry_advice` writes the v2 file under
-the current rule (`--rule exec/1` may name it; any other rule is refused),
+measured and set again. The same holds for `completion_check`: every
+threshold stored before rule `reply/1` was fitted on downstream labels and
+no longer enforces. `set --use retry_advice` and `set --use
+completion_check` write the v2 file under the use's current rule (`--rule
+exec/1` or `--rule reply/1` may name it; any other rule is refused),
 and `list` shows the rule; it marks a legacy entry of such a use
-`legacy, not enforced: re-measure under rule exec/1` (`"legacy": true,
-"enforced": false` in `--json`). The legacy file is never written in a new shape,
+`legacy, not enforced: re-measure under rule <rule>`, naming the use's
+current rule (`exec/1` for `retry_advice`, `reply/1` for
+`completion_check`) (`"legacy": true,
+"enforced": false` in `--json`). A new shadow period
+of `completion_check` collects only `keep` labels, so the report never
+suggests its threshold nor marks it eligible: an operator who wants it
+enforced picks a cut and stores it with `apb decisions thresholds
+set --use completion_check --provider <p> --model <m> --threshold <t>`. That
+is a person's choice, not a measured promotion. The legacy file is never written in a new shape,
 so an older apb keeps reading it; an unknown field in the v2 file is refused
 with the file's name and leaves the other uses unaffected.
 
@@ -1058,7 +1074,9 @@ Common rules, applied by the runner for every use:
    every path mid-run), and the playbook opts in (below).
 2. The answer is calibrated, or `uses.<name>.allow_uncalibrated: true`.
 3. A threshold is stored for the use and the answering provider and model in
-   `<config_dir>/decisions-thresholds.yaml` (see "Stored thresholds" above;
+   `<config_dir>/decisions-thresholds.yaml`, or in
+   `<config_dir>/decisions-thresholds-v2.yaml` under the current rule for a
+   use with rule versions (see "Stored thresholds" above;
    written by `apb decisions thresholds set`). The model must match exactly:
    a new model id never inherits.
 4. At most `uses.<name>.max_actions` (default 3) automatic actions per use

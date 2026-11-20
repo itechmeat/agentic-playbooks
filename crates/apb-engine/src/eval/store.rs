@@ -167,6 +167,45 @@ pub struct Repetition {
     /// The worktree kept because the run did not end cleanly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kept_worktree: Option<String>,
+    /// The connector calls a doubled case's run made, without their args
+    /// (the captures stay in the stored run directory).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connector_calls: Vec<CallSummary>,
+    /// Whether the case doubled its connectors: its `calls:` line is
+    /// shown even when the run made no call.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub doubled: bool,
+    /// Whether the capture of a doubled run could not be read: the number
+    /// of its calls is unknown, never zero.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub calls_unreadable: bool,
+}
+
+/// One connector call of a doubled repetition, as its result keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallSummary {
+    /// `<connector>.<function>`.
+    pub function: String,
+    pub site: String,
+    /// Whether a double answered it (else `double_unmatched`).
+    pub answered: bool,
+    /// Whether its answer was delivered to its caller.
+    pub delivered: bool,
+}
+
+impl CallSummary {
+    /// The summaries of a run's captured calls, in order.
+    pub fn of(calls: &[super::doubles::CapturedCall]) -> Vec<CallSummary> {
+        calls
+            .iter()
+            .map(|c| CallSummary {
+                function: format!("{}.{}", c.connector, c.function),
+                site: c.site.clone(),
+                answered: c.answer.is_some(),
+                delivered: c.delivered,
+            })
+            .collect()
+    }
 }
 
 /// Every repetition of one case in one invocation.
@@ -603,6 +642,21 @@ pub fn render_result(r: &EvalResult) -> String {
                     ch.detail.as_deref().unwrap_or("")
                 ));
             }
+            if rep.calls_unreadable {
+                s.push_str("      calls: unknown (the capture could not be read)\n");
+            } else if rep.doubled || !rep.connector_calls.is_empty() {
+                let unmatched = rep.connector_calls.iter().filter(|c| !c.answered).count();
+                let undelivered = rep.connector_calls.iter().filter(|c| !c.delivered).count();
+                let undelivered = if undelivered > 0 {
+                    format!(", {undelivered} reserved and never delivered")
+                } else {
+                    String::new()
+                };
+                s.push_str(&format!(
+                    "      calls: {} ({unmatched} unmatched{undelivered})\n",
+                    rep.connector_calls.len()
+                ));
+            }
             if let Some(w) = &rep.kept_worktree {
                 s.push_str(&format!("      worktree kept: {w}\n"));
             }
@@ -664,7 +718,27 @@ mod tests {
             },
             duration_ms: Some(2000),
             kept_worktree: None,
+            connector_calls: Vec::new(),
+            doubled: false,
+            calls_unreadable: false,
         }
+    }
+
+    /// A doubled repetition whose capture did not read shows its calls as
+    /// unknown; a readable empty capture shows zero.
+    #[test]
+    fn an_unreadable_capture_is_not_zero_calls() {
+        let mut r = result("e1", 100, key("haiku"), &[true, true]);
+        r.cases[0].repetitions[0].doubled = true;
+        r.cases[0].repetitions[1].doubled = true;
+        r.cases[0].repetitions[1].calls_unreadable = true;
+        let text = render_result(&r);
+        assert!(text.contains("calls: 0 (0 unmatched)"), "{text}");
+        assert!(
+            text.contains("calls: unknown (the capture could not be read)"),
+            "{text}"
+        );
+        assert_eq!(text.matches("calls: 0").count(), 1, "{text}");
     }
 
     fn result(id: &str, at: u128, config: ConfigKey, passes: &[bool]) -> EvalResult {
@@ -710,6 +784,17 @@ mod tests {
             text.contains("tokens, cost $0.0100 subscription equivalent, not billed"),
             "{text}"
         );
+    }
+
+    /// A doubled repetition shows its `calls:` line even with no call; a
+    /// repetition without doubles shows none.
+    #[test]
+    fn a_doubled_repetition_without_a_call_shows_its_calls_line() {
+        let mut r = result("e1", 100, key("haiku"), &[true, true]);
+        r.cases[0].repetitions[0].doubled = true;
+        let text = render_result(&r);
+        assert_eq!(text.matches("calls: 0 (0 unmatched)").count(), 1, "{text}");
+        assert_eq!(text.matches("calls:").count(), 1, "{text}");
     }
 
     /// The total splits the repetitions' costs by basis, an older

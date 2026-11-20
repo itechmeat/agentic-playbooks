@@ -999,6 +999,31 @@ struct LiveRun {
     tree: PathBuf,
     run_id: String,
     driver_pid: Option<u32>,
+    /// An `--external-data` repetition with doubles: never kept, by the
+    /// guard either.
+    never_kept: bool,
+}
+
+/// What the scratch guard does with the repetition of a run still live when
+/// `apb eval` unwinds or is interrupted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuardAction {
+    /// An `--external-data` repetition with doubles: removed, never kept.
+    Remove,
+    /// Its driver still lives: the tree moves to `kept/`.
+    Keep,
+    /// Its driver is gone: it goes with the scratch directory.
+    Leave,
+}
+
+fn guard_action(driver_gone: bool, never_kept: bool) -> GuardAction {
+    if never_kept {
+        GuardAction::Remove
+    } else if driver_gone {
+        GuardAction::Leave
+    } else {
+        GuardAction::Keep
+    }
 }
 
 static LIVE: std::sync::Mutex<Option<LiveRun>> = std::sync::Mutex::new(None);
@@ -1188,14 +1213,27 @@ impl Drop for ScratchGuard {
             if gone && let Some(rep) = run.tree.parent() {
                 kill_leftover_group(run.driver_pid, rep, &run.run_id);
             }
-            if !gone
-                && let (Some(rep), Some(eval)) = (run.tree.parent(), self.scratch.file_name())
-                && let Some(name) = rep.file_name()
-            {
-                let kept = self.evals_home.join("kept").join(eval).join(name);
-                if let Err(e) = keep_repetition(rep, &kept, &self.keep) {
-                    eprintln!("warning: {e}");
+            match guard_action(gone, run.never_kept) {
+                GuardAction::Remove => {
+                    if let Some(rep) = run.tree.parent()
+                        && let Err(e) = remove_external_repetition(rep, &run.run_id)
+                    {
+                        eprintln!(
+                            "warning: an --external-data repetition with doubles is never kept, but {e}"
+                        );
+                    }
                 }
+                GuardAction::Keep => {
+                    if let (Some(rep), Some(eval)) = (run.tree.parent(), self.scratch.file_name())
+                        && let Some(name) = rep.file_name()
+                    {
+                        let kept = self.evals_home.join("kept").join(eval).join(name);
+                        if let Err(e) = keep_repetition(rep, &kept, &self.keep) {
+                            eprintln!("warning: {e}");
+                        }
+                    }
+                }
+                GuardAction::Leave => {}
             }
         }
         if self.keep.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1317,6 +1355,9 @@ fn error_rep(n: u32, detail: String, kept: Option<String>) -> Repetition {
         usage: RepUsage::default(),
         duration_ms: None,
         kept_worktree: kept,
+        connector_calls: Vec::new(),
+        doubled: false,
+        calls_unreadable: false,
     }
 }
 
@@ -1351,9 +1392,25 @@ fn run_repetition(
     };
     let env = overlay(&lc.env(&cx.suite.suite), &rep_dir);
     let limits = lc.case.limits.over(&cx.suite.suite.limits);
+    let doubled = !lc.case.doubles.is_empty();
+    let mut spawn_env = env.clone();
+    if doubled {
+        // An agent step answers its connector calls with the `apb` on its
+        // PATH: this binary first, so an older one there never takes them.
+        match doubled_path() {
+            Ok(path) => {
+                spawn_env.insert("PATH".to_string(), path);
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&rep_dir);
+                return (error_rep(n, e, None), None, None);
+            }
+        }
+    }
     let settings = apb_engine::run_config::EvalRunSettings {
-        spawn_env: env.clone(),
+        spawn_env,
         deadline_ms: Some(engine_deadline_ms(&limits)),
+        doubles: doubled.then(|| lc.case.doubles.clone()),
     };
     let started = match start_run(
         cx.args,
@@ -1377,6 +1434,7 @@ fn run_repetition(
         tree: tree.clone(),
         run_id: started.run_id.clone(),
         driver_pid,
+        never_kept: cx.args.external_data && doubled,
     }));
     let stop = follow(&tree, &started.run_id, &limits);
     let clean = driver_gone(&run_dir, &started.run_id);
@@ -1399,6 +1457,7 @@ fn run_repetition(
     // The agent had the operator's filesystem: the hooks directory is
     // emptied again before any check runs git.
     let _ = apb_engine::eval::git::empty_hooks_dir(cx.hooks);
+    let calls = apb_engine::eval::doubles::read_calls(&run_dir);
     let input = CheckInput {
         case: &lc.case,
         playbook: cx.playbook,
@@ -1410,13 +1469,66 @@ fn run_repetition(
         stopped: stop.as_ref().map(|s| s.text.as_str()),
         script_env,
         hooks_dir: cx.hooks,
+        calls: calls.as_deref(),
     };
     let (check_results, goal) = checks::evaluate(&input);
+    let connector_calls = calls
+        .as_deref()
+        .map(apb_engine::eval::store::CallSummary::of)
+        .unwrap_or_default();
+    let calls_unreadable = doubled && calls.is_err();
+    let mut check_results = check_results;
+    // An external-data repetition that used doubles is never kept, on any
+    // platform: once its checks ran (their results are in the repetition,
+    // printed with the result), its capture and its whole directory are
+    // removed, whatever the outcome and whether or not a driver or helper
+    // still runs. Nothing proves such a process stopped, and nothing has
+    // to: what it writes through an open descriptor goes to an unlinked
+    // file, and what it writes afterwards by path lands outside any stored
+    // or kept run and goes with the scratch directory.
+    let never_kept = cx.args.external_data && doubled;
+    let removal = never_kept.then(|| remove_external_repetition(&rep_dir, &started.run_id));
+    if let Some(Err(why)) = &removal {
+        check_results.push(checks::CheckResult {
+            kind: "external_data_removal".into(),
+            status: checks::CheckStatus::Error,
+            detail: Some(why.clone()),
+        });
+    }
     let verdict = if stop.as_ref().is_some_and(|s| s.limit) {
         "incomplete".to_string()
     } else {
         checks::verdict(&check_results).to_string()
     };
+    if let Some(removal) = removal {
+        let warning = match removal {
+            Ok(()) => format!(
+                "case `{}` repetition {n}: an --external-data repetition with doubles is never kept; the repetition directory was removed",
+                lc.case.id
+            ),
+            Err(why) => format!(
+                "case `{}` repetition {n}: an --external-data repetition with doubles is never kept, but {why}",
+                lc.case.id
+            ),
+        };
+        let rep = Repetition {
+            repetition: n,
+            run_id: Some(started.run_id.clone()),
+            run_dir: None,
+            verdict,
+            outcome: checks::outcome(&events, stop.as_ref().map(|s| s.text.as_str())),
+            stopped: stop.map(|s| s.text),
+            checks: check_results,
+            goal,
+            usage: RepUsage::from_events(&events),
+            duration_ms: checks::duration_ms(&events),
+            kept_worktree: None,
+            connector_calls,
+            doubled,
+            calls_unreadable,
+        };
+        return (rep, None, Some(warning));
+    }
     let kept_rep = cx
         .evals_home
         .join("kept")
@@ -1486,8 +1598,172 @@ fn run_repetition(
         usage: RepUsage::from_events(&events),
         duration_ms: checks::duration_ms(&events),
         kept_worktree: kept,
+        connector_calls,
+        doubled,
+        calls_unreadable,
     };
     (rep, stored, warning)
+}
+
+/// The `PATH` of a doubled case's steps: this binary's directory, then the
+/// `PATH` `apb eval` inherited, nothing else. Why it cannot be built (no
+/// directory of this binary, a directory or an inherited `PATH` that is
+/// not UTF-8, a directory that holds the `PATH` separator) refuses the
+/// repetition, never a silently shorter `PATH`.
+fn doubled_path() -> Result<String, String> {
+    let own = apb_core::fsutil::reexec_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .ok_or("connector doubles: the directory of this apb binary cannot be found, so the steps' PATH cannot start with it; the repetition did not run")?;
+    step_path(&own, std::env::var_os("PATH"))
+}
+
+/// The steps' `PATH` from this binary's directory `own` and the inherited
+/// `PATH`. A directory the `PATH` cannot hold as one entry (it contains
+/// the separator) is refused: split, it would put some other `apb` first.
+fn step_path(own: &Path, inherited: Option<std::ffi::OsString>) -> Result<String, String> {
+    let own = own.to_str().ok_or("connector doubles: the directory of this apb binary is not UTF-8, so the steps' PATH cannot start with it; the repetition did not run")?;
+    std::env::join_paths([own]).map_err(|_| {
+        "connector doubles: the directory of this apb binary contains the PATH separator, so the steps' PATH cannot start with it; the repetition did not run".to_string()
+    })?;
+    let inherited = match inherited {
+        None => String::new(),
+        Some(p) => p.into_string().map_err(|_| {
+            "connector doubles: the inherited PATH is not UTF-8, so it cannot be passed on after this binary's directory; the repetition did not run".to_string()
+        })?,
+    };
+    Ok(if inherited.is_empty() {
+        own.to_string()
+    } else {
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        format!("{own}{sep}{inherited}")
+    })
+}
+
+/// The `<connector>.<function>` names a case doubles, sorted.
+fn doubled_functions(case: &core_eval::EvalCase) -> Vec<String> {
+    case.doubles
+        .iter()
+        .flat_map(|(c, fns)| fns.keys().map(move |f| format!("{c}.{f}")))
+        .collect()
+}
+
+/// Removes the repetition directory `rep_dir` that apb created for an
+/// external-data repetition with doubles, following no link and touching
+/// nothing outside it: every entry is reached through directory
+/// descriptors opened without following a link at each component
+/// (`fsutil::beneath`), from the scratch directory that holds `rep_dir`
+/// down. Directory modes are put back first through their own descriptors
+/// (`Beneath::make_dirs_private`), then the run tree is checked as apb
+/// created it (`<rep>/tree/.apb/runs/<run_id>`), best effort: a link, a
+/// missing component or one that cannot be read is reported, a directory
+/// put in the place of the original is not detected. The capture is
+/// removed from it, the tree checked again, and the repetition removed by a
+/// walk that unlinks a link instead of following it
+/// (`Beneath::remove_tree`). `Err` says what was found and, when the
+/// repetition directory went anyway, that it was removed.
+fn remove_external_repetition(rep_dir: &Path, run_id: &str) -> Result<(), String> {
+    let (Some(scratch), Some(name)) = (
+        rep_dir.parent(),
+        rep_dir.file_name().and_then(|n| n.to_str()),
+    ) else {
+        return Err(format!(
+            "{} is not a repetition directory",
+            rep_dir.display()
+        ));
+    };
+    let b = apb_core::fsutil::beneath::Beneath::open(scratch)
+        .map_err(|e| format!("{} could not be opened ({e})", scratch.display()))?;
+    let _ = b.make_dirs_private(name);
+    let run_rel = format!("{name}/tree/.apb/runs/{run_id}");
+    let mut problems: Vec<String> = Vec::new();
+    let mut moved = false;
+    let mut found = run_tree_problem(&b, scratch, &run_rel);
+    if found.is_none() {
+        for entry in apb_engine::eval::doubles::CAPTURE_ENTRIES {
+            let at = format!("{run_rel}/{entry}");
+            if let Err(e) = b.remove_tree(&at) {
+                problems.push(format!(
+                    "{} could not be removed ({e})",
+                    scratch.join(&at).display()
+                ));
+            }
+        }
+        // A component swapped since the first look is reported too.
+        found = run_tree_problem(&b, scratch, &run_rel);
+    }
+    if let Some((what, link)) = found {
+        moved |= link;
+        problems.insert(0, what);
+    }
+    let mut last = None;
+    for _ in 0..3 {
+        match b.remove_tree(name) {
+            Ok(()) => {
+                last = None;
+                break;
+            }
+            Err(e) => last = Some(e),
+        }
+        let _ = b.make_dirs_private(name);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let removed = matches!(b.kind(name), Ok(None));
+    if !removed {
+        problems.push(format!(
+            "{} could not be removed ({})",
+            rep_dir.display(),
+            last.map(|e| e.to_string()).unwrap_or_default()
+        ));
+    }
+    if problems.is_empty() {
+        return Ok(());
+    }
+    let mut why = problems.join("; ");
+    if moved {
+        why.push_str(&format!(
+            "; the run tree was moved, and nothing outside {} was touched",
+            rep_dir.display()
+        ));
+    }
+    if removed {
+        why.push_str("; the repetition directory was removed");
+    }
+    Err(why)
+}
+
+/// What is wrong with the run tree at `run_rel` beneath `b`, component by
+/// component, and whether it is a link (the run tree was moved); `None`
+/// when each component is a directory.
+fn run_tree_problem(
+    b: &apb_core::fsutil::beneath::Beneath,
+    scratch: &Path,
+    run_rel: &str,
+) -> Option<(String, bool)> {
+    use apb_core::fsutil::beneath::EntryKind;
+    let mut rel = String::new();
+    for seg in run_rel.split('/') {
+        if !rel.is_empty() {
+            rel.push('/');
+        }
+        rel.push_str(seg);
+        let at = scratch.join(&rel);
+        let (what, link) = match b.kind(&rel) {
+            Ok(Some(EntryKind::Dir)) => continue,
+            Ok(Some(EntryKind::Link)) => ("is a link".to_string(), true),
+            Ok(Some(_)) => ("is not a directory".to_string(), false),
+            Ok(None) => ("is missing".to_string(), false),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::InvalidInput
+                    && e.to_string().contains("goes through a link") =>
+            {
+                ("goes through a link".to_string(), true)
+            }
+            Err(e) => (format!("could not be read ({e})"), false),
+        };
+        return Some((format!("{} {what}", at.display()), link));
+    }
+    None
 }
 
 fn overrides_digest(ov: Option<&RunOverrides>) -> Option<String> {
@@ -1631,6 +1907,20 @@ pub(crate) fn case_launch(
     }
 }
 
+/// Prints an `eval_refused_effects` refusal of playbook `id` and returns
+/// its exit code (2).
+fn print_refused(id: &str, json_out: bool, reasons: &[String]) -> ExitCode {
+    if json_out {
+        print_json(&json!({ "refused": "eval_refused_effects", "id": id, "reasons": reasons }));
+    } else {
+        eprintln!("eval: refused, `{id}` cannot be evaluated:");
+        for r in reasons {
+            eprintln!("  {r}");
+        }
+    }
+    ExitCode::from(2)
+}
+
 pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
     let Some(evals_home) = core_eval::evals_home() else {
         return fail(args.json, "no_config_dir", "no apb config directory".into());
@@ -1650,17 +1940,7 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
     let version = loaded.version.clone();
     let reasons = core_eval::refusal(&playbook);
     if !reasons.is_empty() {
-        if args.json {
-            print_json(
-                &json!({ "refused": "eval_refused_effects", "id": args.id, "reasons": reasons }),
-            );
-        } else {
-            eprintln!("eval: refused, `{}` cannot be evaluated:", args.id);
-            for r in &reasons {
-                eprintln!("  {r}");
-            }
-        }
-        return ExitCode::from(2);
+        return print_refused(&args.id, args.json, &reasons);
     }
     let playbook_dir = root.join(".apb/playbooks").join(&args.id);
     match apb_core::trust::read_lifecycle(&playbook_dir) {
@@ -1854,6 +2134,21 @@ fn run_eval(
             ),
         );
     }
+    // The suite validation, checked again per selected case with the
+    // installed connectors read now: a case of a connector playbook runs
+    // only with doubles for every function it may call.
+    let facts = apb_core::connector::resolve::validation_facts();
+    let reasons: Vec<String> = cases
+        .iter()
+        .flat_map(|lc| {
+            core_eval::case_refusal(playbook, &lc.case, &facts)
+                .into_iter()
+                .map(|r| format!("case `{}`: {r}", lc.case.id))
+        })
+        .collect();
+    if !reasons.is_empty() {
+        return print_refused(&args.id, args.json, &reasons);
+    }
     let budget = args
         .max_usd
         .or(suite.suite.budget.max_usd_per_invocation)
@@ -1928,13 +2223,23 @@ fn run_eval(
                 "plan": {
                     "playbook": args.id, "version": version, "budget_usd": budget,
                     "suite_digest": suite_digest, "suite_approved": approved,
-                    "cases": planned.iter().map(|p| json!({"case": p.lc.case.id, "repeat": p.repeat})).collect::<Vec<_>>(),
+                    "cases": planned.iter().map(|p| json!({"case": p.lc.case.id, "repeat": p.repeat, "doubled": doubled_functions(&p.lc.case)})).collect::<Vec<_>>(),
                 }
             }));
         } else {
             println!("{plan_line}");
             for p in &planned {
-                println!("  {} x{}", p.lc.case.id, p.repeat);
+                let doubled = doubled_functions(&p.lc.case);
+                if doubled.is_empty() {
+                    println!("  {} x{}", p.lc.case.id, p.repeat);
+                } else {
+                    println!(
+                        "  {} x{} (doubled: {})",
+                        p.lc.case.id,
+                        p.repeat,
+                        doubled.join(", ")
+                    );
+                }
             }
         }
         return ExitCode::SUCCESS;
@@ -2106,6 +2411,17 @@ fn run_eval(
         match &stored_at {
             Some(Ok(p)) => println!("stored: {}", p.display()),
             Some(Err(e)) => eprintln!("eval: the result could not be stored: {e}"),
+            // A repetition ran, but the result of an external-data run is
+            // kept nowhere (a never-kept doubled repetition keys nothing).
+            None if args.external_data
+                && result
+                    .cases
+                    .iter()
+                    .flat_map(|c| &c.repetitions)
+                    .any(|r| r.run_id.is_some()) =>
+            {
+                println!("not stored: an --external-data run keeps no result")
+            }
             None => println!("not stored: no repetition started a run"),
         }
         if started
@@ -2126,8 +2442,202 @@ fn run_eval(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn the_step_path_refuses_a_directory_with_the_separator() {
+        use std::path::Path;
+        let ok = super::step_path(Path::new("/opt/apb"), Some("/usr/bin:/bin".into())).unwrap();
+        assert_eq!(ok, "/opt/apb:/usr/bin:/bin");
+        assert_eq!(
+            super::step_path(Path::new("/opt/apb"), None).unwrap(),
+            "/opt/apb"
+        );
+        let err =
+            super::step_path(Path::new("/opt/apb:beta"), Some("/usr/bin".into())).unwrap_err();
+        assert!(err.contains("PATH separator"), "{err}");
+    }
+
     use super::*;
     use std::sync::atomic::Ordering;
+
+    /// The scratch guard never keeps an external-data repetition with
+    /// doubles, live driver or not; others as before.
+    #[test]
+    fn the_scratch_guard_never_keeps_an_external_data_repetition() {
+        assert_eq!(guard_action(false, true), GuardAction::Remove);
+        assert_eq!(guard_action(true, true), GuardAction::Remove);
+        assert_eq!(guard_action(false, false), GuardAction::Keep);
+        assert_eq!(guard_action(true, false), GuardAction::Leave);
+    }
+
+    /// A repetition laid out as apb creates it: `<scratch>/c-1/tree/.apb/runs/r1`
+    /// with a capture.
+    #[cfg(unix)]
+    fn laid_out(t: &Path) -> (PathBuf, PathBuf) {
+        let rep = t.join("scratch/c-1");
+        let run = rep.join("tree/.apb/runs/r1");
+        std::fs::create_dir_all(run.join("eval-calls.owners")).unwrap();
+        std::fs::write(run.join(apb_engine::eval::doubles::CALLS_FILE), "{}\n").unwrap();
+        (rep, run)
+    }
+
+    /// An external-data repetition with doubles is removed whole, capture
+    /// first, directories a step made read-only included.
+    #[cfg(unix)]
+    #[test]
+    fn an_external_repetition_is_removed_whole() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let (rep, run) = laid_out(t.path());
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o555)).unwrap();
+        std::fs::set_permissions(rep.join("tree"), std::fs::Permissions::from_mode(0o555)).unwrap();
+        remove_external_repetition(&rep, "r1").unwrap();
+        assert!(!rep.exists());
+    }
+
+    /// A plain link inside the tree is unlinked, its target untouched.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_inside_the_tree_is_unlinked_not_followed() {
+        let t = tempfile::tempdir().unwrap();
+        let (rep, run) = laid_out(t.path());
+        let outside = t.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep.txt"), "mine").unwrap();
+        std::os::unix::fs::symlink(&outside, run.join("out")).unwrap();
+        std::os::unix::fs::symlink(outside.join("keep.txt"), rep.join("tree/file-link")).unwrap();
+        remove_external_repetition(&rep, "r1").unwrap();
+        assert!(!rep.exists());
+        assert_eq!(
+            std::fs::read_to_string(outside.join("keep.txt")).unwrap(),
+            "mine"
+        );
+    }
+
+    /// `tree/.apb` moved out and replaced by a link to a directory holding a
+    /// file named like the capture: nothing outside the repetition is
+    /// touched, the outside file survives, and the removal fails naming the
+    /// moved path.
+    #[cfg(unix)]
+    #[test]
+    fn a_moved_run_tree_is_reported_and_nothing_outside_is_touched() {
+        let t = tempfile::tempdir().unwrap();
+        let (rep, _) = laid_out(t.path());
+        let outside = t.path().join("outside/apb");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        std::fs::rename(rep.join("tree/.apb"), &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, rep.join("tree/.apb")).unwrap();
+        let why = remove_external_repetition(&rep, "r1").unwrap_err();
+        assert!(why.contains("the run tree was moved"), "{why}");
+        assert!(
+            why.contains(&rep.join("tree/.apb").display().to_string()),
+            "{why}"
+        );
+        assert!(!why.contains("discarded"), "{why}");
+        let capture = outside
+            .join("runs/r1")
+            .join(apb_engine::eval::doubles::CALLS_FILE);
+        assert!(capture.is_file(), "the outside file survives");
+        assert!(
+            !rep.exists(),
+            "the repetition itself, link included, is gone"
+        );
+    }
+
+    /// A component a step made unreadable gets its mode back before the run
+    /// tree is checked: nothing is reported, everything goes.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_component_is_reset_before_the_check() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let (rep, _) = laid_out(t.path());
+        std::fs::set_permissions(
+            rep.join("tree/.apb"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert_eq!(remove_external_repetition(&rep, "r1"), Ok(()));
+        assert!(!rep.exists());
+    }
+
+    /// A missing component is reported as missing, never as moved, and the
+    /// repetition directory that was removed is said to be removed.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_component_is_reported_as_missing() {
+        let t = tempfile::tempdir().unwrap();
+        let (rep, run) = laid_out(t.path());
+        std::fs::remove_dir_all(&run).unwrap();
+        let why = remove_external_repetition(&rep, "r1").unwrap_err();
+        assert!(
+            why.contains(&format!("{} is missing", run.display())),
+            "{why}"
+        );
+        assert!(!why.contains("run tree was moved"), "{why}");
+        assert!(
+            why.ends_with("the repetition directory was removed"),
+            "{why}"
+        );
+        assert!(!rep.exists());
+    }
+
+    /// A capture entry that cannot be removed is reported with its path.
+    #[cfg(unix)]
+    #[test]
+    fn a_capture_that_cannot_be_removed_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let (rep, run) = laid_out(t.path());
+        let stuck = run.join("eval-calls.owners/stuck");
+        std::fs::create_dir_all(stuck.join("x")).unwrap();
+        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let can_open = std::fs::read_dir(&stuck).is_ok();
+        let r = remove_external_repetition(&rep, "r1");
+        let _ = std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o700));
+        if can_open {
+            assert_eq!(r, Ok(()));
+            return;
+        }
+        let why = r.unwrap_err();
+        assert!(
+            why.contains(&format!(
+                "{} could not be removed",
+                run.join("eval-calls.owners").display()
+            )),
+            "{why}"
+        );
+        assert!(
+            !why.contains("the repetition directory was removed"),
+            "{why}"
+        );
+    }
+
+    /// A repetition that cannot be removed says what is still on disk and
+    /// never that it was removed.
+    #[cfg(unix)]
+    #[test]
+    fn a_repetition_that_cannot_be_removed_names_what_stayed() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let (rep, run) = laid_out(t.path());
+        let stuck = run.join("stuck");
+        std::fs::create_dir_all(stuck.join("x")).unwrap();
+        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let can_open = std::fs::read_dir(&stuck).is_ok();
+        let r = remove_external_repetition(&rep, "r1");
+        let _ = std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o700));
+        if can_open {
+            // Running as a user that reads any directory: nothing sticks.
+            assert_eq!(r, Ok(()));
+            return;
+        }
+        let why = r.unwrap_err();
+        assert!(why.contains(&rep.display().to_string()), "{why}");
+        assert!(!why.contains("discarded"), "{why}");
+        // The capture went first.
+        assert!(!run.join(apb_engine::eval::doubles::CALLS_FILE).exists());
+    }
 
     /// An agent that replaced `tree/.apb` with a link to a directory outside
     /// the tree does not get that directory moved into the eval store, nor

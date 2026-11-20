@@ -15,7 +15,11 @@
 //! the wait park would count a parked timer wait as paused time and wait
 //! the whole timer again. A run whose definition uses any of them carries
 //! a `run_guard` naming them after every checkpoint, so such an apb refuses to continue
-//! it. A later release adds names here instead of a new guard.
+//! it. One name is a run feature, not a definition feature: an apb that
+//! does not know connector doubles would drive a doubled eval run as an
+//! ordinary one, so a doubled run carries `eval_doubles` (never named by
+//! [`guarded_features`]). A later release adds names here instead of a new
+//! guard.
 
 use serde::{Deserialize, Serialize};
 
@@ -66,11 +70,15 @@ pub enum GuardedFeature {
     /// A timer wait the run waits out paused (the wait park); an older apb
     /// counts it as paused time and would wait the whole timer again.
     WaitPark,
+    /// An eval run whose connector calls are answered by the case's
+    /// doubles; an older apb drops the doubles and would drive it as an
+    /// ordinary run. A run feature: [`guarded_features`] never names it.
+    EvalDoubles,
 }
 
 impl GuardedFeature {
     /// Every feature this binary knows, in declaration order.
-    pub const ALL: [GuardedFeature; 13] = [
+    pub const ALL: [GuardedFeature; 14] = [
         GuardedFeature::ApprovalBinding,
         GuardedFeature::PersonOnly,
         GuardedFeature::RequiredApproval,
@@ -84,6 +92,7 @@ impl GuardedFeature {
         GuardedFeature::ReviewMaxScope,
         GuardedFeature::ListPilot,
         GuardedFeature::WaitPark,
+        GuardedFeature::EvalDoubles,
     ];
 
     /// The name a `run_guard` carries.
@@ -102,6 +111,7 @@ impl GuardedFeature {
             GuardedFeature::ReviewMaxScope => "review_max_scope",
             GuardedFeature::ListPilot => "list_pilot",
             GuardedFeature::WaitPark => "wait_park",
+            GuardedFeature::EvalDoubles => "eval_doubles",
         }
     }
 
@@ -192,7 +202,7 @@ mod tests {
     /// Each declaration names its own feature, a definition using several
     /// names each once in declaration order, and a definition using none
     /// needs no guard.
-    /// `deadline:` names `deadline`, and this binary knows thirteen features.
+    /// `deadline:` names `deadline`, and this binary knows fourteen features.
     #[test]
     fn a_deadline_is_a_guarded_feature() {
         let pb = Playbook::from_yaml(
@@ -200,7 +210,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(guarded_features(&pb), vec![GuardedFeature::Deadline]);
-        assert_eq!(GuardedFeature::ALL.len(), 13);
+        assert_eq!(GuardedFeature::ALL.len(), 14);
         assert_eq!(
             GuardedFeature::parse("deadline"),
             Some(GuardedFeature::Deadline)
@@ -366,13 +376,20 @@ mod tests {
         assert!(guarded_features(&plain).is_empty());
     }
 
-    /// `ALL` knows thirteen features, `list_pilot` twelfth and `wait_park`
-    /// the last one; a guard lists its names in this declaration order.
+    /// `ALL` knows fourteen features, `list_pilot` twelfth, `wait_park`
+    /// thirteenth and `eval_doubles` the last one; a guard lists its names
+    /// in this declaration order.
     #[test]
-    fn all_has_thirteen_entries_in_order() {
-        assert_eq!(GuardedFeature::ALL.len(), 13);
+    fn all_has_fourteen_entries_in_order() {
+        assert_eq!(GuardedFeature::ALL.len(), 14);
         assert_eq!(GuardedFeature::ALL[11], GuardedFeature::ListPilot);
         assert_eq!(GuardedFeature::ALL[12], GuardedFeature::WaitPark);
+        assert_eq!(GuardedFeature::ALL[13], GuardedFeature::EvalDoubles);
+        assert_eq!(GuardedFeature::EvalDoubles.as_str(), "eval_doubles");
+        assert_eq!(
+            GuardedFeature::parse("eval_doubles"),
+            Some(GuardedFeature::EvalDoubles)
+        );
         let mut sorted = GuardedFeature::ALL;
         sorted.sort();
         assert_eq!(sorted, GuardedFeature::ALL, "ALL is the declaration order");

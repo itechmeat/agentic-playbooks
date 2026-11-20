@@ -538,3 +538,202 @@ fn only_a_node_granted_the_ack_function_may_ack_skipped_events() {
         );
     }
 }
+
+// -- connector doubles of an eval run (eval-doubles D1) --
+
+/// A run directory with the `mock-tracker` snapshot, a grant of every
+/// function to node `a`, the manifest connector `mconn` and a `run.yaml`
+/// with `doubles` (none when `None`).
+fn doubled_run_dir(
+    mconn: crate::manifest::ManifestConnector,
+    doubles: Option<apb_core::eval_doubles::Doubles>,
+) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join(".apb/runs/r1");
+    std::fs::create_dir_all(run.join("connectors")).unwrap();
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/connectors/mock-tracker/connector.yaml"),
+        run.join("connectors/mock-tracker.yaml"),
+    )
+    .unwrap();
+    let mut m = crate::manifest::RunExecutionManifest::default();
+    m.connectors.push(mconn);
+    m.connector_grants.insert(
+        "a".into(),
+        vec![ManifestConnectorGrant {
+            connector: "mock-tracker".into(),
+            accounts: vec!["main".into()],
+            functions: vec!["list_items".into(), "notify_person".into()],
+            max_calls: None,
+            on_unknown: None,
+        }],
+    );
+    crate::manifest::write(&run, &m).unwrap();
+    crate::run_config::write_run_config(
+        &run,
+        &crate::run_config::RunConfig {
+            eval: doubles.map(|d| crate::run_config::EvalRunSettings {
+                doubles: Some(d),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    dir
+}
+
+fn list_doubles() -> apb_core::eval_doubles::Doubles {
+    serde_json::from_value(json!({
+        "mock-tracker": {
+            "list_items": [{ "answer": { "status": 200, "body": { "items": [] } } }],
+            "notify_person": [{ "answer": { "status": 200, "body": { "id": "m1" } } }]
+        }
+    }))
+    .unwrap()
+}
+
+fn doubled_connector() -> crate::manifest::ManifestConnector {
+    crate::manifest::ManifestConnector {
+        name: "mock-tracker".into(),
+        digest: "sha256:test".into(),
+        accounts: Vec::new(),
+        doubled_accounts: vec![crate::manifest::DoubledAccount {
+            name: "main".into(),
+            default: true,
+        }],
+    }
+}
+
+fn real_connector() -> crate::manifest::ManifestConnector {
+    crate::manifest::ManifestConnector {
+        name: "mock-tracker".into(),
+        digest: "sha256:test".into(),
+        accounts: vec![ManifestAccount {
+            name: "main".into(),
+            default: true,
+            // Nothing listens on the discard port.
+            fields: BTreeMap::from([("base_url".into(), "http://127.0.0.1:9".into())]),
+            env: BTreeMap::new(),
+            cmd: BTreeMap::new(),
+            digest: "sha256:acct".into(),
+        }],
+        doubled_accounts: Vec::new(),
+    }
+}
+
+fn call_in(dir: &Path, function: &str, args: Value, ctx: CallContext) -> (Value, bool) {
+    execute_with(
+        CallRequest {
+            run_dir: &dir.join(".apb/runs/r1"),
+            root: dir,
+            node_id: "a",
+            connector: "mock-tracker",
+            function,
+            account: None,
+            args,
+            dry_run: false,
+            full: false,
+        },
+        ctx,
+    )
+}
+
+fn journaled_calls(dir: &Path) -> usize {
+    crate::event::read_all_lossy_tail(&dir.join(".apb/runs/r1"))
+        .unwrap_or_default()
+        .iter()
+        .filter(|e| matches!(e.payload, EventPayload::ConnectorCall { .. }))
+        .count()
+}
+
+/// A notification is a live call: a doubled run refuses it before any
+/// target is looked at, and nothing is captured.
+#[test]
+fn a_doubled_run_never_notifies() {
+    let dir = doubled_run_dir(doubled_connector(), Some(list_doubles()));
+    let pins = TargetPins {
+        connector: "sha256:test".into(),
+        account: "sha256:acct".into(),
+    };
+    let (v, ok) = call_in(
+        dir.path(),
+        "notify_person",
+        json!({ "to": "ann", "text": "done" }),
+        CallContext::notify("notify:finished.1", pins, "sha256:t".into(), None),
+    );
+    assert!(!ok, "{v}");
+    assert_eq!(v["error"]["code"], "permission", "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("an eval run never sends notifications"),
+        "{v}"
+    );
+    assert!(
+        !dir.path()
+            .join(".apb/runs/r1")
+            .join(crate::eval::doubles::CALLS_FILE)
+            .exists()
+    );
+    assert_eq!(journaled_calls(dir.path()), 0);
+}
+
+/// A run whose `run.yaml` does not read is not called an eval run: its
+/// notification is refused with the settings' own reason, nothing sent.
+#[test]
+fn a_notification_of_a_run_with_unreadable_settings_names_the_settings() {
+    let dir = doubled_run_dir(doubled_connector(), None);
+    std::fs::write(dir.path().join(".apb/runs/r1/run.yaml"), "params: { a: [").unwrap();
+    let pins = TargetPins {
+        connector: "sha256:test".into(),
+        account: "sha256:acct".into(),
+    };
+    let (v, ok) = call_in(
+        dir.path(),
+        "notify_person",
+        json!({ "to": "ann", "text": "done" }),
+        CallContext::notify("notify:finished.1", pins, "sha256:t".into(), None),
+    );
+    assert!(!ok, "{v}");
+    assert_eq!(v["error"]["code"], "config", "{v}");
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(message.contains("(run.yaml) do not read"), "{v}");
+    assert!(!message.contains("eval run"), "{v}");
+    assert_eq!(journaled_calls(dir.path()), 0);
+}
+
+/// A doubled manifest without doubles in `run.yaml`, and doubles with a
+/// manifest that holds accounts: both fail `config`, nothing sent or
+/// journaled.
+#[test]
+fn snapshot_and_settings_that_disagree_fail_closed() {
+    for (what, mconn, doubles) in [
+        ("doubled manifest, no doubles", doubled_connector(), None),
+        (
+            "doubles, manifest with accounts",
+            real_connector(),
+            Some(list_doubles()),
+        ),
+    ] {
+        let dir = doubled_run_dir(mconn, doubles);
+        let (v, ok) = call_in(
+            dir.path(),
+            "list_items",
+            json!({ "q": "x" }),
+            CallContext::default(),
+        );
+        assert!(!ok, "{what}: {v}");
+        assert_eq!(v["error"]["code"], "config", "{what}: {v}");
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("the run's snapshot and its eval settings disagree"),
+            "{what}: {v}"
+        );
+        assert_eq!(journaled_calls(dir.path()), 0, "{what}");
+    }
+}

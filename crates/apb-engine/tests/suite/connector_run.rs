@@ -243,6 +243,7 @@ fn snapshot_writes_connector_yaml_and_returns_expanded_grants() {
         &pb,
         &expected_connectors,
         &expected_accounts,
+        false,
     )
     .unwrap();
 
@@ -299,6 +300,7 @@ fn tampered_connector_digest_fails_naming_the_connector() {
         &pb,
         &expected_connectors,
         &expected_accounts,
+        false,
     )
     .unwrap_err();
     let msg = err.to_string();
@@ -330,6 +332,7 @@ fn missing_env_var_fails_naming_var_and_account() {
         &pb,
         &expected_connectors,
         &expected_accounts,
+        false,
     )
     .unwrap_err();
     let msg = err.to_string();

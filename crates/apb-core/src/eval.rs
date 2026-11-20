@@ -17,16 +17,18 @@
 //! version's trust digest. The runner (`apb eval`) lives in the CLI; this
 //! module is what every surface shares: parsing, validation and digests.
 //!
-//! Not in this release (they come with mock connectors): `connectors`,
-//! `answers`, `stop_before`, `connector_calls` and `pushed`. A case that
-//! uses one is refused by V80 with a message naming the field, so a suite
-//! written for a later apb never runs half-understood.
+//! A case's `connectors:` doubles answer every connector call of its run
+//! ([`crate::eval_doubles`], V280 and V281). Not in this release:
+//! `answers`, `stop_before` and `pushed`. A case that uses one is refused
+//! by V80 with a message naming the field, so a suite written for a later
+//! apb never runs half-understood.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::connector::resolve::ConnectorFacts;
 use crate::schema::{Effect, NodeKind, Playbook};
 use crate::validate::{Issue, Severity};
 
@@ -46,8 +48,8 @@ pub const DEFAULT_CHANGE_BRANCH: &str = "eval-change";
 
 /// Case fields reserved for the second half of the eval suite. A case that
 /// sets one is refused (V80) instead of running without it.
-const LATER_FIELDS: [&str; 3] = ["connectors", "answers", "stop_before"];
-const LATER_CHECKS: [&str; 2] = ["connector_calls", "pushed"];
+const LATER_FIELDS: [&str; 2] = ["answers", "stop_before"];
+const LATER_CHECKS: [&str; 1] = ["pushed"];
 
 /// One eval case (`evals/<id>.yaml`).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -75,6 +77,15 @@ pub struct EvalCase {
     /// repetition's scratch dir.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Recorded answers per connector function (`connectors:` in the
+    /// file). A case with doubles runs every connector call against them
+    /// and none against the service.
+    #[serde(
+        default,
+        rename = "connectors",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub doubles: crate::eval_doubles::Doubles,
     #[serde(default)]
     pub checks: CaseChecks,
     #[serde(default)]
@@ -141,6 +152,9 @@ pub struct CaseChecks {
     /// Scripts under `evals/scripts/`, run with `sh` in the tree after the run.
     #[serde(default)]
     pub scripts: Vec<String>,
+    /// Assertions over the connector calls the case's doubles answered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connector_calls: Vec<crate::eval_doubles::CallCheck>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -348,7 +362,7 @@ fn later_field(raw: &str) -> Option<String> {
 fn parse_case(raw: &str, stem: &str) -> Result<EvalCase, String> {
     if let Some(f) = later_field(raw) {
         return Err(format!(
-            "{f} is not supported by this apb (it needs mock connectors, a later release)"
+            "{f} is not supported by this apb (scripted answers, stop_before and push checks are a later release)"
         ));
     }
     let case: EvalCase = yaml_serde::from_str(raw).map_err(|e| e.to_string())?;
@@ -455,27 +469,18 @@ fn tree_relative(rel: &str) -> bool {
             .all(|c| matches!(c, Component::Normal(_)))
 }
 
-/// Why the playbook cannot be evaluated at all: every effect an eval run
-/// cannot neutralize in this release. Never run irreversible playbooks in
-/// evals, and there is no case-level escape: the effective effects must not
-/// contain `irreversible`, no node may declare `irreversible` or `secrets`
-/// effects or look like a merge, push, deploy or publish step (the V73
-/// evidence chain), no node may bind a connector (mock connectors come in a
-/// later release, and a real connector is never called from an eval) and no
-/// node may start a sub-playbook (whose effects the case cannot see).
+/// Why the playbook cannot be evaluated by any case: every effect an eval
+/// run cannot neutralize. Never run irreversible playbooks in evals, and
+/// there is no case-level escape, connector doubles included: the
+/// effective effects must not contain `irreversible`, no node may declare
+/// `irreversible` or `secrets` effects or look like a merge, push, deploy
+/// or publish step (the V73 evidence chain) and no node may start a
+/// sub-playbook (whose effects the case cannot see). Connector bindings
+/// depend on the case ([`case_refusal`]).
 pub fn refusal(playbook: &Playbook) -> Vec<String> {
     let mut why = Vec::new();
     if crate::effects::effective(playbook).contains(&Effect::Irreversible) {
         why.push("the playbook's effects contain `irreversible`".to_string());
-    }
-    for (site, bindings) in playbook.connector_sites() {
-        let site: &str = &site;
-        if !bindings.is_empty() {
-            why.push(format!(
-                "{} binds a connector; eval runs never call real connectors and mocks are not supported yet",
-                crate::connector::sites::site_label(site)
-            ));
-        }
     }
     for n in &playbook.nodes {
         if let Some(reason) = crate::validate::node_shipping_reason(n) {
@@ -489,6 +494,132 @@ pub fn refusal(playbook: &Playbook) -> Vec<String> {
         }
     }
     why
+}
+
+/// One reason per binding site that binds a connector, for a case without
+/// doubles: an eval run never calls a real connector.
+fn connector_site_reasons(playbook: &Playbook) -> Vec<String> {
+    playbook
+        .connector_sites()
+        .filter(|(_, bindings)| !bindings.is_empty())
+        .map(|(site, _)| {
+            format!(
+                "{} binds a connector; eval runs never call real connectors; give the case `connectors:` doubles for every function it binds",
+                crate::connector::sites::site_label(&site)
+            )
+        })
+        .collect()
+}
+
+/// Every refusal for running `case`: [`refusal`], then for a case without
+/// doubles today's connector sites (one reason per site that binds a
+/// connector), for a case with doubles its coverage gaps
+/// ([`crate::eval_doubles::coverage_gaps`]).
+pub fn case_refusal(
+    playbook: &Playbook,
+    case: &EvalCase,
+    facts: &BTreeMap<String, ConnectorFacts>,
+) -> Vec<String> {
+    let mut why = refusal(playbook);
+    if case.doubles.is_empty() {
+        why.extend(connector_site_reasons(playbook));
+    } else {
+        why.extend(crate::eval_doubles::coverage_gaps(
+            playbook,
+            &case.doubles,
+            facts,
+        ));
+    }
+    why
+}
+
+/// The ids of the version's sites that bind a connector.
+fn binding_sites(playbook: &Playbook) -> BTreeSet<String> {
+    playbook
+        .connector_sites()
+        .filter(|(_, b)| !b.is_empty())
+        .map(|(site, _)| site.into_owned())
+        .collect()
+}
+
+/// V280 problems of a case that declares doubles: its coverage gaps and
+/// every malformed answer.
+fn doubles_problems(
+    case: &EvalCase,
+    playbook: &Playbook,
+    sites: &BTreeSet<String>,
+    facts: &BTreeMap<String, ConnectorFacts>,
+) -> Vec<String> {
+    let mut p = crate::eval_doubles::coverage_gaps(playbook, &case.doubles, facts);
+    for (c, fns) in &case.doubles {
+        for (f, answers) in fns {
+            for (i, a) in answers.iter().enumerate() {
+                let at = format!("double `{c}.{f}` answer {}", i + 1);
+                if !(100..=599).contains(&a.answer.status) {
+                    p.push(format!(
+                        "{at}: status {} is not an HTTP status (100 to 599)",
+                        a.answer.status
+                    ));
+                }
+                if a.times == Some(0) {
+                    p.push(format!("{at}: `times` is 0, so it never answers"));
+                }
+                let Some(m) = &a.matcher else { continue };
+                if m.args.as_ref().is_some_and(|v| !v.is_object()) {
+                    p.push(format!("{at}: `match.args` is not an object"));
+                }
+                if let Some(site) = &m.site
+                    && !sites.contains(site)
+                {
+                    p.push(format!(
+                        "{at}: `match.site` `{site}` is not a binding site of version {}",
+                        playbook.version
+                    ));
+                }
+            }
+        }
+    }
+    p
+}
+
+/// V281 problems of a case's `checks.connector_calls`.
+fn call_check_problems(
+    case: &EvalCase,
+    playbook: &Playbook,
+    sites: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut p = Vec::new();
+    for cc in &case.checks.connector_calls {
+        let at = format!("connector_calls `{}`", cc.function);
+        match cc.function.split_once('.') {
+            Some((c, f)) if !c.is_empty() && !f.is_empty() && !f.contains('.') => {
+                if !case.doubles.get(c).is_some_and(|fns| fns.contains_key(f)) {
+                    p.push(format!("{at} names a function the case does not double"));
+                }
+            }
+            _ => p.push(format!("{at} is not `<connector>.<function>`")),
+        }
+        if cc.count.is_some() && (cc.min.is_some() || cc.max.is_some()) {
+            p.push(format!("{at} sets `count` together with `min` or `max`"));
+        }
+        if let (Some(min), Some(max)) = (cc.min, cc.max)
+            && min > max
+        {
+            p.push(format!("{at} has `min` {min} above `max` {max}"));
+        }
+        if cc.args.as_ref().is_some_and(|v| !v.is_object()) {
+            p.push(format!("{at}: `args` is not an object"));
+        }
+        if let Some(site) = &cc.site
+            && !sites.contains(site)
+        {
+            p.push(format!(
+                "{at}: `site` `{site}` is not a binding site of version {}",
+                playbook.version
+            ));
+        }
+    }
+    p
 }
 
 /// Env names an overlay may not set: they reconfigure apb itself (`APB_*`,
@@ -717,25 +848,36 @@ fn case_problems(
 ///   not have, a path leaves `evals/scripts/` or `evals/fixtures/`, a regex
 ///   does not compile; the suite holds a symlink or cannot be digested.
 /// - **V81** (error): the playbook has a suite but cannot be evaluated at
-///   all ([`refusal`]): irreversible effects, shipping steps, connectors or
-///   sub-playbooks.
+///   all ([`refusal`]): irreversible effects, shipping steps or
+///   sub-playbooks; and, per case that applies to the version, a case
+///   without doubles of a version that binds connectors ([`case_refusal`]
+///   without the coverage gaps, which are V280).
 /// - **V82** (warning): the version has a `human_review` or interactive node;
 ///   an eval run cannot answer it in this release, so the run is stopped
 ///   when it waits and the case must accept `stopped`.
 /// - **V83** (warning): no case applies to the version (`versions` ranges).
+/// - **V280** (error): a case's `connectors:` doubles are malformed, name a
+///   connector or function no binding site of the version binds, or leave
+///   a bound function without a double.
+/// - **V281** (error): a case's `checks.connector_calls` entry is malformed
+///   or names a function the case does not double.
 ///
-/// A playbook without `evals/` yields nothing.
+/// A playbook without `evals/` yields nothing. Without the installed
+/// connectors' facts (this function passes none) V280 reports that the
+/// doubles cannot be checked.
 pub fn validate_suite(playbook_dir: &Path, playbook: &Playbook) -> Vec<Issue> {
-    validate_suite_with(playbook_dir, playbook, &|_| true)
+    validate_suite_with(playbook_dir, playbook, &|_| true, &BTreeMap::new())
 }
 
 /// [`validate_suite`] that also refuses event type names `is_event_type`
-/// does not know (the engine's journal types; `apb_engine::eval::checks::
-/// validate_suite` passes them).
+/// does not know (the engine's journal types) and checks doubles against
+/// the installed connectors' `facts` (`apb_engine::eval::checks::
+/// validate_suite` passes both).
 pub fn validate_suite_with(
     playbook_dir: &Path,
     playbook: &Playbook,
     is_event_type: &dyn Fn(&str) -> bool,
+    facts: &BTreeMap<String, ConnectorFacts>,
 ) -> Vec<Issue> {
     if !has_suite(playbook_dir) {
         return Vec::new();
@@ -781,6 +923,38 @@ pub fn validate_suite_with(
             Severity::Error,
             format!("the eval suite cannot run: {why}"),
         ));
+    }
+    let sites = binding_sites(playbook);
+    for lc in loaded
+        .cases
+        .iter()
+        .filter(|lc| applies_to(&lc.case, &playbook.version))
+    {
+        let id = &lc.case.id;
+        if lc.case.doubles.is_empty() {
+            for why in connector_site_reasons(playbook) {
+                out.push(issue(
+                    "V81",
+                    Severity::Error,
+                    format!("eval case `{id}` cannot run: {why}"),
+                ));
+            }
+        } else {
+            for why in doubles_problems(&lc.case, playbook, &sites, facts) {
+                out.push(issue(
+                    "V280",
+                    Severity::Error,
+                    format!("eval case {id}: {why}"),
+                ));
+            }
+        }
+        for why in call_check_problems(&lc.case, playbook, &sites) {
+            out.push(issue(
+                "V281",
+                Severity::Error,
+                format!("eval case {id}: {why}"),
+            ));
+        }
     }
     let waits: Vec<&str> = playbook
         .nodes
@@ -1113,7 +1287,7 @@ mod tests {
     #[test]
     fn v80_names_every_problem_of_a_case() {
         let bad_id = "schema: 1\nid: other\nfixture: { dir: fixtures/base }\n";
-        let later = "schema: 1\nid: later\nfixture: { dir: fixtures/base }\nconnectors: {}\n";
+        let later = "schema: 1\nid: later\nfixture: { dir: fixtures/base }\nanswers: {}\n";
         let later_check =
             "schema: 1\nid: pushed\nfixture: { dir: fixtures/base }\nchecks: { pushed: [] }\n";
         let unknown_field = "schema: 1\nid: typo\nfixture: { dir: fixtures/base }\nrepat: 3\n";
@@ -1138,7 +1312,7 @@ mod tests {
             )
         };
         has("does not match the file name `bad-id.yaml`");
-        has("`connectors` is not supported");
+        has("`answers` is not supported");
         has("`checks.pushed` is not supported");
         has("unknown field `repat`");
         has("exactly one of `git` and `dir`");
@@ -1160,7 +1334,7 @@ mod tests {
     fn v81_refuses_every_effect_an_eval_cannot_neutralize() {
         let dir = suite_with(&[("good.yaml", GOOD)]);
         let w = "{ id: w, type: prompt, prompt: hi }";
-        let rows: [(&str, String, &str); 5] = [
+        let rows: [(&str, String, &str); 4] = [
             (
                 "irreversible",
                 PB.replace("nodes:", "effects: [irreversible]\nnodes:"),
@@ -1179,14 +1353,6 @@ mod tests {
                 "push_branch",
             ),
             (
-                "connector",
-                PB.replace(
-                    w,
-                    "{ id: w, type: agent_task, prompt: hi, profile: x, connectors: [jira] }",
-                ),
-                "node `w` binds a connector",
-            ),
-            (
                 "sub-playbook",
                 PB.replace(w, "{ id: w, type: playbook, playbook: child }"),
                 "node `w` starts a sub-playbook",
@@ -1202,6 +1368,240 @@ mod tests {
             );
         }
         assert!(refusal(&pb(PB)).is_empty());
+        // A connector is refused per case without doubles.
+        let connector = PB.replace(
+            w,
+            "{ id: w, type: agent_task, prompt: hi, profile: x, connectors: [jira] }",
+        );
+        let got = codes(&validate_suite(dir.path(), &pb(&connector)));
+        assert!(
+            got.iter().any(|(c, m)| *c == "V81"
+                && m == "eval case `good` cannot run: node `w` binds a connector; eval runs never call real connectors; give the case `connectors:` doubles for every function it binds"),
+            "{got:?}"
+        );
+        assert!(refusal(&pb(&connector)).is_empty());
+    }
+
+    /// The `crm` connector of the doubles tests: two reads and a write.
+    fn crm_facts() -> BTreeMap<String, ConnectorFacts> {
+        BTreeMap::from([(
+            "crm".to_string(),
+            ConnectorFacts {
+                functions: vec!["find".into(), "get".into(), "update".into()],
+                write_functions: vec!["update".into()],
+                ..Default::default()
+            },
+        )])
+    }
+
+    /// `PB` with `w` an agent step that binds `crm` (`functions` as given;
+    /// `all` leaves the field out).
+    fn crm_pb(functions: &str) -> Playbook {
+        pb(&PB.replace(
+            "{ id: w, type: prompt, prompt: hi }",
+            &format!(
+                "{{ id: w, type: agent_task, prompt: hi, profile: x, connectors: [{{ name: crm{} }}] }}",
+                if functions == "all" {
+                    String::new()
+                } else {
+                    format!(", functions: {functions}")
+                }
+            ),
+        ))
+    }
+
+    const DOUBLED: &str = "schema: 1\nid: doubled\nfixture: { dir: fixtures/base }\nconnectors:\n  crm:\n    find:\n      - match: { args: { q: acme }, site: w }\n        answer: { status: 200, body: { items: [1] } }\n        times: 1\n      - answer: { status: 200, body: { items: [] } }\n    update:\n      - answer: { status: 200, body: { ok: true } }\nchecks:\n  connector_calls:\n    - { function: crm.update, args: { id: 1 }, count: 1 }\n    - { function: crm.find, site: w, contains: acme, min: 1, max: 3 }\n";
+
+    fn issues_of(case: &str, playbook: &Playbook) -> Vec<(&'static str, String)> {
+        let dir = suite_with(&[("doubled.yaml", case)]);
+        codes(&validate_suite_with(
+            dir.path(),
+            playbook,
+            &|_| true,
+            &crm_facts(),
+        ))
+    }
+
+    #[test]
+    fn a_doubled_case_parses() {
+        let dir = suite_with(&[("doubled.yaml", DOUBLED)]);
+        let loaded = load_suite(dir.path());
+        assert!(loaded.issues.is_empty(), "{:?}", codes(&loaded.issues));
+        let case = &loaded.cases[0].case;
+        let find = &case.doubles["crm"]["find"];
+        assert_eq!(find.len(), 2);
+        assert_eq!(find[0].times, Some(1));
+        let m = find[0].matcher.as_ref().unwrap();
+        assert_eq!(m.args, Some(serde_json::json!({"q": "acme"})));
+        assert_eq!(m.site.as_deref(), Some("w"));
+        assert_eq!(find[1].answer.body, serde_json::json!({"items": []}));
+        assert_eq!(case.checks.connector_calls.len(), 2);
+        assert_eq!(case.checks.connector_calls[0].count, Some(1));
+        assert_eq!(case.checks.connector_calls[1].min, Some(1));
+        // Covered exactly: nothing to report.
+        let got = issues_of(DOUBLED, &crm_pb("[find, update]"));
+        assert!(got.is_empty(), "{got:?}");
+        // An unknown key in a double is a parse error, not ignored.
+        let typo = DOUBLED.replace("times: 1", "tims: 1");
+        let dir = suite_with(&[("doubled.yaml", &typo)]);
+        assert!(
+            load_suite(dir.path())
+                .issues
+                .iter()
+                .any(|i| i.code == "V80")
+        );
+    }
+
+    #[test]
+    fn answers_and_stop_before_stay_refused() {
+        for (field, body) in [
+            ("answers", "answers: {}\n"),
+            ("stop_before", "stop_before: [w]\n"),
+        ] {
+            let case = format!("schema: 1\nid: c\nfixture: {{ dir: fixtures/base }}\n{body}");
+            let dir = suite_with(&[("c.yaml", &case)]);
+            let got = codes(&validate_suite(dir.path(), &pb(PB)));
+            assert!(
+                got.iter().any(|(c, m)| *c == "V80"
+                    && m == &format!("eval case `c.yaml`: `{field}` is not supported by this apb (scripted answers, stop_before and push checks are a later release)")),
+                "{field}: {got:?}"
+            );
+        }
+        let pushed = "schema: 1\nid: c\nfixture: { dir: fixtures/base }\nchecks: { pushed: [] }\n";
+        let dir = suite_with(&[("c.yaml", pushed)]);
+        let got = codes(&validate_suite(dir.path(), &pb(PB)));
+        assert!(
+            got.iter()
+                .any(|(c, m)| *c == "V80" && m.contains("`checks.pushed` is not supported")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn v280_names_an_uncovered_function() {
+        // `all` binds `get` too, which the case does not double.
+        let got = issues_of(DOUBLED, &crm_pb("all"));
+        let v280: Vec<&String> = got
+            .iter()
+            .filter(|(c, _)| *c == "V280")
+            .map(|(_, m)| m)
+            .collect();
+        assert_eq!(
+            v280,
+            [
+                &"eval case doubled: `crm.get` is bound but the case gives it no double"
+                    .to_string()
+            ],
+            "{got:?}"
+        );
+        // A partly doubled case is not lifted out of the connector refusal
+        // by V81 either: V280 is its error.
+        assert!(got.iter().all(|(c, _)| *c != "V81"), "{got:?}");
+        // A double of an unbound function, a bad status, `times: 0`, a
+        // non-object match and an unknown site.
+        let bad = DOUBLED
+            .replace("status: 200, body: { ok: true }", "status: 700, body: {}")
+            .replace("times: 1", "times: 0")
+            .replace("args: { q: acme }, site: w", "args: [acme], site: nowhere");
+        let got = issues_of(&bad, &crm_pb("[find]"));
+        let has = |needle: &str| {
+            assert!(
+                got.iter().any(|(c, m)| *c == "V280" && m.contains(needle)),
+                "missing `{needle}` in {got:#?}"
+            )
+        };
+        has("`crm.update` has a double, but no binding site");
+        has("status 700 is not an HTTP status");
+        has("`times` is 0");
+        has("`match.args` is not an object");
+        has("`match.site` `nowhere` is not a binding site");
+        // Without the installed connectors the doubles cannot be checked.
+        let dir = suite_with(&[("doubled.yaml", DOUBLED)]);
+        let got = codes(&validate_suite(dir.path(), &crm_pb("[find, update]")));
+        assert!(
+            got.iter().any(|(c, m)| *c == "V280"
+                && m.contains("cannot be checked without the installed connectors")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn v281_refuses_count_with_min() {
+        let bad = DOUBLED
+            .replace(
+                "{ function: crm.update, args: { id: 1 }, count: 1 }",
+                "{ function: crm.update, args: [1], count: 1, min: 1 }",
+            )
+            .replace("min: 1, max: 3", "min: 4, max: 3")
+            .replace("site: w, contains", "site: elsewhere, contains")
+            + "    - { function: crm.get }\n    - { function: crm }\n";
+        let got = issues_of(&bad, &crm_pb("[find, update]"));
+        let has = |needle: &str| {
+            assert!(
+                got.iter().any(|(c, m)| *c == "V281" && m.contains(needle)),
+                "missing `{needle}` in {got:#?}"
+            )
+        };
+        has(
+            "eval case doubled: connector_calls `crm.update` sets `count` together with `min` or `max`",
+        );
+        has("connector_calls `crm.update`: `args` is not an object");
+        has("connector_calls `crm.find` has `min` 4 above `max` 3");
+        has("connector_calls `crm.find`: `site` `elsewhere` is not a binding site");
+        has("connector_calls `crm.get` names a function the case does not double");
+        has("connector_calls `crm` is not `<connector>.<function>`");
+        assert_eq!(
+            got.iter().filter(|(c, _)| *c == "V281").count(),
+            6,
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn a_case_without_doubles_keeps_every_reason() {
+        let playbook = crm_pb("all");
+        let case: EvalCase = yaml_serde::from_str(GOOD).unwrap();
+        let why = case_refusal(&playbook, &case, &crm_facts());
+        assert_eq!(
+            why,
+            [
+                "node `w` binds a connector; eval runs never call real connectors; give the case `connectors:` doubles for every function it binds"
+            ]
+        );
+        let got = issues_of(&GOOD.replace("id: good", "id: doubled"), &playbook);
+        assert!(
+            got.iter().any(|(c, m)| *c == "V81"
+                && m.starts_with("eval case `doubled` cannot run: node `w` binds a connector")),
+            "{got:?}"
+        );
+        assert!(got.iter().all(|(c, _)| *c != "V280"), "{got:?}");
+        // With full doubles nothing is refused.
+        let doubled: EvalCase = yaml_serde::from_str(DOUBLED).unwrap();
+        assert!(case_refusal(&crm_pb("[find, update]"), &doubled, &crm_facts()).is_empty());
+    }
+
+    #[test]
+    fn full_doubles_keep_the_irreversible_refusal() {
+        let doubled: EvalCase = yaml_serde::from_str(DOUBLED).unwrap();
+        let bound = "{ id: w, type: agent_task, prompt: hi, profile: x, connectors: [{ name: crm, functions: [find, update] }] }";
+        let declared = pb(&PB
+            .replace("{ id: w, type: prompt, prompt: hi }", bound)
+            .replace("nodes:", "effects: [irreversible]\nnodes:"));
+        let node = pb(&PB.replace(
+            "{ id: w, type: prompt, prompt: hi }",
+            &bound.replace("profile: x,", "profile: x, effects: [irreversible],"),
+        ));
+        for (what, playbook) in [("playbook", declared), ("node", node)] {
+            let why = case_refusal(&playbook, &doubled, &crm_facts());
+            assert!(!why.is_empty(), "{what}");
+            assert_eq!(why, refusal(&playbook), "{what}");
+            let got = issues_of(DOUBLED, &playbook);
+            assert!(
+                got.iter()
+                    .any(|(c, m)| *c == "V81" && m.starts_with("the eval suite cannot run: ")),
+                "{what}: {got:?}"
+            );
+        }
     }
 
     /// V82 names a gate and an interactive agent step (a warning); V83 says

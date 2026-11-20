@@ -738,11 +738,80 @@ fn tree(dir: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
     out
 }
 
+/// Runs playbook `d` of `p` on a thread and approves its bound gate `g`
+/// as a person at the terminal once it asks.
+fn run_deciding_g_at_the_terminal(p: &Project) -> (RunStatus, String) {
+    use apb_engine::decision_channel::DecisionChannel;
+    use apb_engine::review::{ReviewCommand, post_decision_via};
+    let root = p.root.path().to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ =
+            tx.send(run(&root, "d", None, RunOptions::default()).map(|r| (r.outcome, r.run_id)));
+    });
+    let runs = p.root.path().join(".apb/runs");
+    let started = std::time::Instant::now();
+    let (run_dir, nonce) = loop {
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the gate never asked"
+        );
+        let asked = fs::read_dir(&runs).ok().and_then(|dirs| {
+            dirs.flatten().find_map(|d| {
+                read_all(&d.path())
+                    .ok()?
+                    .into_iter()
+                    .find_map(|e| match e.payload {
+                        EventPayload::ReviewRequested { node, binding, .. } if node == "g" => {
+                            Some((d.path(), binding?.nonce))
+                        }
+                        _ => None,
+                    })
+            })
+        });
+        if let Some(found) = asked {
+            break found;
+        }
+        // A run that ended before its gate asked is reported at once.
+        match rx.try_recv() {
+            Ok(ended) => panic!("the run ended before the gate asked: {ended:?}"),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                panic!("the run thread ended before the gate asked")
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    post_decision_via(
+        &run_dir,
+        ReviewCommand {
+            node: "g".into(),
+            decision: "approve".into(),
+            note: String::new(),
+        },
+        Some(nonce),
+        None,
+        DecisionChannel::Terminal,
+    )
+    .unwrap();
+    rx.recv_timeout(Duration::from_secs(60))
+        .expect("the run ended")
+        .unwrap()
+}
+
 #[test]
 fn the_report_labels_a_real_run_and_replay_leaves_its_journal_untouched() {
     use apb_engine::decision::report::{self, ReportFilter, ReportSettings, replay};
 
-    let p = Project::new(&two_nodes(), DONE);
+    // A person approves `w`'s reply at the gate that approves its result:
+    // that labels `w` keep through the run's stored definition.
+    let p = Project::new(
+        &playbook(
+            "  - { id: w, type: agent_task, prompt: \"First step\", results: [ { path: report.md } ] }\n  - { id: g, type: human_review, options: [approve, reject], approves: { results: [w] } }\n  - { id: w2, type: agent_task, prompt: \"Second step\" }\n",
+            "  - { from: w, to: g }\n  - { from: g, to: w2 }\n  - { from: w2, to: ok }\n",
+        ),
+        DONE,
+    );
     let server = StubServer::start(vec![
         StubResponse::json(200, reply(0.93, "complete")),
         StubResponse::json(200, reply(0.91, "complete")),
@@ -761,7 +830,7 @@ fn the_report_labels_a_real_run_and_replay_leaves_its_journal_untouched() {
     // The installation key an `apb` process creates at its entry point, so
     // the run is stamped as created here.
     apb_core::run_origin::ensure_key().unwrap();
-    let (status, run_id, _) = p.run();
+    let (status, run_id) = run_deciding_g_at_the_terminal(&p);
     assert_eq!(status, RunStatus::Succeeded);
     assert_eq!((server.count(), other.count()), (2, 0));
     // A copy under another id carries a stamp that does not verify, like a
@@ -784,10 +853,25 @@ fn the_report_labels_a_real_run_and_replay_leaves_its_journal_untouched() {
         (g.provider.as_str(), g.provider_kind.as_deref()),
         ("stub", Some("systemone"))
     );
-    // `w` is followed by a successful `w2`, and `w2` ends a successful run.
+    // Under rule `reply/1`: a person approved `w` at `g` (keep, and the
+    // check said complete: right); `w2` ends the run with no gate after
+    // it, so it stays unlabelled.
     assert_eq!(
-        (g.labelled, g.keep_labels, g.all.accuracy),
-        (2, 2, Some(1.0))
+        (g.labelled, g.keep_labels, g.act_labels, g.all.accuracy),
+        (1, 1, 0, Some(1.0))
+    );
+    assert_eq!(
+        (
+            g.all.false_actions.count,
+            g.all.false_actions.of,
+            g.all.false_actions.rate
+        ),
+        (0, 1, Some(0.0))
+    );
+    assert_eq!(
+        g.unlabelled
+            .get("no person approved the reply at the gate that follows it"),
+        Some(&1)
     );
 
     let run_dir = p.run_dir(&run_id);
@@ -809,12 +893,12 @@ fn the_report_labels_a_real_run_and_replay_leaves_its_journal_untouched() {
     )
     .unwrap();
     assert_eq!((s.matched, s.with_state, s.asked, s.errors), (2, 2, 2, 0));
-    // `other` flags `w` (0.05 < 0.15): one of two agree, and labelled
-    // accuracy drops from 2/2 to 1/2.
+    // `other` flags `w` (0.05 < 0.15): one of two agree, and over the one
+    // labelled decision the accuracy drops from 1/1 to 0/1.
     assert_eq!(s.agreement, Some(0.5));
     assert_eq!(
         (s.original_accuracy, s.replay_accuracy),
-        (Some(1.0), Some(0.5))
+        (Some(1.0), Some(0.0))
     );
     assert_eq!(other.count(), 2);
     // The replayed state is the one that was sent, in the same order.

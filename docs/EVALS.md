@@ -12,12 +12,14 @@ Evals are opt-in and paid: every repetition is a full agent run. Nothing
 starts one except an explicit `apb eval`; saving a version, writing a
 profile or promoting a patch never does.
 
-`apb eval` shipped in 0.24.0 as the first half of the design. Not built
-yet: mock connectors (and so any playbook that binds a connector),
-scripted gate and question answers, `stop_before`, push checks, reporting
-which cases a `playbook_update` or `profile_write` invalidates, the
-`after_eval` promotion policy, a dashboard card, and an MCP tool. `apb eval`
-is CLI only.
+`apb eval` shipped in 0.24.0 as the first half of the design. Connector
+doubles followed: a case answers every connector call of its run from
+recorded answers (see "Connector doubles" below), so a playbook that binds
+a connector can be evaluated. Not built yet: scripted gate and question
+answers, `stop_before`, push checks, reporting which cases a
+`playbook_update` or `profile_write` invalidates, the `after_eval`
+promotion policy, a dashboard card, and an MCP tool. `apb eval` is CLI
+only.
 
 ## Never with irreversible effects
 
@@ -30,13 +32,27 @@ in an eval that could ship something:
 - a node that declares `irreversible` or `secrets` effects or looks like a
   merge, push, deploy or publish step (the V73 evidence chain),
 - a node that binds a connector (real connectors are never called from an
-  eval, and mocks come later), including a list node whose item check reads
-  a connector (`check.connector`, the `<node>#check` binding site),
+  eval), including a list node whose item check reads a connector
+  (`check.connector`, the `<node>#check` binding site), the `@baseline`
+  and `@follow_up` sites, unless the case doubles every function of every
+  binding site (see "Connector doubles" below),
 - a `playbook` node (the child's effects are not visible to the case).
 
 Such a playbook is refused before anything is created
 (`eval_refused_effects`, exit 2), and `apb validate` reports it as V81.
+The connector item is the exception: it is checked per case, as described
+below (`invalid_suite`, naming V81 or V280).
 There is no case-level switch that lifts the refusal.
+
+Doubles lift the connector item only. A declared `irreversible` effect
+(the playbook's own `effects`, the effective effects a node's declaration
+widens, or any node's declaration) is refused whatever the case's doubles
+cover: doubles answer the calls a node makes through `apb connector call`,
+and they do not reach what an agent can still do with the network and the
+person's logged-in CLIs, so a node that says it does something
+irreversible can still do it in a doubled run. A case of a playbook that
+binds connectors without doubling all of them is refused before anything
+runs as an invalid suite (`invalid_suite`, exit 2, naming V81 or V280).
 
 List nodes (`list:`) are allowed otherwise: an eval runs their items and
 their `output`, `script` and `judge` item checks as a real run does. To
@@ -102,7 +118,8 @@ scenarios (quick and smoke) run for project and global playbooks (see
 A playbook has a suite when `evals/` holds `suite.yaml` or a case file
 directly. A directory holding only `scenarios/` is no suite: `apb validate`
 checks no case for it and raises no V81, so a playbook an eval cannot run
-(a publish node, a connector, a sub-playbook) may still carry scenarios.
+(a publish node, an undoubled connector, a sub-playbook) may still carry
+scenarios.
 The suite digest covers the whole `evals/` tree, `scenarios/` included, so
 editing a scenario, or saving a labelled judge example, asks for a new
 suite approval before the next `apb eval`.
@@ -164,10 +181,11 @@ git (V80): `APB_*`, `HOME`, `XDG_*`, `PATH`, `LD_*`, `DYLD_*`, `GIT_DIR`,
 and the shell variables (`SHELL`, `ENV`, `BASH_ENV`, `IFS`, `CDPATH`,
 `BASH_FUNC_*` and similar).
 
-A case that sets `connectors`, `answers`, `stop_before`,
-`checks.connector_calls` or `checks.pushed` is refused (V80): those need
-the second half of the suite, and a case written for a later apb never runs
-half-understood.
+A case that sets `answers`, `stop_before` or `checks.pushed` is refused
+(V80): scripted answers, `stop_before` and push checks are a later
+release, and a case written for a later apb never runs half-understood.
+`connectors` and `checks.connector_calls` are the connector doubles (see
+"Connector doubles" below).
 
 ### The fixture
 
@@ -230,6 +248,258 @@ calls get apb's hardening through `GIT_CONFIG_PARAMETERS`
 only) with the location variables removed; anything else a script runs
 reads the tree as the agent left it, with the rest of the operator's
 environment. Regular expressions use the `regex` crate (linear time).
+
+## Connector doubles
+
+A case answers the connector calls of its run from recorded answers, the
+doubles, and never from the service. A playbook that binds connectors can
+be evaluated only by a case whose doubles answer every function of every
+binding site (each node's bindings, a list node's `<node>#check`, the
+`@baseline` and `@follow_up` sites), and every reconcile function of a
+send that declares `idempotency`. A playbook that declares an
+`irreversible` effect stays refused (see "Never with irreversible effects"
+above), so the worked case below uses `examples/playbooks/crm-cleanup.yaml`
+(`effects: [network, external]`).
+
+### The format
+
+```yaml
+connectors:
+  <connector>:
+    <function>:
+      - match: { args: { ... }, contains: "...", site: <site> }   # optional
+        answer: { status: 200, body: { ... } }
+        times: 1                                                   # optional
+      - answer: { status: 200, body: { ... } }
+```
+
+Per function, an ordered list of answers:
+
+- `match` says which calls an answer serves; without it, every call.
+  `args` is a JSON object every key of which the call's args hold with a
+  value that matches (objects recursively, everything else equal, arrays
+  whole); `contains` is text some string value of the args contains
+  (case-sensitive; numbers, booleans and null never contain text); `site`
+  is the binding site the call is made at (a node id, `<node>#check`,
+  `@baseline`, `@follow_up`). Every field it sets must hold; `match: {}`
+  holds always.
+- `answer` is the recorded answer, in the shape of a connector function's
+  `mock`: `status` (100 to 599) and `body`.
+- `times` is how many calls the answer serves, counted across every call
+  process of the run; without it, every matching call.
+
+A call is answered by the first answer whose `match` holds and whose
+`times` is not used up. Answers without `times` after ones with it make a
+sequence: `[{answer: A, times: 1}, {answer: B}]` answers A once, then B
+for every later call.
+
+The answer goes through the same status table, journal record and send
+settlement as a function's `mock`. A doubled inbox read answers with the
+JSON a real `read` returns (`{events: [{seq, received_at, type, body}],
+cursor, truncated}`, CONNECTORS.md); write the recorded body in that shape.
+
+### What a doubled run does
+
+`apb eval` hands the case's doubles to the run as an eval run setting.
+Every connector call of that run (a node's, an item check's, the
+baseline's, the follow-up's, a send's reconcile) is checked as a real call
+is (grants, `max_calls`, the run budget, the args schema, the send ledger)
+and is then answered by a double, or refused `double_unmatched` when no
+answer matches. No call sends a secret, runs a `{{cmd:...}}` helper or
+opens a connection; the values of the variables the workspace's
+connectors reference are read only to scrub the captured arguments, and
+never leave the call process. A function's own `mock` never answers a
+doubled call. A `--dry-run` call of a step stays a dry run and uses no `times`: its preview names the connector and account (`doubled: true`), never a rendered request, since the run holds no account fields. A
+doubled run never sends a notification.
+
+A send function that declares `idempotency` goes through the send ledger
+as in a real run: a repeat of the same intent is answered `already_sent`,
+and its reconcile function needs a double too. A `marker` send's
+read-back first reads the connector's own identity, then lists the recent
+items, both through the call path, so the connector's `identity` function
+needs a double as well (coverage asks for both). A recorded answer never
+holds the marker nonce of a send, so a doubled `marker` reconcile finds no
+matching item and the send stays unknown.
+
+Secrets at the start are checked as for any run: each bound connector must
+be installed with an account configured and trusted, and every variable
+its accounts reference must be present. Any value does (a placeholder in
+CI); no call of the run sends it, and a doubled call reads it only to
+scrub its captured arguments.
+
+A doubled run's manifest records the accounts' names only, with no
+account record a call could resolve, so an `apb` that does not know
+doubles (an older binary an agent runs by an absolute path, or one that
+resumes the run) fails every connector call of the run instead of reaching
+a service. The run also carries the run guard `eval_doubles`
+(GUARDRAILS.md, "Older apb binaries").
+
+Agent steps answer their connector calls by running `apb connector call`
+from their `PATH`. For a doubled case `apb eval` sets the `PATH` of every
+agent and script the run spawns to its own binary's directory followed by
+the `PATH` the `apb eval` process inherited, and nothing else, so the
+step's `apb` is the one that knows doubles.
+
+Doubles answer the calls a node makes through `apb connector call`; they
+do not take away what an agent can do on its own. A node that binds a
+connector cannot be isolated (V113), so:
+
+- run the agent nodes that bind no connector with `isolation: { level:
+  full, network: none }` (ISOLATION.md),
+- and cut the operator's credentials with the case `env` (see "Never with
+  irreversible effects" above).
+
+### The call capture
+
+Every dispatched call of a doubled run is captured in
+`eval-calls.jsonl` in its run directory. A dispatched call is one that
+reached the answer step, matched or `double_unmatched`; a call refused
+before it (a grant or `max_calls` refusal, `invalid_args`, a repeat the
+send ledger answers itself, such as `already_sent`) leaves no line, just as
+it sends nothing.
+
+- Each call first writes a reservation (its site, connector, function,
+  account, list item, the answer it gets and its scrubbed input
+  arguments), synced before the call is dispatched, and then a delivery
+  line, synced before the answer is handed to the caller. An answer is
+  handed out only after its delivery is recorded; when the delivery cannot
+  be recorded the call fails `eval_call_delivery_unrecorded` instead.
+- A call whose process died between its reservation and its delivery never received its answer: a retry of the same call gets the same answer, uses no further `times` and is never counted twice. The retry writes a `replayed` line naming the reservation, synced before it is dispatched, so its own `connector_call` in the journal is accounted for. A
+  reservation still held by a live call is not replayed.
+- A reservation never delivered fails the repetition: nobody can tell
+  whether its caller acted on the answer.
+- A doubled call is identified by a MAC under this installation's key, so
+  two identical calls compare equal without the raw args being stored. A
+  doubled call needs that key and is refused `eval_call_key_unavailable`
+  without one, before anything is written or answered.
+- A capture line that does not parse fails the next call of the run
+  (`config`) and fails the repetition; it is never skipped.
+- Before a reservation's call is dispatched, a new reservation or a replayed one, the run directory is synced (once per call process), so a power loss never takes the capture file with a dispatched call in it.
+- The capture is read beneath the run directory: a link is never
+  followed, only a regular file is opened (never a FIFO), and a capture
+  larger than 64 MiB does not read.
+- The capture file is created, empty and synced with its directory, when a doubled run is prepared, before its first node. A missing capture file fails every connector check (`capture_missing`), whatever the journal says, and a doubled call refuses to answer without it.
+- Every call a doubled run dispatches is journaled `connector_call`; a doubled call the journal cannot record is refused `eval_call_unjournaled` before its answer is handed out. When the journal records a doubled call the capture does not hold, every connector check fails `capture_incomplete`. `count: 0` passes only when both say there was none.
+- When a power loss leaves the capture and the run journal apart, neither
+  is repaired from the other: the capture is what the checks read, and the
+  journal is what the run reads (a resume, the send ledger, the run
+  outcome and every run surface).
+
+The captured arguments are the call's input arguments, scrubbed by the
+run's storage redactor, which refuses whenever a secret the workspace's
+installed connectors reference is unresolved. Args are therefore withheld
+(`{"withheld": "secrets_unresolved"}`) whenever a connector installed in
+the workspace references a command-sourced secret or a variable the run
+cannot see. Args longer than 16 KiB once scrubbed are kept as
+`{"clipped": true}`. Withheld or clipped args never change which answer
+serves a call: matching reads the call's own args in memory. A list
+item id in the capture passes the same redactor.
+
+The checks trust the run directory: an agent step that is not isolated can
+write it, the capture included, just as it can write the journal the other
+checks read.
+
+The capture stays in the stored run directory under
+`<config-dir>/evals/runs/<playbook>/<run-id>/`, or in the kept tree of a
+repetition that could not be stored.
+
+An `--external-data` repetition with doubles is never kept, on any
+platform. Once its checks ran, its capture and then its whole repetition
+directory are removed, whatever the outcome and whether or not a driver or
+helper still runs; the check results, the refusal and error codes and the
+`calls:` line are part of the result printed afterwards, and the result
+names no run directory and no kept tree. Nothing is stopped for this: a
+process that may still run holds handles only into a removed directory,
+so what it writes through an open descriptor goes to an unlinked file, and what it writes afterwards by path lands outside any stored or kept run and goes with the scratch directory; nothing it writes is stored or read by apb. apb removes the repetition directory it created, following no link and touching nothing outside it: every entry is reached through directory descriptors opened without following a link at each component, a link in the tree is unlinked and its target left alone, and the modes of its directories are put back to 0700 through their own descriptors first. A filesystem a step mounted inside the repetition directory is removed with it like any other content. Before the capture is removed, the run tree (`tree/.apb/runs/<run-id>`) is checked component by component, best effort: a component that is a link (the run tree was moved), is missing, or cannot be read is reported with its path, and the repetition fails with the check `external_data_removal`; a directory put in the place of the original is not detected. Any failure to remove the capture or the repetition directory is that error too, with the path; the message says the repetition directory was removed only when it was.
+
+What this covers: what apb wrote and what lies in the repetition directory when it is removed. It does not contain the evaluated agent. A process the agent left running, or the agent itself during the run, can write the data it was given anywhere its user can write, a path it recreates included; containing that is the node's isolation (ISOLATION.md), not the eval runner, and EXTERNAL-DATA.md limits the external-data promise to what apb itself keeps. For an external-data eval of an agent you do not trust, give its agent nodes `isolation: full`.
+
+### Checks over the calls
+
+A case with doubles always gets the check `connector_doubles`: it fails
+when a call no double answered, when a reservation was never delivered, or
+when the capture does not read (naming the line).
+
+`checks.connector_calls` asserts the captured calls of one function:
+
+```yaml
+checks:
+  connector_calls:
+    - function: <connector>.<function>   # required
+      site: <site>                      # optional: only calls at this binding site
+      args: { ... }                     # optional: a subset of the input arguments
+      contains: "..."                   # optional: text a string value of the input arguments contains
+      count: 3                          # exactly this many; or min and/or max
+```
+
+Each entry selects the delivered calls of `function`, narrowed by `site`,
+`args` (held as in `match.args`) and `contains`; `count` must equal the
+number selected, `min` and `max` bound it, and with none of the three the
+selection must not be empty. `args` and `contains` assert the input
+arguments of the call: the arguments the call was made with, before the
+connector's text modes, the neutralizing of forged markers and an appended
+send marker; never the body a real request would carry. They compare the
+captured arguments, which are scrubbed: a secret value in them reads as its
+redaction marker, so assert on the values a case gives, never on a secret.
+Only dispatched
+calls count, so a repeated send the send ledger answered `already_sent` is
+one call, not two.
+
+An entry fails as indeterminate, whatever its rule, when:
+
+- it sets `args` or `contains` and a selected call's args were clipped or
+  withheld (a `count: 0` over clipped text is never passed),
+- a call of its function (at its site, when set) was reserved and never
+  delivered,
+- the capture does not read.
+
+The text report prints, per repetition with doubles, `calls: <n> (<u>
+unmatched)`, with `, <r> reserved and never delivered` when there are
+such, and `--dry-run` lists the doubled functions of each case.
+
+### A worked case: `crm-cleanup`
+
+`examples/playbooks/crm-cleanup.yaml` binds the Twenty connector:
+`list_opportunities` at the baseline and at the nodes `count_unowned` and
+`recount`, and `update_opportunity` at `assign_owners`. It declares no
+`irreversible` effect. With the playbook in the project and an empty
+fixture directory under `evals/fixtures/empty`, this case
+(`evals/assigns-three-owners.yaml`) doubles every function it binds:
+
+```yaml
+schema: 1
+id: assigns-three-owners
+fixture: { dir: fixtures/empty }
+params: { default_owner_id: u-default, open_stages: "NEW,SCREENING" }
+connectors:
+  twenty:
+    list_opportunities:
+      - match: { site: "@baseline" }
+        answer: { status: 200, body: { data: { opportunities: [] }, totalCount: 3 } }
+        times: 1
+      - match: { site: "@baseline" }
+        answer: { status: 200, body: { data: { opportunities: [] }, totalCount: 0 } }
+      - match: { site: count_unowned }
+        answer: { status: 200, body: { data: { opportunities: [ { id: o-1 }, { id: o-2 }, { id: o-3 } ] }, totalCount: 3, pageInfo: { hasNextPage: false } } }
+      - match: { site: recount }
+        answer: { status: 200, body: { data: { opportunities: [] }, totalCount: 0, pageInfo: { hasNextPage: false } } }
+    update_opportunity:
+      - answer: { status: 200, body: { data: { updateOpportunity: { id: o-1 } } } }
+checks:
+  connector_calls:
+    - { function: twenty.update_opportunity, contains: u-default, count: 3 }
+    - { function: twenty.list_opportunities, site: recount, min: 1 }
+```
+
+The baseline reads three unowned deals before the first acting node and
+none at the finish (the first answer serves one call, the second every
+later one); the first count lists three deals and the recount none. The
+checks assert three `update_opportunity` calls whose input arguments
+contain the default owner id, and at least one recount read. The accounts'
+variables of the Twenty connector must be present when the case runs; no
+value leaves the call process, and one is read only to scrub the captured
+arguments. The captured calls of a first repetition show what the
+playbook asked for, which helps when writing the answers of a new case.
 
 ## Running
 
@@ -376,7 +646,9 @@ does); `result` has `eval_id`, `playbook`, `version`, `started_at_ms`,
 absent when no repetition reported a cost on it), `total_tokens` and
 `journal_agent_writable`; a repetition has
 `repetition`, `run_id`, `run_dir`, `verdict`, `outcome`, `stopped`,
-`checks`, `goal`, `usage`, `duration_ms` and `kept_worktree`.
+`checks`, `goal`, `usage`, `duration_ms` and `kept_worktree`, and for a
+case with doubles `connector_calls` (one `{ function, site, answered,
+delivered }` per captured call, never its args).
 
 ## Validation codes
 
@@ -392,7 +664,20 @@ absent when no repetition reported a cost on it), `total_tokens` and
   suite holds a symlink or cannot be digested. The node, param and goal
   checks skip a case whose `versions` range excludes the version.
 - **V81** (error): the playbook cannot be evaluated at all (the refusal
-  above).
+  above), reported per case: a case without doubles of a playbook that
+  binds connectors gets one reason per connector binding site.
+- **V280** (error): a case's `connectors:` doubles are malformed (an
+  answer's `status` outside 100 to 599, a `times` of 0, a `match.args`
+  that is not an object, a `match.site` that is not a binding site of the
+  version), name a connector or function no binding site of the version
+  binds, or leave a bound function (a send's reconcile function included)
+  without a double. Without the installed connectors it says the
+  connector rules cannot be checked.
+- **V281** (error): a `checks.connector_calls` entry is malformed (a
+  `function` that is not `<connector>.<function>`, `count` together with
+  `min` or `max`, `min` above `max`, an `args` that is not an object, a
+  `site` that is not a binding site) or names a function the case does not
+  double.
 - **V82** (warning): a `human_review` or interactive node; the run is stopped
   when it waits there.
 - **V83** (warning): no case applies to the version.

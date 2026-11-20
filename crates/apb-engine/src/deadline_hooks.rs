@@ -59,6 +59,18 @@ pub enum Hook {
     /// In a grade write, after the grades directory was made and before
     /// the grade file is written. The argument is the run directory.
     GradeBeforeWrite,
+    /// In a doubled eval run's connector call, right after its reservation
+    /// is durable and before the call is dispatched. The argument is the
+    /// run directory.
+    DoubleBeforeDispatch,
+    /// In a doubled eval run's connector call, after the call was journaled
+    /// and before its delivery is recorded. The argument is the run
+    /// directory.
+    DoubleBeforeDeliver,
+    /// In a doubled eval run's call, after its reservation was written (or
+    /// found for a replay) and before this process syncs the run directory.
+    /// The argument is the run directory.
+    DoubleBeforeCaptureDirSync,
 }
 
 type Action = Arc<dyn Fn(&Path) + Send + Sync>;

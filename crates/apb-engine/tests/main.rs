@@ -255,6 +255,8 @@ mod child_connector_prepare;
 mod child_run_event_test;
 #[path = "suite/cloud_gate_test.rs"]
 mod cloud_gate_test;
+#[path = "suite/completion_labels_test.rs"]
+mod completion_labels_test;
 #[path = "suite/connector_asana.rs"]
 mod connector_asana;
 #[path = "suite/connector_call.rs"]
@@ -333,6 +335,8 @@ mod digest_binding_test;
 #[cfg(unix)]
 #[path = "suite/edge_route_test.rs"]
 mod edge_route_test;
+#[path = "suite/eval_doubles_test.rs"]
+mod eval_doubles_test;
 #[path = "suite/event_test.rs"]
 mod event_test;
 #[path = "suite/evidence_test.rs"]
