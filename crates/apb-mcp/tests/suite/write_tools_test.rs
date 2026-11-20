@@ -94,6 +94,51 @@ fn playbook_delete_trash_list_and_restore() {
     assert!(matches!(err, ToolError::Conflict(_)), "got {err:?}");
 }
 
+/// A save refuses a definition that renders a secret param (V340), and
+/// stores no version.
+#[test]
+fn a_save_that_renders_a_secret_param_is_refused_v340() {
+    let _cfg = crate::common::config_sandbox();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let rendering = VALID.replace(
+        "{ name: task, type: text, label: \"Task\" }",
+        "{ name: task, type: text, label: \"Task\", secret: true }",
+    );
+    assert_ne!(rendering, VALID);
+    for err in [
+        playbook_update(dir.path(), "implement-task", &rendering).unwrap_err(),
+        playbook_create(
+            dir.path(),
+            "brand-new",
+            &rendering.replace("id: implement-task", "id: brand-new"),
+        )
+        .unwrap_err(),
+    ] {
+        match err {
+            ToolError::Engine(msg) => assert!(
+                msg.lines()
+                    .any(|l| l.starts_with("- V340 error (node `plan`):")),
+                "{msg}"
+            ),
+            other => panic!("expected Engine, got {other:?}"),
+        }
+    }
+    let versions: Vec<_> = fs::read_dir(dir.path().join(".apb/playbooks/implement-task"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name())
+        .collect();
+    assert_eq!(versions, vec![std::ffi::OsString::from("1.0.0")]);
+    assert!(
+        !dir.path()
+            .join(".apb/playbooks/brand-new")
+            .join("1.0.0")
+            .exists()
+    );
+}
+
 #[test]
 fn playbook_update_invalid_playbook_renders_structured_validation_message() {
     let _cfg = crate::common::config_sandbox();

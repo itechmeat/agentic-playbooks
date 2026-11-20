@@ -2929,6 +2929,8 @@ async fn lists_runs_by_search_field_like_runs_list() {
             format!("params:\n  customer: {customer}\n"),
         )
         .unwrap();
+        // A prepared run has its snapshot beside its config.
+        fs::write(run.join("playbook.yaml"), "params: []\n").unwrap();
     }
     let app = build_router(AppState::new(root.to_path_buf()));
     let (status, plain) = get_json(app.clone(), "/api/runs").await;

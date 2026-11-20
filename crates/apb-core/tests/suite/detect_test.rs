@@ -500,16 +500,22 @@ fn hermes_auth_hint_from_env_file() {
     );
     let hermes_dir = e.home.join(".hermes");
     std::fs::create_dir_all(&hermes_dir).unwrap();
-    std::fs::write(hermes_dir.join(".env"), "SOME_KEY=secret\n").unwrap();
+    // A value no temp path holds, so the check below reads the detector's
+    // fields only, wherever the test's directories live.
+    let value = "hv-7c1e0d-never-in-a-path";
+    std::fs::write(hermes_dir.join(".env"), format!("SOME_KEY={value}\n")).unwrap();
 
     let agents = agent_catalog::agents(true);
     let h = agents.iter().find(|a| a.agent == "hermes").unwrap();
     let kind = h.auth.as_ref().map(|a| a.kind);
     assert_eq!(kind, Some(AuthKind::ApiKey));
 
-    // The secret value must never leak into the detect output.
+    // The secret value must never leak into the detect output: not in the
+    // auth hint, not in any field of any agent.
+    let hint = serde_json::to_string(&h.auth).unwrap();
+    assert!(!hint.contains(value), "{hint}");
     let serialized = serde_json::to_string(&agents).unwrap();
-    assert!(!serialized.contains("secret"));
+    assert!(!serialized.contains(value));
 
     // Without the file - no auth hint.
     let e2 = setup();

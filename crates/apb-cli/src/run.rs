@@ -955,13 +955,26 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
     } else {
         CacheRunMode::Auto
     };
-    let parsed = match parse_params(params) {
+    let mut eval = match eval_settings.as_deref().map(crate::eval::read_run_settings) {
+        None => None,
+        Some(Ok(s)) => Some(s),
+        Some(Err(e)) => {
+            eprintln!("bad --eval-settings: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut parsed = match parse_params(params) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{e}");
             return ExitCode::from(2);
         }
     };
+    // An eval case's params come in its private settings file, never on
+    // argv; they are taken out of it so the run config holds them once.
+    if let Some(e) = eval.as_mut() {
+        parsed.extend(std::mem::take(&mut e.params));
+    }
     let budget = match budget.request() {
         Ok(b) => b,
         Err(e) => {
@@ -1108,14 +1121,6 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
     let how = crate::consent::CliConsent::Ask {
         flag: confirm_irreversible,
     };
-    let eval = match eval_settings.as_deref().map(crate::eval::read_run_settings) {
-        None => None,
-        Some(Ok(s)) => Some(s),
-        Some(Err(e)) => {
-            eprintln!("bad --eval-settings: {e}");
-            return ExitCode::from(2);
-        }
-    };
     if eval.is_some() && (supervise || host) {
         eprintln!("--eval-settings is only for a cli run");
         return ExitCode::from(2);
@@ -1189,10 +1194,6 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         // after printing the run_id (see spawn_detached_supervised) - so the
         // drive loop moves into a separate OS process detached from the
         // parent (the hidden `__drive-supervised` subcommand).
-        let param_args: Vec<String> = parsed
-            .into_iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect();
         let handoff = apb_engine::launch_handoff::Handoff::Supervise {
             grant: apb_engine::gate::launch::HandoffGrant {
                 record: grant.record.clone(),
@@ -1214,6 +1215,8 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
             start_key: start_key
                 .as_ref()
                 .map(apb_engine::launch_handoff::HandoffStartKey::of),
+            // The params cross in the handoff, never on the child's argv.
+            params: parsed,
         };
         let handoff = match apb_engine::launch_handoff::write(root, &handoff) {
             Ok(p) => p,
@@ -1227,7 +1230,6 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
             name,
             requested,
             instruction.as_deref(),
-            &param_args,
             allow_shared_workdir,
             continued_from.as_deref(),
             worktree.as_deref(),
@@ -1444,7 +1446,6 @@ pub(crate) fn spawn_detached_supervised(
     name: &str,
     version: Option<&str>,
     instruction: Option<&str>,
-    param_args: &[String],
     allow_shared_workdir: bool,
     continued_from: Option<&str>,
     worktree: Option<&str>,
@@ -1483,9 +1484,6 @@ pub(crate) fn spawn_detached_supervised(
     if let Some(instr) = instruction {
         cmd.arg("--instruction").arg(instr);
     }
-    for p in param_args {
-        cmd.arg("--param").arg(p);
-    }
     if allow_shared_workdir {
         cmd.arg("--allow-shared-workdir");
     }
@@ -1495,7 +1493,10 @@ pub(crate) fn spawn_detached_supervised(
     if let Some(tree) = worktree {
         cmd.arg("--worktree").arg(tree);
     }
-    cmd.arg("--launch-handoff").arg(handoff);
+    // The params are in the handoff: the child refuses to start without it.
+    cmd.arg("--launch-handoff")
+        .arg(handoff)
+        .arg("--params-in-handoff");
     if let Some(b) = budget {
         cmd.args(crate::budget::BudgetFlags::args_of(b));
     }
@@ -1570,6 +1571,7 @@ pub(crate) fn drive_supervised_child(
     continued_from: Option<String>,
     worktree: Option<String>,
     launch_handoff: Option<&Path>,
+    params_in_handoff: bool,
     handshake: &Path,
     budget: &crate::budget::BudgetFlags,
     notify: &crate::notify::NotifyFlags,
@@ -1619,6 +1621,7 @@ pub(crate) fn drive_supervised_child(
     .with_external_data(external_data);
     let mut how = crate::consent::CliConsent::None;
     let parent = apb_engine::launch_handoff::parent_pid();
+    let mut handed_params = false;
     match launch_handoff.map(|p| apb_engine::launch_handoff::take(root, p, parent)) {
         Some(Ok(apb_engine::launch_handoff::Handoff::Supervise {
             grant,
@@ -1627,7 +1630,10 @@ pub(crate) fn drive_supervised_child(
             consent,
             deadline_ms,
             start_key,
+            params,
         })) => {
+            opts.params.extend(params);
+            handed_params = true;
             opts.deadline_ms = deadline_ms;
             opts.start_key = start_key.and_then(|k| k.request());
             launch = launch
@@ -1647,6 +1653,15 @@ pub(crate) fn drive_supervised_child(
         Some(Ok(_)) => eprintln!("apb: the launch handoff is not a supervised start's"),
         Some(Err(e)) => eprintln!("apb: launch handoff refused: {e}"),
         None => {}
+    }
+    // The parent put the params in the handoff: without it this start
+    // would run without them, so it does not start at all.
+    if params_in_handoff && !handed_params {
+        let _ = atomic_write(
+            handshake,
+            b"ERR: the run's params were in a launch handoff this process did not take",
+        );
+        return ExitCode::from(2);
     }
     let start_version = match gate_run(root, name, version, true, &mut opts, &how, &launch) {
         Ok((_, v)) => v,
@@ -2753,6 +2768,11 @@ pub(crate) fn resume_cmd(
         deadline_ms,
         ..apb_engine::ResumeRequest::operator()
     };
+    // A run whose definition renders a secret param is refused before any
+    // consent is recorded or cleared (the engine's resume checks again).
+    if let Err(e) = apb_engine::scheduler::resume_secret_preflight(root, run_id) {
+        return resume_failed(&e);
+    }
     // 0.24.0 irreversible consent: a run of an irreversible tree with no
     // valid consent recorded (one an older apb started, or a directory apb
     // did not create here) asks once; the consent goes into its manifest.

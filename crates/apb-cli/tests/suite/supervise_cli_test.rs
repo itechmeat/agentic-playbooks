@@ -410,6 +410,62 @@ fn a_supervised_external_data_start_is_flagged() {
     });
 }
 
+/// A `--supervise` start hands its params to the `__drive-supervised`
+/// child in the handoff file, never on its argv (the supervisor stub
+/// records its parent's command line): a secret param's value sits on no
+/// process's argv for the life of the run, and the run still has it.
+#[cfg(target_os = "linux")]
+#[test]
+fn params_are_not_on_the_child_argv() {
+    let dir = seeded();
+    let vdir = dir.path().join(".apb/playbooks/svnoagent/1.0.0");
+    let with_param = SUPERVISED_NOAGENT.replace(
+        "supervisor:\n",
+        "params:\n  - { name: message, type: text, secret: true }\nsupervisor:\n",
+    );
+    fs::write(vdir.join("playbook.yaml"), with_param).unwrap();
+    let parent_argv = dir.path().join("parent_argv.txt");
+    let stub = dir.path().join("agent_stub.sh");
+    fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\ntr '\\0' ' ' < /proc/$PPID/cmdline >> '{}'\necho >> '{}'\nexit 0\n",
+            parent_argv.display(),
+            parent_argv.display()
+        ),
+    )
+    .unwrap();
+    set_executable(&stub);
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let value = "violet hedgehog";
+    let out = playbook()
+        .args(["run", "svnoagent", "--supervise", "--param"])
+        .arg(format!("message={value}"))
+        .current_dir(dir.path())
+        .env("APB_AGENT_CMD", &stub)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{stdout} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run_id = extract_run_id(&stdout, &dir.path().join(".apb/runs"));
+    let argv = poll_until("the supervisor's parent argv", || {
+        let t = fs::read_to_string(&parent_argv).ok()?;
+        t.contains("__drive-supervised").then_some(t)
+    });
+    assert!(
+        !argv.contains(value),
+        "the value is on the child argv: {argv}"
+    );
+    assert!(!argv.split_whitespace().any(|t| t == "--param"), "{argv}");
+    let cfg = apb_engine::run_config::read_run_config(&dir.path().join(".apb/runs").join(&run_id))
+        .unwrap();
+    assert_eq!(cfg.params.get("message").map(String::as_str), Some(value));
+}
+
 /// A keyed `--supervise` start hands its key to the `__drive-supervised`
 /// child in the handoff file, never on its argv (the supervisor stub
 /// records its parent's command line), and a repeat answers the run.

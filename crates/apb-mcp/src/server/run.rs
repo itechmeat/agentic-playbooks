@@ -1335,6 +1335,11 @@ impl WfMcp {
         {
             return to_call_tool_result(Ok(refusal));
         }
+        // A run whose definition renders a secret param is refused before
+        // any consent is recorded or cleared.
+        if let Err(e) = apb_engine::scheduler::resume_secret_preflight(&root, &run_id) {
+            return to_call_tool_result(Err(ToolError::from(e)));
+        }
         // 0.24.0 irreversible consent: a run with no valid consent recorded
         // (one an older apb started) asks once; the consent is then written
         // into its manifest.

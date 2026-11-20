@@ -501,12 +501,16 @@ pub fn capture(root: &Path, run_dir: &Path, req: &CaptureRequest) -> Result<Capt
 
     // Params: a sensitive value with no default to re-derive it from can
     // never be replayed; one with a default is left out of the scenario
-    // params, warned.
+    // params, warned. A param counts as declared secret when the run holds
+    // it secret (its manifest or snapshot), not only when this definition
+    // still declares it.
+    let run_secret = crate::run_redact::secret_names(run_dir);
     for p in &playbook.params {
         let Some(value) = config.params.get(&p.name) else {
             continue;
         };
-        if apb_core::run_params::sensitive(p.secret, &p.name, value).is_some()
+        let declared = p.secret || run_secret.contains(&p.name);
+        if apb_core::run_params::sensitive(declared, &p.name, value).is_some()
             && p.default.is_none()
         {
             gaps.push(Gap {
@@ -989,15 +993,19 @@ impl Fold<'_> {
     fn build(&self, mut answers: BTreeMap<String, Vec<VisitAnswer>>) -> Scenario {
         let config = crate::run_config::read_run_config(self.run_dir).ok();
         let mut params = BTreeMap::new();
+        let run_secret = crate::run_redact::secret_names(self.run_dir);
         for (name, value) in config
             .as_ref()
             .map(|c| c.params.clone())
             .unwrap_or_default()
         {
             let declared = self.playbook.params.iter().find(|p| p.name == name);
+            let held = run_secret.contains(&name);
             let sensitive = declared
-                .map(|p| apb_core::run_params::sensitive(p.secret, &p.name, &value).is_some())
-                .unwrap_or_else(|| apb_core::run_params::sensitive(false, &name, &value).is_some());
+                .map(|p| {
+                    apb_core::run_params::sensitive(p.secret || held, &p.name, &value).is_some()
+                })
+                .unwrap_or_else(|| apb_core::run_params::sensitive(held, &name, &value).is_some());
             if sensitive {
                 self.warnings.borrow_mut().push(format!(
                     "param `{name}` was withheld: its value is sensitive; a replay takes its default or asks again"

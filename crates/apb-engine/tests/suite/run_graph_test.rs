@@ -930,6 +930,8 @@ fn a_presented_graph_is_redacted_before_it_is_clipped() {
         format!("params:\n  api_token: {secret}\n"),
     )
     .unwrap();
+    // A prepared run has its snapshot beside its config.
+    std::fs::write(run_dir.join("playbook.yaml"), "params: []\n").unwrap();
     let redactor = apb_engine::run_redact::RunRedactor::for_run(root.path(), &run_dir);
     let shown = g.present(&redactor).to_string();
     assert!(!shown.contains("s3cr3t"), "{shown}");

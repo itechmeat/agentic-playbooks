@@ -304,6 +304,11 @@ pub fn expedite_live(
     {
         return Ok(None);
     }
+    // A retry-now is a resume surface: a run whose definition renders a
+    // secret param, or whose secret set cannot be read, is refused before
+    // anything is journaled. (A run nothing drives is answered `None`
+    // above; its caller then resumes it, and the resume checks.)
+    crate::run_redact::snapshot_check(run_dir, run_id)?;
     expedite_run(run_dir, node, Some(by)).map(Some)
 }
 

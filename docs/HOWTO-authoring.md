@@ -68,30 +68,119 @@ A param that carries a credential (an API token, a password) is marked
 `secret: true`. apb never remembers its value for the next start (see
 "Remembered run input" below), the dashboard asks for it in a password field
 at every start and never prefills it, and a remembered value of a param that
-became secret is never used. Two validator errors keep a secret out of the
-definition itself:
+became secret is never used. Three validator errors keep a secret out of
+the definition itself and out of every text apb renders:
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
 | V99 | error | a `secret: true` param has a `default`: the secret would sit in the YAML |
 | V100 | error | a `secret: true` param is not `type: text` |
+| V340 | error | a string of the definition references a `secret: true` param (`{{params.<name>}}`, with or without spaces inside the braces), mapping keys included |
 
 ```yaml
 params:
   - { name: deploy_token, type: text, label: "Deploy token", secret: true }
 ```
 
-A secret param still reaches the run like any param (the run's
-configuration records the values it started with), so prefer a connector
-account or an environment variable for a credential the playbook uses on
-every run.
+**apb never renders a secret param.** V340 refuses every reference to a
+secret param in every string of the definition: a prompt, a sub-playbook's
+`instruction`, a judge state, a review field's default or `show` text, a
+`workdir`, `writes`, `cache.key`, `worktree` or publish `branch`, a
+connector argument or `complete_when` of a baseline or follow-up check, a
+list item check, a `previous_success.when_none` time, and a text apb
+shows as written (a review prompt, a label) too. `quality.task_type` and
+`concurrency.key` refuse it with their own codes (V104, V210). A
+definition that cannot be checked is refused with V340 as well. The rule
+holds at validate, at save, at every start (a version stored before this
+rule is refused before a run directory exists) and at resume: a run whose
+definition renders a secret param is refused `secret_param_rendered`
+by `apb resume`, MCP `run_resume`, the dashboard, a retry-now, the pause
+waker and `apb resume --all`. The refusal writes nothing as long as the
+run's snapshot and secret set stay as the check read them; a snapshot
+replaced between that check and the resume can let a consent be
+recorded before the engine's own check refuses the resume. Stop it and start it
+again from a version that reads the value in a script. Migration: a
+playbook that renders a secret param into a template
+(`{{params.<name>}}` where the param is `secret: true`) is now refused
+(V340) at validate, at save and at run start, and a run that does so is
+refused at resume (`secret_param_rendered`). Read the value in a script
+from `$APB_RUN_DIR/run.yaml`, give a connector the credential as an
+account secret, or drop `secret: true` if the value is not a secret.
 
-**What is delivered.** The executor gets the value: the agent's prompt, a
-script's environment, and a host task's prompt handed to the host that
-drives the run (`pending_tasks` of `run_status` and `run_wait`, `apb
-tasks`). The run's journal, `run.yaml`, node outputs and transcripts keep
-what the executor produced, because routing, conditions, resume and child
-runs read them.
+**What is delivered.** Nothing is rendered: a step that needs the value
+reads it from the run's `run.yaml` itself. A script node, a goal script and
+a baseline or follow-up script source get `APB_RUN_DIR` and run as you, and
+so does an agent step without a sandbox (`isolation: none`, or
+`best_effort` where no sandbox is built) and a host-mode subagent (the host
+started the run with the params). A sandboxed agent (`isolation: full`, or
+`best_effort` with a sandbox) cannot read it, and a `success_check` is not
+handed `APB_RUN_DIR`. A connector that needs a credential uses its account
+secrets (`{{account.*}}` in its manifest). A sub-playbook gets no params of
+its parent: apb renders nothing of them into the child, and the child's
+own secret param starts empty. (A value a step printed still reaches the
+child through a template that reads that step's output, such as the
+child's `instruction`.)
+
+**Who else can read it.** An unsandboxed step runs as you, so it can read
+the `run.yaml` of every run in the project that is not yet pruned, not
+only its own: a child can read its parent's, and any later run can read
+an earlier one's. `isolation: full` is what keeps a step away from other
+runs' files. Prune runs you no longer need (`apb runs prune`), and give a
+step that should not see other runs' values `isolation: full`.
+
+The file is a contract for steps:
+
+1. Path: `$APB_RUN_DIR/run.yaml`.
+2. Shape: one YAML document whose top-level `params` maps each param name
+   to the run's resolved value, a string: the value the start was given,
+   else a value the project remembered (never for a secret param), else
+   the param's `default` (a secret param has none). A param with none of
+   the three is absent. Every other key is apb's own.
+3. Quoting: values are quoted whenever YAML needs it (a value that reads
+   as a number, a boolean or null, holds `: ` or ` #`, starts with a
+   special character or spans lines), so parse the file as YAML and read
+   `params.<name>`; cutting lines with a text tool works only for a value
+   YAML leaves plain.
+4. Mode 0600, owned by you.
+5. Lifetime: written when the run is prepared, before its first node,
+   written again with the same params when a resume commits, kept until
+   the run directory is removed (`apb runs prune`).
+
+```sh
+#!/bin/sh
+# Reads the secret param `deploy_token` and uses it without printing it.
+# A plain-text read under the top-level `params:` key, for a value YAML
+# leaves plain (see item 3); a value YAML quotes needs a YAML parser.
+token=$(awk '/^params:/ { p = 1; next } /^[^ ]/ { p = 0 }
+  p && sub(/^  deploy_token: /, "") { print; exit }' "$APB_RUN_DIR/run.yaml")
+curl -fsS -H "Authorization: Bearer $token" https://deploy.example/api/release >/dev/null
+```
+
+For a value that may need quoting, read it with a YAML parser, for
+example `yq -r '.params.deploy_token' "$APB_RUN_DIR/run.yaml"` where
+`yq` is installed.
+
+**What is stored.** apb keeps the value only in `run.yaml` (0600), and
+no process apb starts carries it on its argv: a detached supervised
+drive gets the params in its private launch handoff (read once and
+deleted), an eval case run in its private settings file (removed as soon
+as the case run read it). A value you
+type on `apb run --param` is on that command's own argv while it runs.
+The start key file, remembered input, the manifest (which names the secret
+params, never their values), the estimate and the report page hold none.
+What a step prints or writes after it read the value itself (an agent
+that echoes it, a script that prints it, a file it writes under
+`$APB_RUN_DIR`) is the step's output: the run's journal, node outputs and
+transcripts keep what the executor produced, because routing, conditions,
+resume and child runs read them, and it is redacted on the way out as
+below.
+
+**Older binaries.** The rule is enforced by this apb and every later one.
+An older apb never had it, so an older binary that resumes or patches a
+run, one this apb started included, can render a secret param exactly as
+it could before. Mixing binaries on one run is outside the guarantee:
+every apb that drives a run with a secret param should be this release or
+newer.
 
 **What is redacted.** Everywhere else a run's data leaves apb, the run's
 sensitive values are replaced: every param value declared `secret: true`,
@@ -116,8 +205,8 @@ shown as `<redacted>`, but an output, an error or an event that echoes such
 a short value keeps it, so a start whose declared secret value is that
 short gets a warning (on the terminal for `apb run`, in `warnings` of the
 MCP and dashboard start answers); it is not refused. Use a longer value
-where the echo matters. A run, a `run.yaml` or a journal of the tree that
-cannot be read (a torn last journal line is read past, as everywhere) never
+where the echo matters. A run, a `run.yaml`, a journal, or a `manifest.yaml` or
+`playbook.yaml` that is there, of any run of the tree, that cannot be read (a torn last journal line is read past, as everywhere) never
 counts as holding no secret, and neither does a run whose own `run.yaml`
 is gone though it was prepared (it has a manifest, or its `run_started`
 names its definition): the run's surfaces then withhold its text as
@@ -156,11 +245,18 @@ of paths, e-mail addresses and connector secrets.
 
 **A run's secret set only grows.** The params declared secret when a run
 starts are recorded in its manifest (`secret_params`). A current-run patch
-that declares another param secret adds it; a patch that removes `secret:
-true` does not make the value visible again, for that run or its children.
-A run started by an apb without this record uses the declarations of its
-current snapshot, so a patch that removed a declaration from such a run
-before this release is not undone.
+that declares another param secret adds it, recorded once its new
+snapshot is written. A patch may not remove `secret: true` from a param
+the run holds secret, nor remove such a param while a string still
+references it (`secret_declaration_dropped`), and a patch, a forward patch
+or a waiting candidate is judged by every name the run (or `current`)
+holds secret, not only by its own declarations; a waiting candidate that
+renders a secret param or drops a declaration of `current` is skipped
+(`candidate_skipped: refused: secret_param_rendered`) and the start runs
+`current`. A run whose manifest or snapshot does not read is refused
+`secret_set_unreadable` where its secret set is needed (a patch, a forward
+patch, a resume). A run started by an apb without this record uses the
+declarations of its current snapshot.
 
 **Files.** A run directory is created readable by its owner only (0700),
 and the files that can hold an echoed value (`run.yaml`, `events.jsonl`,
@@ -473,8 +569,10 @@ The rules:
   `accept_untrusted`. An agent counts as unable to send outward only with
   `isolation: { level: full, network: none }`, no connector binding, and no
   declared `network`, `external` or `irreversible` effect.
-- **V180** (warning): the node also renders a secret param, binds a
-  connector, or declares the `secrets` effect, whether or not it accepts.
+- **V180** (warning): the node also binds a connector or declares the
+  `secrets` effect, whether or not it accepts. Rendering a secret param is
+  V340's (an error, so the untrusted rules do not run on such a
+  definition).
 - **V181** (error): `untrusted` on a node that is not `agent_task` or
   `script`; a param both `secret` and `untrusted`; `accept_untrusted` on
   another kind, or with a reason that is empty, whitespace only, or over
@@ -2086,7 +2184,7 @@ What else a routine should know:
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
-| V176 | error | a malformed `run.previous_success` reference, an unknown node in one, a read of the namespace in the run's `worktree` template, or a `when_none` value that is neither an RFC 3339 time nor a template over non-secret `params.*` |
+| V176 | error | a malformed `run.previous_success` reference, an unknown node in one, a read of the namespace in the run's `worktree` template, or a `when_none` value that is neither an RFC 3339 time nor a template over `params.*` (a secret one is V340's) |
 
 ### Context budget (how much recorded output a prompt gets)
 

@@ -55,8 +55,17 @@ pub fn declared_secret(playbook: &Playbook) -> Vec<String> {
 
 /// Records in the run's manifest every param any of `playbooks` declares
 /// secret, so a later snapshot that drops a declaration does not drop the
-/// classification (a current-run patch calls this before it writes the new
-/// snapshot).
+/// classification. A current-run patch calls this twice: with the running
+/// definition before it writes the new snapshot (names that snapshot
+/// already declares), and with the patched definition only after the new
+/// snapshot is written, so a refused or interrupted patch never leaves the
+/// manifest calling a param secret that the executing snapshot calls
+/// plain. Every reader takes the manifest and the snapshot together, so a
+/// name the new snapshot declares counts from the moment it is written;
+/// that is why the second call is best effort: when it fails the patch
+/// still goes through, the name counts through the snapshot, and only its
+/// memory after a later patch is lost (the next patch's first call writes
+/// it from this snapshot).
 pub(crate) fn keep_secret_declarations(
     run_dir: &Path,
     playbooks: &[&Playbook],
@@ -73,21 +82,61 @@ pub(crate) fn keep_secret_declarations(
 }
 
 /// The params a run counts as declared secret: its manifest's
-/// `secret_params` and its current snapshot's declarations.
+/// `secret_params` and its current snapshot's declarations, as far as they
+/// read (see [`secret_names_read`]).
 pub fn secret_names(run_dir: &Path) -> BTreeSet<String> {
-    let mut names: BTreeSet<String> = crate::manifest::read(run_dir)
-        .ok()
-        .flatten()
-        .map(|m| m.secret_params.into_iter().collect())
-        .unwrap_or_default();
-    names.extend(snapshot_declarations(run_dir));
-    names
+    secret_names_read(run_dir).0
 }
 
-/// The params the run's snapshot (`playbook.yaml`) declares secret. Only
-/// the `params` list is read, so a snapshot this binary would not load
-/// whole (an older schema, a newer field) still gives its declarations.
-fn snapshot_declarations(run_dir: &Path) -> Vec<String> {
+/// [`secret_names`] and whether both of its sources read: a manifest that
+/// is absent counts as read (it names nothing), and so does an absent
+/// snapshot of a run that was never prepared; one that is there and does
+/// not read, or does not parse, does not, and neither does an absent
+/// snapshot of a prepared run ([`was_prepared`]) whose `run.yaml` holds a
+/// param value (only the snapshot could tell which of them is secret; a
+/// run with no value has nothing to withhold). The run's surfaces
+/// withhold its text when it does not ([`RunRedactor`]).
+fn secret_names_read(run_dir: &Path) -> (BTreeSet<String>, bool) {
+    let mut complete = true;
+    let mut names = BTreeSet::new();
+    // The snapshot before the manifest, as in [`secret_names_strict`].
+    match std::fs::read_to_string(run_dir.join("playbook.yaml")) {
+        Ok(yaml) => match parse_declarations(&yaml) {
+            Ok(declared) => names.extend(declared),
+            Err(_) => complete = false,
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if was_prepared(run_dir) && holds_params(run_dir) {
+                complete = false;
+            }
+        }
+        Err(_) => complete = false,
+    }
+    match crate::manifest::read(run_dir) {
+        Ok(m) => names.extend(m.into_iter().flat_map(|m| m.secret_params)),
+        Err(_) => complete = false,
+    }
+    (names, complete)
+}
+
+/// Whether the run at `run_dir` was prepared, so its `playbook.yaml`
+/// snapshot was written: it has a `run.yaml` (preparation writes the
+/// snapshot, `snapshot_playbook` in `scheduler/prepare.rs`, before the
+/// run config, `write_run_config`, and every apb has written both), or
+/// [`config_expected`] says it was (a manifest, or a `run_started` that
+/// names its definition). Anything at the `run.yaml` path counts.
+/// Whether the run's `run.yaml` holds a param value; a config that does
+/// not read counts as holding one.
+fn holds_params(run_dir: &Path) -> bool {
+    crate::run_config::read_run_config(run_dir).map_or(true, |c| !c.params.is_empty())
+}
+
+fn was_prepared(run_dir: &Path) -> bool {
+    std::fs::symlink_metadata(run_dir.join("run.yaml")).is_ok() || config_expected(run_dir)
+}
+
+/// The names a snapshot's `params` list declares secret.
+fn parse_declarations(yaml: &str) -> Result<Vec<String>, String> {
     #[derive(serde::Deserialize)]
     struct Snapshot {
         #[serde(default)]
@@ -99,17 +148,220 @@ fn snapshot_declarations(run_dir: &Path) -> Vec<String> {
         #[serde(default)]
         secret: bool,
     }
-    std::fs::read_to_string(run_dir.join("playbook.yaml"))
-        .ok()
-        .and_then(|yaml| yaml_serde::from_str::<Snapshot>(&yaml).ok())
-        .map(|s| {
-            s.params
-                .into_iter()
-                .filter(|p| p.secret)
-                .map(|p| p.name)
-                .collect()
-        })
-        .unwrap_or_default()
+    let s = yaml_serde::from_str::<Snapshot>(yaml).map_err(|e| e.to_string())?;
+    Ok(s.params
+        .into_iter()
+        .filter(|p| p.secret)
+        .map(|p| p.name)
+        .collect())
+}
+
+/// The refusal of a run whose secret set cannot be read.
+pub const SECRET_SET_UNREADABLE: &str = "secret_set_unreadable";
+/// The refusal of a definition that renders a secret param.
+pub const SECRET_PARAM_RENDERED: &str = "secret_param_rendered";
+/// The refusal of a definition that drops a declaration the run holds.
+pub const SECRET_DECLARATION_DROPPED: &str = "secret_declaration_dropped";
+
+/// A refusal of the secret check: why a run, or a definition it may
+/// execute, is refused, without any value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretRefusal {
+    /// The run's secret set does not read (`secret_set_unreadable`): the
+    /// file and its cause, about the run itself.
+    Unreadable {
+        run_id: String,
+        file: &'static str,
+        cause: String,
+    },
+    /// The definition is refused (`secret_declaration_dropped` or
+    /// `secret_param_rendered`): `clause` is a predicate whose subject the
+    /// caller names ("the patched definition", "run `<id>`").
+    Definition { code: &'static str, clause: String },
+}
+
+impl SecretRefusal {
+    /// The refusal's code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            SecretRefusal::Unreadable { .. } => SECRET_SET_UNREADABLE,
+            SecretRefusal::Definition { code, .. } => code,
+        }
+    }
+
+    /// The refusal as one sentence without its code, a definition's
+    /// clause after `subject`.
+    pub fn sentence(&self, subject: &str) -> String {
+        match self {
+            SecretRefusal::Unreadable {
+                run_id,
+                file,
+                cause,
+            } => format!(
+                "run `{run_id}`: {file} does not read ({cause}); the run's secret params cannot be known, so this apb refuses rather than judge by part of them"
+            ),
+            SecretRefusal::Definition { clause, .. } => format!("{subject} {clause}"),
+        }
+    }
+
+    /// `<code>: <sentence>`, the form of an [`EngineError`] reason.
+    pub fn reason(&self, subject: &str) -> String {
+        format!("{}: {}", self.code(), self.sentence(subject))
+    }
+}
+
+/// The params a run counts as declared secret, read strictly: what
+/// [`secret_names`] gives, except that a manifest that exists and does not
+/// read, and a snapshot (`playbook.yaml`) that is missing, does not read or
+/// does not parse as its `params` list, refuse
+/// ([`SecretRefusal::Unreadable`]) instead of counting as no name. A run
+/// with no manifest (an older apb's) gives its snapshot's declarations.
+pub fn secret_names_strict(run_dir: &Path) -> Result<BTreeSet<String>, SecretRefusal> {
+    let run_id = run_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let unreadable = |file: &'static str, cause: String| SecretRefusal::Unreadable {
+        run_id: run_id.clone(),
+        file,
+        cause,
+    };
+    // The snapshot before the manifest: a patch records a name in the
+    // manifest before it writes a snapshot that drops the declaration, so a
+    // reader in between sees the name in one of the two.
+    let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml"))
+        .map_err(|e| unreadable("playbook.yaml", e.to_string()))?;
+    let declared = parse_declarations(&yaml)
+        .map_err(|_| unreadable("playbook.yaml", "its params list does not parse".into()))?;
+    let mut names: BTreeSet<String> = match crate::manifest::read(run_dir) {
+        Ok(Some(m)) => m.secret_params.into_iter().collect(),
+        Ok(None) => BTreeSet::new(),
+        Err(e) => return Err(unreadable("manifest.yaml", e.to_string())),
+    };
+    names.extend(declared);
+    Ok(names)
+}
+
+/// The one secret check of a definition a run executes or may execute:
+/// `candidate` is judged by the run's full secret set read strictly
+/// ([`secret_names_strict`]) plus what `running` (the definition the run
+/// executes now, when the caller holds it) declares. An in-run patch, a
+/// forward patch and both resume entries call it.
+pub fn run_secret_refusal(
+    run_dir: &Path,
+    running: Option<&Playbook>,
+    candidate: &Playbook,
+) -> Option<SecretRefusal> {
+    let mut run_secret = match secret_names_strict(run_dir) {
+        Ok(set) => set,
+        Err(refusal) => return Some(refusal),
+    };
+    if let Some(running) = running {
+        run_secret.extend(declared_secret(running));
+    }
+    secret_render_refusal(&run_secret, candidate)
+}
+
+/// [`run_secret_refusal`] over the run's full secret set, as the refusal of
+/// a resume, a retry-now or a detached driver: `secret_set_unreadable`
+/// about the run, or the definition's code with the advice to start again.
+pub(crate) fn run_check(
+    run_dir: &Path,
+    run_id: &str,
+    playbook: &Playbook,
+) -> Result<(), EngineError> {
+    match run_secret_refusal(run_dir, None, playbook) {
+        None => Ok(()),
+        Some(refusal @ SecretRefusal::Unreadable { .. }) => {
+            Err(EngineError::Conflict(refusal.reason("")))
+        }
+        Some(refusal) => Err(EngineError::Conflict(format!(
+            "{}. Stop the run and start it again from a version that reads the value in a script",
+            refusal.reason(&format!("run `{run_id}`"))
+        ))),
+    }
+}
+
+/// [`run_check`] of the run's stored snapshot, read-only: a snapshot that
+/// does not read or does not parse refuses `secret_set_unreadable`, naming
+/// the file but never the parser's text.
+pub(crate) fn snapshot_check(run_dir: &Path, run_id: &str) -> Result<(), EngineError> {
+    let unreadable = |cause: String| {
+        EngineError::Conflict(
+            SecretRefusal::Unreadable {
+                run_id: run_id.to_string(),
+                file: "playbook.yaml",
+                cause,
+            }
+            .reason(""),
+        )
+    };
+    let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml"))
+        .map_err(|e| unreadable(e.kind().to_string()))?;
+    let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)
+        .map_err(|_| unreadable("it does not parse as a playbook".to_string()))?;
+    run_check(run_dir, run_id, &playbook)
+}
+
+/// The secret check of `playbook` against `run_secret`, the names the run
+/// (or `current`) holds secret: the first refusal, `None` when it passes.
+///
+/// The definition is walked once. A walk that fails is
+/// `secret_param_rendered` at once (fail closed). Then every name of
+/// `run_secret` that `playbook` keeps as a plain param, or no longer has as
+/// a param while one of its strings still references it, is
+/// `secret_declaration_dropped`; then every reference to a name of
+/// `run_secret` or a name `playbook` declares secret is
+/// `secret_param_rendered`.
+pub fn secret_render_refusal(
+    run_secret: &BTreeSet<String>,
+    playbook: &Playbook,
+) -> Option<SecretRefusal> {
+    let hits = match apb_core::validate::secret_param_refs(playbook, run_secret) {
+        Ok(hits) => hits,
+        Err(e) => {
+            return Some(SecretRefusal::Definition {
+                code: SECRET_PARAM_RENDERED,
+                clause: format!("cannot be checked for secret param references: {e}"),
+            });
+        }
+    };
+    for name in run_secret {
+        let dropped = match playbook.params.iter().find(|p| &p.name == name) {
+            Some(p) if p.secret => None,
+            Some(_) => Some(format!(
+                "keeps param `{name}` plain, which is secret in this run; `secret: true` may not be removed from it"
+            )),
+            None => hits.iter().find(|h| &h.param == name).map(|hit| {
+                format!(
+                    "no longer declares param `{name}`, which is secret in this run, while {} still references it",
+                    located(hit)
+                )
+            }),
+        };
+        if let Some(clause) = dropped {
+            return Some(SecretRefusal::Definition {
+                code: SECRET_DECLARATION_DROPPED,
+                clause,
+            });
+        }
+    }
+    hits.first().map(|hit| SecretRefusal::Definition {
+        code: SECRET_PARAM_RENDERED,
+        clause: format!(
+            "renders secret param `{}` in {}; this apb never renders a secret param",
+            hit.param,
+            located(hit)
+        ),
+    })
+}
+
+/// Where a reference sits, for a sentence.
+fn located(hit: &apb_core::validate::SecretParamRef) -> String {
+    match &hit.node {
+        Some(node) => format!("`{}` of node `{node}`", hit.field),
+        None => format!("`{}`", hit.field),
+    }
 }
 
 /// The sensitive param values of the run's tree a decision request loses,
@@ -188,11 +440,11 @@ struct TreeSecrets {
 /// parent's node output, and from there a sibling's params or instruction,
 /// so every run of the tree hides the values of every other.
 fn tree_secrets(run_dir: &Path) -> TreeSecrets {
-    let own = secret_names(run_dir);
+    let (own, own_read) = secret_names_read(run_dir);
     let mut found = TreeSecrets {
         values: Vec::new(),
         own: own.clone(),
-        complete: true,
+        complete: own_read,
         own_config_error: None,
     };
     let mut seen = BTreeSet::new();
@@ -218,7 +470,9 @@ fn tree_secrets(run_dir: &Path) -> TreeSecrets {
         let names = if depth == 0 {
             own.clone()
         } else {
-            secret_names(&dir)
+            let (names, read) = secret_names_read(&dir);
+            found.complete &= read;
+            names
         };
         found.values.extend(sensitive_values(&cfg.params, &names));
         top = dir.clone();
@@ -350,9 +604,11 @@ fn descendants(top: &Path, found: &mut TreeSecrets) {
                     continue;
                 }
                 match named_config(&child_dir, true) {
-                    Ok(cfg) => found
-                        .values
-                        .extend(sensitive_values(&cfg.params, &secret_names(&child_dir))),
+                    Ok(cfg) => {
+                        let (names, read) = secret_names_read(&child_dir);
+                        found.complete &= read;
+                        found.values.extend(sensitive_values(&cfg.params, &names));
+                    }
                     Err(_) => found.complete = false,
                 }
                 next.push(child_dir);
@@ -1036,6 +1292,97 @@ mod tests {
                     Err(SecretsUnresolved)
                 );
             },
+        );
+    }
+
+    // --- the strict secret set (secret_names_strict) ---------------------
+
+    fn strict_run(snapshot: Option<&str>, manifest_names: Option<&[&str]>) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("r-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(s) = snapshot {
+            std::fs::write(dir.join("playbook.yaml"), s).unwrap();
+        }
+        if let Some(names) = manifest_names {
+            crate::manifest::add_secret_params(&dir, "r-1", names.iter().map(|n| n.to_string()))
+                .unwrap();
+        }
+        tmp
+    }
+
+    fn unreadable_names(dir: &Path, file: &str) {
+        match secret_names_strict(dir) {
+            Err(refusal) => {
+                let msg = refusal.reason("");
+                assert!(
+                    msg.starts_with("secret_set_unreadable: run `r-1`: "),
+                    "{msg}"
+                );
+                assert!(msg.contains(&format!("{file} does not read")), "{msg}");
+            }
+            other => panic!("expected secret_set_unreadable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_strict_set_is_the_manifest_and_the_snapshot_together() {
+        let tmp = strict_run(Some(SECRET_SNAPSHOT), Some(&["token"]));
+        let names = secret_names_strict(&tmp.path().join("r-1")).unwrap();
+        assert_eq!(names, ["message".to_string(), "token".to_string()].into());
+    }
+
+    #[test]
+    fn a_run_without_a_manifest_gives_its_snapshots_declarations() {
+        let tmp = strict_run(Some(SECRET_SNAPSHOT), None);
+        let dir = tmp.path().join("r-1");
+        assert!(crate::manifest::read(&dir).unwrap().is_none());
+        assert_eq!(
+            secret_names_strict(&dir).unwrap(),
+            ["message".to_string()].into()
+        );
+        let tmp = strict_run(Some(PLAIN_SNAPSHOT), None);
+        assert!(
+            secret_names_strict(&tmp.path().join("r-1"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_manifest_that_does_not_read_refuses() {
+        let tmp = strict_run(Some(SECRET_SNAPSHOT), Some(&["token"]));
+        let dir = tmp.path().join("r-1");
+        std::fs::write(dir.join("manifest.yaml"), "secret_params: [unclosed\n").unwrap();
+        unreadable_names(&dir, "manifest.yaml");
+    }
+
+    #[test]
+    fn a_snapshot_that_is_missing_unreadable_or_unparsable_refuses() {
+        // Missing.
+        let tmp = strict_run(None, Some(&["token"]));
+        unreadable_names(&tmp.path().join("r-1"), "playbook.yaml");
+        // A directory where the file was: a read error.
+        let tmp = strict_run(None, Some(&["token"]));
+        let dir = tmp.path().join("r-1");
+        std::fs::create_dir_all(dir.join("playbook.yaml")).unwrap();
+        unreadable_names(&dir, "playbook.yaml");
+        // Bytes that do not parse as a params list.
+        let tmp = strict_run(Some("params: {not: [a list\n"), Some(&["token"]));
+        unreadable_names(&tmp.path().join("r-1"), "playbook.yaml");
+        // A wrong-typed scalar: the refusal never repeats the parser's text.
+        let tmp = strict_run(
+            Some("params:\n  - { name: x, secret: amber-lantern-17 }\n"),
+            Some(&["token"]),
+        );
+        let dir = tmp.path().join("r-1");
+        unreadable_names(&dir, "playbook.yaml");
+        let msg = secret_names_strict(&dir).unwrap_err().reason("");
+        assert!(!msg.contains("amber-lantern-17"), "{msg}");
+        // The lenient reader keeps its form for the surfaces that only read.
+        assert_eq!(
+            secret_names(&tmp.path().join("r-1")),
+            ["token".to_string()].into()
         );
     }
 }

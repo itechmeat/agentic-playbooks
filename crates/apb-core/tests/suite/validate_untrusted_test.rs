@@ -144,16 +144,3 @@ fn an_empty_acceptance_reason_accepts_nothing() {
     assert!(got.iter().any(|(c, _, _)| c == "V179"), "{got:?}");
     assert!(got.iter().any(|(c, _, _)| c == "V181"), "{got:?}");
 }
-
-#[test]
-fn a_secret_read_by_a_writes_template_is_v180() {
-    let got = issues(
-        "  - { id: w, type: agent_task, prompt: \"x {{params.body}}\", accept_untrusted: \"labels only\", writes: \"{{params.spath}}\" }\n",
-        "params:\n  - { name: body, type: text, untrusted: true }\n  - { name: spath, type: text, secret: true }\n",
-    );
-    assert!(
-        got.iter()
-            .any(|(c, _, m)| c == "V180" && m.contains("secret param spath")),
-        "{got:?}"
-    );
-}

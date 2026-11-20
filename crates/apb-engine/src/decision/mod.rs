@@ -1913,6 +1913,8 @@ mod tests {
             })
             .unwrap();
         std::fs::write(child.join("run.yaml"), "params: [unclosed\n").unwrap();
+        // A prepared run has its snapshot beside its config.
+        std::fs::write(child.join("playbook.yaml"), "params: []\n").unwrap();
         let runner = enforce_runner(cfg.path(), &parent);
         let v = runner.outbound_value(json!({ "m": "said orchard-candle", "n": 2 }));
         assert_eq!(v, json!({ "m": crate::run_redact::WITHHELD, "n": 2 }));

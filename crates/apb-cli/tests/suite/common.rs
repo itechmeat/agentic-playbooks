@@ -397,3 +397,58 @@ pub fn flock_held(path: &std::path::Path) -> bool {
         })
     })
 }
+
+/// One `tools/call` over a fresh `apb mcp` stdio session in `root`: the
+/// whole JSON-RPC answer.
+pub fn mcp_call(root: &Path, tool: &str, args: serde_json::Value) -> serde_json::Value {
+    use std::io::{BufRead, BufReader, Write};
+    let mut child = apb_std()
+        .arg("mcp")
+        .current_dir(root)
+        .env_remove("CI")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<serde_json::Value>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
+                && tx.send(v).is_err()
+            {
+                break;
+            }
+        }
+    });
+    let answer = |id: u64| loop {
+        let v = rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the MCP server did not answer");
+        if v["id"] == serde_json::json!(id) {
+            break v;
+        }
+    };
+    let init = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2024-11-05", "capabilities": {},
+        "clientInfo": { "name": "t", "version": "0" } }});
+    writeln!(stdin, "{init}").unwrap();
+    answer(1);
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+    )
+    .unwrap();
+    let call = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": tool, "arguments": args }});
+    writeln!(stdin, "{call}").unwrap();
+    stdin.flush().unwrap();
+    let out = answer(2);
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    out
+}

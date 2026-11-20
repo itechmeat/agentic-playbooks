@@ -495,6 +495,31 @@ pub(crate) fn resume_detached_held(
     resume_detached_inner(root, run_id, &req, Some(hold))
 }
 
+/// The secret check of a resume, read-only (nothing written, no journal
+/// opened, no lock taken): the run's definition must render no secret param
+/// and keep every declaration the run holds secret. Every resume surface
+/// that records a consent first calls it before that step; both resume
+/// entries run the same check on the definition they parsed.
+pub fn resume_secret_preflight(root: &Path, run_id: &str) -> Result<(), EngineError> {
+    if !apb_core::registry::is_safe_segment(run_id) {
+        return Err(EngineError::NotFound(format!("run `{run_id}`")));
+    }
+    let run_dir = root.join(".apb/runs").join(run_id);
+    if !run_dir.is_dir() {
+        return Err(EngineError::NotFound(format!("run `{run_id}`")));
+    }
+    crate::run_redact::snapshot_check(&run_dir, run_id)
+}
+
+/// [`crate::run_redact::run_check`], as a resume's refusal.
+pub(crate) fn secret_check(
+    run_dir: &Path,
+    run_id: &str,
+    playbook: &Playbook,
+) -> Result<(), EngineError> {
+    crate::run_redact::run_check(run_dir, run_id, playbook)
+}
+
 fn resume_detached_inner(
     root: &Path,
     run_id: &str,
@@ -540,6 +565,9 @@ fn resume_detached_inner(
     // after this call reported the resume started (issue #200).
     let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml"))?;
     let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)?;
+    // A definition that renders a secret param is refused here, before the
+    // spawn, on the value the driver will parse again.
+    secret_check(&run_dir, run_id, &playbook)?;
     if let Some(tree) = resume_lock_tree(&playbook, &run_dir)? {
         crate::workdir::check_free_for(root, tree.as_deref(), run_id)?;
     }
@@ -715,6 +743,14 @@ pub fn resume_req(
     run_id: &str,
     req: &ResumeRequest<'_>,
 ) -> Result<RunResult, EngineError> {
+    // The secret check before the consent check: both read only, and a run
+    // whose secret set cannot be read is refused by its own code.
+    if apb_core::registry::is_safe_segment(run_id) {
+        let run_dir = root.join(".apb/runs").join(run_id);
+        if run_dir.is_dir() {
+            crate::run_redact::snapshot_check(&run_dir, run_id)?;
+        }
+    }
     require_resume_consent(root, run_id)?;
     crate::budget::check_resume(root, run_id, req.budget, req.by)?;
     resume_inner_checked(root, run_id, req, false, None)
@@ -1118,13 +1154,16 @@ fn resume_inner_checked(
     // A legacy snapshot needs its ephemeral manifest built once; the Playbook
     // itself is parsed by the shared read-only snapshot parser either way (it
     // tolerates the schema-1 executors resume once relied on inline).
+    // It is parsed first: a definition that renders a secret param is
+    // refused before anything is written, the ephemeral manifest included.
+    let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)?;
+    secret_check(&run_dir, run_id, &playbook)?;
     if crate::legacy_snapshot::has_legacy_executors(&yaml)
         && crate::manifest::read(&run_dir)?.is_none()
     {
         let m = crate::legacy_snapshot::build_ephemeral_manifest(&run_dir, &yaml)?;
         crate::manifest::write(&run_dir, &m)?;
     }
-    let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)?;
     // Opening the log refuses a journal with an unknown event (one a newer
     // apb wrote) that no checkpoint settles; one that is settled is skipped,
     // and said so once.

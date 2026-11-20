@@ -113,6 +113,16 @@ pub fn create(
     let lock = apb_core::candidate::lock(&playbook_dir)?;
     check_base(&playbook_dir, &base_version)?;
     check_patch_budget(root, &run_dir, &events, &id, run_id)?;
+    // A param the run holds secret stays secret in the candidate, and the
+    // candidate renders none: rechecked here, under the candidate lock and
+    // right before the write, on the run's set read now (an in-run patch
+    // may have declared a name since the YAML was made).
+    if let Some(refusal) = crate::run_redact::run_secret_refusal(&run_dir, Some(&base), &patched) {
+        return Err(refused(
+            refusal.code(),
+            refusal.sentence("the patched definition"),
+        ));
+    }
     let CreatedCandidate { version, replaced } = create_forward_patch(
         root,
         &id,

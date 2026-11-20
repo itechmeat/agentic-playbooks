@@ -1,7 +1,7 @@
 //! The `run.previous_success` namespace: V176 refuses a malformed
 //! reference, an unknown node, a worktree read, and a `when_none` value
-//! that is neither an RFC 3339 time nor a template over `params.*` only,
-//! and a `when_none` template that reads a short secret param (its rendered
+//! that is neither an RFC 3339 time nor a template over `params.*` only;
+//! a `when_none` template that reads a secret param is V340's (its rendered
 //! time would be journaled). A read of the namespace is a guarded
 //! feature.
 
@@ -117,11 +117,19 @@ fn a_when_none_template_reading_a_node_is_v176() {
 }
 
 #[test]
-fn a_when_none_template_reading_a_secret_param_is_v176() {
+fn a_when_none_template_reading_a_secret_param_is_v340_not_v176() {
     let extra = "params:\n  - { name: token, type: text, secret: true }\nprevious_success:\n  when_none:\n    started_at: \"{{params.token}}\"\n";
-    let got = issues("", extra);
-    assert_eq!(got.len(), 1, "{got:?}");
-    assert!(got[0].contains("reads secret param `token`"), "{got:?}");
+    assert!(issues("", extra).is_empty(), "{:?}", issues("", extra));
+    let yaml = format!(
+        "schema: 2\nid: p\nname: P\nversion: 1.0.0\n{extra}nodes:\n  - {{ id: start, type: start }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: done }}\n"
+    );
+    let p = Playbook::from_yaml(&yaml).unwrap();
+    let codes: Vec<&str> = validate(&p, &ValidationContext::default())
+        .issues
+        .iter()
+        .map(|i| i.code)
+        .collect();
+    assert_eq!(codes, vec!["V340"], "{yaml}");
 }
 
 #[test]

@@ -107,12 +107,9 @@ fn when_none_rule(playbook: &Playbook, r: &mut ValidationReport) {
                 None,
                 format!("previous_success.when_none.{field} reads `{{{{{cap}}}}}`; only params.* may be read there"),
             );
-        } else if let Some(name) = secret {
-            r.error(
-                "V176",
-                None,
-                format!("previous_success.when_none.{field} reads secret param `{name}`; its value would be written to the journal"),
-            );
+        } else if secret.is_some() {
+            // A secret param here is V340's, reported whatever else the
+            // definition gets wrong.
         } else if crate::template::refs(value).is_empty() {
             r.error(
                 "V176",

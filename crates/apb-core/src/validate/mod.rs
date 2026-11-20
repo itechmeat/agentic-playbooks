@@ -77,6 +77,7 @@ use nodes::{
     check_goal, check_interactive, check_playbook_ref, check_scripts, check_success_check,
     check_trigger,
 };
+pub use params::{SecretParamRef, SecretWalkError, secret_param_refs};
 pub use publish::{OpenAgent, publish_only_violations};
 pub use results::snapshotted_nodes;
 use templates::{check_cross_branch_reads, check_refs, check_templates};
@@ -435,7 +436,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     decisions::check_undeclared_shipping(playbook, &mut r); // V90
     list::check_lists(playbook, ctx, &mut r); // V85-V89, V93-V95
     budget::check_budget(playbook, &mut r); // V96-V98
-    params::check_params(playbook, &mut r); // V99, V100, V177, V178
+    params::check_params(playbook, &mut r); // V99, V100, V177, V178, V340
     quality::check_quality(playbook, &mut r); // V102-V107
     known_problems::check_known_problems(playbook, &mut r); // V108-V111
     publish::check_publish(playbook, &mut r); // V116-V120, V140

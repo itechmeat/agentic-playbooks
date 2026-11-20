@@ -1234,6 +1234,11 @@ pub(crate) async fn post_resume_handler(
         Ok(g) => g,
         Err(refusal) => return (StatusCode::CONFLICT, Json(refusal)).into_response(),
     };
+    // A run whose definition renders a secret param is refused before any
+    // consent is recorded or cleared.
+    if let Err(e) = apb_engine::scheduler::resume_secret_preflight(&root, &id) {
+        return resume_error(e);
+    }
     let deprecation = match apb_engine::gate::check_resume_consent(
         &root,
         &id,
