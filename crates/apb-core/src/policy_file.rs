@@ -11,6 +11,7 @@
 //! notify:
 //!   finished: [failed, aborted]          # the outcomes a `finished` notice covers
 //!   playbooks: [deploy, global:triage]   # the playbooks a default subscription covers
+//!   remind: [1h, 4h, 24h]                # one reminder after each, of active run time
 //! launch:
 //!   agent: ask                           # every playbook, for an agent
 //!   playbooks:                           # machine: exact `<workspace id>/<id>` or `global/<id>`
@@ -226,6 +227,10 @@ pub struct NotifyPolicy {
     /// The playbooks a default subscription covers: `<id>` for a project
     /// playbook, `global:<id>` for a global one.
     pub playbooks: Option<Vec<String>>,
+    /// One reminder for an open review, question or host task after each
+    /// duration, of active run time (`1h`, `4h`). Absent: no reminders;
+    /// an empty list is the same. A project file may only set `[]`.
+    pub remind: Option<Vec<String>>,
 }
 
 /// The playbook a run starts, as a `playbooks` filter names it.
@@ -255,7 +260,7 @@ impl<'a> PlaybookKey<'a> {
 }
 
 impl NotifyPolicy {
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self, source: PolicySource) -> Result<(), String> {
         if self.finished.as_ref().is_some_and(Vec::is_empty) {
             return Err(
                 "notify.finished names no outcome; remove `finished` from policy.yaml (to stop end-of-run notices, leave `finished` out of `notify.on` in config.yaml)"
@@ -273,6 +278,45 @@ impl NotifyPolicy {
                         "notify.playbooks: `{entry}` is not a playbook id or `global:<id>`"
                     ));
                 }
+            }
+        }
+        if let Some(list) = &self.remind {
+            // A project file may only turn reminders off: its non-empty
+            // list is refused before the entries are read.
+            if source == PolicySource::Project && !list.is_empty() {
+                return Err(
+                    "notify.remind: a project may only turn reminders off (remind: [])".into(),
+                );
+            }
+            if list.len() > 5 {
+                return Err(format!(
+                    "notify.remind has {} entries; use at most 5",
+                    list.len()
+                ));
+            }
+            const MIN_MS: u64 = 10 * 60 * 1000;
+            const MAX_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+            let mut previous: Option<u64> = None;
+            for entry in list {
+                let Some(secs) = crate::duration::parse_duration_str(entry) else {
+                    return Err(format!("notify.remind: `{entry}` is not a duration"));
+                };
+                let ms = secs.saturating_mul(1000);
+                if ms < MIN_MS {
+                    return Err(format!("notify.remind: `{entry}` is shorter than 10m"));
+                }
+                if ms > MAX_MS {
+                    return Err(format!("notify.remind: `{entry}` is longer than 7d"));
+                }
+                if let Some(prev) = previous
+                    && ms <= prev
+                {
+                    let before = crate::duration::format_duration_ms(prev);
+                    return Err(format!(
+                        "notify.remind: `{entry}` does not come after `{before}`"
+                    ));
+                }
+                previous = Some(ms);
             }
         }
         Ok(())
@@ -461,6 +505,32 @@ impl Policies {
             .filter(|o| project.contains(o))
             .collect()
     }
+
+    /// The reminder cadence in force: the machine's list in milliseconds,
+    /// empty when the project file says `remind: []` or the machine sets
+    /// none.
+    pub fn remind_ms(&self) -> Vec<u64> {
+        if self
+            .project
+            .notify
+            .remind
+            .as_ref()
+            .is_some_and(Vec::is_empty)
+        {
+            return Vec::new();
+        }
+        self.machine
+            .notify
+            .remind
+            .as_ref()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|v| crate::duration::parse_duration_str(v))
+                    .map(|secs| secs.saturating_mul(1000))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 /// One file at `path`: absent or empty is the default; anything present
@@ -490,7 +560,7 @@ pub fn parse_as(raw: &str, source: PolicySource) -> Result<PolicyFile, String> {
         yaml_serde::Value::Mapping(_) => yaml_serde::from_value(doc).map_err(|e| e.to_string())?,
         _ => return Err("the top level must be a mapping".into()),
     };
-    file.notify.validate()?;
+    file.notify.validate(source)?;
     file.launch.validate(source)?;
     file.runs.validate()?;
     file.health.validate()?;

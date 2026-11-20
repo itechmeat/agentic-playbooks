@@ -76,6 +76,16 @@ pub(crate) fn early_resume_note(root: &Path, run_id: &str) -> Option<String> {
     let p = view.pause()?;
     let until = p.until?;
     (!p.pausing && until > apb_core::clock::now_ms_u64()).then(|| {
+        // A park: resuming early only parks the run again, at the same
+        // wake time.
+        if p.cause == Some(apb_engine::pause::PauseCause::Wait)
+            && let Some(node) = apb_engine::pause::cause::parse_wait_reason(&p.reason)
+        {
+            return format!(
+                "the wait on timer `{node}` is due at {}; the run waits again until then",
+                apb_core::dismiss::iso_utc(until)
+            );
+        }
         format!(
             "resuming early: the pause was set until {}",
             apb_core::dismiss::iso_utc(until)
@@ -93,4 +103,51 @@ pub(crate) fn marker(p: &PauseInfo) -> String {
 /// The pause block of `apb runs <id>` and `apb wait`.
 pub(crate) fn print_block(p: &PauseInfo) {
     say!("  {}", marker(p));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A park's early-resume note says the run waits again until the wake
+    /// time, not that the pause was set until then.
+    #[test]
+    fn a_park_resumed_early_says_it_waits_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join(".apb/runs/w-r");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: pause, type: wait, wait_for: { type: timer, seconds: 60 }, timeout_seconds: 120 }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: pause }\n  - { from: pause, to: f }\n",
+        )
+        .unwrap();
+        let until = apb_core::clock::now_ms_u64() + 3_600_000;
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            format!(
+                "{{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}}\n{{\"seq\":1,\"ts\":1,\"type\":\"run_paused\",\"reason\":\"wait (pause)\",\"by\":\"engine\",\"mode\":\"drain\",\"until\":{until},\"keep_lock\":true}}\n"
+            ),
+        )
+        .unwrap();
+        let note = early_resume_note(dir.path(), "w-r").unwrap();
+        assert!(
+            note.starts_with("the wait on timer `pause` is due at ")
+                && note.ends_with("; the run waits again until then"),
+            "{note}"
+        );
+
+        // A person's pause keeps the plain wording.
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            format!(
+                "{{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}}\n{{\"seq\":1,\"ts\":1,\"type\":\"run_paused\",\"reason\":\"looking\",\"by\":\"operator\",\"mode\":\"drain\",\"until\":{until},\"keep_lock\":true}}\n"
+            ),
+        )
+        .unwrap();
+        let note = early_resume_note(dir.path(), "w-r").unwrap();
+        assert!(
+            note.starts_with("resuming early: the pause was set until "),
+            "{note}"
+        );
+    }
 }

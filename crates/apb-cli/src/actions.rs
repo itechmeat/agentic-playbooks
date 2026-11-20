@@ -527,6 +527,7 @@ mod tests {
         let notified = TransitionId {
             kind: Transition::Review,
             seq: 9,
+            reminder: 0,
         };
         let line = command_for(&open, "r-1", &notified, None).unwrap().line();
         assert_eq!(parse(line), ("r-1".into(), "gate".into(), Some(9), None));
@@ -535,6 +536,7 @@ mod tests {
         let late = TransitionId {
             kind: Transition::Review,
             seq: 5,
+            reminder: 0,
         };
         assert!(command_for(&open, "r-1", &late, None).is_none());
         // Another run's action never answers this run's notice.
@@ -562,6 +564,7 @@ mod tests {
             &TransitionId {
                 kind: Transition::Review,
                 seq: 4,
+                reminder: 0,
             },
             None,
         )
@@ -581,6 +584,7 @@ mod tests {
         let wake = TransitionId {
             kind: Transition::Supervisor,
             seq: 3,
+            reminder: 0,
         };
         assert!(command_for(&[retry], "r-1", &wake, None).is_none());
     }

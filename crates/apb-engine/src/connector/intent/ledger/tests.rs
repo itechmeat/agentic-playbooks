@@ -87,6 +87,7 @@ impl Journal {
                 deadline_ms,
                 replay_of: replay_of.map(str::to_string),
                 resend_of: resend_of.map(str::to_string),
+                target_digest: None,
             },
         )
     }

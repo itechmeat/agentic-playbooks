@@ -921,6 +921,14 @@ run, needs no supervisor token, and is not offered to a supervisor agent
   (`90m`, `2h`). A small detached waker resumes the run then. A reboot kills the
   waker; `apb resume --all` resumes runs whose `until` has passed (see
   `docs/DEPLOYMENT.md` for a boot unit).
+- **The wait park.** A timer wait in a run that may release, with more than a
+  minute of the timer left and nothing else to run, pauses the run on its own:
+  the pause reads `paused` with cause `wait` and the line "waiting on timer
+  `<node>` until <T>"; no driver and no agent run, and the small pause waker
+  resumes the run when the timer is due (`apb resume --all` after a reboot). A
+  resume before `until` parks the run again for the time left. A pause or a
+  stop of such a run works as on any paused run, also one sent while the run
+  is about to wait on its timer.
 - **`keep_lock`.** The working-tree lock is released while paused so another
   run can use the tree; `keep_lock` holds it for the paused run (`apb doctor`
   lists it, `apb stop` of the run releases it).
@@ -932,7 +940,7 @@ run, needs no supervisor token, and is not offered to a supervisor agent
   timeouts, the eval deadline, `expected_duration` comparisons and the run and
   node durations in `apb stats`, `run_report` and the retro leave the paused
   time out. A playbook can read `{{run.active_elapsed_seconds}}` for its own
-  budget.
+  budget. A wait park is not paused time: the wait's timer keeps running.
 
 `run_status`, `run_wait` and `runs_list` (and `apb runs`, the dashboard) carry
 the pause as a `pause` object: `reason`, `by` (`operator`, `supervisor` or

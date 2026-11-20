@@ -52,6 +52,9 @@ pub(super) struct Report {
     pub(super) previous_success: Option<crate::run_view::PreviousSuccessView>,
     /// The deadline line (`45m, 12m left (ends ...)`); absent without one.
     pub(super) deadline: Option<String>,
+    /// The pause line of a paused run (`PauseInfo::line`); absent on an
+    /// ended or driving run.
+    pub(super) pause: Option<String>,
     /// The concurrency line (`key "<display>" (queue_latest)`); absent
     /// without a slot.
     pub(super) concurrency: Option<String>,
@@ -129,6 +132,12 @@ impl Report {
         let untrusted = crate::run_view::untrusted_nodes(&view.events);
         let deadline = crate::run_view::deadline(&view.events, u128::from(now))
             .map(|d| crate::run_view::deadline_line(&d));
+        // A paused run shows its pause (a park as the wait it is); an ended
+        // or driving run shows none.
+        let pause = view
+            .pause()
+            .filter(|_| status == crate::state::RunStatus::Paused)
+            .map(crate::pause::PauseInfo::line);
         let concurrency = {
             let scope = view
                 .events
@@ -168,6 +177,7 @@ impl Report {
             link: crate::people::link::run_link(root, &run_id),
             previous_success,
             deadline,
+            pause,
             concurrency,
             start_key,
             started_by,

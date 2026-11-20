@@ -74,6 +74,8 @@ pub struct IntentRecord {
     pub settled_by: Option<String>,
     /// A later intent that replays or resends this one.
     pub superseded_by: Option<String>,
+    /// For a notification, the digest of the target it went to.
+    pub target_digest: Option<String>,
 }
 
 /// Every intent of a run, in journal order.
@@ -135,6 +137,7 @@ impl Ledger {
             deadline_ms,
             replay_of,
             resend_of,
+            target_digest,
         } = &event.payload
         else {
             return;
@@ -192,6 +195,7 @@ impl Ledger {
             },
             settled_by: None,
             superseded_by: None,
+            target_digest: target_digest.clone(),
         });
     }
 

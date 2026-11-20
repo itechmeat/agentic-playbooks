@@ -274,6 +274,7 @@ mod tests {
                 deadline_ms: 0,
                 replay_of: replay_of.map(str::to_string),
                 resend_of: None,
+                target_digest: None,
             },
         }
     }

@@ -120,6 +120,7 @@ pub fn admit(
             attempt_seq: None,
             timeout_sec,
             now_ms,
+            target_digest: None,
         };
         match intent::admitted(&draft, &admission) {
             Some(new) => {

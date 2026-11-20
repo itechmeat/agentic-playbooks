@@ -334,6 +334,7 @@ fn seed_old_unknown_intent(run: &Run, function: &str, label: &str, mode: &str) {
                 deadline_ms: 0,
                 replay_of: None,
                 resend_of: None,
+                target_digest: None,
             },
         },
         apb_engine::event::Event {
@@ -1195,6 +1196,7 @@ fn a_person_may_not_decide_a_send_in_flight_but_may_once_its_sender_is_gone() {
             deadline_ms: u64::MAX,
             replay_of: None,
             resend_of: None,
+            target_digest: None,
         });
     }
     let dir = run.run.path();

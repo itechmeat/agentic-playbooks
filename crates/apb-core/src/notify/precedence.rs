@@ -76,6 +76,9 @@ pub struct Effective {
     pub on: Vec<Transition>,
     /// The outcomes a `finished` notice is sent for.
     pub finished: Vec<FinishOutcome>,
+    /// The reminder cadence in force (active run milliseconds), from the
+    /// machine's `policy.yaml`; empty when reminders are off.
+    pub remind_ms: Vec<u64>,
     pub source: NotifySource,
 }
 
@@ -147,6 +150,7 @@ pub fn effective(
             )
         }
     };
+    let remind_ms = policies.remind_ms();
     let finished = FinishOutcome::normalized(&finished);
     // Filters that leave no outcome leave no `finished` notice either.
     let on: Vec<Transition> = Transition::normalized(&on)
@@ -157,6 +161,7 @@ pub fn effective(
         target,
         on,
         finished,
+        remind_ms,
         source,
     })
 }

@@ -25,6 +25,27 @@ pub struct NotifyTargetRecord {
 }
 
 impl NotifyTargetRecord {
+    /// The digest of the whole target: connector, account, function,
+    /// recipient and both pinned digests. A notification's intent carries
+    /// it, so a reminder is matched to the exact target its notice reached.
+    pub fn digest(&self) -> String {
+        let fields = [
+            self.connector.as_str(),
+            self.account.as_str(),
+            self.function.as_str(),
+            self.to.as_str(),
+            self.connector_digest.as_str(),
+            self.account_digest.as_str(),
+        ];
+        // Each field framed by its length, so no two targets share bytes.
+        let mut bytes = Vec::new();
+        for f in fields {
+            bytes.extend_from_slice(&(f.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(f.as_bytes());
+        }
+        format!("nt1:{}", apb_core::content::sha256_hex(&bytes))
+    }
+
     /// The target without its digests, as a person names it.
     pub fn target(&self) -> apb_core::notify::NotifyTarget {
         apb_core::notify::NotifyTarget {

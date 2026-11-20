@@ -20,6 +20,33 @@ pub(crate) enum ControlScan {
     Terminal(RunStatus),
 }
 
+/// The discard of a park (design D6 rule 4): the cursor moves past it, in
+/// memory and persisted, and nothing is journaled for it. The drive goes on
+/// with the next entry.
+fn discard_park(
+    run_dir: &Path,
+    control_cursor: &mut Option<u64>,
+    entry: &crate::control::ControlEntry,
+) -> Result<(), EngineError> {
+    *control_cursor = Some(entry.seq);
+    write_control_cursor(run_dir, entry.seq)
+}
+
+/// The `(timer seconds, timeout seconds)` of the node's open timer wait, for
+/// the due time the scan computes again (design D6 rule 3.1). `None` when
+/// the node is not a timer wait.
+fn wait_timer_of(playbook: &Playbook, node: &str) -> Option<(u64, u64)> {
+    let node = playbook.node(node)?;
+    match &node.kind {
+        apb_core::schema::NodeKind::Wait {
+            wait_for: apb_core::schema::WaitFor::Timer { seconds },
+            timeout_seconds,
+            ..
+        } => Some((*seconds, *timeout_seconds)),
+        _ => None,
+    }
+}
+
 /// Applies every control entry queued after `control_cursor` that can be
 /// applied at a node boundary. `playbook`, `current` and `control_cursor` are
 /// updated in place, mirroring what the loop itself would have done.
@@ -63,8 +90,27 @@ pub(crate) fn scan_control(
     // below the loop.
     let mut blocked_by: Option<String> = None;
     let pending_control = read_control_after(run_dir, *control_cursor)?;
-    for entry in pending_control.iter().cloned() {
-        match entry.cmd {
+    // Whether an entry of this pass was consumed already: a park is a
+    // candidate only as the last entry of a pass that applied nothing
+    // before it (design D6 rule 2.2).
+    let mut consumed = false;
+    // The cursor value an exit that consumed entry `idx` writes: the seq of
+    // a park that is the entry right after it, discarded in the same write
+    // (design D6 rule 5), else the entry's own. Never below the consumed
+    // entry: a stop posted without the numbering lock can stand above a
+    // park appended after it, and the cursor must not leave it pending.
+    let cursor_after = |idx: usize| -> u64 {
+        let own = pending_control[idx].seq;
+        match pending_control.get(idx + 1) {
+            Some(next) => match &next.cmd {
+                Control::Pause(req) if req.is_park() => next.seq.max(own),
+                _ => own,
+            },
+            None => own,
+        }
+    };
+    for (idx, entry) in pending_control.iter().enumerate() {
+        match entry.cmd.clone() {
             Control::Abort { reason, by, .. } => {
                 // Effect first, cursor persisted last: if `log.append` errs
                 // (ordinary I/O failure), the entry must NOT be marked
@@ -75,13 +121,69 @@ pub(crate) fn scan_control(
                 // completion-plan defect 1 - a stale stop command re-firing
                 // on resume).
                 log.append(EventPayload::RunAborted { reason, by })?;
-                write_control_cursor(run_dir, entry.seq)?;
+                let target = cursor_after(idx);
+                write_control_cursor(run_dir, target)?;
+                *control_cursor = Some(target);
                 return Ok(ControlScan::Terminal(RunStatus::Aborted));
             }
             Control::Pause(req) => {
+                // A park is decided here only as the last word: the last
+                // entry of the pass, nothing consumed before it, at the
+                // node the drive is at (design D6 rule 2), then re-decided
+                // under the run's event lock (rule 3). Any other park is
+                // discarded (rule 4).
+                if req.is_park() {
+                    let candidate = idx + 1 == pending_control.len()
+                        && !consumed
+                        && crate::pause::cause::parse_wait_reason(
+                            req.reason.as_deref().unwrap_or(""),
+                        ) == Some(current.as_str());
+                    if !candidate {
+                        discard_park(run_dir, control_cursor, entry)?;
+                        continue;
+                    }
+                    // A lock that cannot be taken within its bounded wait
+                    // discards the park (rule 4); it never ends the drive.
+                    let Ok(lock) = apb_core::fsutil::lock_dir(run_dir, crate::stop::EVENT_LOCK)
+                    else {
+                        discard_park(run_dir, control_cursor, entry)?;
+                        continue;
+                    };
+                    // Nothing may sit behind the park when it is applied.
+                    if !read_control_after(run_dir, Some(entry.seq))?.is_empty() {
+                        drop(lock);
+                        discard_park(run_dir, control_cursor, entry)?;
+                        continue;
+                    }
+                    // The wait's due time, computed again on the current
+                    // clock (rule 3.1): a pause journaled directly since the
+                    // park was posted moved it; a past or stale park never
+                    // equals it.
+                    let due_again =
+                        wait_timer_of(playbook, current).and_then(|(seconds, timeout)| {
+                            let events = read_all(run_dir).ok()?;
+                            let now = apb_core::clock::now_ms();
+                            crate::scheduler::wait_park::due_at_ms(
+                                &events, current, seconds, timeout, now,
+                            )
+                        });
+                    if due_again != req.until {
+                        drop(lock);
+                        discard_park(run_dir, control_cursor, entry)?;
+                        continue;
+                    }
+                    // Same ordering and reasoning as Abort above.
+                    log.append(req.to_event())?;
+                    *control_cursor = Some(entry.seq);
+                    write_control_cursor(run_dir, entry.seq)?;
+                    drop(lock);
+                    return Ok(ControlScan::Terminal(RunStatus::Paused));
+                }
                 // Same ordering and reasoning as Abort above.
                 log.append(req.to_event())?;
-                write_control_cursor(run_dir, entry.seq)?;
+                let target = cursor_after(idx);
+                write_control_cursor(run_dir, target)?;
+                *control_cursor = Some(target);
                 return Ok(ControlScan::Terminal(RunStatus::Paused));
             }
             Control::ContextAppend { note } => {
@@ -93,6 +195,7 @@ pub(crate) fn scan_control(
                 rebuild_context_md(run_dir)?;
                 *control_cursor = Some(entry.seq);
                 write_control_cursor(run_dir, entry.seq)?;
+                consumed = true;
             }
             Control::Patch {
                 version,
@@ -118,8 +221,10 @@ pub(crate) fn scan_control(
                         continue_from,
                     },
                 )?;
-                *control_cursor = Some(entry.seq);
-                write_control_cursor(run_dir, entry.seq)?;
+                let target = cursor_after(idx);
+                *control_cursor = Some(target);
+                write_control_cursor(run_dir, target)?;
+                consumed = true;
                 match result {
                     PatchResult::Applied(applied) => {
                         *last_applied_patch = Some(*applied);
@@ -146,6 +251,7 @@ pub(crate) fn scan_control(
                 })?;
                 *control_cursor = Some(entry.seq);
                 write_control_cursor(run_dir, entry.seq)?;
+                consumed = true;
             }
             Control::Interrupt { .. } => {
                 // A mid-attempt interrupt (finding 7 of issue #42, third
@@ -157,6 +263,7 @@ pub(crate) fn scan_control(
                 // posted with no attempt running is a harmless no-op.
                 *control_cursor = Some(entry.seq);
                 write_control_cursor(run_dir, entry.seq)?;
+                consumed = true;
             }
             Control::Rebind {
                 node,
@@ -184,6 +291,7 @@ pub(crate) fn scan_control(
                 )?;
                 *control_cursor = Some(entry.seq);
                 write_control_cursor(run_dir, entry.seq)?;
+                consumed = true;
             }
             Control::Retry { ref node, .. } | Control::ContinueFrom { ref node } => {
                 // Valid only inside await_control, in response to a wake -
@@ -229,25 +337,31 @@ pub(crate) fn scan_control(
     // seq: the next iteration re-reads control and this arm fires with the
     // real entry in hand.
     if let Some(blocked_node) = blocked_by.as_ref() {
-        let salvage = pending_control.iter().find_map(|e| match &e.cmd {
-            Control::Abort { reason, by, .. } => Some((
-                e.seq,
-                RunStatus::Aborted,
-                reason.clone(),
-                EventPayload::RunAborted {
-                    reason: reason.clone(),
-                    by: *by,
-                },
-            )),
-            Control::Pause(req) => Some((
-                e.seq,
-                RunStatus::Paused,
-                req.journal_reason(),
-                req.to_event(),
-            )),
-            _ => None,
+        let salvage = pending_control.iter().enumerate().find_map(|(idx, e)| {
+            match &e.cmd {
+                Control::Abort { reason, by, .. } => Some((
+                    idx,
+                    e.seq,
+                    RunStatus::Aborted,
+                    reason.clone(),
+                    EventPayload::RunAborted {
+                        reason: reason.clone(),
+                        by: *by,
+                    },
+                )),
+                // A park is never salvaged: it is discarded by the cursor
+                // move, the way the Retry behind it is.
+                Control::Pause(req) if !req.is_park() => Some((
+                    idx,
+                    e.seq,
+                    RunStatus::Paused,
+                    req.journal_reason(),
+                    req.to_event(),
+                )),
+                _ => None,
+            }
         });
-        if let Some((terminal_seq, status, reason, terminal)) = salvage
+        if let Some((idx, _terminal_seq, status, reason, terminal)) = salvage
             && (status != RunStatus::Aborted || run_cancel.load(Ordering::SeqCst))
         {
             log.append(EventPayload::SupervisorAction {
@@ -258,7 +372,9 @@ pub(crate) fn scan_control(
                 ),
             })?;
             log.append(terminal)?;
-            write_control_cursor(run_dir, terminal_seq)?;
+            let target = cursor_after(idx);
+            write_control_cursor(run_dir, target)?;
+            *control_cursor = Some(target);
             return Ok(ControlScan::Terminal(status));
         }
     }
@@ -269,4 +385,149 @@ pub(crate) fn scan_control(
         return Ok(ControlScan::Migrated);
     }
     Ok(ControlScan::Proceed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PLAYBOOK: &str = r#"
+schema: 1
+id: w
+name: W
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: pause, type: wait, wait_for: { type: timer, seconds: 30 }, timeout_seconds: 3600 }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: pause }
+  - { from: pause, to: done }
+"#;
+
+    /// A run event lock that cannot be taken within its bounded wait
+    /// discards the park (design D6 rule 4): the scan moves the cursor
+    /// past it, journals nothing and goes on; it never ends the drive.
+    #[test]
+    fn a_park_whose_event_lock_is_busy_is_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run_dir = root.join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let mut log = EventLog::create(&run_dir).unwrap();
+        log.append(EventPayload::WaitStarted {
+            node: "pause".into(),
+            kind: "timer".into(),
+        })
+        .unwrap();
+        let events = read_all(&run_dir).unwrap();
+        let due = crate::scheduler::wait_park::due_at_ms(
+            &events,
+            "pause",
+            30,
+            3600,
+            apb_core::clock::now_ms(),
+        )
+        .unwrap();
+        let n = crate::control::post_control(
+            &run_dir,
+            Control::Pause(crate::pause::PauseRequest {
+                reason: Some(crate::pause::cause::wait_reason("pause")),
+                by: Some(crate::pause::PauseBy::Engine),
+                mode: crate::pause::PauseMode::Drain,
+                until: Some(due),
+                keep_lock: false,
+            }),
+        )
+        .unwrap();
+        // A live holder of the run's event lock.
+        let _held = apb_core::fsutil::lock_dir(&run_dir, crate::stop::EVENT_LOCK).unwrap();
+        let mut playbook = Playbook::from_yaml(PLAYBOOK).unwrap();
+        let mut current = "pause".to_string();
+        let mut cursor = None;
+        let mut last = None;
+        let scan = scan_control(
+            root,
+            &run_dir,
+            &mut log,
+            &RunConfig::default(),
+            &mut playbook,
+            &mut current,
+            &mut cursor,
+            &mut last,
+            &AtomicBool::new(false),
+        )
+        .expect("a busy lock never ends the drive");
+        assert!(matches!(scan, ControlScan::Proceed));
+        assert_eq!(cursor, Some(n), "the cursor moved past the park");
+        assert_eq!(read_control_cursor(&run_dir).unwrap(), Some(n));
+        assert_eq!(
+            read_all(&run_dir).unwrap().len(),
+            events.len(),
+            "nothing journaled"
+        );
+    }
+
+    /// A stop numbered above a park appended after it (the stop posted
+    /// without the numbering lock): consuming the stop discards the park in
+    /// the same write, and the cursor stands at the stop, never below it,
+    /// so a later drive never applies the stop again.
+    #[test]
+    fn a_stop_numbered_above_a_later_park_is_not_left_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run_dir = root.join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let mut log = EventLog::create(&run_dir).unwrap();
+        let entries = [
+            crate::control::ControlEntry {
+                seq: 2,
+                cmd: Control::Abort {
+                    reason: "stop".into(),
+                    by: None,
+                    graceful: false,
+                },
+            },
+            crate::control::ControlEntry {
+                seq: 1,
+                cmd: Control::Pause(crate::pause::PauseRequest {
+                    reason: Some(crate::pause::cause::wait_reason("pause")),
+                    by: Some(crate::pause::PauseBy::Engine),
+                    mode: crate::pause::PauseMode::Drain,
+                    until: Some(u64::MAX),
+                    keep_lock: false,
+                }),
+            },
+        ];
+        let lines: String = entries
+            .iter()
+            .map(|e| serde_json::to_string(e).unwrap() + "\n")
+            .collect();
+        std::fs::write(run_dir.join("control.jsonl"), lines).unwrap();
+        let mut playbook = Playbook::from_yaml(PLAYBOOK).unwrap();
+        let mut current = "pause".to_string();
+        let mut cursor = None;
+        let mut last = None;
+        let scan = scan_control(
+            root,
+            &run_dir,
+            &mut log,
+            &RunConfig::default(),
+            &mut playbook,
+            &mut current,
+            &mut cursor,
+            &mut last,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(matches!(scan, ControlScan::Terminal(RunStatus::Aborted)));
+        assert_eq!(cursor, Some(2), "the cursor stands at the stop");
+        assert_eq!(read_control_cursor(&run_dir).unwrap(), Some(2));
+        assert!(
+            crate::control::read_control_after(&run_dir, cursor)
+                .unwrap()
+                .is_empty(),
+            "nothing left pending"
+        );
+    }
 }

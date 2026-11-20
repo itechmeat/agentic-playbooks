@@ -34,6 +34,24 @@ describe('pause words', () => {
     expect(pauseLine(p)).toContain('pausing (r, ')
   })
 
+  it('names a timer wait', () => {
+    const park: PauseInfo = {
+      reason: 'wait (pause)',
+      by: 'engine',
+      mode: 'drain',
+      since: Date.UTC(2026, 9, 15, 20, 0, 0),
+      until: Date.UTC(2026, 9, 15, 22, 0, 0),
+      cause: 'wait',
+    }
+    expect(pauseLine(park)).toBe(
+      'waiting on timer `pause` until 2026-10-15T22:00:00Z; a waker resumes the run then, lock kept'.replace(
+        ', lock kept',
+        '',
+      ),
+    )
+    expect(pauseCauseLabel(park)).toBe('on a timer wait')
+  })
+
   it('clips a long reason in the list marker', () => {
     const long = { ...paused, reason: 'x'.repeat(100) }
     expect(pauseMarker(long).length).toBeLessThan(60)

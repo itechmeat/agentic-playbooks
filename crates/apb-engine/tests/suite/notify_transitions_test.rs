@@ -34,6 +34,7 @@ fn subscribed(seq: u64, on: &[&str]) -> Event {
             source: "run".into(),
             by: None,
             problem: None,
+            remind_ms: Vec::new(),
         },
     )
 }
@@ -126,6 +127,7 @@ fn tried(seq: u64, id: &str, label: &str, mode: &str, settled: Option<(&str, &st
             deadline_ms: 0,
             replay_of: None,
             resend_of: None,
+            target_digest: None,
         },
     )];
     if let Some((outcome, source)) = settled {
@@ -241,6 +243,7 @@ fn only_news_and_only_the_kinds_subscribed_to() {
             source: "person".into(),
             by: Some(PauseBy::Operator),
             problem: None,
+            remind_ms: Vec::new(),
         },
     ));
     assert!(ids(&off).is_empty());
@@ -647,6 +650,7 @@ fn a_notice_names_who_is_expected_and_never_a_prompt_or_a_wake_detail() {
         &TransitionId {
             kind: Transition::HostTask,
             seq: 2,
+            reminder: 0,
         },
         &[],
     );
@@ -664,6 +668,7 @@ fn a_notice_names_who_is_expected_and_never_a_prompt_or_a_wake_detail() {
         &TransitionId {
             kind: Transition::Supervisor,
             seq: 3,
+            reminder: 0,
         },
         &[],
     );
@@ -758,6 +763,7 @@ fn a_stalled_attempt_opens_an_opt_in_stalled_transition() {
         &apb_engine::notify::transitions::TransitionId {
             kind: apb_core::notify::Transition::Stalled,
             seq: 2,
+            reminder: 0,
         },
         &[],
     );

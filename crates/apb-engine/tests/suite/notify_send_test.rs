@@ -553,6 +553,7 @@ fn a_notice_says_what_waits_and_how_to_answer_but_never_what_was_asked() {
         &TransitionId {
             kind: Transition::Question,
             seq: 1,
+            reminder: 0,
         },
         &actions,
     );
@@ -579,6 +580,7 @@ fn a_notice_says_what_waits_and_how_to_answer_but_never_what_was_asked() {
         &TransitionId {
             kind: Transition::Review,
             seq: 2,
+            reminder: 0,
         },
         &actions,
     );
@@ -834,6 +836,7 @@ fn a_review_title_reaches_a_notice_as_plain_text() {
         &TransitionId {
             kind: Transition::Review,
             seq: 1,
+            reminder: 0,
         },
     );
     assert!(
@@ -1664,6 +1667,7 @@ fn a_follow_up_notice_names_the_verdict_and_its_results() {
         &TransitionId {
             kind: Transition::FollowUp,
             seq: 3,
+            reminder: 0,
         },
         &[],
     );
@@ -1707,6 +1711,7 @@ fn a_follow_up_notice_names_the_verdict_and_its_results() {
         &TransitionId {
             kind: Transition::FollowUp,
             seq: 3,
+            reminder: 0,
         },
         &[],
     );

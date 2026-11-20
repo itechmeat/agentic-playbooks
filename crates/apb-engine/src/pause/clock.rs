@@ -1,7 +1,8 @@
 //! The pause clock's fold and the park in force (routine operations):
 //! the paused intervals of a run cut into segments by the owner of each
 //! instant, the deadline clock over them, and which pause or release holds
-//! a run. A leaf of the pause module, so the run deadline reads it without
+//! a run. A wait park is the engine's own way to wait and is not paused
+//! time. A leaf of the pause module, so the run deadline reads it without
 //! depending on the pause module's waker and resume paths.
 
 use crate::event::{Event, EventPayload};
@@ -31,8 +32,18 @@ pub(super) fn closes_pause(p: &EventPayload) -> bool {
 struct PausedInterval {
     start: u128,
     end: u128,
-    /// `(start, end, by)` in order, covering `[start, end)` exactly.
-    segments: Vec<(u128, u128, Option<PauseBy>)>,
+    /// In order, covering `[start, end)` exactly.
+    segments: Vec<Segment>,
+}
+
+/// One segment of a paused interval: `[start, end)` owned by `by`, a park
+/// when the engine paused the run on a timer wait (a park is the engine's
+/// own way to wait, not paused time).
+struct Segment {
+    start: u128,
+    end: u128,
+    by: Option<PauseBy>,
+    park: bool,
 }
 
 /// The one fold of a run's pauses both public clocks read: the paused
@@ -43,7 +54,7 @@ fn paused_fold(events: &[Event], now_ms: u128) -> Vec<PausedInterval> {
     let mut open: Option<PausedInterval> = None;
     let close_last = |iv: &mut PausedInterval, at: u128| {
         if let Some(last) = iv.segments.last_mut() {
-            last.1 = at.max(last.0);
+            last.end = at.max(last.start);
         }
         iv.end = at.max(iv.start);
     };
@@ -51,18 +62,23 @@ fn paused_fold(events: &[Event], now_ms: u128) -> Vec<PausedInterval> {
         if is_legacy_resume_marker(&e.payload) {
             continue;
         }
-        if let EventPayload::RunPaused { by, .. } = &e.payload {
+        if let EventPayload::RunPaused { by, reason, .. } = &e.payload {
+            let segment = |start: u128| Segment {
+                start,
+                end: start,
+                by: *by,
+                park: super::cause::is_park_event(reason, *by),
+            };
             match open.as_mut() {
                 Some(iv) => {
                     close_last(iv, e.ts);
-                    iv.segments
-                        .push((e.ts.max(iv.start), e.ts.max(iv.start), *by));
+                    iv.segments.push(segment(e.ts.max(iv.start)));
                 }
                 None => {
                     open = Some(PausedInterval {
                         start: e.ts,
                         end: e.ts,
-                        segments: vec![(e.ts, e.ts, *by)],
+                        segments: vec![segment(e.ts)],
                     });
                 }
             }
@@ -81,13 +97,30 @@ fn paused_fold(events: &[Event], now_ms: u128) -> Vec<PausedInterval> {
 }
 
 /// The paused intervals of a run, `[start, end)` in epoch milliseconds, in
-/// journal order. An interval still open at the end of the journal runs to
-/// `now_ms`.
+/// journal order: the spans of every interval's segments that are not a
+/// park, merged where adjacent, so a park followed by a person's pause is
+/// one interval from the person's `run_paused` on. An interval still open
+/// at the end of the journal runs to `now_ms`.
 pub fn paused_intervals(events: &[Event], now_ms: u128) -> Vec<(u128, u128)> {
-    paused_fold(events, now_ms)
-        .into_iter()
-        .map(|iv| (iv.start, iv.end))
-        .collect()
+    let mut out = Vec::new();
+    for iv in paused_fold(events, now_ms) {
+        let mut cur: Option<(u128, u128)> = None;
+        for seg in iv.segments.iter().filter(|s| !s.park) {
+            match cur {
+                Some((cs, ce)) if seg.start <= ce => cur = Some((cs, ce.max(seg.end))),
+                _ => {
+                    if let Some(span) = cur.take() {
+                        out.push(span);
+                    }
+                    cur = Some((seg.start, seg.end.max(seg.start)));
+                }
+            }
+        }
+        if let Some(span) = cur.take() {
+            out.push(span);
+        }
+    }
+    out
 }
 
 /// The deadline clock of a run: wall time since `run_started`, minus the
@@ -123,8 +156,8 @@ pub fn deadline_elapsed_ms(events: &[Event], now_ms: u128) -> u128 {
     let mut spans: Vec<(u128, u128)> = paused_fold(events, now)
         .into_iter()
         .flat_map(|iv| iv.segments)
-        .filter(|(_, _, by)| *by == Some(PauseBy::Operator))
-        .map(|(s, e, _)| (s, e))
+        .filter(|seg| seg.by == Some(PauseBy::Operator))
+        .map(|seg| (seg.start, seg.end))
         .chain(ended_intervals(events))
         .map(|(s, e)| (s.max(start), e.min(now)))
         .filter(|(s, e)| e > s)
@@ -266,4 +299,134 @@ pub fn remaining_ms(events: &[Event], now_ms: u128) -> Option<u64> {
 /// Whether a deadline is in force and nothing is left.
 pub fn expired(events: &[Event], now_ms: u128) -> bool {
     remaining_ms(events, now_ms) == Some(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::kind::PauseMode;
+    use super::*;
+    use crate::event::EventPayload;
+
+    /// An event list of `run_started` plus the given payloads, each with
+    /// its own epoch-millisecond time, starting at 0.
+    fn events(pairs: &[(u128, EventPayload)]) -> Vec<Event> {
+        let mut out = vec![Event {
+            seq: 0,
+            ts: 0,
+            payload: EventPayload::RunStarted {
+                playbook: "p".into(),
+                version: "1.0.0".into(),
+                definition: None,
+                external_data: false,
+            },
+        }];
+        for (i, (ts, payload)) in pairs.iter().enumerate() {
+            out.push(Event {
+                seq: (i + 1) as u64,
+                ts: *ts,
+                payload: payload.clone(),
+            });
+        }
+        out
+    }
+
+    fn paused(reason: &str, by: PauseBy, until: Option<u64>) -> EventPayload {
+        EventPayload::RunPaused {
+            reason: reason.into(),
+            by: Some(by),
+            mode: Some(PauseMode::Drain),
+            until,
+            keep_lock: false,
+        }
+    }
+
+    fn resumed_by(by: PauseBy) -> EventPayload {
+        EventPayload::RunResumed {
+            from_node: "n".into(),
+            by: Some(by),
+            explicit: false,
+            launch: None,
+            definition: None,
+            apb: None,
+            deadline: None,
+        }
+    }
+
+    #[test]
+    fn a_park_is_not_paused_time() {
+        // An engine pause with a wait reason from 100 to 600: the park is
+        // active time, so no paused interval holds.
+        let park = events(&[
+            (100, paused("wait (a, b (c))", PauseBy::Engine, None)),
+            (600, resumed_by(PauseBy::Engine)),
+            (
+                1000,
+                EventPayload::RunFinished {
+                    outcome: "success".into(),
+                },
+            ),
+        ]);
+        assert!(paused_intervals(&park, 1000).is_empty());
+        assert_eq!(super::super::active_elapsed_ms(&park, 0, 1000, 1000), 1000);
+        // The same shape with a quota reason stays paused time.
+        let quota = events(&[
+            (100, paused("quota (a/m)", PauseBy::Engine, None)),
+            (600, resumed_by(PauseBy::Engine)),
+            (
+                1000,
+                EventPayload::RunFinished {
+                    outcome: "success".into(),
+                },
+            ),
+        ]);
+        assert_eq!(paused_intervals(&quota, 1000), vec![(100, 600)]);
+    }
+
+    #[test]
+    fn a_person_pause_over_a_park_counts_from_its_ts() {
+        // A park at 100, a person's run_paused at 300 (no resume between),
+        // a resume at 700: the interval starts at the person's ts.
+        let evs = events(&[
+            (100, paused("wait (n)", PauseBy::Engine, None)),
+            (300, paused("looking", PauseBy::Operator, None)),
+            (700, resumed_by(PauseBy::Operator)),
+            (
+                1000,
+                EventPayload::RunFinished {
+                    outcome: "success".into(),
+                },
+            ),
+        ]);
+        assert_eq!(paused_intervals(&evs, 1000), vec![(300, 700)]);
+    }
+
+    #[test]
+    fn a_park_counts_toward_the_deadline() {
+        // The run started at 0 and was parked 100 to 600 (engine, wait
+        // reason): at 1000 the deadline clock holds all but nothing of the
+        // park; a quota pause of the same shape would hold 500 ms less.
+        let park = events(&[
+            (100, paused("wait (n)", PauseBy::Engine, None)),
+            (600, resumed_by(PauseBy::Engine)),
+            (
+                1000,
+                EventPayload::RunFinished {
+                    outcome: "success".into(),
+                },
+            ),
+        ]);
+        assert_eq!(deadline_elapsed_ms(&park, 1000), 1000);
+        // An operator pause of the same shape is subtracted.
+        let operator = events(&[
+            (100, paused("looking", PauseBy::Operator, None)),
+            (600, resumed_by(PauseBy::Operator)),
+            (
+                1000,
+                EventPayload::RunFinished {
+                    outcome: "success".into(),
+                },
+            ),
+        ]);
+        assert_eq!(deadline_elapsed_ms(&operator, 1000), 500);
+    }
 }

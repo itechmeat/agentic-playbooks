@@ -115,10 +115,14 @@ fn outcome(run: &Observation, a: &NextAction) -> Option<UnattendedOutcome> {
                 })?;
             Some(UnattendedOutcome::Proceeds { auto })
         }
-        // A quota pause resumes at its `until` as in an attended run; an
-        // operator's pause and a dead driver are no wait of the run.
-        ActionCode::ResumeRun => (run.view.pause().and_then(|p| p.cause)
-            == Some(PauseCause::Quota))
+        // A quota pause or a park resumes at its `until` as in an attended
+        // run (a park is the engine's own way to wait; the field describes
+        // the wait, since an unattended run never parks); an operator's
+        // pause and a dead driver are no wait of the run.
+        ActionCode::ResumeRun => (matches!(
+            run.view.pause().and_then(|p| p.cause),
+            Some(PauseCause::Quota) | Some(PauseCause::Wait)
+        ))
         .then_some(UnattendedOutcome::Proceeds {
             auto: AutoOutcome::ResumeAttempt,
         }),

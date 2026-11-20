@@ -417,6 +417,88 @@ fn the_report_shows_the_deadline_line_when_recorded() {
     assert!(!render(dir2.path(), &d2).unwrap().contains("deadline: "));
 }
 
+/// The header's pause line: a paused run shows its pause, a parked run the
+/// wait line; an ended run shows none.
+#[test]
+fn the_report_shows_a_pause_line() {
+    let paused_journal = |reason: &str, by: &str, until: u128| {
+        format!(
+            r#"{{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}}
+{{"seq":1,"ts":2,"type":"node_started","node":"done","attempt":1}}
+{{"seq":2,"ts":3,"type":"run_paused","reason":{reason_json},"by":"{by}","mode":"drain","until":{until},"keep_lock":true}}"#,
+            reason_json = serde_json::to_string(reason).unwrap()
+        )
+    };
+
+    // A person's pause: the pause line, as the pause line() renders it.
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().join(".apb/runs/p-1");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("playbook.yaml"), SNAPSHOT).unwrap();
+    std::fs::write(
+        d.join("events.jsonl"),
+        paused_journal("looking", "operator", 3_000_000),
+    )
+    .unwrap();
+    let html = render(dir.path(), &d).unwrap();
+    assert!(
+        html.contains("pause: paused (looking, by operator"),
+        "{html}"
+    );
+
+    // A parked run: the waiting-on-timer line.
+    let dir2 = tempfile::tempdir().unwrap();
+    let d2 = dir2.path().join(".apb/runs/p-1");
+    std::fs::create_dir_all(&d2).unwrap();
+    std::fs::write(d2.join("playbook.yaml"), SNAPSHOT).unwrap();
+    std::fs::write(
+        d2.join("events.jsonl"),
+        paused_journal("wait (pause)", "engine", 1_000_000_000),
+    )
+    .unwrap();
+    let html = render(dir2.path(), &d2).unwrap();
+    assert!(
+        html.contains("pause: waiting on timer `pause` until "),
+        "{html}"
+    );
+
+    // An ended run: no pause line.
+    let dir3 = tempfile::tempdir().unwrap();
+    let d3 = run_dir(dir3.path(), true, "done", 0);
+    assert!(!render(dir3.path(), &d3).unwrap().contains("pause: "));
+}
+
+/// A pause reason that quotes a secret of the run reaches the page only
+/// redacted, like every other text of the report.
+#[test]
+fn the_pause_line_is_redacted() {
+    let _lock = crate::common::env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let _cfg_var = crate::common::EnvVar::set("APB_CONFIG_DIR", cfg.path());
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".apb")).unwrap();
+    const SECRET: &str = "pausesecret-value";
+    with_known_secret(cfg.path(), tmp.path(), SECRET);
+    let d = tmp.path().join(".apb/runs/p-1");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("playbook.yaml"), SNAPSHOT).unwrap();
+    std::fs::write(
+        d.join("events.jsonl"),
+        format!(
+            r#"{{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}}
+{{"seq":1,"ts":2,"type":"node_started","node":"done","attempt":1}}
+{{"seq":2,"ts":3,"type":"run_paused","reason":"saw {SECRET} here","by":"operator","mode":"drain","keep_lock":false}}"#
+        ),
+    )
+    .unwrap();
+    let html = render(tmp.path(), &d).unwrap();
+    assert!(
+        html.contains("pause: paused (saw [redacted] here"),
+        "{html}"
+    );
+    assert!(!html.contains(SECRET), "the secret must not reach the page");
+}
+
 /// The untrusted-input section: present when the run recorded followers,
 /// absent otherwise.
 #[test]

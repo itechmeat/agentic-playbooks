@@ -180,7 +180,7 @@ pub(crate) fn hold_for_supervisor(
         node: None,
         detail,
     })?;
-    super::journal::post_engine_pause(run_dir, pause)
+    super::journal::post_engine_pause(run_dir, pause).map(|_| ())
 }
 
 /// Spawns the supervisor and acts on a billing hold; a spawn that fails

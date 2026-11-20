@@ -23,11 +23,36 @@ export function when(ms: number | undefined): string | null {
 }
 
 // Why the engine paused the run, as a label next to the pause word: its
-// budget or a provider quota; null for any other pause.
+// budget, a provider quota, or the timer wait it waits out; null for any
+// other pause.
 export function pauseCauseLabel(pause: PauseInfo | null | undefined): string | null {
   if (pause?.cause === 'budget') return 'by its budget'
   if (pause?.cause === 'quota') return 'by a provider quota'
+  if (pause?.cause === 'wait') return 'on a timer wait'
   return null
+}
+
+// The node of a park's reason `wait (<node>)`: the prefix `wait (`, the
+// final `)`, the node verbatim between (the one form the engine writes).
+function waitNode(reason: string): string | null {
+  if (!reason.startsWith('wait (') || !reason.endsWith(')')) return null
+  const node = reason.slice('wait ('.length, -1)
+  return node ? node : null
+}
+
+// The line of a park: "waiting on timer `<node>` until <T>; a waker resumes
+// the run then", with the kept lock named. A park keeps the journal status
+// `paused`; this is what it says instead.
+function parkLine(pause: PauseInfo): string | null {
+  if (pause.cause !== 'wait') return null
+  const node = waitNode(pause.reason)
+  if (!node) return null
+  const until = when(pause.until)
+  let line = until
+    ? `waiting on timer \`${node}\` until ${until}; a waker resumes the run then`
+    : `waiting on timer \`${node}\`; a waker resumes the run then`
+  if (pause.keep_lock) line += ', lock kept'
+  return line
 }
 
 // A budget pause resumes only with a budget change (a plain resume is
@@ -51,6 +76,8 @@ export function pauseDetails(pause: PauseInfo): string[] {
 
 // The one-line marker of the run list and the badge tooltip.
 export function pauseLine(pause: PauseInfo): string {
+  const park = parkLine(pause)
+  if (park) return park
   return `${pauseWord(pause)} (${[pause.reason, ...pauseDetails(pause)].join(', ')})`
 }
 

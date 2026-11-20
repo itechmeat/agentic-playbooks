@@ -2004,7 +2004,7 @@ export type PauseBy = "operator" | "supervisor" | "engine";
 
 export type PauseMode = "drain" | "now";
 
-export type PauseCause = "quota" | "budget" | "billing";
+export type PauseCause = "quota" | "budget" | "billing" | "wait";
 
 export type PauseInfo = { reason: string, by: PauseBy, mode: PauseMode, 
 /**

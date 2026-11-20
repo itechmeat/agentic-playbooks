@@ -35,6 +35,8 @@ pub struct NotifyPlan {
     pub on: Vec<Transition>,
     /// The outcomes a `finished` notice is sent for.
     pub finished: Vec<FinishOutcome>,
+    /// The reminder cadence in force (active run milliseconds).
+    pub remind_ms: Vec<u64>,
     pub source: NotifySource,
 }
 
@@ -70,6 +72,7 @@ impl NotifyCheck {
                 plan.source,
                 None,
                 None,
+                plan.remind_ms.clone(),
             ));
         }
         let source = self.failed?;
@@ -79,6 +82,7 @@ impl NotifyCheck {
             source,
             None,
             self.warnings.first().cloned(),
+            Vec::new(),
         ))
     }
 }
@@ -210,6 +214,7 @@ fn verify(root: &Path, eff: apb_core::notify::Effective) -> Result<NotifyPlan, S
         target: record(&target, pins.connector, pins.account),
         on: eff.on,
         finished: eff.finished,
+        remind_ms: eff.remind_ms,
         source: eff.source,
     })
 }
@@ -235,6 +240,7 @@ fn set_event(
     source: NotifySource,
     by: Option<PauseBy>,
     problem: Option<String>,
+    remind_ms: Vec<u64>,
 ) -> EventPayload {
     EventPayload::NotifySet {
         target,
@@ -242,6 +248,7 @@ fn set_event(
         source: source.as_str().to_string(),
         by,
         problem,
+        remind_ms,
     }
 }
 
@@ -259,6 +266,7 @@ pub(crate) fn inherited(parent_dir: &Path) -> Option<EventPayload> {
             NotifySource::Parent,
             None,
             None,
+            active.remind_ms.clone(),
         )
     })
 }
@@ -298,6 +306,7 @@ pub fn set(
                 NotifySource::Person,
                 Some(PauseBy::Operator),
                 None,
+                Vec::new(),
             ),
         ),
         NotifyRequest::On {
@@ -364,6 +373,7 @@ pub fn set(
                 NotifySource::Person,
                 Some(PauseBy::Operator),
                 None,
+                plan.remind_ms.clone(),
             );
             (check, payload)
         }

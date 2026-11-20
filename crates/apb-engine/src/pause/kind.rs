@@ -71,6 +71,9 @@ pub enum PauseCause {
     /// Agent work billed or of unknown basis the run has no confirmation
     /// for (see `pause::billing`).
     Billing,
+    /// A timer wait the run waits out paused, on the engine's own request
+    /// (see `scheduler::wait_park`).
+    Wait,
 }
 
 impl PauseCause {
@@ -79,6 +82,7 @@ impl PauseCause {
             PauseCause::Quota => "quota",
             PauseCause::Budget => "budget",
             PauseCause::Billing => "billing",
+            PauseCause::Wait => "wait",
         }
     }
 }

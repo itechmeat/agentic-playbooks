@@ -446,6 +446,8 @@ mod named_outputs_test;
 mod near_run_test;
 #[path = "suite/next_action_test.rs"]
 mod next_action_test;
+#[path = "suite/notify_remind_test.rs"]
+mod notify_remind_test;
 #[path = "suite/notify_send_test.rs"]
 mod notify_send_test;
 #[path = "suite/notify_transitions_test.rs"]

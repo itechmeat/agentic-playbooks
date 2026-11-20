@@ -39,7 +39,7 @@ use auth::{non_secret_fields, resolve_secrets};
 use http::HttpCall;
 use render::{insert_at_path, render_http};
 use request::validate_args;
-pub use request::{CallContext, CallRequest};
+pub use request::{CallContext, CallRequest, StillDue};
 pub(crate) use request::{CallOrigin, TargetPins};
 use response::map_status;
 pub(crate) use target::LiveTarget;

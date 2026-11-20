@@ -362,3 +362,70 @@ fn a_project_only_raises_the_probation_floor() {
         "a project file sets no waiver"
     );
 }
+
+// --- reminders for open waits -------------------------------------------------
+
+/// The `remind` entries are durations, 10m to 7d, at most five, strictly
+/// increasing; an empty list is valid. Each error names its value.
+#[test]
+fn remind_entries_are_checked() {
+    let err = parse("notify:\n  remind: [5m]\n").unwrap_err();
+    assert!(err.contains("`5m` is shorter than 10m"), "{err}");
+    let err = parse("notify:\n  remind: [8d]\n").unwrap_err();
+    assert!(err.contains("`8d` is longer than 7d"), "{err}");
+    let err = parse("notify:\n  remind: [1h, 30m]\n").unwrap_err();
+    assert!(err.contains("`30m` does not come after `1h`"), "{err}");
+    let err = parse("notify:\n  remind: [1h, 1h]\n").unwrap_err();
+    assert!(err.contains("`1h` does not come after `1h`"), "{err}");
+    let err = parse("notify:\n  remind: [soon]\n").unwrap_err();
+    assert!(err.contains("`soon` is not a duration"), "{err}");
+    let six = "notify:\n  remind: [10m, 1h, 4h, 24h, 3d, 7d]\n";
+    let err = parse(six).unwrap_err();
+    assert!(err.contains("6 entries; use at most 5"), "{err}");
+    let ok = parse("notify:\n  remind: [10m, 1h, 4h, 24h, 7d]\n").unwrap();
+    assert_eq!(
+        ok.notify.remind.as_deref(),
+        Some(
+            ["10m", "1h", "4h", "24h", "7d"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>()
+                .as_slice()
+        )
+    );
+    // An empty list is valid: no reminders.
+    assert!(parse("notify:\n  remind: []\n").is_ok());
+    // A quoted bare number is a duration of seconds.
+    assert!(parse("notify:\n  remind: [\"3600\"]\n").is_ok());
+}
+
+/// A project file may only turn reminders off: any other value is refused.
+#[test]
+fn a_project_may_only_turn_reminders_off() {
+    let _sandbox = config_sandbox();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(".apb")).unwrap();
+    let project = project_path(root.path());
+    std::fs::write(&project, "notify:\n  remind: [5m]\n").unwrap();
+    let err = Policies::load(root.path()).unwrap_err();
+    assert!(
+        err.message
+            .contains("a project may only turn reminders off"),
+        "{err}"
+    );
+    // `remind: []` is fine.
+    std::fs::write(&project, "notify:\n  remind: []\n").unwrap();
+    assert!(Policies::load(root.path()).is_ok());
+}
+
+/// The reminders in force are the machine's list in milliseconds, emptied
+/// by the project's `remind: []`.
+#[test]
+fn remind_ms_reads_the_machine_list() {
+    let p = policies("notify:\n  remind: [1h30m, 4h]\n", "");
+    assert_eq!(p.remind_ms(), vec![5_400_000, 14_400_000]);
+    let p = policies("notify:\n  remind: [1h]\n", "notify:\n  remind: []\n");
+    assert_eq!(p.remind_ms(), Vec::<u64>::new());
+    let p = policies("", "notify:\n  remind: []\n");
+    assert_eq!(p.remind_ms(), Vec::<u64>::new());
+}

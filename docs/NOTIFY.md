@@ -68,15 +68,21 @@ Only news is sent:
 - A transition that happened before the subscription took effect is not sent.
 - A gate that closed before the run got to send its notice is not sent.
 - A pause or a stop a person made is not sent: they already know.
-- The same wait never sends a second message, also when the driver restarts
-  or a resume reads the same journal again.
+- The same wait never sends its notice twice, also when the driver restarts
+  or a resume reads the same journal again. With `notify.remind` in
+  `policy.yaml` an open review, question or host task also gets one reminder
+  after each listed duration of active run time, never before its notice
+  went out, only to the target that notice reached, and never after it
+  closed. A timer wait the run waits out paused (a park) is not a wait on a
+  person and gets none.
 
 A sub-playbook inherits only `review` and `question` from its parent run, so
 a person hears about a gate deep in the tree but not about every child run
 that ends. It follows the parent's subscription as it is at each send (and
 its run views show it that way): a
-parent turned off, narrowed or pointed at a new target does the same to its
-children.
+parent turned off, narrowed, pointed at a new target or given another
+reminder cadence does the same to its children, and a sub-playbook of a
+sub-playbook follows the run at the top of its chain.
 
 ## Setting it up
 
@@ -160,6 +166,49 @@ Check the setup with one test message:
 apb notify            # the machine's target and whether runs here notify by default
 apb notify test       # sends one test message through the target
 ```
+
+## Reminders
+
+A gate nobody answers stays silent for days. The machine's `policy.yaml`
+may ask for reminders of an open wait:
+
+```yaml
+notify:
+  remind: [1h, 4h, 24h]   # one reminder after each, of active run time
+```
+
+While an apb of this version or later drives the run, an open review,
+question or host task covered by the subscription gets one reminder after
+each listed duration of active run time (a person's pause does not count;
+time after the run ended does not). The rules:
+
+- Off by default. The entries are durations from 10 minutes to 7 days,
+  at most five, strictly increasing. A project's `policy.yaml` may only
+  turn reminders off (`remind: []`).
+- Each reminder goes through the send ledger under its own label
+  (`notify:review.12.r1`), so a restart never sends one twice. A reminder
+  is never sent or recorded once its wait closed, its notice never went
+  out, or its target changed after the notice. Right before a reminder is
+  recorded it is worked out again from the run's journal: when reminders
+  were turned off, or the cadence or the target changed, since the sweep
+  picked it, nothing is recorded, and the next sweep picks the reminder
+  due under the subscription as it is then.
+- A reminder whose try failed is tried again while it is the latest due
+  one, like a notice's retry. After the driver was down past several
+  reminder times, only the latest due one is sent.
+- A reminder goes only to the target its notice was confirmed sent to,
+  recipient and pins included (the notice's send intent records a digest
+  of the whole target): after the notification target changes, an already
+  open request gets no reminder at the new target, and the next request is
+  noticed and reminded there. A notice an older apb sent carries no digest
+  and gets no reminder after any target change.
+  A gate asked again starts its own reminders.
+- A run parked on a timer wait is not a wait on a person: it gets no
+  reminder, and paused time counts toward none.
+- Reminders are best effort across binary versions: they carry no run
+  guard. An apb older than this one drives the run and sends the notices
+  only; when an apb of this version drives the run again, the latest due
+  reminder of each open request is sent once.
 
 ## Per run
 

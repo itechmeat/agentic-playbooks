@@ -122,20 +122,88 @@ pub struct ControlEntry {
     pub cmd: Control,
 }
 
+/// The lock every writer of this apb and later takes to number its entry
+/// and append it under: the count of the lines and the append are one
+/// step, so no two entries share a number and every number is the append
+/// order. A leaf below the run's event lock (`crate::stop::EVENT_LOCK`):
+/// the callers that hold that lock when they post (`request_pause`,
+/// `stop_run_with`, a stop's `abort_children`) take this one after it,
+/// never the reverse, and `post_control` takes nothing else while it holds
+/// it. Readers take no lock. An apb older than this change posts without
+/// it, which is the standing limit that two binaries of different
+/// versions never operate on one live run at once.
+pub const CONTROL_LOCK: &str = "control.jsonl.lock";
+
+/// How far above the next free number a stop posted without
+/// [`CONTROL_LOCK`] is numbered. Locked writers keep numbering from the
+/// file's highest entry while the stop is between its count and its
+/// append; they could reach its number only by posting this many entries
+/// in that moment, so no locked writer publishes the stop's number first.
+/// The scan reads entries in file order and moves its cursor to the
+/// highest number it consumed, so the gap costs nothing.
+pub const UNLOCKED_STOP_GAP: u64 = 1 << 20;
+
 pub fn post_control(run_dir: &Path, cmd: Control) -> Result<u64, EngineError> {
+    post_control_within(run_dir, cmd, false).map(|seq| seq.expect("a busy lock is an error here"))
+}
+
+/// [`post_control`] for an entry that may be left out: a numbering lock
+/// still held by a live owner after its bound is `Ok(None)`, with nothing
+/// appended (the engine's park, which the wait decides again at its next
+/// poll). Every other failure is the error [`post_control`] gives.
+pub fn post_control_unless_busy(run_dir: &Path, cmd: Control) -> Result<Option<u64>, EngineError> {
+    post_control_within(run_dir, cmd, true)
+}
+
+fn post_control_within(
+    run_dir: &Path,
+    cmd: Control,
+    busy_is_none: bool,
+) -> Result<Option<u64>, EngineError> {
     crate::driver::ensure_run_dir(run_dir)?;
 
-    let seq = read_control_after(run_dir, None)?.len() as u64;
+    // The number is the append order: number and append under one lock, the
+    // line and its newline with one `write_all`.
+    let lock = apb_core::fsutil::hold_lock(run_dir, CONTROL_LOCK);
+    let seq = match lock {
+        Ok(_) => next_seq(run_dir)?,
+        Err(e) if busy_is_none && e.kind() == std::io::ErrorKind::WouldBlock => {
+            return Ok(None);
+        }
+        // A stop is never refused for this lock (design D8): an Abort that
+        // cannot take it within its bound is appended without it, numbered
+        // [`UNLOCKED_STOP_GAP`] above the next free number. A holder that
+        // counted already, and every locked writer that counts before the
+        // stop is in the file, numbers below it; one that counts after
+        // numbers above it. Every other writer keeps the lock's error.
+        Err(_) if matches!(cmd, Control::Abort { .. }) => {
+            next_seq(run_dir)?.saturating_add(UNLOCKED_STOP_GAP)
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     let entry = ControlEntry { seq, cmd };
-    let line = serde_json::to_string(&entry).map_err(|e| EngineError::Yaml(e.to_string()))?;
+    let mut line = serde_json::to_string(&entry).map_err(|e| EngineError::Yaml(e.to_string()))?;
+    line.push('\n');
 
     let path = run_dir.join("control.jsonl");
     let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
-    writeln!(file, "{line}")?;
+    file.write_all(line.as_bytes())?;
     file.flush()?;
+    drop(lock);
 
-    Ok(seq)
+    Ok(Some(seq))
+}
+
+/// The next free entry number: one above the highest in the file, 0 for
+/// an empty one. Equal to the line count while every writer holds
+/// [`CONTROL_LOCK`]; one above the stop after an unlocked stop.
+fn next_seq(run_dir: &Path) -> Result<u64, EngineError> {
+    Ok(read_control_after(run_dir, None)?
+        .iter()
+        .map(|e| e.seq + 1)
+        .max()
+        .unwrap_or(0))
 }
 
 /// Reads the persisted control cursor for this run (`runs/<id>/control.cursor`):
@@ -230,7 +298,9 @@ pub fn pending_pause(run_dir: &Path) -> Result<Option<crate::pause::PauseRequest
     Ok(read_control_after(run_dir, cursor)?
         .into_iter()
         .find_map(|e| match e.cmd {
-            Control::Pause(req) => Some(req),
+            // A park is not a pause in progress: the drive decides it at
+            // its wait, and a pending park reads as no `pausing`.
+            Control::Pause(req) if !req.is_park() => Some(req),
             _ => None,
         }))
 }
@@ -266,7 +336,7 @@ pub fn read_control_after(
 
 #[cfg(test)]
 mod tests {
-    use super::Control;
+    use super::{Control, pending_pause, post_control, read_control_after};
 
     /// An `abort` line an older apb wrote (no `graceful`) decodes as an
     /// immediate abort, and an immediate abort writes no `graceful`.
@@ -286,5 +356,169 @@ mod tests {
         let new: Control =
             serde_json::from_str(r#"{"cmd":"abort","reason":"x","graceful":true}"#).unwrap();
         assert!(matches!(new, Control::Abort { graceful: true, .. }));
+    }
+
+    /// Eight threads released by one barrier post 25 entries each into one
+    /// run directory: the numbers are exactly 0 to 199, each once, and the
+    /// file's lines carry them in increasing order. A race, so on main's
+    /// unlocked count-then-append it fails often but not on every run; it
+    /// proves distinct numbers only, never an order of two particular
+    /// posts.
+    #[test]
+    fn two_concurrent_posts_get_distinct_increasing_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("r");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        const THREADS: usize = 8;
+        const EACH: u64 = 25;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let barrier = barrier.clone();
+            let run_dir = run_dir.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..EACH {
+                    post_control(
+                        &run_dir,
+                        Control::Progress {
+                            done: 1,
+                            total: 1,
+                            label: None,
+                            node: None,
+                        },
+                    )
+                    .unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let entries = read_control_after(&run_dir, None).unwrap();
+        let mut seqs: Vec<u64> = entries.iter().map(|e| e.seq).collect();
+        seqs.sort_unstable();
+        let expected: Vec<u64> = (0..THREADS as u64 * EACH).collect();
+        assert_eq!(seqs, expected, "each number exactly once");
+        // The file's lines carry them in increasing order.
+        let in_order: Vec<u64> = entries.iter().map(|e| e.seq).collect();
+        let mut sorted = in_order.clone();
+        sorted.sort_unstable();
+        assert_eq!(in_order, sorted, "append order is number order");
+    }
+
+    /// A held numbering lock never refuses a stop: the Abort is appended
+    /// without it, numbered above every entry, while any other writer
+    /// still gets the lock's error.
+    #[test]
+    fn a_stop_is_posted_while_the_numbering_lock_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("r");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let progress = || Control::Progress {
+            done: 1,
+            total: 1,
+            label: None,
+            node: None,
+        };
+        assert_eq!(post_control(&run_dir, progress()).unwrap(), 0);
+        let held = apb_core::fsutil::hold_lock(&run_dir, super::CONTROL_LOCK).unwrap();
+        assert!(post_control(&run_dir, progress()).is_err());
+        let seq = post_control(
+            &run_dir,
+            Control::Abort {
+                reason: "stop".into(),
+                by: None,
+                graceful: false,
+            },
+        )
+        .unwrap();
+        let stop = 1 + super::UNLOCKED_STOP_GAP;
+        assert_eq!(seq, stop, "far above the next free number");
+        // The holder, which counted 1 before the stop, appends after it and
+        // still numbers below it; it is a number no one else holds.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(run_dir.join("control.jsonl"))
+            .unwrap();
+        use std::io::Write as _;
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string(&super::ControlEntry {
+                seq: 1,
+                cmd: progress(),
+            })
+            .unwrap()
+        )
+        .unwrap();
+        drop(held);
+        // The next locked writer numbers above the stop.
+        assert_eq!(post_control(&run_dir, progress()).unwrap(), stop + 1);
+        let seqs: Vec<u64> = read_control_after(&run_dir, None)
+            .unwrap()
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        assert_eq!(seqs, vec![0, stop, 1, stop + 1], "every number once");
+    }
+
+    /// An entry that may be left out is not appended while the numbering
+    /// lock is held past its bound: `Ok(None)` and nothing in the file;
+    /// once the lock is free it is posted as usual.
+    #[test]
+    fn an_optional_entry_is_left_out_while_the_numbering_lock_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("r");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let park = || {
+            Control::Pause(crate::pause::PauseRequest {
+                reason: Some(crate::pause::cause::wait_reason("pause")),
+                by: Some(crate::pause::PauseBy::Engine),
+                until: Some(1),
+                ..crate::pause::PauseRequest::default()
+            })
+        };
+        let held = apb_core::fsutil::hold_lock(&run_dir, super::CONTROL_LOCK).unwrap();
+        assert_eq!(
+            super::post_control_unless_busy(&run_dir, park()).unwrap(),
+            None
+        );
+        assert!(read_control_after(&run_dir, None).unwrap().is_empty());
+        drop(held);
+        assert_eq!(
+            super::post_control_unless_busy(&run_dir, park()).unwrap(),
+            Some(0)
+        );
+    }
+
+    /// A pending park reads as no `pausing`: `pending_pause` skips it, the
+    /// drive decides it at the wait. A park followed by an operator's
+    /// pause reports the operator's.
+    #[test]
+    fn a_pending_park_is_not_a_pending_pause() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("r");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        post_control(
+            &run_dir,
+            Control::Pause(crate::pause::PauseRequest {
+                reason: Some(crate::pause::cause::wait_reason("pause")),
+                by: Some(crate::pause::kind::PauseBy::Engine),
+                mode: crate::pause::PauseMode::Drain,
+                until: Some(1_000),
+                keep_lock: false,
+            }),
+        )
+        .unwrap();
+        assert_eq!(pending_pause(&run_dir).unwrap(), None);
+        let operator = crate::pause::PauseRequest {
+            reason: Some("looking".into()),
+            by: Some(crate::pause::kind::PauseBy::Operator),
+            ..crate::pause::PauseRequest::default()
+        };
+        post_control(&run_dir, Control::Pause(operator)).unwrap();
+        let pending = pending_pause(&run_dir).unwrap().unwrap();
+        assert_eq!(pending.by, Some(crate::pause::kind::PauseBy::Operator));
     }
 }

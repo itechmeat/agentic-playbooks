@@ -821,6 +821,13 @@ pub fn run_wait_result_as(
         WaitReason::Stopped if view.released().is_some() => {
             "the run is released while a deferred retry waits (see released); its waker resumes it at released.wake_at_ms, and run_resume with retry_now: true starts the retry now"
         }
+        // A park: the run waits on its timer and its waker resumes it, so
+        // the caller waits out the time instead of resuming.
+        WaitReason::Stopped
+            if res.pause().and_then(|p| p.cause) == Some(apb_engine::pause::PauseCause::Wait) =>
+        {
+            "the run waits on a timer (see pause); no driver runs, its waker resumes it at pause.until. Call run_wait again after that time; run_stop ends the run"
+        }
         WaitReason::Stopped if res.driver_alive == Some(false) => {
             "the run's driver is dead, so the run is interrupted; run_resume continues it"
         }
@@ -1435,6 +1442,44 @@ pub fn run_progress_report(
 #[cfg(test)]
 mod progress_tests {
     use super::*;
+
+    /// The `run_wait` instruction for a parked run: the run waits on a
+    /// timer and its waker resumes it at `pause.until`.
+    #[test]
+    fn run_wait_explains_a_park() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: pause, type: wait, wait_for: { type: timer, seconds: 60 }, timeout_seconds: 120 }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: pause }\n  - { from: pause, to: f }\n",
+        )
+        .unwrap();
+        let until = apb_core::clock::now_ms() + 60_000;
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            format!(
+                "{{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}}\n{{\"seq\":1,\"ts\":1,\"type\":\"run_paused\",\"reason\":\"wait (pause)\",\"by\":\"engine\",\"mode\":\"drain\",\"until\":{until},\"keep_lock\":true}}\n"
+            ),
+        )
+        .unwrap();
+        let view =
+            std::sync::Arc::new(apb_engine::run_view::RunView::load(&run_dir, "r1").unwrap());
+        let res = apb_engine::run_wait::RunWaitResult {
+            reason: apb_engine::run_wait::WaitReason::Stopped,
+            status: apb_engine::state::RunStatus::Paused,
+            needs: None,
+            driver_alive: Some(false),
+            waited: std::time::Duration::ZERO,
+            view,
+        };
+        let out = run_wait_result_as(tmp.path(), "r1", &res, ActionCaller::Host).unwrap();
+        let instruction = out["instruction"].as_str().unwrap();
+        assert!(
+            instruction.contains("waits on a timer") && instruction.contains("pause.until"),
+            "{instruction}"
+        );
+    }
 
     #[test]
     fn run_progress_report_posts_a_command() {

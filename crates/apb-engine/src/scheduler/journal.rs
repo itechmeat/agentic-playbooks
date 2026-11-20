@@ -588,12 +588,12 @@ pub(crate) fn journal_interrupted(
 /// Queues a pause the engine asks for (a quota failure, issue #200 design 6,
 /// or the budget gate) on the run's own control channel, so the drive applies it at the next boundary
 /// exactly like an operator's drain pause: the `run_paused` checkpoint, the
-/// driver's exit and the waker for `until`.
+/// driver's exit and the waker for `until`. Returns the entry's number.
 pub(crate) fn post_engine_pause(
     run_dir: &std::path::Path,
     pause: crate::pause::PauseRequest,
-) -> Result<(), crate::error::EngineError> {
-    crate::control::post_control(run_dir, crate::control::Control::Pause(pause)).map(|_| ())
+) -> Result<u64, crate::error::EngineError> {
+    crate::control::post_control(run_dir, crate::control::Control::Pause(pause))
 }
 
 #[cfg(test)]

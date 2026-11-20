@@ -8,6 +8,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use apb_engine::driver::read_driver_pid;
 use apb_engine::event::{Event, EventPayload, read_all};
 use apb_engine::pause::{PauseBy, PauseOutcome, PauseRequest, request_pause};
 
@@ -322,11 +323,32 @@ fn a_follow_up_waker_is_armed_and_reads_in_time() {
 
 // ---- The run deadline while a run is parked (routine operations) ----
 
+/// The start of the argv of an apb process of `run_id` under `root`, as an
+/// extended regex: `--root <root> --run-id <run_id>`. Tests run in
+/// parallel start the same playbook in their own roots at about the same
+/// time, so two of them can share a run id: a process is theirs only with
+/// their own root.
+fn run_argv(root: &Path, run_id: &str) -> String {
+    let root = fs::canonicalize(root).unwrap();
+    let escaped: String = root
+        .to_string_lossy()
+        .chars()
+        .flat_map(|c| {
+            let meta = "\\.^$|?*+()[]{}".contains(c);
+            meta.then_some('\\').into_iter().chain(std::iter::once(c))
+        })
+        .collect();
+    format!("--root {escaped} --run-id {run_id}")
+}
+
 /// The pids of the `apb __pause-waker` processes watching `run_id`'s
-/// deadline.
-fn deadline_wakers(run_id: &str) -> Vec<u32> {
+/// deadline under `root`.
+fn deadline_wakers(root: &Path, run_id: &str) -> Vec<u32> {
     let out = std::process::Command::new("pgrep")
-        .args(["-f", &format!("__pause-waker .*{run_id}.*--deadline")])
+        .args([
+            "-f",
+            &format!("__pause-waker {} .*--deadline", run_argv(root, run_id)),
+        ])
         .output()
         .unwrap();
     String::from_utf8_lossy(&out.stdout)
@@ -431,14 +453,14 @@ fn resume_all_ends_an_expired_indefinite_pause() {
     let (long, _g2) = start_and_park(root, "1h");
     for id in [&short, &long] {
         let pids = poll("the deadline waker", || {
-            let p = deadline_wakers(id);
+            let p = deadline_wakers(root, id);
             (!p.is_empty()).then_some(p)
         });
         for pid in pids {
             crate::common::sig::kill_pid(pid);
         }
         poll("the waker to die", || {
-            deadline_wakers(id).is_empty().then_some(())
+            deadline_wakers(root, id).is_empty().then_some(())
         });
     }
     std::thread::sleep(Duration::from_secs(5));
@@ -460,9 +482,9 @@ fn resume_all_ends_an_expired_indefinite_pause() {
     );
     assert!(deadline_aborted(root, &short));
     poll("the long run's waker back", || {
-        (!deadline_wakers(&long).is_empty()).then_some(())
+        (!deadline_wakers(root, &long).is_empty()).then_some(())
     });
-    for pid in deadline_wakers(&long) {
+    for pid in deadline_wakers(root, &long) {
         crate::common::sig::kill_pid(pid);
     }
 }
@@ -477,14 +499,14 @@ fn a_refused_resume_leaves_the_run_to_its_deadline_waker() {
     seed(root);
     let (run_id, _guard) = start_and_park(root, "3s");
     let pids = poll("the deadline waker", || {
-        let p = deadline_wakers(&run_id);
+        let p = deadline_wakers(root, &run_id);
         (!p.is_empty()).then_some(p)
     });
     for pid in pids {
         crate::common::sig::kill_pid(pid);
     }
     poll("the waker to die", || {
-        deadline_wakers(&run_id).is_empty().then_some(())
+        deadline_wakers(root, &run_id).is_empty().then_some(())
     });
     std::thread::sleep(Duration::from_secs(4));
     let out = crate::common::apb_std()
@@ -499,4 +521,272 @@ fn a_refused_resume_leaves_the_run_to_its_deadline_waker() {
     poll("the armed waker to end the run", || {
         deadline_aborted(root, &run_id).then_some(())
     });
+}
+
+// --- a wait park ---
+
+/// The parked wait playbook: a script node takes the workdir lock, then a
+/// timer wait of `{seconds}` s parks the run.
+const WAIT_PARK_PLAYBOOK: &str = r#"
+schema: 1
+id: wake
+name: Wake
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: s, type: script, script: "scripts/s.sh", runner: sh }
+  - { id: pause, type: wait, wait_for: { type: timer, seconds: {seconds} }, timeout_seconds: 3600 }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: s }
+  - { from: s, to: pause }
+  - { from: pause, to: done }
+"#;
+
+/// How long the hand-over test may look for the settled state.
+const HANDOVER_BOUND: Duration = Duration::from_secs(10);
+
+/// The hand-over test's timer: well past [`HANDOVER_BOUND`], so a correct
+/// waker is still waiting whenever the observation ends, however slow the
+/// process launch was.
+const HANDOVER_TIMER_SECS: u64 = 120;
+
+/// A detached run of the parked wait playbook with a `seconds` timer: the
+/// script starts, the run parks on the timer wait. Returns the run id and
+/// its guard.
+fn start_wait_park(root: &Path, seconds: u64) -> (String, RunGuard) {
+    crate::common::apb_std()
+        .arg("init")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let vdir = root.join(".apb/playbooks/wake/1.0.0");
+    fs::create_dir_all(vdir.join("scripts")).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        WAIT_PARK_PLAYBOOK.replace("{seconds}", &seconds.to_string()),
+    )
+    .unwrap();
+    let d = root.display();
+    fs::write(
+        vdir.join("scripts/s.sh"),
+        format!("touch '{d}/s_running'\necho s\n"),
+    )
+    .unwrap();
+    fs::write(root.join(".apb/playbooks/wake/current"), "1.0.0").unwrap();
+    let out = crate::common::apb_std()
+        .args(["run", "wake", "--detach"])
+        .env("APB_RELEASE_AFTER_MS", "300")
+        .env("APB_WAKER_POLL_MS", "50")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{stdout} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run_id = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("run started: "))
+        .expect("run id")
+        .trim()
+        .to_string();
+    let guard = RunGuard::new(root, &run_id);
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    poll("the park's run_paused", || {
+        read_all(&run_dir)
+            .ok()?
+            .iter()
+            .any(|e| {
+                matches!(&e.payload, EventPayload::RunPaused { reason, by, .. }
+                    if reason.starts_with("wait (") && *by == Some(PauseBy::Engine))
+            })
+            .then_some(())
+    });
+    (run_id, guard)
+}
+
+/// Whether any live process's command line holds `needle`.
+fn a_process_named(needle: &str) -> bool {
+    processes_named(needle) > 0
+}
+
+/// How many live processes' command lines match the extended regex
+/// `needle`, counted from the pids `pgrep` lists (the BSD `pgrep` of macOS
+/// has no `-c`). Fails when `pgrep` cannot run or reports an error (exit
+/// status above 1, 1 being "no match"): a check that cannot look is no
+/// proof that nothing is alive.
+fn processes_named(needle: &str) -> usize {
+    let out = std::process::Command::new("pgrep")
+        .args(["-f", "--", needle])
+        .output()
+        .expect("pgrep must run for this check");
+    assert!(
+        matches!(out.status.code(), Some(0 | 1)),
+        "pgrep failed for {needle:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.trim().parse::<u32>().is_ok())
+        .count()
+}
+
+/// The park of `run_dir`'s journal: the engine's `wait (...)` pause.
+fn the_park(run_dir: &Path) -> apb_engine::event::Event {
+    read_all(run_dir)
+        .unwrap()
+        .into_iter()
+        .find(|e| {
+            matches!(&e.payload, EventPayload::RunPaused { reason, by, .. }
+                if reason.starts_with("wait (") && *by == Some(PauseBy::Engine))
+        })
+        .expect("the park")
+}
+
+/// The live pause wakers of the run under `root`, by pid.
+fn pause_wakers(root: &Path, run_id: &str) -> Vec<u32> {
+    let out = std::process::Command::new("pgrep")
+        .args([
+            "-f",
+            &format!("__pause-waker {}( |$)", run_argv(root, run_id)),
+        ])
+        .output()
+        .expect("pgrep must run for this check");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect()
+}
+
+/// A parked wait holds no driver: `driver.pid` is gone, no driver process of
+/// the run is alive, and exactly the pause waker of the park is left. The
+/// timer outlasts the observation bound, so the waker is still waiting
+/// whenever the check ends; the resume at `until` is
+/// [`a_parked_wait_is_resumed_by_its_waker_at_until`].
+#[test]
+fn a_parked_wait_holds_no_driver_and_leaves_one_waker() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (run_id, _guard) = start_wait_park(root, HANDOVER_TIMER_SECS);
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    let park = the_park(&run_dir);
+
+    // The hand-over is still going on when the `run_paused` lands (the
+    // driver removes its claim and runs the notify sweep before
+    // `after_pause` parks the lock and spawns the waker): poll until the
+    // settled state holds.
+    let start = Instant::now();
+    loop {
+        let driver_gone = read_driver_pid(&run_dir).is_none();
+        // Every process that names the run is the park's waker.
+        let argv = run_argv(root, &run_id);
+        let no_driver_process = !a_process_named(&format!("__drive-run {argv}( |$)"))
+            && processes_named(&format!("{argv}( |$)"))
+                == processes_named(&format!("__pause-waker {argv}( |$)"));
+        let lease =
+            apb_engine::waker::Lease::held(&run_dir, apb_engine::waker::WakerFor::Pause(park.seq));
+        if driver_gone && no_driver_process && lease {
+            break;
+        }
+        assert!(
+            start.elapsed() < HANDOVER_BOUND,
+            "the hand-over did not settle: driver.pid gone {driver_gone}, \
+             no driver process {no_driver_process}, lease held {lease}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Exactly one pause waker of the run is alive, the park's, and it
+    // holds the park's one lease file.
+    let lease_name = format!("pause-{}", park.seq);
+    let leases = fs::read_dir(run_dir.join("wakers"))
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy() == lease_name)
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(leases, 1, "one lease file of the park");
+    assert!(
+        apb_engine::waker::Lease::held(&run_dir, apb_engine::waker::WakerFor::Pause(park.seq)),
+        "the waker's lease is held"
+    );
+    // Exactly one pause waker process of the run stays alive, of any
+    // pause, and it is the park's. A second one started for the same pause
+    // finds the lease held and exits at once, so it may still be seen for
+    // a moment: wait, to a bound, for one.
+    let argv = run_argv(root, &run_id);
+    let any_pause = format!("__pause-waker {argv} --seq [0-9]+( |$)");
+    let this_park = format!("__pause-waker {argv} --seq {}( |$)", park.seq);
+    let start = Instant::now();
+    loop {
+        let (wakers, of_the_park) = (processes_named(&any_pause), processes_named(&this_park));
+        if wakers == 1 && of_the_park == 1 {
+            break;
+        }
+        assert!(
+            start.elapsed() < HANDOVER_BOUND,
+            "exactly one pause waker process of the run, the park's: \
+             {wakers} of the run, {of_the_park} of the park"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !read_all(&run_dir)
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunResumed { .. })),
+        "nothing resumed the run before its timer"
+    );
+
+    // The waker would wait out the long timer: end it with the test.
+    for pid in pause_wakers(root, &run_id) {
+        crate::common::sig::kill_pid(pid);
+    }
+}
+
+/// The waker of a park resumes the run no earlier than `until`, by
+/// `engine`, to a success.
+#[test]
+fn a_parked_wait_is_resumed_by_its_waker_at_until() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (run_id, _guard) = start_wait_park(root, 3);
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    let until = match the_park(&run_dir).payload {
+        EventPayload::RunPaused { until: Some(u), .. } => u,
+        _ => panic!("the park carries its wake time"),
+    };
+    let events = poll("the waker to resume the run to its finish", || {
+        let ev = read_all(&run_dir).ok()?;
+        ev.iter()
+            .any(|e| matches!(e.payload, EventPayload::RunFinished { .. }))
+            .then_some(ev)
+    });
+    let resumed = events.iter().find_map(|e| match &e.payload {
+        EventPayload::RunResumed { by, .. } => Some(*by),
+        _ => None,
+    });
+    assert_eq!(resumed, Some(Some(PauseBy::Engine)), "resumed by the waker");
+    let resumed_at = events
+        .iter()
+        .find(|e| matches!(e.payload, EventPayload::RunResumed { .. }))
+        .unwrap()
+        .ts;
+    assert!(resumed_at >= u128::from(until), "not before `until`");
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::RunFinished { outcome } if outcome == "succeeded"
+        )),
+        "the run did not end succeeded: {}",
+        events
+            .iter()
+            .map(|e| serde_json::to_string(&e.payload).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }

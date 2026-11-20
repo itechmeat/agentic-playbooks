@@ -24,6 +24,9 @@ pub mod notice;
 pub mod record;
 pub mod retry;
 pub(crate) mod send;
+/// The run sweep, for the engine's own integration tests only.
+#[cfg(any(test, feature = "testing"))]
+pub use send::Notifier;
 pub mod start;
 pub mod transitions;
 pub mod trial;
@@ -47,6 +50,9 @@ pub struct Active {
     pub on: Vec<Transition>,
     /// The outcomes a `finished` notice is sent for.
     pub finished: Vec<FinishOutcome>,
+    /// The reminder cadence in force (active run milliseconds), from the
+    /// latest `notify_set` that named a target.
+    pub remind_ms: Vec<u64>,
     pub source: String,
     /// The seq the subscription took effect at: a transition journaled
     /// before it is not news to this subscription.
@@ -59,6 +65,13 @@ pub struct Active {
     /// approved anew.
     pub set_seq: u64,
     pub set_at_ms: u64,
+    /// The seq of the `notify_set` in this run's journal that put the
+    /// current target in force; a set that keeps the same target
+    /// (narrowing the transitions or the outcomes) keeps the previous one.
+    /// A reminder goes only to the target its notice was confirmed to,
+    /// matched by the target digest its intent records; a notice an older
+    /// apb recorded without one counts only when recorded after this.
+    pub target_set_seq: u64,
 }
 
 impl Active {
@@ -101,6 +114,7 @@ impl NotifyState {
                 on,
                 source,
                 problem,
+                remind_ms,
                 ..
             } = &e.payload
             else {
@@ -115,14 +129,24 @@ impl NotifyState {
                 Some(target) if !on.is_empty() => {
                     state.last_on = on.clone();
                     state.last_finished = finished.clone();
+                    // A set that keeps the same target keeps the target's
+                    // set seq and time (narrowing the transitions or the
+                    // outcomes); any change of target or pins starts them.
+                    let target_set_seq = state
+                        .active
+                        .as_ref()
+                        .filter(|a| a.target == *target)
+                        .map_or(e.seq, |a| a.target_set_seq);
                     Some(Active {
                         target: target.clone(),
                         on,
                         finished,
+                        remind_ms: remind_ms.clone(),
                         source: source.clone(),
                         since_seq: state.active.as_ref().map_or(e.seq, |a| a.since_seq),
                         set_seq: e.seq,
                         set_at_ms: u64::try_from(e.ts).unwrap_or(u64::MAX),
+                        target_set_seq,
                     })
                 }
                 _ => None,
@@ -133,12 +157,25 @@ impl NotifyState {
 
     /// The subscription in force for the run at `run_dir` whose journal is
     /// `events`: its own, or for one inherited from the parent run, the
-    /// parent's as it reads now, narrowed to what the child inherited.
+    /// parent's as it is in force now (for a parent that inherited its own,
+    /// the one at the top of the chain), narrowed to what the child
+    /// inherited.
     pub fn in_force(run_dir: &Path, events: &[Event]) -> Self {
+        Self::in_force_within(run_dir, events, apb_core::schema::MAX_SUBPLAYBOOK_DEPTH)
+    }
+
+    /// [`NotifyState::in_force`] following at most `hops` parent runs: a
+    /// chain longer than any sub-playbook nesting (or one that loops) is in
+    /// force nowhere.
+    fn in_force_within(run_dir: &Path, events: &[Event], hops: usize) -> Self {
         let mut state = Self::fold(events);
         if let Some(active) = state.active.take() {
             state.active = if active.source == NotifySource::Parent.as_str() {
-                parent_events(run_dir).and_then(|parent| follow_parent(active, &parent))
+                hops.checked_sub(1).and_then(|left| {
+                    let (dir, parent) = parent_events(run_dir)?;
+                    let current = Self::in_force_within(&dir, &parent, left).active?;
+                    follow_parent(active, current)
+                })
             } else {
                 Some(active)
             };
@@ -147,16 +184,17 @@ impl NotifyState {
     }
 }
 
-/// The journal of the parent run of the run at `run_dir`, `None` when there
-/// is none to read.
-fn parent_events(run_dir: &Path) -> Option<Vec<Event>> {
+/// The directory and journal of the parent run of the run at `run_dir`,
+/// `None` when there is none to read.
+fn parent_events(run_dir: &Path) -> Option<(std::path::PathBuf, Vec<Event>)> {
     let cfg = crate::run_config::read_run_config(run_dir).ok()?;
     let parent = cfg.parent_run?;
     if !apb_core::registry::is_safe_segment(&parent) {
         return None;
     }
     let dir = run_dir.parent()?.join(parent);
-    crate::event::read_all_lossy_tail(&dir).ok()
+    let events = crate::event::read_all_lossy_tail(&dir).ok()?;
+    Some((dir, events))
 }
 
 /// The transitions a sub-playbook inherits: only what still waits on the
@@ -171,12 +209,11 @@ pub(crate) fn inheritable(on: &[Transition]) -> Vec<Transition> {
         .collect()
 }
 
-/// A sub-playbook's inherited subscription `child` as its parent's journal
-/// `parent` reads now: the parent's current target, and only the
-/// transitions both still cover. `None` once the parent stopped notifying
-/// about anything the child inherited.
-fn follow_parent(child: Active, parent: &[Event]) -> Option<Active> {
-    let current = NotifyState::fold(parent).active?;
+/// A sub-playbook's inherited subscription `child` under its parent's
+/// subscription in force now, `current`: the parent's current target and
+/// reminder cadence, and only the transitions both still cover. `None`
+/// once the parent stopped notifying about anything the child inherited.
+fn follow_parent(child: Active, current: Active) -> Option<Active> {
     let on: Vec<Transition> = inheritable(&current.on)
         .into_iter()
         .filter(|t| child.on.contains(t))
@@ -186,6 +223,9 @@ fn follow_parent(child: Active, parent: &[Event]) -> Option<Active> {
     (!on.is_empty()).then_some(Active {
         target: current.target,
         on,
+        // A child's reminders follow the parent's subscription: its
+        // cadence, and its target matched by digest.
+        remind_ms: current.remind_ms,
         set_at_ms,
         ..child
     })
