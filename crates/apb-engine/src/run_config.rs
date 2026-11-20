@@ -298,6 +298,10 @@ pub struct EvalRunSettings {
     /// whether or not anyone still follows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<u64>,
+    /// The case's connector doubles: every connector call of the run is
+    /// answered from them or refused; none reaches a service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doubles: Option<apb_core::eval_doubles::Doubles>,
 }
 
 impl RunConfig {
@@ -318,6 +322,11 @@ impl RunConfig {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// The connector doubles of a doubled eval run (`None` otherwise).
+    pub fn doubles(&self) -> Option<&apb_core::eval_doubles::Doubles> {
+        self.eval.as_ref().and_then(|e| e.doubles.as_ref())
     }
 }
 

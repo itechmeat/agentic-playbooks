@@ -31,7 +31,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
-  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `review_form` for the form of a `human_review` (a malformed `max_scope` V243, `fields` V244, `show` V245, a required field without a default on a gate the engine may decide V246, a default over untrusted text V247), `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`; `list_pilot` names a definition whose list uses `pilot` or `stop_when`, `wait_park` one with a timer wait, the names in this declaration order), `output_types` for the typed output field contract V167-V168, `write_scope` for a declared write scope V170-V172, `deadline` for a run's `deadline` V200, `concurrency` for the `concurrency:` block V210 and V211, `health` for the `health:` block V212, `previous_success` for the `run.previous_success` grammar, the `when_none` block and V176; `nodes` also holds V68, ids that start with `@`
+  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `review_form` for the form of a `human_review` (a malformed `max_scope` V243, `fields` V244, `show` V245, a required field without a default on a gate the engine may decide V246, a default over untrusted text V247), `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`; `list_pilot` names a definition whose list uses `pilot` or `stop_when`, `wait_park` one with a timer wait, `eval_doubles` (never a definition
+  feature) a doubled eval run, named from `run_provenance.eval_doubles`,
+  the names in this declaration order), `output_types` for the typed output field contract V167-V168, `write_scope` for a declared write scope V170-V172, `deadline` for a run's `deadline` V200, `concurrency` for the `concurrency:` block V210 and V211, `health` for the `health:` block V212, `previous_success` for the `run.previous_success` grammar, the `when_none` block and V176; `nodes` also holds V68, ids that start with `@`
   are the engine's, V101, `audience` on a finish without a prompt, and
   V163, a `success_check` `scope` that names no glob or one that does not
   compile, and V173, a `prove_fails_first` proof that cannot mean anything), the
@@ -281,7 +283,10 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   `execution` config section, `cli` or `host` per run, the fallback rule),
   the eval case and suite format with its V80-V83 checks, digests and the
   machine's suite approvals (`eval.rs`; `has_suite` is `suite.yaml` or a
-  case file, so `evals/scenarios/` alone is no suite), scenario files
+  case file, so `evals/scenarios/` alone is no suite), the doubles of an
+  eval case (`eval_doubles.rs`: matching, `pick`, coverage over every
+  binding site with reconcile functions; V280 and V281 with the suite
+  rules in `eval.rs`), scenario files
   (`scenario/`: `format` the types of
   `evals/scenarios/<name>.yaml` and the scripted timeout attempt answer
   (`timed_out: true`, left out of the serialized form when false so
@@ -427,7 +432,11 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   not record, shared with the retro; MCP `playbook_stats` in
   `apb_mcp::tools::stats`), the irreversible-effects consent a run
   start records (`consent.rs`), the eval checks and result store behind
-  `apb eval` (`eval/`), the reading view of a run's result snapshots every
+  `apb eval` (`eval/`; `eval/doubles` the answer of each call of a doubled
+  run, its capture and the strict reader the checks use, failing closed:
+  the call key under the installation key, the reservation synced before
+  dispatch with its owner lock and the replay of a crashed call, the
+  delivery synced before the answer leaves), the reading view of a run's result snapshots every
   surface answers through (`result_view.rs`: rows by node, execution and
   item, every manifest and object re-hashed on every read, text through the
   run redactor, `compare_live` a word only, `verified_manifest` and
@@ -589,7 +598,8 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   leaves the machine goes through (`redact.rs`, over
   `apb_core::scrub::Scrubber`), the run-scoped redactor of a run's secret
   values and those of every run of its tree, ancestors, children and
-  siblings (`run_redact.rs`: `RunRedactor`, `redact_text`
+  siblings (`run_redact.rs`: `RunRedactor`, `for_storing` the storage redactor
+  that withholds whenever a referenced secret is unresolved, `redact_text`
   for text that leaves the machine, `redact_json` for structured answers;
   a read-only process missing a referenced connector secret, or any
   process that cannot read a run, config or journal of the tree, withholds
@@ -728,7 +738,9 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   JSON), `files.rs` (safe file names of saved attachments), and `call/`
   split into account selection, auth, encoding and response mapping,
   `attempt` the call's attempt binding, `target` the snapshot grant or the
-  live trust-gated target a call resolves first, `paginate.rs` (the bounded
+  live trust-gated target a call resolves first (a doubled run's over
+  `ManifestConnector.doubled_accounts`; `connector/run.rs` records no
+  account for it), `paginate.rs` (the bounded
   page walk), `shape.rs` (one response shaped: status, error_when, decoded
   text), and `send_once` the send-once flow; `intent/` the
   send ledger: `identity` what makes two sends the same, `ledger` the fold
@@ -770,7 +782,9 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   no question whether a request is recurring, `standalone` the decider and
   `DecisionLog`, the `decisions.jsonl` reader, lock and counter every
   daily-capped use shares, and `report/`: the labellers, statistics
-  and replay behind `apb decisions`; see `docs/DECISIONS.md`).
+  and replay behind `apb decisions`, labelling through `label_in` over
+  `RunJournal.run_dir`, the completion check's `chain_decision` following
+  a gate's scope re-asks; see `docs/DECISIONS.md`).
 - `apb-mcp` - rmcp stdio MCP server (`server/`, with `read_only` the
   allowlist of `apb mcp --read-only` and the tables every tool is classified
   in) and the tool layer in `tools/`
@@ -1211,6 +1225,18 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   surfaces). A `decisions.yaml` `llm_emulation` provider may name
   `catalog: near-ai-cloud` (`ProviderSpec.cloud`, priced and classed in
   `decision_made.privacy_class`).
+- **Connector doubles** (`docs/EVALS.md`): an eval case's `connectors:`
+  answers every dispatched connector call of its run (an agent's, a
+  check's, an engine site's) after the call's own checks, or refuses it
+  `double_unmatched`; no call resolves a secret to authenticate a
+  request, a doubled run sends no notification, its manifest records
+  account names only (`doubled_accounts`), so no apb can reach a service
+  through its snapshot, and a doubled start writes the `eval_doubles`
+  guard with its provenance. Captured args go through
+  `RunRedactor::for_storing`, which reads the secrets the workspace's
+  connectors reference only to scrub them (and withholds the args when
+  one is unresolved); no value leaves the call process. A declared
+  `irreversible` effect stays refused, doubles or not.
 - **Edge addresses and route facts** (spec
   `docs/superpowers/specs/2026-11-01-edge-identity-design.md`): every edge
   has an address in its definition (`id:<id>` or `e:<from>><to>#<n>`,

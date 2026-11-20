@@ -1121,8 +1121,88 @@ impl Beneath {
     }
 }
 
+#[cfg(unix)]
+/// Whether `e` says the process or the system ran out of descriptors: a
+/// walk that hits it fails instead of skipping what it could not open.
+fn out_of_descriptors(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
+}
+
+#[cfg(unix)]
+impl Beneath {
+    /// Gives the directory at `rel` and every directory below it mode 0700
+    /// (so a tree a step made read-only can be removed), each through its
+    /// own descriptor, never following a link: a link is left as it is and
+    /// what it points at is never changed. A directory that cannot be
+    /// opened is left as it is (its removal then reports it). `rel` itself
+    /// must be a directory reached without a link.
+    pub fn make_dirs_private(&self, rel: &str) -> io::Result<()> {
+        use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+        use std::os::unix::ffi::OsStrExt;
+        crate::process_mode::guard_write(&self.anchor.join(rel))?;
+        let top = self.walk_io(&segments(rel)?, rel)?;
+        let chmod = |fd: &OwnedFd| {
+            // SAFETY: fchmod(2) on a descriptor this walk owns.
+            unsafe { libc::fchmod(fd.as_raw_fd(), 0o700) };
+        };
+        chmod(&top);
+        // The subdirectory names of one open directory, read after its
+        // mode was repaired.
+        // A listing that fails for want of a descriptor fails the walk;
+        // any other failed listing leaves that directory's children as
+        // they are (their removal then reports them).
+        let subdirs = |dir: &OwnedFd| -> io::Result<Vec<std::ffi::CString>> {
+            let names = match sys::read_dir(dir.as_fd(), || true) {
+                Ok((names, _)) => names,
+                Err(e) if out_of_descriptors(&e) => return Err(e),
+                Err(_) => return Ok(Vec::new()),
+            };
+            Ok(names
+                .into_iter()
+                .filter_map(|(raw, kind)| {
+                    let c = std::ffi::CString::new(raw.as_bytes()).ok()?;
+                    let kind = match kind {
+                        Some(k) => k,
+                        None => sys::kind_of(&sys::lstat_at(dir.as_fd(), &c).ok()?),
+                    };
+                    (kind == EntryKind::Dir).then_some(c)
+                })
+                .collect())
+        };
+        // Depth first, one child at a time: the walk holds one descriptor
+        // per level, never one per sibling.
+        let names = subdirs(&top)?;
+        let mut stack: Vec<(OwnedFd, Vec<std::ffi::CString>)> = vec![(top, names)];
+        while let Some((dir, names)) = stack.last_mut() {
+            // `O_NOFOLLOW`: an entry swapped for a link is not opened.
+            let opened = names.pop().map(|c| sys::open_dir(dir.as_fd(), &c));
+            match opened {
+                None => {
+                    stack.pop();
+                }
+                Some(Ok(fd)) => {
+                    chmod(&fd);
+                    let names = subdirs(&fd)?;
+                    stack.push((fd, names));
+                }
+                // Out of descriptors is a failure, never a skipped directory.
+                Some(Err(e)) if out_of_descriptors(&e) => {
+                    return Err(e);
+                }
+                Some(Err(_)) => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(not(unix))]
 impl Beneath {
+    /// Directory modes are not changed off unix.
+    pub fn make_dirs_private(&self, rel: &str) -> io::Result<()> {
+        self.kind(rel).map(|_| ())
+    }
+
     /// Removes the tree at `rel` (a file, a link or a directory with
     /// everything in it), never following a link. A missing entry is no
     /// error.
@@ -1270,6 +1350,80 @@ pub(crate) mod tests {
             b.read_regular_capped("report.md", 1024).unwrap(),
             CappedRead::Refused(_)
         ));
+    }
+
+    /// The permission walk opens every directory without following a
+    /// link, so a link's target keeps its mode.
+    #[test]
+    fn make_dirs_private_never_follows_a_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let outside = t.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let root = t.path().join("root");
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("a/link")).unwrap();
+        std::fs::set_permissions(root.join("a/b"), std::fs::Permissions::from_mode(0o555)).unwrap();
+        std::fs::set_permissions(root.join("a"), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let b = Beneath::open(&root).unwrap();
+        b.make_dirs_private("a").unwrap();
+        let mode = |p: &Path| std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&root.join("a")), 0o700);
+        assert_eq!(mode(&root.join("a/b")), 0o700);
+        assert_eq!(mode(&outside), 0o555, "the link's target was not changed");
+        // A link at the start is refused, never followed.
+        assert!(b.make_dirs_private("a/link").is_err());
+        b.remove_tree("a").unwrap();
+        assert!(!root.join("a").exists());
+        assert!(outside.is_dir(), "the link was unlinked, its target kept");
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Running out of descriptors is told apart from every other failure
+    /// of an open or a listing, which only leaves a directory as it is.
+    #[test]
+    fn only_descriptor_exhaustion_fails_the_permission_walk() {
+        use super::out_of_descriptors;
+        assert!(out_of_descriptors(&io::Error::from_raw_os_error(
+            libc::EMFILE
+        )));
+        assert!(out_of_descriptors(&io::Error::from_raw_os_error(
+            libc::ENFILE
+        )));
+        assert!(!out_of_descriptors(&io::Error::from_raw_os_error(
+            libc::EACCES
+        )));
+        assert!(!out_of_descriptors(&io::Error::from_raw_os_error(
+            libc::ELOOP
+        )));
+        assert!(!out_of_descriptors(&io::Error::other("other")));
+    }
+
+    /// A wide tree is repaired whole: every sibling and its children get
+    /// 0700, walked one child at a time.
+    #[test]
+    fn make_dirs_private_repairs_a_wide_tree() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("root");
+        for i in 0..64 {
+            let d = root.join(format!("a/s{i}/inner"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("f"), b"x").unwrap();
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o555)).unwrap();
+            std::fs::set_permissions(d.parent().unwrap(), std::fs::Permissions::from_mode(0o555))
+                .unwrap();
+        }
+        let b = Beneath::open(&root).unwrap();
+        b.make_dirs_private("a").unwrap();
+        let mode = |p: &Path| std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777;
+        for i in 0..64 {
+            assert_eq!(mode(&root.join(format!("a/s{i}"))), 0o700);
+            assert_eq!(mode(&root.join(format!("a/s{i}/inner"))), 0o700);
+        }
+        b.remove_tree("a").unwrap();
+        assert!(!root.join("a").exists());
     }
 
     /// A name that is not UTF-8 and a deep chain of directories are

@@ -167,6 +167,9 @@ pub struct RunJournal {
     pub events: Vec<Event>,
     /// Provider id to kind, from the run manifest's decisions block.
     pub provider_kinds: BTreeMap<String, String>,
+    /// The run directory the journal was read from; `None` for a journal
+    /// built in memory. A labeller reads the run's stored definitions there.
+    pub run_dir: Option<std::path::PathBuf>,
 }
 
 impl RunJournal {
@@ -200,6 +203,7 @@ impl RunJournal {
             playbook,
             events,
             provider_kinds,
+            run_dir: Some(run_dir.to_path_buf()),
         })
     }
 
@@ -868,7 +872,7 @@ pub fn build(
                 .or_insert_with(|| labeller_for(&r.use_site));
             // The rule comes from the journal, answered or not, so an
             // error joins the row of its rule.
-            let (label, rule) = l.label_with_rule(&r, &j.events);
+            let (label, rule) = l.label_in(&r, &j.events, j.run_dir.as_deref());
             let label = if r.answered() {
                 label
             } else {

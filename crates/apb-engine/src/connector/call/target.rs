@@ -22,10 +22,15 @@ pub(crate) struct Target {
     pub grant: Option<ManifestConnectorGrant>,
 }
 
-/// The target of `req` for a caller of `ctx`'s origin.
-pub(super) fn resolve(req: &CallRequest, ctx: &CallContext) -> Result<Target, CallError> {
+/// The target of `req` for a caller of `ctx`'s origin; `doubles` are the
+/// run's eval doubles (`eval::doubles::of_run`), `None` for a run without.
+pub(super) fn resolve(
+    req: &CallRequest,
+    ctx: &CallContext,
+    doubles: Option<&apb_core::eval_doubles::Doubles>,
+) -> Result<Target, CallError> {
     if !ctx.origin.is_live() {
-        return snapshot(req, ctx);
+        return snapshot(req, ctx, doubles);
     }
     let pins = ctx.pins.as_ref().ok_or_else(|| {
         CallError::new(
@@ -43,7 +48,17 @@ pub(super) fn resolve(req: &CallRequest, ctx: &CallContext) -> Result<Target, Ca
 /// integrity boundary: the manifest tree digest covers the whole live
 /// connector folder and cannot be recomputed from the one copied file, so
 /// drift protection is the snapshot itself.
-fn snapshot(req: &CallRequest, ctx: &CallContext) -> Result<Target, CallError> {
+///
+/// A doubled eval run's snapshot holds no account record, only
+/// `doubled_accounts` (names and default flags): the account is selected
+/// over those and the target carries an empty account, from which no
+/// request can be built. A snapshot and eval settings that disagree fail
+/// closed.
+fn snapshot(
+    req: &CallRequest,
+    ctx: &CallContext,
+    doubles: Option<&apb_core::eval_doubles::Doubles>,
+) -> Result<Target, CallError> {
     let manifest = manifest::read(req.run_dir)
         .map_err(|e| {
             CallError::new(
@@ -85,6 +100,23 @@ fn snapshot(req: &CallRequest, ctx: &CallContext) -> Result<Target, CallError> {
             format!("connector `{}` is not in the run manifest", req.connector),
         )
     })?;
+    let doubled_view;
+    let mconn = match (doubles.is_some(), mconn) {
+        (true, m) if m.accounts.is_empty() => {
+            doubled_view = doubled_view_of(m);
+            &doubled_view
+        }
+        (false, m) if m.doubled_accounts.is_empty() => m,
+        _ => {
+            return Err(CallError::new(
+                CallErrorCode::Config,
+                format!(
+                    "connector `{}`: the run's snapshot and its eval settings disagree; nothing was sent",
+                    req.connector
+                ),
+            ));
+        }
+    };
     let account = select_account(req, grant, mconn)?;
     let maccount = mconn
         .accounts
@@ -114,6 +146,29 @@ fn snapshot(req: &CallRequest, ctx: &CallContext) -> Result<Target, CallError> {
         maccount,
         grant: Some(grant.clone()),
     })
+}
+
+/// The connector of a doubled run as account selection sees it: its
+/// `doubled_accounts` as accounts with no field, no variable, no command
+/// and no digest.
+fn doubled_view_of(mconn: &manifest::ManifestConnector) -> manifest::ManifestConnector {
+    manifest::ManifestConnector {
+        name: mconn.name.clone(),
+        digest: mconn.digest.clone(),
+        accounts: mconn
+            .doubled_accounts
+            .iter()
+            .map(|a| ManifestAccount {
+                name: a.name.clone(),
+                default: a.default,
+                fields: BTreeMap::new(),
+                env: BTreeMap::new(),
+                cmd: BTreeMap::new(),
+                digest: String::new(),
+            })
+            .collect(),
+        doubled_accounts: Vec::new(),
+    }
 }
 
 /// The installed connector and a configured account, outside any run

@@ -504,7 +504,9 @@ fn a_connector_check_is_its_own_site_and_an_eval_refuses_it() {
         .map(|(_, b)| b.into_owned())
         .expect("the item check is a binding site");
     assert_eq!(site[0].name, "imap");
-    let refusals = apb_core::eval::refusal(&p);
+    let case: apb_core::eval::EvalCase =
+        yaml_serde::from_str("schema: 1\nid: c\nfixture: { dir: fixtures/base }\n").unwrap();
+    let refusals = apb_core::eval::case_refusal(&p, &case, &Default::default());
     assert!(
         refusals
             .iter()

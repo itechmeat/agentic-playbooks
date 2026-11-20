@@ -142,8 +142,11 @@ pub(super) fn shipping_reason(
 /// Why node `n` counts as a shipping step by its own declaration or its
 /// name: declared `irreversible` or `secrets` effects, or the merge, push,
 /// deploy or publish name heuristic. The eval runner refuses a playbook with
-/// such a node (`apb_core::eval::refusal`); connector bindings are refused
-/// there outright, so the connector leg of the chain is not consulted.
+/// such a node (`apb_core::eval::refusal`). The connector leg of the chain
+/// is not consulted: a case without doubles refuses every connector site
+/// outright (`case_refusal`), and in a case with doubles every call of a
+/// site is answered locally, so a connector function acts nowhere. Only
+/// declared effects and names count here.
 pub fn node_shipping_reason(n: &crate::schema::Node) -> Option<String> {
     shipping_reason(n, &BTreeMap::new()).map(|r| r.replace(" after the gate", ""))
 }

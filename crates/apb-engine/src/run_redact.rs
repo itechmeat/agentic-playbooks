@@ -427,11 +427,17 @@ pub struct WorkspaceRedaction {
 
 impl WorkspaceRedaction {
     pub fn new(root: &Path) -> Self {
+        Self::resolved(root, crate::read_only::active())
+    }
+
+    /// The workspace's referenced connector secrets, withholding when one
+    /// is unresolved and `withhold_unresolved` holds.
+    fn resolved(root: &Path, withhold_unresolved: bool) -> Self {
         let referenced = apb_core::connector::resolve::resolve_referenced_checked(root);
         WorkspaceRedaction {
             root: root.to_path_buf(),
             workspace: referenced.values,
-            withhold: referenced.unresolved > 0 && crate::read_only::active(),
+            withhold: referenced.unresolved > 0 && withhold_unresolved,
         }
     }
 
@@ -529,6 +535,13 @@ impl RunRedactor {
     /// The redactor of the run at `run_dir` in the workspace at `root`.
     pub fn for_run(root: &Path, run_dir: &Path) -> Self {
         WorkspaceRedaction::new(root).run_dir(run_dir)
+    }
+
+    /// [`RunRedactor::for_run`] for text this process stores: it withholds,
+    /// and so `secret_text` and `secret_json` refuse, whenever any secret the
+    /// workspace references is unresolved, in every process mode.
+    pub fn for_storing(root: &Path, run_dir: &Path) -> Self {
+        WorkspaceRedaction::resolved(root, true).run_dir(run_dir)
     }
 
     /// The redactor of the run at `run_dir`, its workspace found from the
@@ -981,5 +994,48 @@ mod tests {
         assert_eq!(rows[0]["instruction"], WITHHELD);
         assert_eq!(rows[0]["secrets_unresolved"], true);
         assert_eq!(r.redact_text("anything"), WITHHELD);
+    }
+
+    /// A workspace connector whose global account reads its secret from a
+    /// command: the storage redactor refuses to scrub in a driving process
+    /// (read-only mode off), while the run's display redactor does not.
+    #[test]
+    fn for_storing_refuses_an_unresolved_secret_in_a_driving_process() {
+        apb_core::process_mode::testing::in_plain_child(
+            "run_redact::tests::for_storing_refuses_an_unresolved_secret_in_a_driving_process",
+            || {
+                let cfg = tempfile::tempdir().unwrap();
+                // SAFETY: a child process runs this one test on one thread.
+                unsafe { std::env::set_var("APB_CONFIG_DIR", cfg.path()) };
+                let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/connectors/mock-tracker/connector.yaml");
+                let dst = cfg.path().join("connectors/mock-tracker");
+                std::fs::create_dir_all(&dst).unwrap();
+                std::fs::copy(&src, dst.join("connector.yaml")).unwrap();
+                let accounts =
+                    apb_core::connector::config::global_config_path("mock-tracker").unwrap();
+                std::fs::create_dir_all(accounts.parent().unwrap()).unwrap();
+                std::fs::write(
+                    &accounts,
+                    "accounts:\n  - name: main\n    base_url: https://unused.example\n    token: \"{{cmd:printf command-secret}}\"\n",
+                )
+                .unwrap();
+                let root = tempfile::tempdir().unwrap();
+                let runs = root.path().join(".apb/runs");
+                write_run(&runs, "r1", &[], None, PLAIN_SNAPSHOT);
+                let run_dir = runs.join("r1");
+                assert!(!crate::read_only::active());
+                let mut value = serde_json::json!({ "text": "hello" });
+                assert!(
+                    RunRedactor::for_run(root.path(), &run_dir)
+                        .secret_json(&mut value)
+                        .is_ok()
+                );
+                assert_eq!(
+                    RunRedactor::for_storing(root.path(), &run_dir).secret_json(&mut value),
+                    Err(SecretsUnresolved)
+                );
+            },
+        );
     }
 }

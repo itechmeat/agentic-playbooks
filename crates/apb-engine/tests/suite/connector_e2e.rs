@@ -201,6 +201,7 @@ fn e2e_snapshot_and_call_flow() {
         &pb,
         &expected_connectors,
         &expected_accounts,
+        false,
     )
     .unwrap();
 

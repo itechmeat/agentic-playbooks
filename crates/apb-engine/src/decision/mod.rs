@@ -2083,7 +2083,12 @@ mod tests {
         // resume: the rest of the gate is checked again, so no action.
         write_config(cfg.path(), ENFORCE);
         let resumed = runner_over(cfg.path(), root.path(), &events, &provider);
-        std::fs::remove_file(cfg.path().join("decisions-thresholds.yaml")).unwrap();
+        // `completion_check` thresholds live in the v2 file (rule `reply/1`).
+        std::fs::remove_file(
+            cfg.path()
+                .join(apb_core::decision_thresholds::THRESHOLDS_V2_FILE),
+        )
+        .unwrap();
         let outcome = ask(&resumed, &Recorder::default(), "a");
         let (meta, replayed) = meta_of(&outcome);
         assert!(replayed && !meta.applied, "{meta:?}");

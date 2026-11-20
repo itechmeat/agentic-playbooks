@@ -158,6 +158,7 @@ fn rig_with(
     let root = tempfile::tempdir().unwrap();
     let mut m = RunExecutionManifest::default();
     m.connectors.push(ManifestConnector {
+        doubled_accounts: Vec::new(),
         name: CONNECTOR.to_string(),
         digest: "sha256:test".to_string(),
         accounts: accounts.to_vec(),

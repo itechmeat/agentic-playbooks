@@ -233,6 +233,7 @@ mod tests {
 
     fn sample_connector() -> ManifestConnector {
         ManifestConnector {
+            doubled_accounts: Vec::new(),
             name: "mock-tracker".to_string(),
             digest: "sha256:c".to_string(),
             accounts: vec![ManifestAccount {
@@ -573,6 +574,7 @@ functions:
             on_unknown: None,
         };
         let connectors = vec![ManifestConnector {
+            doubled_accounts: Vec::new(),
             name: grant.connector.clone(),
             digest: "sha256:c".to_string(),
             accounts: vec![ManifestAccount {
@@ -607,6 +609,7 @@ functions:
             on_unknown: None,
         };
         let connectors = vec![ManifestConnector {
+            doubled_accounts: Vec::new(),
             name: grant.connector.clone(),
             digest: "sha256:c".to_string(),
             accounts: vec![ManifestAccount {

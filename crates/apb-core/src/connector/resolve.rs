@@ -429,6 +429,16 @@ pub struct ConnectorFacts {
     /// Function name -> the send-once mode it declares; functions that
     /// declare none, or only `repeatable`, are absent (V69).
     pub idempotency: std::collections::BTreeMap<String, super::idempotency::IdempotencyMode>,
+    /// Function name -> the function its send's unknown result is read
+    /// back with (`idempotency.reconcile.function` of a `marker` send).
+    /// An eval case doubles it too: the send ledger's read-back runs
+    /// through the same call path.
+    pub reconcile_functions: std::collections::BTreeMap<String, String>,
+    /// The connector's `identity.function`, set only when a function
+    /// declares a `marker` send: a marker reconcile reads the own
+    /// identity first, through the same call path, so an eval case
+    /// doubles it beside the reconcile function.
+    pub identity_function: Option<String>,
     /// Names of its functions that declare `idempotency: { mode:
     /// repeatable }`: untracked, but safe to repeat, so a list step may use
     /// them (V88).
@@ -481,6 +491,27 @@ impl ConnectorFacts {
                 .iter()
                 .filter_map(|f| Some((f.name.clone(), f.send_once()?.mode()?)))
                 .collect(),
+            reconcile_functions: doc
+                .functions
+                .iter()
+                .filter_map(|f| match f.send_once()? {
+                    super::idempotency::Idempotency::Marker { reconcile, .. } => {
+                        Some((f.name.clone(), reconcile.function.clone()))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            identity_function: doc
+                .functions
+                .iter()
+                .any(|f| {
+                    matches!(
+                        f.send_once(),
+                        Some(super::idempotency::Idempotency::Marker { .. })
+                    )
+                })
+                .then(|| doc.identity.as_ref().map(|i| i.function.clone()))
+                .flatten(),
             repeatable_functions: names(&|f| f.is_repeatable()),
             untrusted_output_functions: names(&|f| f.untrusted_output),
             ..Self::default()

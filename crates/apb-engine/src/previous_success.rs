@@ -428,6 +428,7 @@ mod tests {
                 deadline: None,
                 start_key: None,
                 concurrency: None,
+                eval_doubles: false,
             },
         )
     }

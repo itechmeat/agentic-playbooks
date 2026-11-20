@@ -139,8 +139,10 @@ fn the_report_says_when_nothing_was_recorded_and_reads_journals() {
     assert_eq!(v["decisions"], 3);
     assert_eq!(v["groups"][0]["use"], "completion_check");
     assert_eq!(v["groups"][0]["errors"], 1);
-    // The only node is the last one and the run succeeded: labelled keep.
-    assert_eq!(v["groups"][0]["keep_labels"], 2);
+    // Rule `reply/1`: no review gate follows the reply, so nothing is
+    // labelled (the old rule labelled the last node of a succeeded run keep).
+    assert_eq!(v["groups"][0]["keep_labels"], 0);
+    assert_eq!(v["groups"][0]["rule"], "reply/1");
     assert_eq!(v["groups"][0]["eligible"], false);
     assert_eq!(
         fs::read(&journal).unwrap(),
@@ -187,7 +189,7 @@ fn thresholds_are_set_replaced_range_checked_and_listed() {
         .current_dir(dir.path())
         .assert()
         .success()
-        .stdout("completion_check\tmain/jev-1.13.0\t0.12\n");
+        .stdout("completion_check\tmain/jev-1.13.0\t0.12\trule reply/1\n");
 }
 
 #[test]
@@ -261,6 +263,29 @@ fn replay_honours_the_projects_narrowing_and_the_kill_switch() {
     let (code, _, stderr) = run("", true);
     assert_eq!(code, Some(2));
     assert!(stderr.contains("APB_DECISIONS=off"), "{stderr}");
+}
+
+/// A `completion_check` threshold stored before rule `reply/1` is listed as
+/// a legacy entry its use no longer enforces, naming the rule.
+#[test]
+fn a_legacy_completion_threshold_is_listed_as_not_enforced() {
+    use apb_core::decision_thresholds::THRESHOLDS_FILE;
+    let dir = project(false);
+    let cfg = tempfile::tempdir().unwrap();
+    fs::write(
+        cfg.path().join(THRESHOLDS_FILE),
+        "version: 1\nthresholds:\n- use: completion_check\n  provider: main\n  model: jev-1.13.0\n  threshold: 0.15\n",
+    )
+    .unwrap();
+    apb()
+        .args(["decisions", "thresholds", "list"])
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "completion_check\tmain/jev-1.13.0\t0.15\tlegacy, not enforced: re-measure under rule reply/1\n",
+        ));
 }
 
 /// Card A8 through the binary: `apb decisions thresholds set --use

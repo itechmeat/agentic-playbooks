@@ -99,6 +99,7 @@ fn rig(base: &str, client_id: &str) -> Rig {
     };
     let mut m = RunExecutionManifest::default();
     m.connectors.push(ManifestConnector {
+        doubled_accounts: Vec::new(),
         name: CONNECTOR.to_string(),
         digest: "sha256:test".to_string(),
         accounts: vec![account],

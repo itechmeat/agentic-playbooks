@@ -27,6 +27,7 @@ fn sample_account() -> ManifestAccount {
 
 fn sample_connector() -> ManifestConnector {
     ManifestConnector {
+        doubled_accounts: Vec::new(),
         name: "slack".to_string(),
         digest: "sha256:connector".to_string(),
         accounts: vec![sample_account()],

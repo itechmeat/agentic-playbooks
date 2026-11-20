@@ -141,6 +141,7 @@ fn run(id: &str, f: &Fixture) -> RunJournal {
         playbook: "pb".into(),
         events,
         provider_kinds: BTreeMap::new(),
+        run_dir: None,
     }
 }
 
@@ -156,6 +157,7 @@ fn error_run() -> RunJournal {
             node(4, "a", Some("succeeded")),
         ],
         provider_kinds: BTreeMap::new(),
+        run_dir: None,
     }
 }
 
@@ -184,8 +186,12 @@ fn one_group(r: &DecisionsReport) -> &GroupReport {
     &r.groups[0]
 }
 
+/// Under rule `reply/1` a completion check is labelled only by a person's
+/// approval at the gate that follows the reply: the fixture's runs, whose
+/// next node is `b` (failed or not), are all unlabelled, so no figure is
+/// computed and the row is never eligible.
 #[test]
-fn the_figures_match_the_hand_computed_values() {
+fn the_fixture_is_unlabelled_under_reply_1() {
     let r = build(
         &fixture(),
         &ReportFilter::default(),
@@ -199,56 +205,40 @@ fn the_figures_match_the_hand_computed_values() {
         (g.use_site.as_str(), g.provider.as_str(), g.model.as_str()),
         ("completion_check", "main", "jev-1.13.0")
     );
+    assert_eq!(
+        g.rule.as_deref(),
+        Some(apb_core::decision_thresholds::COMPLETION_RULE)
+    );
     // The timeout joins its provider's group as an error.
     assert_eq!(
         (g.decisions, g.errors, g.answered, g.labelled),
-        (7, 1, 6, 5)
+        (7, 1, 6, 0)
     );
-    assert_eq!(g.label_coverage, Some(0.8333));
-    assert_eq!((g.act_labels, g.keep_labels), (2, 3));
-    assert_eq!(g.unlabelled.get("no downstream outcome yet"), Some(&1));
+    assert_eq!(g.label_coverage, Some(0.0));
+    assert_eq!((g.act_labels, g.keep_labels), (0, 0));
+    assert_eq!(
+        g.unlabelled
+            .get("no person approved the reply at the gate that follows it"),
+        Some(&6)
+    );
     assert_eq!(
         (g.threshold, g.threshold_source.as_str()),
         (0.15, "configured")
     );
-    // Flags at 0.15: r1 right, r2 wrong; r3, r5 kept right; r4 missed.
-    assert_eq!(g.all.accuracy, Some(0.6));
-    assert_eq!(g.all.recall, Some(0.5));
-    assert_eq!(
-        (g.all.majority_label.as_str(), g.all.majority_accuracy),
-        ("keep", Some(0.6))
+    assert_eq!(g.all.accuracy, None);
+    assert_eq!(g.brier, None);
+    assert_eq!(g.all.regex.items, 0);
+    assert!(g.savings.is_none());
+    assert!(!g.eligible);
+    assert!(
+        g.eligibility
+            .iter()
+            .any(|e| e == "accuracy not above the majority class")
     );
-    assert_eq!(g.all.today_behaviour, "always complete");
-    assert_eq!(g.all.today_accuracy, Some(0.6));
-    // Regex: right on r1..r4, wrong on r5.
-    assert_eq!((g.all.regex.items, g.all.regex.accuracy), (5, Some(0.8)));
-    assert_eq!(
-        (
-            g.all.false_actions.count,
-            g.all.false_actions.of,
-            g.all.false_actions.rate
-        ),
-        (1, 3, Some(0.3333))
-    );
-    // Act probabilities 0.95, 0.9, 0.1, 0.4, 0.05 against 1, 0, 0, 1, 0:
-    // (0.0025 + 0.81 + 0.01 + 0.36 + 0.0025) / 5 = 0.237.
-    assert_eq!(g.brier, Some(0.237));
-    // Bin 9 holds 0.95 and 0.9 (mean 0.925, rate 0.5): 0.425 x 2/5 = 0.17;
-    // 0.4 (bin 4, rate 1): 0.6 x 1/5 = 0.12; 0.1 and 0.05 (rate 0): 0.03.
-    assert_eq!(g.ece, Some(0.32));
-    assert_eq!(
-        g.would_change.as_ref().map(|w| (w.items, w.accuracy)),
-        Some((5, Some(0.6)))
-    );
-    // Long outputs: r1, r2, r4. Flags r1 right, r2 wrong, misses r4.
-    assert_eq!(g.long_outputs.labelled, 3);
-    assert_eq!(g.long_outputs.accuracy, Some(0.3333));
-    assert_eq!(g.long_outputs.regex.accuracy, Some(1.0));
-    assert_eq!(g.output_length_unknown, 0);
 }
 
 #[test]
-fn the_threshold_table_steps_by_five_hundredths() {
+fn an_unlabelled_completion_fixture_has_an_empty_threshold_table() {
     let r = build(
         &fixture(),
         &ReportFilter::default(),
@@ -256,45 +246,15 @@ fn the_threshold_table_steps_by_five_hundredths() {
     );
     let g = one_group(&r);
     assert_eq!(g.table.len(), 19);
-    assert_eq!(g.table[0].threshold, 0.05);
-    assert_eq!(g.table[18].threshold, 0.95);
-    let row = |t: f64| g.table.iter().find(|r| r.threshold == t).unwrap();
-    // 0.05: nothing flagged (p < 0.05 is none).
-    assert_eq!(
-        (row(0.05).coverage, row(0.05).recall),
-        (Some(0.0), Some(0.0))
-    );
-    // 0.10: r1 only, right.
-    let r10 = row(0.10);
-    assert_eq!(
-        (r10.coverage, r10.accuracy, r10.false_action_rate),
-        (Some(0.2), Some(0.8), Some(0.0))
-    );
-    assert_eq!(r10.false_action_ci95, Some((0.0, 0.5615)));
-    // 0.65: r1, r2, r4 flagged; one false action of three.
-    let r65 = row(0.65);
-    assert_eq!(
-        (r65.accuracy, r65.recall, r65.false_action_rate),
-        (Some(0.8), Some(1.0), Some(0.3333))
-    );
-    // 0.95: r1..r4 flagged, r5 (p = 0.95) not.
-    assert_eq!(row(0.95).false_action_rate, Some(0.6667));
-    // Under 5 %: only 0.10 catches anything.
-    assert_eq!(g.suggested_threshold, Some(0.1));
-    let s = g.savings.as_ref().unwrap();
-    assert_eq!(
-        (s.avoidable_attempts, s.saved_ms, s.false_actions, s.lost_ms),
-        (1, 60_000, 1, 60_000)
-    );
-    assert_eq!(s.decision_latency_ms, 6 * 200 + 3000);
-    assert_eq!(s.decision_cost_usd, 0.0006);
-    assert!(!g.eligible);
+    // Nothing is labelled: no row has a figure, none is suggested.
     assert!(
-        g.eligibility
+        g.table
             .iter()
-            .any(|e| e.starts_with("no stored threshold"))
+            .all(|r| r.coverage.is_none() && r.accuracy.is_none())
     );
-    assert!(g.eligibility.iter().any(|e| e == "5 labelled, needs 50"));
+    assert_eq!(g.suggested_threshold, None);
+    assert!(g.savings.is_none());
+    assert!(g.eligibility.iter().any(|e| e == "0 labelled, needs 50"));
 }
 
 #[test]
@@ -324,7 +284,7 @@ fn unlabelled_and_unanswered_decisions_stay_out_of_the_figures() {
     assert!(!g.eligible);
     let text = render_text(&r);
     assert!(
-        text.contains("unlabelled: 1 (no downstream outcome yet)"),
+        text.contains("unlabelled: 1 (no person approved the reply at the gate that follows it)"),
         "{text}"
     );
     assert!(text.contains("eligible for enforce: no"), "{text}");
@@ -377,48 +337,50 @@ fn eligible_fixture() -> Vec<RunJournal> {
         .collect()
 }
 
+/// A `completion_check` threshold is read from the v2 file under
+/// `reply/1`; one stored under the old labels is not enforced and the
+/// report says so. Neither makes the row eligible. The fixture has no
+/// approving gate, so it is unlabelled under `reply/1` and the row fails on
+/// its label count and on the majority class alike; a row with keep labels
+/// only cannot do better, since its majority class (always keep) is right
+/// on every labelled decision.
 #[test]
-fn a_stored_threshold_for_the_exact_model_makes_a_measured_use_eligible() {
+fn a_completion_threshold_is_read_under_reply_1_only() {
     let settings = ReportSettings {
-        stored: vec![stored("jev-1.13.0", 0.15)],
+        stored_v2: vec![apb_core::decision_thresholds::VersionedThreshold {
+            use_name: "completion_check".into(),
+            provider: "main".into(),
+            model: "jev-1.13.0".into(),
+            rule: apb_core::decision_thresholds::COMPLETION_RULE.into(),
+            threshold: 0.15,
+            set_at_ms: 0,
+        }],
         ..Default::default()
     };
     let r = build(&eligible_fixture(), &ReportFilter::default(), &settings);
     let g = one_group(&r);
     assert_eq!((g.threshold, g.threshold_source.as_str()), (0.15, "stored"));
-    assert_eq!(g.all.accuracy, Some(1.0));
-    assert!(g.eligible, "{:?}", g.eligibility);
-    assert!(render_text(&r).contains("eligible for enforce: yes (all promotion rules hold)"));
+    assert!(!g.eligible);
+    assert!(
+        g.eligibility
+            .iter()
+            .any(|e| e == "accuracy not above the majority class")
+    );
 
-    // The same numbers with the threshold stored for another model id: no
-    // inheritance, and the report says a new shadow period is needed.
-    let other = ReportSettings {
-        stored: vec![stored("jev-1.12.0", 0.15)],
+    let legacy = ReportSettings {
+        stored: vec![stored("jev-1.13.0", 0.15)],
         ..Default::default()
     };
-    let r = build(&eligible_fixture(), &ReportFilter::default(), &other);
+    let r = build(&eligible_fixture(), &ReportFilter::default(), &legacy);
     let g = one_group(&r);
     assert_eq!(g.threshold_source, "configured");
     assert!(!g.eligible);
     assert!(
         g.notes
             .iter()
-            .any(|n| n.contains("does not carry over") && n.contains("new shadow period"))
-    );
-
-    // A stricter target than the measured false-action rate fails it.
-    let strict = ReportSettings {
-        stored: vec![stored("jev-1.13.0", 0.95)],
-        ..Default::default()
-    };
-    let g = build(&eligible_fixture(), &ReportFilter::default(), &strict)
-        .groups
-        .remove(0);
-    assert!(!g.eligible);
-    assert!(
-        g.eligibility
-            .iter()
-            .any(|e| e.starts_with("false-action rate 100.0%"))
+            .any(|n| n.contains("is not enforced") && n.contains("reply/1")),
+        "{:?}",
+        g.notes
     );
 }
 
@@ -498,8 +460,11 @@ fn the_json_report_matches_its_snapshot() {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/decisions-report.json"
     );
+    // Both shapes: the retry advice fixture's figures and the unlabelled
+    // completion rows.
+    let journals: Vec<RunJournal> = retry_fixture().into_iter().chain(fixture()).collect();
     let r = build(
-        &fixture(),
+        &journals,
         &ReportFilter::default(),
         &ReportSettings::default(),
     );
@@ -648,6 +613,7 @@ fn review_triage_labels_count_advise_shown_decisions_apart() {
                 ),
             ],
             provider_kinds: BTreeMap::new(),
+            run_dir: None,
         }
     };
     let journals = vec![
@@ -712,6 +678,7 @@ fn retry_run(id: &str, with_exec: bool) -> RunJournal {
             })
             .collect(),
         provider_kinds: BTreeMap::new(),
+        run_dir: None,
     }
 }
 
@@ -864,4 +831,310 @@ fn the_class_of_a_catalog_provider_shows_next_to_it() {
     assert_eq!(g.privacy_class.as_deref(), Some("confidential_tee"));
     let text = super::render::render_text(&r);
     assert!(text.contains("confidential_tee"), "{text}");
+}
+
+// --- the hand-computed figures, over retry advice (which labels both ways) ---
+
+/// One retry advice decision: `w`'s attempt 1 failed after 60 s, the
+/// advice says `switch_executor` with confidence `c` (its act
+/// probability), and attempt 2 on the same executor took 120 s and
+/// `next` (`failed` is act, `succeeded` keep); `None`: no attempt 2.
+/// `c = None` is a timeout with no answer.
+fn advice_run(
+    id: &str,
+    c: Option<f64>,
+    next: Option<&str>,
+    regex_flag: bool,
+    output_chars: u64,
+    would_change: bool,
+) -> RunJournal {
+    let exec = serde_json::json!({"binding": "sha256:b1", "step": 0, "source": {"kind": "primary"}, "executed_by": "cli"});
+    let started = |attempt: u32| {
+        serde_json::json!({"type": "attempt_started", "node": "w", "attempt": attempt,
+            "agent": "claude", "model": "m", "exec": exec})
+    };
+    let finished = |attempt: u32, status: &str, ms: u64| {
+        serde_json::json!({"type": "attempt_finished", "node": "w", "attempt": attempt,
+            "status": status, "duration_ms": ms})
+    };
+    let mut decision = serde_json::json!({"type": "decision_made", "use_site": "retry_advice",
+        "node": "w", "attempt": 1, "provider": "main", "mode": "shadow",
+        "questions_digest": "sha256:q", "state_digest": "sha256:s", "state_bytes": 100,
+        "output_chars": output_chars, "applied": false, "cached": false,
+        "baseline": {"regex_flag": regex_flag}});
+    match c {
+        Some(c) => {
+            decision["model"] = serde_json::json!("jev-1.13.0");
+            decision["calibrated"] = serde_json::json!(true);
+            decision["answers"] =
+                serde_json::json!({"next": {"value": "switch_executor", "p": c, "confidence": c}});
+            decision["would_change"] = serde_json::json!(would_change);
+            decision["latency_ms"] = serde_json::json!(200);
+            decision["cost_usd"] = serde_json::json!(0.0001);
+        }
+        None => {
+            decision["calibrated"] = serde_json::json!(false);
+            decision["latency_ms"] = serde_json::json!(3000);
+            decision["error"] = serde_json::json!("timeout");
+        }
+    }
+    let mut lines = vec![
+        serde_json::json!({"type": "run_started", "playbook": "pb", "version": "1.0.0"}),
+        serde_json::json!({"type": "node_started", "node": "w", "attempt": 1}),
+        started(1),
+        finished(1, "failed", 60_000),
+        decision,
+    ];
+    if let Some(status) = next {
+        lines.push(started(2));
+        lines.push(finished(2, status, 120_000));
+    }
+    RunJournal {
+        run_id: id.into(),
+        playbook: "pb".into(),
+        events: lines
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| Event {
+                seq: i as u64,
+                ts: 1_000 + i as u128,
+                payload: serde_json::from_value(v).unwrap(),
+            })
+            .collect(),
+        provider_kinds: BTreeMap::new(),
+        run_dir: None,
+    }
+}
+
+/// Five labelled decisions, one unlabelled, one error. Act probabilities
+/// 0.95, 0.9, 0.1, 0.4, 0.05 against act, keep, keep, act, keep. At the
+/// default 0.6 the advice acts on r1 (right) and r2 (wrong) and misses r4.
+fn retry_fixture() -> Vec<RunJournal> {
+    vec![
+        advice_run("r1", Some(0.95), Some("failed"), true, 1500, true),
+        advice_run("r2", Some(0.90), Some("succeeded"), false, 2000, true),
+        advice_run("r3", Some(0.10), Some("succeeded"), false, 300, false),
+        advice_run("r4", Some(0.40), Some("failed"), true, 1200, false),
+        advice_run("r5", Some(0.05), Some("succeeded"), true, 100, false),
+        advice_run("r6", Some(0.20), None, false, 100, false),
+        advice_run("r7", None, None, false, 10, false),
+    ]
+}
+
+#[test]
+fn the_figures_match_the_hand_computed_values() {
+    let r = build(
+        &retry_fixture(),
+        &ReportFilter::default(),
+        &ReportSettings::default(),
+    );
+    assert_eq!((r.runs, r.decisions), (7, 7));
+    // Attempts: seven first ones at 60 s, five second ones at 120 s: lower
+    // middle 60 s.
+    assert_eq!(r.median_attempt_ms, Some(60_000));
+    let g = one_group(&r);
+    assert_eq!(
+        (g.use_site.as_str(), g.provider.as_str(), g.model.as_str()),
+        ("retry_advice", "main", "jev-1.13.0")
+    );
+    assert_eq!(
+        g.rule.as_deref(),
+        Some(apb_core::decision_thresholds::RETRY_ADVICE_RULE)
+    );
+    // The timeout joins its provider's group as an error.
+    assert_eq!(
+        (g.decisions, g.errors, g.answered, g.labelled),
+        (7, 1, 6, 5)
+    );
+    assert_eq!(g.label_coverage, Some(0.8333));
+    assert_eq!((g.act_labels, g.keep_labels), (2, 3));
+    assert_eq!(
+        g.unlabelled.get("no further attempt of the node followed"),
+        Some(&1)
+    );
+    assert_eq!(
+        (g.threshold, g.threshold_source.as_str()),
+        (0.6, "configured")
+    );
+    // Acts at 0.6: r1 right, r2 wrong; r3, r5 kept right; r4 missed.
+    assert_eq!(g.all.accuracy, Some(0.6));
+    assert_eq!(g.all.recall, Some(0.5));
+    assert_eq!(
+        (g.all.majority_label.as_str(), g.all.majority_accuracy),
+        ("keep", Some(0.6))
+    );
+    assert_eq!(g.all.today_behaviour, "always retry the same executor");
+    assert_eq!(g.all.today_accuracy, Some(0.6));
+    // Regex: right on r1..r4, wrong on r5.
+    assert_eq!((g.all.regex.items, g.all.regex.accuracy), (5, Some(0.8)));
+    assert_eq!(
+        (
+            g.all.false_actions.count,
+            g.all.false_actions.of,
+            g.all.false_actions.rate
+        ),
+        (1, 3, Some(0.3333))
+    );
+    // (0.0025 + 0.81 + 0.01 + 0.36 + 0.0025) / 5 = 0.237.
+    assert_eq!(g.brier, Some(0.237));
+    // Bin 9 holds 0.95 and 0.9 (mean 0.925, rate 0.5): 0.425 x 2/5 = 0.17;
+    // 0.4 (bin 4, rate 1): 0.6 x 1/5 = 0.12; 0.1 and 0.05 (rate 0): 0.03.
+    assert_eq!(g.ece, Some(0.32));
+    assert_eq!(
+        g.would_change.as_ref().map(|w| (w.items, w.accuracy)),
+        Some((5, Some(0.6)))
+    );
+    // Long outputs: r1, r2, r4. Acts on r1 right, r2 wrong, misses r4.
+    assert_eq!(g.long_outputs.labelled, 3);
+    assert_eq!(g.long_outputs.accuracy, Some(0.3333));
+    assert_eq!(g.long_outputs.regex.accuracy, Some(1.0));
+    assert_eq!(g.output_length_unknown, 0);
+}
+
+#[test]
+fn the_threshold_table_steps_by_five_hundredths() {
+    let r = build(
+        &retry_fixture(),
+        &ReportFilter::default(),
+        &ReportSettings::default(),
+    );
+    let g = one_group(&r);
+    assert_eq!(g.table.len(), 19);
+    assert_eq!(g.table[0].threshold, 0.05);
+    assert_eq!(g.table[18].threshold, 0.95);
+    let row = |t: f64| g.table.iter().find(|r| r.threshold == t).unwrap();
+    // 0.05: every advice acts.
+    let r05 = row(0.05);
+    assert_eq!(
+        (
+            r05.coverage,
+            r05.accuracy,
+            r05.recall,
+            r05.false_action_rate
+        ),
+        (Some(1.0), Some(0.4), Some(1.0), Some(1.0))
+    );
+    // 0.10: all but r5.
+    let r10 = row(0.10);
+    assert_eq!(
+        (r10.coverage, r10.accuracy, r10.false_action_rate),
+        (Some(0.8), Some(0.6), Some(0.6667))
+    );
+    // 0.40: r1, r2, r4; one false action of three.
+    let r40 = row(0.40);
+    assert_eq!(
+        (r40.accuracy, r40.recall, r40.false_action_rate),
+        (Some(0.8), Some(1.0), Some(0.3333))
+    );
+    // 0.65: r1, r2.
+    let r65 = row(0.65);
+    assert_eq!(
+        (r65.coverage, r65.accuracy, r65.recall),
+        (Some(0.4), Some(0.6), Some(0.5))
+    );
+    // 0.95: r1 only, right.
+    let r95 = row(0.95);
+    assert_eq!(
+        (r95.coverage, r95.accuracy, r95.false_action_rate),
+        (Some(0.2), Some(0.8), Some(0.0))
+    );
+    assert_eq!(r95.false_action_ci95, Some((0.0, 0.5615)));
+    // Under 5 %: only 0.95 acts without a false action.
+    assert_eq!(g.suggested_threshold, Some(0.95));
+    let s = g.savings.as_ref().unwrap();
+    assert_eq!(
+        (s.avoidable_attempts, s.saved_ms, s.false_actions, s.lost_ms),
+        (1, 60_000, 1, 60_000)
+    );
+    assert_eq!(s.decision_latency_ms, 6 * 200 + 3000);
+    assert_eq!(s.decision_cost_usd, 0.0006);
+    assert!(!g.eligible);
+    assert!(
+        g.eligibility
+            .iter()
+            .any(|e| e.starts_with("no stored threshold"))
+    );
+    assert!(g.eligibility.iter().any(|e| e == "5 labelled, needs 50"));
+}
+
+/// Sixty retry advice decisions: ten failed retries at confidence 0.95,
+/// fifty successful ones at 0.05.
+fn eligible_retry_fixture() -> Vec<RunJournal> {
+    (0..60)
+        .map(|i| {
+            let act = i < 10;
+            advice_run(
+                &format!("e{i:02}"),
+                Some(if act { 0.95 } else { 0.05 }),
+                Some(if act { "failed" } else { "succeeded" }),
+                false,
+                100,
+                act,
+            )
+        })
+        .collect()
+}
+
+fn stored_retry(model: &str, t: f64) -> apb_core::decision_thresholds::VersionedThreshold {
+    apb_core::decision_thresholds::VersionedThreshold {
+        use_name: "retry_advice".into(),
+        provider: "main".into(),
+        model: model.into(),
+        rule: apb_core::decision_thresholds::RETRY_ADVICE_RULE.into(),
+        threshold: t,
+        set_at_ms: 0,
+    }
+}
+
+#[test]
+fn a_stored_threshold_for_the_exact_model_makes_a_measured_use_eligible() {
+    let settings = ReportSettings {
+        stored_v2: vec![stored_retry("jev-1.13.0", 0.15)],
+        ..Default::default()
+    };
+    let r = build(
+        &eligible_retry_fixture(),
+        &ReportFilter::default(),
+        &settings,
+    );
+    let g = one_group(&r);
+    assert_eq!((g.threshold, g.threshold_source.as_str()), (0.15, "stored"));
+    assert_eq!(g.all.accuracy, Some(1.0));
+    assert!(g.eligible, "{:?}", g.eligibility);
+    assert!(render_text(&r).contains("eligible for enforce: yes (all promotion rules hold)"));
+
+    // The same numbers with the threshold stored for another model id: no
+    // inheritance, and the report says a new shadow period is needed.
+    let other = ReportSettings {
+        stored_v2: vec![stored_retry("jev-1.12.0", 0.15)],
+        ..Default::default()
+    };
+    let r = build(&eligible_retry_fixture(), &ReportFilter::default(), &other);
+    let g = one_group(&r);
+    assert_eq!(g.threshold_source, "configured");
+    assert!(!g.eligible);
+    assert!(
+        g.notes
+            .iter()
+            .any(|n| n.contains("does not carry over") && n.contains("new shadow period")),
+        "{:?}",
+        g.notes
+    );
+
+    // A threshold that acts on every advice fails the false-action target.
+    let strict = ReportSettings {
+        stored_v2: vec![stored_retry("jev-1.13.0", 0.05)],
+        ..Default::default()
+    };
+    let g = build(&eligible_retry_fixture(), &ReportFilter::default(), &strict)
+        .groups
+        .remove(0);
+    assert!(!g.eligible);
+    assert!(
+        g.eligibility
+            .iter()
+            .any(|e| e.starts_with("false-action rate 100.0%")),
+        "{:?}",
+        g.eligibility
+    );
 }

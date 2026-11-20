@@ -11,6 +11,7 @@ use apb_core::eval::{EvalCase, GoalMode};
 use apb_core::schema::{GoalCheck, Playbook};
 use serde::{Deserialize, Serialize};
 
+use super::doubles::{ArgsKept, CaptureError, CapturedCall};
 use crate::event::{Event, EventPayload};
 use crate::run_view::RunUsage;
 use crate::state::{NodeStatus, RunState};
@@ -113,9 +114,15 @@ pub fn is_event_type(t: &str) -> bool {
     }
 }
 
-/// [`apb_core::eval::validate_suite`] with the journal's event types.
+/// [`apb_core::eval::validate_suite`] with the journal's event types and
+/// the installed connectors' facts (V280 checks doubles against them).
 pub fn validate_suite(playbook_dir: &Path, playbook: &Playbook) -> Vec<apb_core::validate::Issue> {
-    apb_core::eval::validate_suite_with(playbook_dir, playbook, &is_event_type)
+    apb_core::eval::validate_suite_with(
+        playbook_dir,
+        playbook,
+        &is_event_type,
+        &apb_core::connector::resolve::validation_facts(),
+    )
 }
 
 /// What the checks read.
@@ -140,6 +147,10 @@ pub struct CheckInput<'a> {
     /// An empty directory: the hooks path of every git call the checks and
     /// the case scripts make in the tree (see [`super::git`]).
     pub hooks_dir: &'a Path,
+    /// The calls the case's doubles answered
+    /// ([`super::doubles::read_calls`]), or why the capture does not
+    /// read; `Ok(&[])` for a run without doubles.
+    pub calls: Result<&'a [CapturedCall], &'a CaptureError>,
 }
 
 /// The run's terminal outcome as the checks see it: `stopped` when the
@@ -585,8 +596,218 @@ pub fn evaluate(input: &CheckInput) -> (Vec<CheckResult>, Vec<GoalResult>) {
     output_checks(input, &state, &mut out);
     file_checks(input, &mut out);
     event_checks(input, &mut out);
+    connector_checks(input, &mut out);
     script_checks(input, &mut out);
     (out, goal)
+}
+
+/// `connector.function at site` of the first five of `calls`.
+fn first_five(calls: &[&CapturedCall]) -> String {
+    calls
+        .iter()
+        .take(5)
+        .map(|c| format!("{}.{} at {}", c.connector, c.function, c.site))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The checks of a case with doubles over the calls they answered: every
+/// dispatched call answered and delivered (`connector_doubles`), and each
+/// `checks.connector_calls` entry. A capture that does not read, a
+/// reservation never delivered and args not kept whole never pass a check
+/// over the calls they hide: such a check fails as indeterminate.
+fn connector_checks(input: &CheckInput, out: &mut Vec<CheckResult>) {
+    if input.case.doubles.is_empty() {
+        return;
+    }
+    let calls = match input.calls {
+        Ok(calls) => calls,
+        Err(e) => {
+            out.push(CheckResult::new("connector_doubles", false, || {
+                if e.line == 0 {
+                    e.reason.clone()
+                } else {
+                    format!(
+                        "the call capture does not read (line {}): {}",
+                        e.line, e.reason
+                    )
+                }
+            }));
+            for cc in &input.case.checks.connector_calls {
+                out.push(CheckResult::new(
+                    format!("connector_calls[{}]", cc.function),
+                    false,
+                    || "indeterminate: the call capture does not read".to_string(),
+                ));
+            }
+            return;
+        }
+    };
+    // The journal's own record of the doubled calls: every call a doubled
+    // run dispatches is journaled `connector_call` (`connector::call`
+    // `append_event`, after its answer and before its delivery). A call the
+    // journal holds and the capture does not means the capture was removed
+    // or cut short, never that no call was made.
+    if let Some(why) = capture_gap(input.events, calls) {
+        out.push(CheckResult::new("connector_doubles", false, || why.clone()));
+        for cc in &input.case.checks.connector_calls {
+            out.push(CheckResult::new(
+                format!("connector_calls[{}]", cc.function),
+                false,
+                || format!("indeterminate: {why}"),
+            ));
+        }
+        return;
+    }
+    let unmatched: Vec<&CapturedCall> = calls
+        .iter()
+        .filter(|c| c.delivered && c.answer.is_none())
+        .collect();
+    let undelivered: Vec<&CapturedCall> = calls.iter().filter(|c| !c.delivered).collect();
+    out.push(CheckResult::new(
+        "connector_doubles",
+        unmatched.is_empty() && undelivered.is_empty(),
+        || {
+            let mut why = Vec::new();
+            if !unmatched.is_empty() {
+                why.push(format!(
+                    "{} call(s) no double answered: {}",
+                    unmatched.len(),
+                    first_five(&unmatched)
+                ));
+            }
+            if !undelivered.is_empty() {
+                why.push(format!(
+                    "{} call(s) reserved and never delivered: {}",
+                    undelivered.len(),
+                    first_five(&undelivered)
+                ));
+            }
+            why.join("; ")
+        },
+    ));
+    for cc in &input.case.checks.connector_calls {
+        out.push(call_check(cc, calls));
+    }
+}
+
+/// Why the capture does not account for the doubled calls the run journal
+/// records (its `connector_call` events, one per dispatched call of a
+/// doubled run): `capture_missing` when the capture holds no call while
+/// the journal holds some, `capture_incomplete` when a function has fewer
+/// dispatches (reservations and their replays) than journaled calls. `None` when every journaled call is
+/// in the capture (the capture may hold more: a call whose process died
+/// before its journal line, which fails as never delivered).
+fn capture_gap(events: &[Event], calls: &[CapturedCall]) -> Option<String> {
+    let mut journaled: std::collections::BTreeMap<(String, String), usize> =
+        std::collections::BTreeMap::new();
+    for e in events {
+        if let EventPayload::ConnectorCall {
+            connector,
+            function,
+            ..
+        } = &e.payload
+        {
+            *journaled
+                .entry((connector.clone(), function.clone()))
+                .or_insert(0) += 1;
+        }
+    }
+    let total: usize = journaled.values().sum();
+    if total == 0 {
+        return None;
+    }
+    if calls.is_empty() {
+        return Some(format!(
+            "capture_missing: the run journal records {total} doubled call(s) and the call capture holds none"
+        ));
+    }
+    let short: Vec<String> = journaled
+        .iter()
+        .filter_map(|((c, f), n)| {
+            // Each reservation is one dispatch, and each replay of it one
+            // more, each journaled on its own.
+            let held: usize = calls
+                .iter()
+                .filter(|x| &x.connector == c && &x.function == f)
+                .map(|x| 1 + x.replays as usize)
+                .sum();
+            (held < *n).then(|| format!("{c}.{f} ({n} journaled, {held} captured)"))
+        })
+        .collect();
+    (!short.is_empty()).then(|| {
+        format!(
+            "capture_incomplete: the call capture holds fewer calls than the run journal records: {}",
+            short.join(", ")
+        )
+    })
+}
+
+/// One `connector_calls[<function>]` check over the captured calls.
+fn call_check(cc: &apb_core::eval_doubles::CallCheck, calls: &[CapturedCall]) -> CheckResult {
+    let kind = format!("connector_calls[{}]", cc.function);
+    let (connector, function) = cc.function.split_once('.').unwrap_or((&cc.function, ""));
+    let selects = |c: &&CapturedCall| {
+        c.connector == connector
+            && c.function == function
+            && cc.site.as_deref().is_none_or(|s| s == c.site)
+    };
+    let undelivered = calls
+        .iter()
+        .filter(selects)
+        .filter(|c| !c.delivered)
+        .count();
+    if undelivered > 0 {
+        return CheckResult::new(kind, false, || {
+            format!(
+                "indeterminate: {undelivered} call(s) of {} reserved and never delivered",
+                cc.function
+            )
+        });
+    }
+    let selected: Vec<&CapturedCall> = calls.iter().filter(selects).collect();
+    if cc.args.is_some() || cc.contains.is_some() {
+        let partial = selected
+            .iter()
+            .filter(|c| c.args_kept != ArgsKept::Whole)
+            .count();
+        if partial > 0 {
+            return CheckResult::new(kind, false, || {
+                format!(
+                    "indeterminate: {partial} call(s) of {} kept no whole args (clipped or withheld)",
+                    cc.function
+                )
+            });
+        }
+    }
+    let k = selected
+        .iter()
+        .filter(|c| {
+            cc.args
+                .as_ref()
+                .is_none_or(|p| apb_core::eval_doubles::args_hold(p, &c.args))
+                && cc
+                    .contains
+                    .as_deref()
+                    .is_none_or(|t| apb_core::eval_doubles::args_contain(&c.args, t))
+        })
+        .count() as u32;
+    let ok = match (cc.count, cc.min, cc.max) {
+        (None, None, None) => k > 0,
+        (count, min, max) => {
+            count.is_none_or(|n| k == n) && min.is_none_or(|n| k >= n) && max.is_none_or(|n| k <= n)
+        }
+    };
+    CheckResult::new(kind, ok, || {
+        let rule = match (cc.count, cc.min, cc.max) {
+            (Some(n), ..) => format!("exactly {n}"),
+            (None, Some(lo), Some(hi)) => format!("{lo} to {hi}"),
+            (None, Some(lo), None) => format!("at least {lo}"),
+            (None, None, Some(hi)) => format!("at most {hi}"),
+            (None, None, None) => "at least 1".to_string(),
+        };
+        format!("{k} matching call(s), expected {rule}")
+    })
 }
 
 /// `passed` when every check passed, `error` when none failed but one could
@@ -668,6 +889,7 @@ mod tests {
             stopped: None,
             script_env: Vec::new(),
             hooks_dir: tree.path(),
+            calls: Ok(&[]),
         };
         evaluate(&input).0
     }
@@ -812,6 +1034,7 @@ mod tests {
             stopped: None,
             script_env: Vec::new(),
             hooks_dir: hooks.path(),
+            calls: Ok(&[]),
         };
         let mut out = Vec::new();
         file_checks(&input, &mut out);
@@ -832,5 +1055,200 @@ mod tests {
         let link = row("files[link.txt]");
         assert_eq!(link.1, CheckStatus::Failed);
         assert!(link.2.unwrap().contains("symlink"), "the link was followed");
+    }
+
+    const DOUBLED: &str = "schema: 1\nid: c\nfixture: { dir: fixtures/x }\nconnectors:\n  crm:\n    find:\n      - answer: { status: 200, body: {} }\n    update:\n      - answer: { status: 200, body: {} }\nchecks:\n  connector_calls:\n";
+
+    fn captured(function: &str, args: serde_json::Value, answered: bool) -> CapturedCall {
+        CapturedCall {
+            seq: 0,
+            site: "w".into(),
+            connector: "crm".into(),
+            function: function.into(),
+            account: "main".into(),
+            item: None,
+            call_key: "k".into(),
+            args,
+            args_kept: ArgsKept::Whole,
+            answer: answered.then_some(0),
+            delivered: true,
+            replays: 0,
+        }
+    }
+
+    /// The connector checks of a doubled case whose `connector_calls`
+    /// entries are `entries` (YAML list lines), over `calls`.
+    fn doubled(
+        entries: &str,
+        calls: Result<&[CapturedCall], &CaptureError>,
+    ) -> Vec<(String, CheckStatus, Option<String>)> {
+        let c = case(&format!("{DOUBLED}{entries}"));
+        let pb: Playbook = yaml_serde::from_str(PB).unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        let input = CheckInput {
+            case: &c,
+            playbook: &pb,
+            events: &[],
+            raw_types: &[],
+            tree: tree.path(),
+            fixture_commit: "HEAD",
+            suite_dir: tree.path(),
+            stopped: None,
+            script_env: Vec::new(),
+            hooks_dir: tree.path(),
+            calls,
+        };
+        let mut out = Vec::new();
+        connector_checks(&input, &mut out);
+        out.into_iter()
+            .map(|c| (c.kind, c.status, c.detail))
+            .collect()
+    }
+
+    fn row<'a>(
+        rows: &'a [(String, CheckStatus, Option<String>)],
+        kind: &str,
+    ) -> &'a (String, CheckStatus, Option<String>) {
+        rows.iter()
+            .find(|r| r.0 == kind)
+            .unwrap_or_else(|| panic!("{kind} in {rows:?}"))
+    }
+
+    #[test]
+    fn connector_calls_count_min_max_args_contains() {
+        let calls = [
+            captured("find", serde_json::json!({ "q": "acme corp" }), true),
+            captured("find", serde_json::json!({ "q": "other" }), true),
+            captured(
+                "update",
+                serde_json::json!({ "id": 1, "set": { "a": 2 } }),
+                true,
+            ),
+        ];
+        let rows = doubled(
+            "    - { function: crm.find, count: 2 }\n    - { function: crm.find, contains: acme, min: 1, max: 1 }\n    - { function: crm.update, args: { set: { a: 2 } } }\n    - { function: crm.update, args: { id: 2 } }\n    - { function: crm.find, site: elsewhere, max: 0 }\n    - { function: crm.find, min: 3 }\n",
+            Ok(&calls),
+        );
+        assert_eq!(row(&rows, "connector_doubles").1, CheckStatus::Passed);
+        let statuses: Vec<CheckStatus> = rows[1..].iter().map(|r| r.1).collect();
+        assert_eq!(
+            statuses,
+            [
+                CheckStatus::Passed,
+                CheckStatus::Passed,
+                CheckStatus::Passed,
+                CheckStatus::Failed,
+                CheckStatus::Passed,
+                CheckStatus::Failed,
+            ]
+        );
+        assert_eq!(
+            rows[4].2.as_deref(),
+            Some("0 matching call(s), expected at least 1")
+        );
+        assert_eq!(
+            rows[6].2.as_deref(),
+            Some("2 matching call(s), expected at least 3")
+        );
+    }
+
+    #[test]
+    fn an_unmatched_capture_fails_connector_doubles() {
+        let calls = [
+            captured("find", serde_json::json!({}), true),
+            captured("update", serde_json::json!({}), false),
+        ];
+        let rows = doubled("    - { function: crm.update }\n", Ok(&calls));
+        let d = row(&rows, "connector_doubles");
+        assert_eq!(d.1, CheckStatus::Failed);
+        assert_eq!(
+            d.2.as_deref(),
+            Some("1 call(s) no double answered: crm.update at w")
+        );
+        // The unmatched call was still made: it counts.
+        assert_eq!(
+            row(&rows, "connector_calls[crm.update]").1,
+            CheckStatus::Passed
+        );
+    }
+
+    #[test]
+    fn a_clipped_capture_makes_an_args_check_indeterminate() {
+        for kept in [ArgsKept::Clipped, ArgsKept::Withheld] {
+            let mut clipped = captured("find", serde_json::json!({ "clipped": true }), true);
+            clipped.args_kept = kept;
+            let calls = [clipped];
+            let rows = doubled(
+                "    - { function: crm.find, contains: acme, count: 0 }\n",
+                Ok(&calls),
+            );
+            let r = row(&rows, "connector_calls[crm.find]");
+            assert_eq!(r.1, CheckStatus::Failed, "{kept:?}");
+            assert_eq!(
+                r.2.as_deref(),
+                Some(
+                    "indeterminate: 1 call(s) of crm.find kept no whole args (clipped or withheld)"
+                )
+            );
+            // Without args or contains every call counts, whole or not.
+            let rows = doubled("    - { function: crm.find, count: 1 }\n", Ok(&calls));
+            assert_eq!(
+                row(&rows, "connector_calls[crm.find]").1,
+                CheckStatus::Passed
+            );
+        }
+    }
+
+    #[test]
+    fn a_corrupt_capture_line_fails_the_repetition() {
+        let e = CaptureError {
+            line: 3,
+            reason: "the line does not parse".into(),
+        };
+        let rows = doubled("    - { function: crm.find, max: 5 }\n", Err(&e));
+        let d = row(&rows, "connector_doubles");
+        assert_eq!(d.1, CheckStatus::Failed);
+        assert_eq!(
+            d.2.as_deref(),
+            Some("the call capture does not read (line 3): the line does not parse")
+        );
+        let r = row(&rows, "connector_calls[crm.find]");
+        assert_eq!(
+            (r.1, r.2.as_deref()),
+            (
+                CheckStatus::Failed,
+                Some("indeterminate: the call capture does not read")
+            )
+        );
+    }
+
+    #[test]
+    fn an_undelivered_reservation_fails_the_repetition() {
+        let mut pending = captured("update", serde_json::json!({ "id": 1 }), true);
+        pending.delivered = false;
+        let calls = [captured("find", serde_json::json!({}), true), pending];
+        let rows = doubled(
+            "    - { function: crm.update, count: 0 }\n    - { function: crm.find, count: 1 }\n",
+            Ok(&calls),
+        );
+        let d = row(&rows, "connector_doubles");
+        assert_eq!(d.1, CheckStatus::Failed);
+        assert_eq!(
+            d.2.as_deref(),
+            Some("1 call(s) reserved and never delivered: crm.update at w")
+        );
+        // Never read as "no call": `count: 0` is indeterminate, not passed.
+        let r = row(&rows, "connector_calls[crm.update]");
+        assert_eq!(
+            (r.1, r.2.as_deref()),
+            (
+                CheckStatus::Failed,
+                Some("indeterminate: 1 call(s) of crm.update reserved and never delivered")
+            )
+        );
+        assert_eq!(
+            row(&rows, "connector_calls[crm.find]").1,
+            CheckStatus::Passed
+        );
     }
 }

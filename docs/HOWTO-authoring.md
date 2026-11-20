@@ -5374,16 +5374,25 @@ profile bundles, resolved models) and compares them with the previous
 result. Write goal criteria against persistent outcomes and the suite gets
 them for free: `checks.goal: required` is the default.
 
-Evals never run a playbook with `irreversible` effects, a shipping step, a
-connector or a sub-playbook; such a suite is V81 and `apb eval` refuses it.
+Evals never run a playbook with `irreversible` effects, a shipping step or
+a sub-playbook; such a suite is V81 and `apb eval` refuses it. A playbook
+that binds connectors runs only against connector doubles: a case's
+`connectors:` block gives recorded answers per connector function, every
+call of the run is answered from them (or refused `double_unmatched`) and
+never reaches the service, and `checks.connector_calls` asserts the calls
+the run made, by count and by their input arguments. The doubles must
+cover every function of every binding site (V280; a malformed call
+assertion is V281); a case without them is V81. A declared `irreversible`
+effect stays refused, doubles or not. See "Connector doubles" in
+`docs/EVALS.md`.
 Keep the cases small (the fixture of the repository's own
 `branch-quality-review` suite is a twenty-line crate), tag a quick subset,
 and set `limits` and `budget` in `suite.yaml`: every repetition is a paid
 agent run. The format, the checks and the storage are in `docs/EVALS.md`.
 
-List nodes (`list:`) run in evals like any other node, except that a
-`connector` item check is a connector binding site and is refused like
-every other one (V81). To assert the counts, give the playbook a `type:
+List nodes (`list:`) run in evals like any other node; a `connector`
+item check is a connector binding site (`<node>#check`) and needs its
+doubles like every other one. To assert the counts, give the playbook a `type:
 list` goal criterion: `checks.goal: required` then needs every item
 processed with none left for a look, and an `events` check may name
 `list_started`, `list_batch_started` and `list_item_settled`.

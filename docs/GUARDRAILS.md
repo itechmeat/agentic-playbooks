@@ -275,11 +275,22 @@ binaries on `PATH`.
 
 The run guard names cover `evidence`, a run's `deadline`, a `concurrency:`
 key, a gate's `fields`, `show` or `max_scope`, a list node's
-`pilot` or `stop_when` (`list_pilot`) and a timer wait (`wait_park`),
-among the features each change added. A guard lists its names in one
-fixed order, the order the features were added (`GuardedFeature::ALL`),
-so a definition with both a pilot list and a timer wait carries
-`["list_pilot", "wait_park"]`. A definition whose list block carries `pilot` or `stop_when` is
+`pilot` or `stop_when` (`list_pilot`), a timer wait (`wait_park`) and a
+doubled eval run (`eval_doubles`), among the features each change added.
+A guard lists its names in one fixed order, the order the features were
+added (`GuardedFeature::ALL`), so a definition with both a pilot list and
+a timer wait carries `["list_pilot", "wait_park"]`. `eval_doubles` is a
+run feature, not a definition feature: `apb eval` names it for a run
+whose case answers its connector calls from recorded answers (EVALS.md,
+"Connector doubles"), written in the same journal write as the start's
+`run_provenance`, and every patch keeps it. An apb that does not know
+doubles would drive such a run as an ordinary one; one that knows run
+guards refuses to resume or pause it once the journal holds the guard,
+and still stops it. The guard narrows what an older apb does with the
+run; what keeps a doubled run from a service through a connector is its
+manifest, which records the accounts' names only, so every connector call
+an apb blind to doubles makes for the run fails before it loads the
+connector, resolves a secret or sends a request. A definition whose list block carries `pilot` or `stop_when` is
 refused outright by apb 1.0.0-beta.1 and every later release without this
 change: their list block rejects unknown fields, so such a binary neither
 starts such a playbook nor resumes such a run and appends nothing to its

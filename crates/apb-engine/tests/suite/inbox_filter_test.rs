@@ -87,6 +87,7 @@ fn account() -> ManifestAccount {
 fn seed_run(run_dir: &Path, functions: &[&str], max_calls: Option<u32>) {
     let mut m = RunExecutionManifest::default();
     m.connectors.push(ManifestConnector {
+        doubled_accounts: Vec::new(),
         name: CONNECTOR.to_string(),
         digest: "sha256:test".to_string(),
         accounts: vec![account()],

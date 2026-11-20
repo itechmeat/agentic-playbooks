@@ -306,6 +306,7 @@ pub(crate) fn build_run_manifest(
     expected_accounts: &BTreeMap<String, String>,
     overrides: Option<&apb_core::overrides::RunOverrides>,
     supervised: bool,
+    doubled: bool,
 ) -> Result<RunExecutionManifest, EngineError> {
     let mut bindings: Vec<(String, apb_core::profile::QualifiedProfileRef)> = Vec::new();
     for n in &playbook.nodes {
@@ -353,6 +354,7 @@ pub(crate) fn build_run_manifest(
             playbook,
             expected_connectors,
             expected_accounts,
+            doubled,
         )?;
         manifest.connectors = connectors;
         manifest.connector_grants = grants;
@@ -1467,6 +1469,7 @@ pub(crate) fn prepare_placed(
                 &opts.expected_connector_accounts,
                 opts.overrides.as_ref(),
                 opts.mode.expects_supervisor_agent(),
+                opts.eval.as_ref().is_some_and(|e| e.doubles.is_some()),
             ),
         )?,
     };
@@ -1607,7 +1610,8 @@ pub(crate) fn prepare_placed(
         (opts.parent_run.is_none() && opts.depth == 0 && scenario.is_none() && opts.eval.is_none())
             .then(|| crate::run_deadline::at_start(&playbook, opts.deadline_ms))
             .flatten();
-    log.append(EventPayload::RunProvenance {
+    let eval_doubles = opts.eval.as_ref().is_some_and(|e| e.doubles.is_some());
+    let provenance = EventPayload::RunProvenance {
         origin: Some(t.origin_label.into()),
         digest: Some(digest),
         execution_root: Some(t.execution_root.to_string_lossy().into_owned()),
@@ -1636,13 +1640,20 @@ pub(crate) fn prepare_placed(
             record.queued = key_queued;
             record
         }),
-    })?;
+        eval_doubles,
+    };
     // A definition using a feature an older apb would drop is guarded from
     // here on: every checkpoint carries the guard, so such an apb refuses
     // to continue the run. A deadline from the run argument alone is named
-    // too, and the concurrency feature exactly when the run took a slot.
-    if let Some(guard) = run_guard_of(&playbook, deadline.is_some(), key.is_some()) {
-        log.append(guard)?;
+    // too, the concurrency feature exactly when the run took a slot, and
+    // `eval_doubles` for a doubled eval run, whose guard goes out in one
+    // write with its provenance.
+    let run_guard = run_guard_of(&playbook, deadline.is_some(), key.is_some(), eval_doubles);
+    journal_provenance(&mut log, provenance, run_guard)?;
+    // A doubled run's capture exists, empty and durable, before its first
+    // node: a capture missing later was removed, never "no call yet".
+    if eval_doubles {
+        prep_try(&mut log, crate::eval::doubles::create_capture(&run_dir))?;
     }
     // The claim is durable now: an active holder's reservation is cleared
     // (its owner released), a waiter's owner is kept for its turn.
@@ -1958,10 +1969,20 @@ pub(crate) fn run_guard(
             }
         )
     });
+    let doubled = events.iter().any(|e| {
+        matches!(
+            &e.payload,
+            EventPayload::RunProvenance {
+                eval_doubles: true,
+                ..
+            }
+        )
+    });
     run_guard_of(
         playbook,
         crate::run_deadline::in_force(events).is_some(),
         keyed,
+        doubled,
     )
 }
 
@@ -1969,8 +1990,14 @@ pub(crate) fn run_guard(
 /// with `deadline` named exactly when a deadline is in force for the run
 /// (a scenario, an eval and a child ignore the playbook's) and
 /// `concurrency` named exactly when the run took a slot (a child, a
-/// scenario and an eval take none).
-fn run_guard_of(playbook: &Playbook, deadline: bool, concurrency: bool) -> Option<EventPayload> {
+/// scenario and an eval take none), and `eval_doubles` exactly when the
+/// run is a doubled eval run (a run feature, never the definition's).
+fn run_guard_of(
+    playbook: &Playbook,
+    deadline: bool,
+    concurrency: bool,
+    eval_doubles: bool,
+) -> Option<EventPayload> {
     use apb_core::validate::GuardedFeature;
     let mut features: Vec<GuardedFeature> = apb_core::validate::guarded_features(playbook)
         .into_iter()
@@ -1982,12 +2009,45 @@ fn run_guard_of(playbook: &Playbook, deadline: bool, concurrency: bool) -> Optio
     if concurrency {
         features.push(GuardedFeature::Concurrency);
     }
+    if eval_doubles {
+        features.push(GuardedFeature::EvalDoubles);
+    }
     features.sort();
     let requires: Vec<String> = features
         .into_iter()
         .map(|f| f.as_str().to_string())
         .collect();
     (!requires.is_empty()).then_some(EventPayload::RunGuard { requires })
+}
+
+/// Journals a start's `run_provenance` and its `run_guard`. A doubled
+/// start (`eval_doubles` on the provenance) writes both in one write
+/// ([`EventLog::append_pair`]); every other start keeps main's separate
+/// appends, so a run that uses no new feature writes main's journal.
+fn journal_provenance(
+    log: &mut EventLog,
+    provenance: EventPayload,
+    guard: Option<EventPayload>,
+) -> Result<(), EngineError> {
+    let doubled = matches!(
+        provenance,
+        EventPayload::RunProvenance {
+            eval_doubles: true,
+            ..
+        }
+    );
+    match guard {
+        Some(guard) if doubled => {
+            log.append_pair(provenance, |_, _| {}, |_| guard)?;
+        }
+        guard => {
+            log.append(provenance)?;
+            if let Some(guard) = guard {
+                log.append(guard)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The limits a run journals on `run_provenance`, from the profiles its
@@ -2049,15 +2109,154 @@ mod run_guard_tests {
             "schema: 2\nid: p\nname: p\nversion: 1.0.0\nconcurrency: { on_busy: refuse }\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
         )
         .unwrap();
-        let none = run_guard_of(&pb, false, false).map(|p| match p {
+        let none = run_guard_of(&pb, false, false, false).map(|p| match p {
             EventPayload::RunGuard { requires } => requires,
             _ => Vec::new(),
         });
         assert_eq!(none, None);
-        let keyed = run_guard_of(&pb, false, true).map(|p| match p {
+        let keyed = run_guard_of(&pb, false, true, false).map(|p| match p {
             EventPayload::RunGuard { requires } => requires,
             _ => Vec::new(),
         });
         assert_eq!(keyed, Some(vec!["concurrency".to_string()]));
+    }
+
+    const PLAIN: &str = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n";
+
+    fn requires(p: Option<EventPayload>) -> Option<Vec<String>> {
+        p.map(|p| match p {
+            EventPayload::RunGuard { requires } => requires,
+            _ => Vec::new(),
+        })
+    }
+
+    fn provenance(json: serde_json::Value) -> EventPayload {
+        let mut v = json;
+        v["type"] = "run_provenance".into();
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn event(seq: u64, payload: EventPayload) -> crate::event::Event {
+        crate::event::Event {
+            seq,
+            ts: 1,
+            payload,
+        }
+    }
+
+    /// A doubled run's guard names `eval_doubles`, read from its
+    /// provenance as a patch recomputes it (`patch.rs` calls
+    /// [`run_guard`]), so a patch keeps it; a run without doubles has none.
+    #[test]
+    fn a_doubled_run_carries_the_eval_doubles_guard() {
+        let pb = Playbook::from_yaml(PLAIN).unwrap();
+        assert_eq!(
+            requires(run_guard_of(&pb, false, false, true)),
+            Some(vec!["eval_doubles".to_string()])
+        );
+        let doubled = [event(
+            2,
+            provenance(serde_json::json!({ "eval_doubles": true })),
+        )];
+        assert_eq!(
+            requires(run_guard(&pb, &doubled)),
+            Some(vec!["eval_doubles".to_string()])
+        );
+        let plain = [event(2, provenance(serde_json::json!({})))];
+        assert_eq!(requires(run_guard(&pb, &plain)), None);
+        // The guard names it last, after the definition's features.
+        let deadline = PLAIN.replace("version: 1.0.0\n", "version: 1.0.0\ndeadline: 1h\n");
+        let pb = Playbook::from_yaml(&deadline).unwrap();
+        assert_eq!(
+            requires(run_guard_of(&pb, true, false, true)),
+            Some(vec!["deadline".to_string(), "eval_doubles".to_string()])
+        );
+    }
+
+    /// A doubled start's provenance and guard go out in one write: the
+    /// guard follows at the next seq with the same `ts`, and a write cut
+    /// at its end leaves the provenance whole beside the torn guard.
+    #[test]
+    fn the_guard_is_written_with_the_provenance() {
+        let pb = Playbook::from_yaml(PLAIN).unwrap();
+        let doubled = || provenance(serde_json::json!({ "eval_doubles": true }));
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = EventLog::create(dir.path()).unwrap();
+        journal_provenance(&mut log, doubled(), run_guard_of(&pb, false, false, true)).unwrap();
+        let events = crate::event::read_all(dir.path()).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0].payload,
+            EventPayload::RunProvenance {
+                eval_doubles: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &events[1].payload,
+            EventPayload::RunGuard { requires } if requires == &["eval_doubles"]
+        ));
+        assert_eq!(events[1].seq, events[0].seq + 1);
+        assert_eq!(events[1].ts, events[0].ts);
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = EventLog::create(dir.path()).unwrap();
+        log.fault_next_write(5);
+        assert!(
+            journal_provenance(&mut log, doubled(), run_guard_of(&pb, false, false, true)).is_err()
+        );
+        let lossy = crate::event::read_all_lossy_tail(dir.path()).unwrap();
+        assert_eq!(lossy.len(), 1, "the provenance whole, its guard torn");
+        assert!(matches!(
+            lossy[0].payload,
+            EventPayload::RunProvenance { .. }
+        ));
+        assert!(crate::event::read_all(dir.path()).is_err());
+    }
+
+    /// A start with a deadline and no doubles journals as main does: the
+    /// provenance in its own append, then the guard in another, so a write
+    /// cut at the end of the provenance's tears the provenance itself and
+    /// no guard is written.
+    #[test]
+    fn an_undoubled_guarded_start_writes_as_main() {
+        let deadline = PLAIN.replace("version: 1.0.0\n", "version: 1.0.0\ndeadline: 1h\n");
+        let pb = Playbook::from_yaml(&deadline).unwrap();
+        let plain = || provenance(serde_json::json!({}));
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = EventLog::create(dir.path()).unwrap();
+        log.append(EventPayload::RunStarted {
+            playbook: "p".into(),
+            version: "1.0.0".into(),
+            definition: None,
+            external_data: false,
+        })
+        .unwrap();
+        journal_provenance(&mut log, plain(), run_guard_of(&pb, true, false, false)).unwrap();
+        let events = crate::event::read_all(dir.path()).unwrap();
+        let types: Vec<String> = events
+            .iter()
+            .map(|e| {
+                serde_json::to_value(&e.payload).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(types, ["run_started", "run_provenance", "run_guard"]);
+        let line = std::fs::read_to_string(dir.path().join("events.jsonl")).unwrap();
+        assert!(!line.contains("eval_doubles"), "{line}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = EventLog::create(dir.path()).unwrap();
+        log.fault_next_write(5);
+        assert!(
+            journal_provenance(&mut log, plain(), run_guard_of(&pb, true, false, false)).is_err()
+        );
+        let lossy = crate::event::read_all_lossy_tail(dir.path()).unwrap();
+        assert!(
+            lossy.is_empty(),
+            "the provenance's own write was cut: {lossy:?}"
+        );
     }
 }

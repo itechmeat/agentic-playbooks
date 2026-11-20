@@ -74,11 +74,19 @@ pub const RETRY_ADVICE_LEGACY_RULE: &str = "exec/0";
 /// execution identity.
 pub const RETRY_ADVICE_RULE: &str = "exec/1";
 
+/// The current rule of `completion_check` labels: only a person's approval
+/// of the reply at the gate that follows it, labelled `keep`.
+pub const COMPLETION_RULE: &str = "reply/1";
+
 /// The current labelling rule of a use whose labels have rule versions;
 /// `None` for every other use, which keeps reading [`THRESHOLDS_FILE`]. A
 /// threshold measured under one rule version never enforces under another.
 pub fn versioned_use(use_name: &str) -> Option<&'static str> {
-    (use_name == "retry_advice").then_some(RETRY_ADVICE_RULE)
+    match use_name {
+        "retry_advice" => Some(RETRY_ADVICE_RULE),
+        "completion_check" => Some(COMPLETION_RULE),
+        _ => None,
+    }
 }
 
 /// One threshold of [`THRESHOLDS_V2_FILE`]: [`StoredThreshold`] plus the
@@ -365,23 +373,68 @@ fn set_v2(
 mod tests {
     use super::*;
 
+    /// `completion_check` labels have rule versions: its thresholds are
+    /// stored in the v2 file under `reply/1` only.
+    #[test]
+    fn completion_check_is_a_versioned_use() {
+        assert_eq!(versioned_use("completion_check"), Some(COMPLETION_RULE));
+        let dir = tempfile::tempdir().unwrap();
+        let set =
+            set_threshold_with_rule_in(dir.path(), "completion_check", "main", "m", 0.2, None)
+                .unwrap();
+        assert_eq!(
+            (set.file, set.rule),
+            (THRESHOLDS_V2_FILE, Some(COMPLETION_RULE))
+        );
+        assert!(!dir.path().join(THRESHOLDS_FILE).exists());
+        assert!(
+            set_threshold_with_rule_in(
+                dir.path(),
+                "completion_check",
+                "main",
+                "m",
+                0.2,
+                Some("exec/1")
+            )
+            .is_err()
+        );
+        assert_eq!(
+            stored_threshold_in(dir.path(), "completion_check", "main", "m"),
+            Some(0.2)
+        );
+    }
+
+    /// A `completion_check` threshold stored before rule versions (the
+    /// legacy file) was fitted on the downstream labels: it never enforces.
+    #[test]
+    fn a_threshold_stored_under_the_old_rule_no_longer_enforces() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = "version: 1\nthresholds:\n- use: completion_check\n  provider: main\n  model: m\n  threshold: 0.15\n";
+        std::fs::write(dir.path().join(THRESHOLDS_FILE), legacy).unwrap();
+        assert_eq!(load_in(dir.path()).unwrap().len(), 1);
+        assert_eq!(
+            stored_threshold_in(dir.path(), "completion_check", "main", "m"),
+            None
+        );
+    }
+
     #[test]
     fn a_threshold_round_trips_for_its_exact_model_only() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
-            stored_threshold_in(dir.path(), "completion_check", "main", "jev-1.13.0"),
+            stored_threshold_in(dir.path(), "review_triage", "main", "jev-1.13.0"),
             None
         );
-        set_threshold_in(dir.path(), "completion_check", "main", "jev-1.13.0", 0.15).unwrap();
+        set_threshold_in(dir.path(), "review_triage", "main", "jev-1.13.0", 0.15).unwrap();
         assert_eq!(
-            stored_threshold_in(dir.path(), "completion_check", "main", "jev-1.13.0"),
+            stored_threshold_in(dir.path(), "review_triage", "main", "jev-1.13.0"),
             Some(0.15)
         );
         // No inheritance: another model id, provider or use has none.
         for (u, p, m) in [
-            ("completion_check", "main", "jev-1.14.0"),
-            ("completion_check", "main", "jev-1.13"),
-            ("completion_check", "other", "jev-1.13.0"),
+            ("review_triage", "main", "jev-1.14.0"),
+            ("review_triage", "main", "jev-1.13"),
+            ("review_triage", "other", "jev-1.13.0"),
             ("retry_advice", "main", "jev-1.13.0"),
         ] {
             assert_eq!(
@@ -391,12 +444,12 @@ mod tests {
             );
         }
         // Setting again replaces instead of adding a second entry.
-        set_threshold_in(dir.path(), "completion_check", "main", "jev-1.13.0", 0.2).unwrap();
-        set_threshold_in(dir.path(), "completion_check", "main", "jev-1.14.0", 0.1).unwrap();
+        set_threshold_in(dir.path(), "review_triage", "main", "jev-1.13.0", 0.2).unwrap();
+        set_threshold_in(dir.path(), "review_triage", "main", "jev-1.14.0", 0.1).unwrap();
         let all = load_in(dir.path()).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(
-            stored_threshold_in(dir.path(), "completion_check", "main", "jev-1.13.0"),
+            stored_threshold_in(dir.path(), "review_triage", "main", "jev-1.13.0"),
             Some(0.2)
         );
     }
@@ -465,9 +518,8 @@ mod tests {
             None
         );
         // A use without rule versions keeps the legacy file.
-        let set =
-            set_threshold_with_rule_in(dir.path(), "completion_check", "main", "m", 0.2, None)
-                .unwrap();
+        let set = set_threshold_with_rule_in(dir.path(), "review_triage", "main", "m", 0.2, None)
+            .unwrap();
         assert_eq!((set.file, set.rule), (THRESHOLDS_FILE, None));
     }
 
@@ -489,7 +541,7 @@ mod tests {
         assert!(
             set_threshold_with_rule_in(
                 dir.path(),
-                "completion_check",
+                "review_triage",
                 "main",
                 "m",
                 0.2,

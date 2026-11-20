@@ -812,6 +812,7 @@ mod tests {
             deadline: None,
             start_key: None,
             concurrency: None,
+            eval_doubles: false,
             origin: Some("project".into()),
             digest: None,
             execution_root: None,

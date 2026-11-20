@@ -48,6 +48,7 @@ pub mod edge_address;
 pub mod effects;
 // --- 0.24.0 eval suites ---
 pub mod eval;
+pub mod eval_doubles;
 // --- end 0.24.0 eval suites ---
 // host execution mode (0.23.0)
 pub mod execution;

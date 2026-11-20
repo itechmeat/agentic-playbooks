@@ -147,6 +147,7 @@ fn rig_with(yaml: &str, base: &str, max_calls: Option<u32>) -> Rig {
         }
     };
     m.connectors.push(ManifestConnector {
+        doubled_accounts: Vec::new(),
         name: CONNECTOR.to_string(),
         digest: "sha256:test".to_string(),
         accounts: vec![account],

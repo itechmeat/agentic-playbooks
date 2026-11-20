@@ -432,8 +432,10 @@ fn an_uncalibrated_provider_is_refused_unless_allowed() {
             "version: 1\nmode: enforce\nproviders:\n  - {{ id: stub, kind: fake, answers: {{ final_result: {{ type: noul, noul: 0.01 }} }} }}\nuses:\n  completion_check: {{ mode: enforce, allow_uncalibrated: {allow} }}\n"
         ));
         fs::write(
-            p.cfg.path().join("decisions-thresholds.yaml"),
-            "thresholds:\n  - { use: completion_check, provider: stub, model: fake-1, threshold: 0.05 }\n",
+            p.cfg
+                .path()
+                .join(apb_core::decision_thresholds::THRESHOLDS_V2_FILE),
+            "thresholds:\n  - { use: completion_check, provider: stub, model: fake-1, rule: reply/1, threshold: 0.05 }\n",
         )
         .unwrap();
         let _lock = common::env_lock();

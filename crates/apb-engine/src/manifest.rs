@@ -264,7 +264,22 @@ pub struct ManifestAccount {
 pub struct ManifestConnector {
     pub name: String,
     pub digest: String,
+    /// The accounts a call resolves its target from; empty for a doubled
+    /// eval run, whose accounts no binary may resolve.
     pub accounts: Vec<ManifestAccount>,
+    /// A doubled eval run's accounts, by name and default flag only: no
+    /// field, no variable name, no command. An apb that does not know
+    /// doubles ignores it and finds no account to call through.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub doubled_accounts: Vec<DoubledAccount>,
+}
+
+/// One account of a doubled eval run's connector: what account selection
+/// needs and nothing a request could be built from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoubledAccount {
+    pub name: String,
+    pub default: bool,
 }
 
 /// A single node's grant against one connector: which accounts, which

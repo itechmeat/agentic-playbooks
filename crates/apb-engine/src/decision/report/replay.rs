@@ -263,7 +263,7 @@ fn ask(
     journal: &RunJournal,
 ) -> ReplayItem {
     let labeller = labeller_for(&r.use_site);
-    let label = labeller.label(r, &journal.events);
+    let (label, _) = labeller.label_in(r, &journal.events, journal.run_dir.as_deref());
     let (model, answers, latency_ms, error) = match runner.ask_unjournaled(request) {
         Ok(resp) => (
             Some(resp.model.clone()),

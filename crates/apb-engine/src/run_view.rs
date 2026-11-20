@@ -1117,6 +1117,7 @@ mod decision_tests {
                 deadline: None,
                 start_key: None,
                 concurrency: Some(keyed_record(false)),
+                eval_doubles: false,
             },
         )];
         let tmp = tempfile::tempdir().unwrap();
@@ -1153,6 +1154,7 @@ mod decision_tests {
                 deadline: None,
                 start_key: None,
                 concurrency: Some(keyed_record(true)),
+                eval_doubles: false,
             },
         )];
         let tmp = tempfile::tempdir().unwrap();

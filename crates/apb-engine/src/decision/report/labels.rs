@@ -16,8 +16,9 @@
 //! label it.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
-use crate::event::{DecisionAnswer, DecisionBaseline, Event, EventPayload, supervisor_action};
+use crate::event::{DecisionAnswer, DecisionBaseline, Event, EventPayload};
 
 /// One journaled `decision_made`, with the run it belongs to.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +29,9 @@ pub struct DecisionRecord {
     pub ts: u128,
     pub use_site: String,
     pub node: Option<String>,
+    /// The list item the decision judged (`decision_made.item`), for an
+    /// item of a list node.
+    pub item: Option<String>,
     pub attempt: Option<u32>,
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -56,6 +60,7 @@ impl DecisionRecord {
         let EventPayload::DecisionMade {
             use_site,
             node,
+            item,
             attempt,
             provider,
             model,
@@ -83,6 +88,7 @@ impl DecisionRecord {
             ts: e.ts,
             use_site: use_site.clone(),
             node: node.clone(),
+            item: item.clone(),
             attempt: *attempt,
             provider: provider.clone(),
             model: model.clone(),
@@ -182,6 +188,18 @@ pub trait Labeller: Sync {
     ) -> (Label, Option<&'static str>) {
         (self.label(r, events), None)
     }
+    /// [`Labeller::label_with_rule`] over a run read from disk
+    /// (`RunJournal::run_dir`): a labeller that needs more than the events (a
+    /// stored definition) reads it from `run_dir`. The report and the replay
+    /// label through it.
+    fn label_in(
+        &self,
+        r: &DecisionRecord,
+        events: &[Event],
+        _run_dir: Option<&Path>,
+    ) -> (Label, Option<&'static str>) {
+        self.label_with_rule(r, events)
+    }
     /// A stub that labels nothing yet.
     fn pending(&self) -> bool {
         false
@@ -209,35 +227,269 @@ pub fn labeller_for(use_site: &str) -> Box<dyn Labeller> {
 
 // --- the completion check ---------------------------------------------------
 
-/// Labels a completion check from what happened after the attempt:
+/// Labels a completion check under rule `reply/1`
+/// ([`apb_core::decision_thresholds::COMPLETION_RULE`]), from what the
+/// journal proves about the reply itself:
 ///
-/// - `Act` (the reply was not finished) when, before the node starts again,
-///   a supervisor retried it (`node_retry`), the run was moved back to it or
-///   to a node that ran before it (`run_continue_from`, a patch or migration
-///   `continue_from`), or the next node to start after it finished `failed`;
-/// - `Keep` when the next node finished `succeeded` with none of those, or
-///   the node was the last one and the run finished `succeeded`;
-/// - unlabelled while the run has not shown either, when another attempt of
-///   the same visit followed (its outcome is not this attempt's), and above
-///   shadow when the check's own anomaly wake came first (the outcome may be
-///   the decision's doing).
+/// - `Keep` (flagging the reply would have been wrong) when the node's next
+///   `node_finished` succeeded, the first node to start or ask after it is a
+///   review gate whose request is bound to this execution's snapshot, the
+///   gate's stored definition `approves` the node, and a person decided
+///   that request (or a scope re-ask of it that keeps the binding) with one
+///   of the gate's approving options;
+/// - nothing is labelled `Act`: a reply that asks a question back stops
+///   before the check runs, and a later failure, a supervisor retry or a
+///   move back say something went wrong later, not that the reply was
+///   unfinished;
+/// - unlabelled otherwise, when another attempt of the same visit followed,
+///   and above shadow when the check's own anomaly wake came first.
+///
+/// The approving options come from the definition the run executed, which
+/// only a run directory holds: [`Labeller::label`] (events only) never
+/// labels `Keep`.
 pub struct CompletionLabeller;
 
-/// The node a supervisor or patch moved the run back to, if this event does.
-fn moved_back_to(e: &Event) -> Option<&str> {
-    match &e.payload {
-        EventPayload::SupervisorAction {
-            action,
-            node: Some(n),
-            ..
-        } if action == supervisor_action::NODE_RETRY
-            || action == supervisor_action::RUN_CONTINUE_FROM =>
-        {
-            Some(n)
+impl CompletionLabeller {
+    fn label_at(&self, r: &DecisionRecord, events: &[Event], run_dir: Option<&Path>) -> Label {
+        let Some(node) = r.node.as_deref() else {
+            return Label::Unlabelled("no node on the decision");
+        };
+        // An item's reply is settled by the item, not by the list's
+        // aggregate `node_finished`, and the list's gate approves the list:
+        // neither says a person approved this item's reply.
+        if r.item.is_some() {
+            return Label::Unlabelled("the decision judged a list item's reply");
         }
-        EventPayload::PatchApplied { continue_from, .. }
-        | EventPayload::RunMigrated { continue_from, .. } => Some(continue_from),
-        _ => None,
+        let Some(at) = events.iter().position(|e| e.seq == r.seq) else {
+            return Label::Unlabelled("decision not in its journal");
+        };
+        // The events up to the node's next start: a later start is a new
+        // decision's business.
+        let window: Vec<&Event> = events[at + 1..]
+            .iter()
+            .take_while(
+                |e| !matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node),
+            )
+            .collect();
+        // Another attempt of the same visit (the checked one was rejected
+        // or failed after it): what follows is that attempt's outcome, not
+        // this one's, and an enforce rejection would label itself.
+        if window.iter().any(|e| {
+            matches!(&e.payload, EventPayload::AttemptStarted { node: n, attempt, .. }
+                if n == node && r.attempt.is_some_and(|a| *attempt > a))
+        }) {
+            return Label::Unlabelled("a later attempt of the node followed");
+        }
+        // Above shadow the check raised its own anomaly wake: what answers
+        // it would confirm the decision by its own doing.
+        if r.mode != "shadow"
+            && window.iter().any(|e| {
+                matches!(&e.payload, EventPayload::WakeRaised { trigger: crate::event::WakeTrigger::Anomaly, node: n, .. } if n == node)
+            })
+        {
+            return Label::Unlabelled("the decision's own anomaly wake preceded the outcome");
+        }
+        const NOT_APPROVED: &str = "no person approved the reply at the gate that follows it";
+        const NOT_THE_REPLY: &str = "the gate does not approve the reply";
+        let Some(fin) = window.iter().position(
+            |e| matches!(&e.payload, EventPayload::NodeFinished { node: n, .. } if n == node),
+        ) else {
+            return Label::Unlabelled(if window.len() < events.len() - at - 1 {
+                "the node ran again before any outcome"
+            } else {
+                "no downstream outcome yet"
+            });
+        };
+        let settlement = window[fin].seq;
+        if !matches!(&window[fin].payload, EventPayload::NodeFinished { status, .. } if status == "succeeded")
+        {
+            return Label::Unlabelled(NOT_APPROVED);
+        }
+        // The first node to start or ask after the reply settled.
+        let next = window[fin + 1..].iter().find(|e| match &e.payload {
+            EventPayload::NodeStarted { node: n, .. }
+            | EventPayload::ReviewRequested { node: n, .. } => n != node,
+            _ => false,
+        });
+        let Some(request) = next else {
+            return Label::Unlabelled(NOT_APPROVED);
+        };
+        let EventPayload::ReviewRequested {
+            node: gate,
+            plan_digest: None,
+            binding,
+            ..
+        } = &request.payload
+        else {
+            return Label::Unlabelled(NOT_APPROVED);
+        };
+        if !binds(binding.as_ref(), node, settlement) {
+            return Label::Unlabelled(NOT_THE_REPLY);
+        }
+        let (decision, _, final_request) =
+            match chain_decision(events, gate, request.seq, node, settlement) {
+                Ok(found) => found,
+                Err(why) => return Label::Unlabelled(why),
+            };
+        let Some(definition) = run_dir.and_then(|d| definition_at(d, events, final_request)) else {
+            return Label::Unlabelled("the gate's definition is not stored");
+        };
+        let Some(approving) = approving_options_of(&definition, gate, node) else {
+            return Label::Unlabelled(NOT_THE_REPLY);
+        };
+        if approving.iter().any(|o| o == decision) {
+            Label::Keep
+        } else {
+            Label::Unlabelled(NOT_APPROVED)
+        }
+    }
+}
+
+/// Whether `binding` holds a snapshot of `node` settled at `settlement`.
+fn binds(binding: Option<&crate::approval::ReviewBinding>, node: &str, settlement: u64) -> bool {
+    binding.is_some_and(|b| {
+        b.snapshots
+            .iter()
+            .any(|s| s.node == node && s.settlement_seq == settlement)
+    })
+}
+
+/// The definition in force at `seq`: the last boundary at or before it,
+/// when it journaled a digest whose bytes are stored and parse.
+fn definition_at(run_dir: &Path, events: &[Event], seq: u64) -> Option<apb_core::schema::Playbook> {
+    let boundary = crate::run_definitions::boundaries(events)
+        .into_iter()
+        .rev()
+        .find(|b| b.seq <= seq)?;
+    let bytes = crate::run_definitions::read_stored(run_dir, boundary.definition.as_deref()?)?;
+    apb_core::schema::Playbook::from_yaml(std::str::from_utf8(&bytes).ok()?).ok()
+}
+
+/// The approving options of `gate` in `definition` when it is a
+/// `human_review` whose `approves.results` names `node`.
+fn approving_options_of(
+    definition: &apb_core::schema::Playbook,
+    gate: &str,
+    node: &str,
+) -> Option<Vec<String>> {
+    let gate = definition.nodes.iter().find(|n| n.id == gate)?;
+    let apb_core::schema::NodeKind::HumanReview { options, .. } = &gate.kind else {
+        return None;
+    };
+    let approves = gate.approves.as_ref()?;
+    approves
+        .results
+        .iter()
+        .any(|r| r == node)
+        .then(|| approves.approving_options(options))
+}
+
+/// The person's decision on the request at `first` of gate `gate` and on
+/// every re-ask that keeps its binding of `node`'s snapshot settled at
+/// `settlement` with no `patch_applied` since `first`: `Ok((decision,
+/// note, final_request_seq))` of the last request of the chain, or why
+/// there is none. A person's decision is one with no `decided_by` whose
+/// recorded channel (`via`) is a person's (`terminal` or
+/// `dashboard_session`); a decision without a recorded channel, or through
+/// MCP, a run step or any other surface, is no person's label.
+fn chain_decision<'a>(
+    events: &'a [Event],
+    gate: &str,
+    first: u64,
+    node: &str,
+    settlement: u64,
+) -> Result<(&'a str, &'a str, u64), &'static str> {
+    const UNDECIDED: &str = "the gate visit is not decided yet";
+    let Some(start) = events.iter().position(|e| e.seq == first) else {
+        return Err(UNDECIDED);
+    };
+    let mut open = first;
+    let mut i = start + 1;
+    while i < events.len() {
+        match &events[i].payload {
+            EventPayload::ReviewRequested { node: n, .. } if n == gate => {
+                // The next visit began before this one was decided.
+                return Err("the gate visit was never decided");
+            }
+            // No decision across a patch is read as an approval, re-asked
+            // or not.
+            EventPayload::PatchApplied { .. } => {
+                return Err("the gate's definition changed while it waited");
+            }
+            EventPayload::ReviewWithdrawn { node: n, reason } if n == gate => {
+                let reask = crate::event::is_scope_changed(reason)
+                    .then(|| reask_after(events, i, gate))
+                    .flatten()
+                    .filter(|&j| {
+                        matches!(&events[j].payload, EventPayload::ReviewRequested { binding, .. }
+                            if binds(binding.as_ref(), node, settlement))
+                    });
+                let Some(j) = reask else {
+                    return Err("the gate visit was withdrawn");
+                };
+                if events[start..j]
+                    .iter()
+                    .any(|e| matches!(e.payload, EventPayload::PatchApplied { .. }))
+                {
+                    return Err("the gate's definition changed while it waited");
+                }
+                open = events[j].seq;
+                i = j;
+            }
+            EventPayload::ReviewDecided {
+                node: n,
+                decided_by: Some(by),
+                ..
+            } if n == gate => return Err(not_a_person(by)),
+            EventPayload::ReviewDecided {
+                node: n,
+                decision,
+                note,
+                via,
+                ..
+            } if n == gate => {
+                return match via {
+                    Some(c) if c.is_person_channel() => {
+                        Ok((decision.as_str(), note.as_str(), open))
+                    }
+                    Some(_) => Err("the gate visit was decided through no person's channel"),
+                    None => Err("the gate visit's decision records no channel"),
+                };
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Err(UNDECIDED)
+}
+
+/// The index of the re-ask that follows the withdrawal at `at`: the next
+/// event of `gate` when it is a `review_requested` and no other node
+/// started before it.
+fn reask_after(events: &[Event], at: usize, gate: &str) -> Option<usize> {
+    for (j, e) in events.iter().enumerate().skip(at + 1) {
+        match &e.payload {
+            EventPayload::ReviewRequested { node: n, .. } if n == gate => return Some(j),
+            EventPayload::NodeStarted { .. } => return None,
+            EventPayload::ReviewDecided { node: n, .. }
+            | EventPayload::ReviewWithdrawn { node: n, .. }
+            | EventPayload::NodeFinished { node: n, .. }
+                if n == gate =>
+            {
+                return None;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Why a decision with `decided_by` set is no person's label.
+fn not_a_person(by: &crate::event::DecidedBy) -> &'static str {
+    match by {
+        crate::event::DecidedBy::Unattended => "the gate visit was decided unattended",
+        crate::event::DecidedBy::Model => "the model decided the gate itself",
+        crate::event::DecidedBy::Unknown => "the gate visit was decided by no person",
     }
 }
 
@@ -247,7 +499,7 @@ impl Labeller for CompletionLabeller {
     }
 
     fn label_source(&self) -> &'static str {
-        "downstream outcome: the next node failing, a supervisor retry, or a continue_from back"
+        "the reply itself: a person approved it at the review gate that follows it and approves its result (keep); nothing in the journal says a reply was unfinished, so none is labelled act"
     }
 
     fn today(&self) -> (Label, &'static str) {
@@ -267,84 +519,32 @@ impl Labeller for CompletionLabeller {
     }
 
     fn label(&self, r: &DecisionRecord, events: &[Event]) -> Label {
-        let Some(node) = r.node.as_deref() else {
-            return Label::Unlabelled("no node on the decision");
-        };
-        let Some(at) = events.iter().position(|e| e.seq == r.seq) else {
-            return Label::Unlabelled("decision not in its journal");
-        };
-        // Nodes that ran before the decision: moving back to one of them
-        // redoes the checked node's work.
-        let before: Vec<&str> = events[..at]
-            .iter()
-            .filter_map(|e| match &e.payload {
-                EventPayload::NodeStarted { node, .. } => Some(node.as_str()),
-                _ => None,
-            })
-            .collect();
-        // The events up to the node's next start: a retry of it or a move
-        // back ends up there, and a later start is a new decision's business.
-        let window: Vec<&Event> = events[at + 1..]
-            .iter()
-            .take_while(
-                |e| !matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node),
-            )
-            .collect();
-        let restarted = window.len() < events.len() - at - 1;
-        // Another attempt of the same visit (the checked one was rejected
-        // or failed after it): what follows is that attempt's outcome, not
-        // this one's, and an enforce rejection would label itself.
-        if window.iter().any(|e| {
-            matches!(&e.payload, EventPayload::AttemptStarted { node: n, attempt, .. }
-                if n == node && r.attempt.is_some_and(|a| *attempt > a))
-        }) {
-            return Label::Unlabelled("a later attempt of the node followed");
-        }
-        // Above shadow the check raised its own anomaly wake: a supervisor
-        // retry that answers it would confirm the decision by its own doing.
-        if r.mode != "shadow"
-            && window.iter().any(|e| {
-                matches!(&e.payload, EventPayload::WakeRaised { trigger: crate::event::WakeTrigger::Anomaly, node: n, .. } if n == node)
-            })
-        {
-            return Label::Unlabelled("the decision's own anomaly wake preceded the outcome");
-        }
-        if window.iter().any(|e| {
-            moved_back_to(e).is_some_and(|target| target == node || before.contains(&target))
-        }) {
-            return Label::Act;
-        }
-        let mut own_finished = false;
-        let mut next: Option<&str> = None;
-        for e in &window {
-            match &e.payload {
-                EventPayload::NodeFinished { node: n, .. } if n == node => own_finished = true,
-                EventPayload::NodeStarted { node: n, .. } if own_finished && next.is_none() => {
-                    next = Some(n.as_str());
-                }
-                EventPayload::NodeFinished {
-                    node: n, status, ..
-                } if Some(n.as_str()) == next => {
-                    return match status.as_str() {
-                        "failed" => Label::Act,
-                        "succeeded" => Label::Keep,
-                        _ => Label::Unlabelled("the next node neither failed nor succeeded"),
-                    };
-                }
-                EventPayload::RunFinished { outcome } if next.is_none() && own_finished => {
-                    return if outcome == "succeeded" {
-                        Label::Keep
-                    } else {
-                        Label::Unlabelled("the run ended without a next node")
-                    };
-                }
-                _ => {}
-            }
-        }
-        if restarted {
-            return Label::Unlabelled("the node ran again before any outcome");
-        }
-        Label::Unlabelled("no downstream outcome yet")
+        self.label_with_rule(r, events).0
+    }
+
+    /// The rule is chosen by the code: the old downstream rule is wrong for
+    /// every journal.
+    fn label_with_rule(
+        &self,
+        r: &DecisionRecord,
+        events: &[Event],
+    ) -> (Label, Option<&'static str>) {
+        (
+            self.label_at(r, events, None),
+            Some(apb_core::decision_thresholds::COMPLETION_RULE),
+        )
+    }
+
+    fn label_in(
+        &self,
+        r: &DecisionRecord,
+        events: &[Event],
+        run_dir: Option<&Path>,
+    ) -> (Label, Option<&'static str>) {
+        (
+            self.label_at(r, events, run_dir),
+            Some(apb_core::decision_thresholds::COMPLETION_RULE),
+        )
     }
 }
 
@@ -401,13 +601,7 @@ fn gate_visit_decision<'a>(
                 node: n,
                 decided_by: Some(by),
                 ..
-            } if n == node && open => {
-                return Err(match by {
-                    crate::event::DecidedBy::Unattended => "the gate visit was decided unattended",
-                    crate::event::DecidedBy::Model => "the model decided the gate itself",
-                    crate::event::DecidedBy::Unknown => "the gate visit was decided by no person",
-                });
-            }
+            } if n == node && open => return Err(not_a_person(by)),
             EventPayload::ReviewDecided {
                 node: n,
                 decision,
@@ -818,6 +1012,7 @@ impl Labeller for PendingLabeller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::supervisor_action;
     use apb_core::decision_thresholds::{RETRY_ADVICE_LEGACY_RULE, RETRY_ADVICE_RULE};
 
     fn ev(seq: u64, payload: EventPayload) -> Event {
@@ -853,6 +1048,7 @@ mod tests {
             ts: 0,
             use_site: "completion_check".into(),
             node: Some(node.into()),
+            item: None,
             attempt: Some(1),
             provider: Some("main".into()),
             model: Some("m".into()),
@@ -913,94 +1109,538 @@ mod tests {
             },
         );
         let events = vec![started(1, "a"), decision_event(2), wake, retry];
+        let own_wake = Label::Unlabelled("the decision's own anomaly wake preceded the outcome");
         let mut advised = decision(2, "a");
-        assert_eq!(CompletionLabeller.label(&advised, &events), Label::Act);
+        assert_ne!(CompletionLabeller.label(&advised, &events), own_wake);
         advised.mode = "advise".into();
-        assert!(matches!(
-            CompletionLabeller.label(&advised, &events),
-            Label::Unlabelled(_)
-        ));
+        assert_eq!(CompletionLabeller.label(&advised, &events), own_wake);
     }
 
     fn decision_event(seq: u64) -> Event {
         ev(seq, EventPayload::resumed("placeholder", None, false))
     }
 
-    fn label(events: &[Event]) -> Label {
-        CompletionLabeller.label(&decision(2, "a"), events)
+    // --- reply/1 ---
+
+    const APPROVES_A: &str = "{ id: g, type: human_review, options: [ship, hold, reject], approves: { results: [a], options: [ship] } }";
+
+    fn gate_yaml(gate: &str) -> String {
+        format!(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - {{ id: s, type: start }}\n  - {{ id: a, type: agent_task, prompt: hi, profile: x, results: [] }}\n  - {{ id: b, type: agent_task, prompt: hi, profile: x, results: [] }}\n  - {gate}\nedges: []\n"
+        )
+    }
+
+    /// A run directory holding the stored definitions of `gates`, and their
+    /// digests in order.
+    fn stored(gates: &[&str]) -> (tempfile::TempDir, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let digests = gates
+            .iter()
+            .map(|g| {
+                let yaml = gate_yaml(g);
+                apb_core::schema::Playbook::from_yaml(&yaml).unwrap();
+                crate::run_definitions::store(dir.path(), yaml.as_bytes()).unwrap()
+            })
+            .collect();
+        (dir, digests)
+    }
+
+    fn json_ev(seq: u64, v: serde_json::Value) -> Event {
+        ev(seq, serde_json::from_value(v).unwrap())
+    }
+
+    fn boundary(seq: u64, digest: &str) -> Event {
+        let mut p = EventPayload::resumed("s", None, false);
+        if let EventPayload::RunResumed { definition, .. } = &mut p {
+            *definition = Some(digest.to_string());
+        }
+        ev(seq, p)
+    }
+
+    fn patched(seq: u64, digest: &str) -> Event {
+        json_ev(
+            seq,
+            serde_json::json!({ "type": "patch_applied", "version": "1.0.1",
+                "classification": "prompt", "continue_from": "g", "definition": digest }),
+        )
+    }
+
+    /// A request of gate `g` bound to `a`'s snapshot settled at `settlement`.
+    fn bound_request(seq: u64, settlement: u64) -> Event {
+        json_ev(
+            seq,
+            serde_json::json!({ "type": "review_requested", "node": "g",
+                "options": ["ship", "hold", "reject"],
+                "binding": { "nonce": "n", "snapshots": [{ "node": "a", "execution": 1,
+                    "settlement_seq": settlement, "snapshot_id": "s1" }] } }),
+        )
+    }
+
+    fn person_decided(seq: u64, decision: &str) -> Event {
+        json_ev(
+            seq,
+            serde_json::json!({ "type": "review_decided", "node": "g",
+                "decision": decision, "note": "", "via": "terminal" }),
+        )
+    }
+
+    fn gate_withdrawn(seq: u64, reason: &str) -> Event {
+        json_ev(
+            seq,
+            serde_json::json!({ "type": "review_withdrawn", "node": "g", "reason": reason }),
+        )
+    }
+
+    /// The definition boundary, `a` started, the decision at 2 and `a`
+    /// settled at 3.
+    fn reply(digest: &str) -> Vec<Event> {
+        vec![
+            boundary(0, digest),
+            started(1, "a"),
+            ev(2, EventPayload::hop("s", "a", false, false, Vec::new())),
+            finished(3, "a", "succeeded"),
+        ]
+    }
+
+    /// [`reply`], then gate `g` asks (bound to seq 3) and a person decides.
+    fn approved(digest: &str, decision: &str) -> Vec<Event> {
+        let mut events = reply(digest);
+        events.extend([
+            bound_request(4, 3),
+            started(5, "g"),
+            person_decided(6, decision),
+        ]);
+        events
+    }
+
+    fn label_in(dir: &std::path::Path, events: Vec<Event>) -> Label {
+        let (label, rule) = CompletionLabeller.label_in(&decision(2, "a"), &events, Some(dir));
+        assert_eq!(rule, Some(apb_core::decision_thresholds::COMPLETION_RULE));
+        label
+    }
+
+    const NOT_APPROVED: Label =
+        Label::Unlabelled("no person approved the reply at the gate that follows it");
+    const NOT_THE_REPLY: Label = Label::Unlabelled("the gate does not approve the reply");
+
+    #[test]
+    fn an_approval_at_the_next_gate_labels_keep() {
+        let (dir, d) = stored(&[APPROVES_A]);
+        assert_eq!(label_in(dir.path(), approved(&d[0], "ship")), Label::Keep);
+    }
+
+    /// A list item's completion decision: with `on_needs_look: continue`
+    /// an item needs a look, the list's node succeeds and a person approves
+    /// the list's gate. Neither the aggregate `node_finished` nor that
+    /// approval is the item's: the decision stays unlabelled, while the same
+    /// journal labels a decision of the whole node keep.
+    #[test]
+    fn an_item_decision_is_never_credited_with_the_lists_approval() {
+        let yaml = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: a, type: agent_task, prompt: hi, profile: x, results: [], list: { items: { inline: [ { id: i1 }, { id: i2 } ] }, on_needs_look: continue } }\n  - { id: g, type: human_review, options: [ship, hold, reject], approves: { results: [a], options: [ship] } }\nedges: []\n";
+        apb_core::schema::Playbook::from_yaml(yaml).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let d = crate::run_definitions::store(dir.path(), yaml.as_bytes()).unwrap();
+        let decided = json_ev(
+            2,
+            serde_json::json!({ "type": "decision_made", "use_site": "completion_check",
+                "node": "a", "item": "i1", "attempt": 1, "provider": "main", "model": "m",
+                "calibrated": true, "mode": "shadow", "questions_digest": "q",
+                "state_digest": "s", "state_bytes": 1, "applied": false,
+                "latency_ms": 1, "cached": false }),
+        );
+        let settled = |seq: u64, item: &str, state: &str| {
+            json_ev(
+                seq,
+                serde_json::json!({ "type": "list_item_settled", "node": "a",
+                    "item": item, "state": state }),
+            )
+        };
+        let events = vec![
+            boundary(0, &d),
+            started(1, "a"),
+            decided.clone(),
+            settled(3, "i1", "needs_look"),
+            settled(4, "i2", "passed"),
+            finished(5, "a", "succeeded"),
+            bound_request(6, 5),
+            started(7, "g"),
+            person_decided(8, "ship"),
+        ];
+        let record = DecisionRecord::from_event("r", "p", &decided).unwrap();
+        assert_eq!(record.item.as_deref(), Some("i1"), "the item is kept");
+        let (label, _) = CompletionLabeller.label_in(&record, &events, Some(dir.path()));
+        assert_eq!(
+            label,
+            Label::Unlabelled("the decision judged a list item's reply")
+        );
+        // The same journal, read for a decision of the whole node.
+        let whole = DecisionRecord {
+            item: None,
+            ..record
+        };
+        let (label, _) = CompletionLabeller.label_in(&whole, &events, Some(dir.path()));
+        assert_eq!(label, Label::Keep);
     }
 
     #[test]
-    fn the_next_node_decides_the_completion_label() {
-        let base = || vec![started(0, "start"), started(1, "a"), decision_event(2)];
-        let mut ok = base();
-        ok.extend([finished(3, "a", "succeeded"), started(4, "b")]);
-        let mut pending = ok.clone();
-        ok.push(finished(5, "b", "succeeded"));
-        assert_eq!(label(&ok), Label::Keep);
-        let mut failed = pending.clone();
-        failed.push(finished(5, "b", "failed"));
-        assert_eq!(label(&failed), Label::Act);
-        pending.push(ev(5, crate::pause::engine_paused("x")));
-        assert!(matches!(label(&pending), Label::Unlabelled(_)));
-        // The last node: the run's outcome labels it.
-        let mut last = base();
-        last.extend([
-            finished(3, "a", "succeeded"),
-            ev(
+    fn label_alone_never_labels_keep() {
+        let (_dir, d) = stored(&[APPROVES_A]);
+        let events = approved(&d[0], "ship");
+        assert_eq!(
+            CompletionLabeller.label(&decision(2, "a"), &events),
+            Label::Unlabelled("the gate's definition is not stored")
+        );
+        assert_eq!(
+            CompletionLabeller
+                .label_with_rule(&decision(2, "a"), &events)
+                .1,
+            Some(apb_core::decision_thresholds::COMPLETION_RULE)
+        );
+    }
+
+    #[test]
+    fn an_unstored_definition_leaves_it_unlabelled() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            label_in(dir.path(), approved("sha256:00", "ship")),
+            Label::Unlabelled("the gate's definition is not stored")
+        );
+    }
+
+    #[test]
+    fn a_declared_approving_option_labels_keep() {
+        let (dir, d) = stored(&[APPROVES_A]);
+        // `approve` is not one of the gate's approving options, `ship` is.
+        assert_eq!(label_in(dir.path(), approved(&d[0], "ship")), Label::Keep);
+        assert_eq!(label_in(dir.path(), approved(&d[0], "hold")), NOT_APPROVED);
+        assert_eq!(
+            label_in(dir.path(), approved(&d[0], "approve")),
+            NOT_APPROVED
+        );
+        // Without declared options the default `approve` approves.
+        let (dir, d) = stored(&["{ id: g, type: human_review, approves: { results: [a] } }"]);
+        assert_eq!(
+            label_in(dir.path(), approved(&d[0], "approve")),
+            Label::Keep
+        );
+    }
+
+    #[test]
+    fn a_gate_without_approves_leaves_it_unlabelled() {
+        let (dir, d) = stored(&["{ id: g, type: human_review, options: [ship, hold, reject] }"]);
+        assert_eq!(label_in(dir.path(), approved(&d[0], "ship")), NOT_THE_REPLY);
+    }
+
+    #[test]
+    fn a_gate_approving_another_node_leaves_it_unlabelled() {
+        let (dir, d) = stored(&[
+            "{ id: g, type: human_review, options: [ship, hold, reject], approves: { results: [b], options: [ship] } }",
+        ]);
+        assert_eq!(label_in(dir.path(), approved(&d[0], "ship")), NOT_THE_REPLY);
+    }
+
+    #[test]
+    fn a_binding_of_an_earlier_execution_leaves_it_unlabelled() {
+        let (dir, d) = stored(&[APPROVES_A]);
+        let mut events = reply(&d[0]);
+        events.extend([
+            bound_request(4, 1),
+            started(5, "g"),
+            person_decided(6, "ship"),
+        ]);
+        assert_eq!(label_in(dir.path(), events), NOT_THE_REPLY);
+    }
+
+    #[test]
+    fn a_rejected_reply_stays_unlabelled() {
+        let (dir, d) = stored(&[APPROVES_A]);
+        assert_eq!(
+            label_in(dir.path(), approved(&d[0], "reject")),
+            NOT_APPROVED
+        );
+    }
+
+    #[test]
+    fn an_unattended_approval_leaves_it_unlabelled() {
+        let (dir, d) = stored(&[APPROVES_A]);
+        for (by, why) in [
+            ("unattended", "the gate visit was decided unattended"),
+            ("model", "the model decided the gate itself"),
+        ] {
+            let mut events = approved(&d[0], "ship");
+            events.pop();
+            events.push(json_ev(
+                6,
+                serde_json::json!({ "type": "review_decided", "node": "g",
+                    "decision": "ship", "note": "", "decided_by": by }),
+            ));
+            assert_eq!(label_in(dir.path(), events), Label::Unlabelled(why), "{by}");
+        }
+    }
+
+    #[test]
+    fn a_publish_consent_is_not_a_review_of_the_reply() {
+        let (dir, d) = stored(&[APPROVES_A]);
+        let mut events = reply(&d[0]);
+        events.extend([
+            json_ev(
                 4,
+                serde_json::json!({ "type": "review_requested", "node": "g",
+                    "options": ["ship"], "plan_digest": "sha256:p",
+                    "binding": { "nonce": "n", "snapshots": [{ "node": "a", "execution": 1,
+                        "settlement_seq": 3, "snapshot_id": "s1" }] } }),
+            ),
+            person_decided(5, "ship"),
+        ]);
+        assert_eq!(label_in(dir.path(), events), NOT_APPROVED);
+    }
+
+    #[test]
+    fn a_finished_run_without_a_gate_stays_unlabelled() {
+        let (dir, d) = stored(&[APPROVES_A]);
+        let mut events = reply(&d[0]);
+        events.extend([
+            started(4, "b"),
+            finished(5, "b", "succeeded"),
+            ev(
+                6,
                 EventPayload::RunFinished {
                     outcome: "succeeded".into(),
                 },
             ),
         ]);
-        assert_eq!(label(&last), Label::Keep);
+        assert_eq!(label_in(dir.path(), events), NOT_APPROVED);
     }
 
     #[test]
-    fn a_retry_or_a_move_back_labels_act() {
-        let mut retry = vec![
-            started(0, "start"),
-            started(1, "a"),
-            decision_event(2),
-            finished(3, "a", "succeeded"),
+    fn a_finished_report_followed_by_a_failing_node_is_not_act() {
+        let (dir, d) = stored(&[APPROVES_A]);
+        let mut events = reply(&d[0]);
+        events.extend([started(4, "b"), finished(5, "b", "failed")]);
+        assert_eq!(label_in(dir.path(), events), NOT_APPROVED);
+    }
+
+    #[test]
+    fn a_supervisor_retry_leaves_the_reply_unlabelled() {
+        let (dir, d) = stored(&[APPROVES_A]);
+        let mut events = reply(&d[0]);
+        events.extend([
             started(4, "b"),
             finished(5, "b", "succeeded"),
-        ];
-        let mut back = retry.clone();
-        retry.push(ev(
-            6,
+            ev(
+                6,
+                EventPayload::SupervisorAction {
+                    action: supervisor_action::NODE_RETRY.into(),
+                    node: Some("a".into()),
+                    detail: String::new(),
+                },
+            ),
+        ]);
+        assert_eq!(label_in(dir.path(), events), NOT_APPROVED);
+    }
+
+    /// No journal labels `act`: a failing next node, a retry, a move back,
+    /// a rejection, an approval.
+    #[test]
+    fn nothing_is_labelled_act_under_reply_1() {
+        let (dir, d) = stored(&[APPROVES_A]);
+        let mut failing = reply(&d[0]);
+        failing.extend([started(4, "b"), finished(5, "b", "failed")]);
+        let mut back = reply(&d[0]);
+        back.push(ev(
+            4,
+            EventPayload::SupervisorAction {
+                action: supervisor_action::RUN_CONTINUE_FROM.into(),
+                node: Some("s".into()),
+                detail: String::new(),
+            },
+        ));
+        let mut retried = reply(&d[0]);
+        retried.push(ev(
+            4,
             EventPayload::SupervisorAction {
                 action: supervisor_action::NODE_RETRY.into(),
                 node: Some("a".into()),
                 detail: String::new(),
             },
         ));
-        // A retry of the node wins even after the next node succeeded (a
-        // gate that let a false success through).
-        assert_eq!(label(&retry), Label::Act);
-        back.truncate(5);
-        back.push(ev(
-            5,
-            EventPayload::SupervisorAction {
-                action: supervisor_action::RUN_CONTINUE_FROM.into(),
-                node: Some("start".into()),
-                detail: String::new(),
-            },
-        ));
-        assert_eq!(label(&back), Label::Act);
-        // A move forward to a node that never ran before is not a move back.
-        let mut forward = back.clone();
-        forward.pop();
-        forward.push(ev(
-            5,
-            EventPayload::SupervisorAction {
-                action: supervisor_action::RUN_CONTINUE_FROM.into(),
-                node: Some("c".into()),
-                detail: String::new(),
-            },
-        ));
-        assert!(matches!(label(&forward), Label::Unlabelled(_)));
+        for events in [
+            failing,
+            back,
+            retried,
+            approved(&d[0], "reject"),
+            approved(&d[0], "ship"),
+        ] {
+            assert_ne!(label_in(dir.path(), events), Label::Act);
+        }
+    }
+
+    #[test]
+    fn an_approval_on_a_scope_reask_labels_keep() {
+        let (dir, d) = stored(&[APPROVES_A]);
+        let mut events = reply(&d[0]);
+        events.extend([
+            bound_request(4, 3),
+            started(5, "g"),
+            gate_withdrawn(6, crate::event::SCOPE_CHANGED_REASON),
+            bound_request(7, 3),
+            person_decided(8, "ship"),
+        ]);
+        assert_eq!(label_in(dir.path(), events), Label::Keep);
+    }
+
+    #[test]
+    fn a_reask_binding_another_snapshot_leaves_it_unlabelled() {
+        let (dir, d) = stored(&[APPROVES_A]);
+        let mut events = reply(&d[0]);
+        events.extend([
+            bound_request(4, 3),
+            started(5, "g"),
+            gate_withdrawn(6, crate::event::SCOPE_CHANGED_REASON),
+            bound_request(7, 1),
+            person_decided(8, "ship"),
+        ]);
+        assert_eq!(
+            label_in(dir.path(), events),
+            Label::Unlabelled("the gate visit was withdrawn")
+        );
+    }
+
+    #[test]
+    fn a_withdrawal_without_a_reask_leaves_it_unlabelled() {
+        let (dir, d) = stored(&[APPROVES_A]);
+        let withdrawn_for = |reason: &str| {
+            let mut events = reply(&d[0]);
+            events.extend([
+                bound_request(4, 3),
+                started(5, "g"),
+                gate_withdrawn(6, reason),
+            ]);
+            events
+        };
+        // A scope re-ask that never came: another node started first.
+        let mut moved = withdrawn_for(crate::event::SCOPE_CHANGED_REASON);
+        moved.extend([
+            started(7, "b"),
+            bound_request(8, 3),
+            person_decided(9, "ship"),
+        ]);
+        assert_eq!(
+            label_in(dir.path(), moved),
+            Label::Unlabelled("the gate visit was withdrawn")
+        );
+        // A withdrawal for another reason, even when the gate asks again.
+        let mut other = withdrawn_for("node_retry");
+        other.extend([bound_request(7, 3), person_decided(8, "ship")]);
+        assert_eq!(
+            label_in(dir.path(), other),
+            Label::Unlabelled("the gate visit was withdrawn")
+        );
+    }
+
+    #[test]
+    fn a_reask_after_a_patch_leaves_it_unlabelled() {
+        // The patched gate's `ship` no longer approves.
+        let (dir, d) = stored(&[
+            APPROVES_A,
+            "{ id: g, type: human_review, options: [ship, hold, reject], approves: { results: [a], options: [hold] } }",
+        ]);
+        let with_patch = |patch: bool| {
+            let mut events = reply(&d[0]);
+            events.extend([bound_request(4, 3), started(5, "g")]);
+            if patch {
+                events.push(patched(6, &d[1]));
+            }
+            events.extend([
+                gate_withdrawn(7, crate::event::SCOPE_CHANGED_REASON),
+                bound_request(8, 3),
+                person_decided(9, "ship"),
+            ]);
+            events
+        };
+        assert_eq!(
+            label_in(dir.path(), with_patch(true)),
+            Label::Unlabelled("the gate's definition changed while it waited")
+        );
+        assert_eq!(label_in(dir.path(), with_patch(false)), Label::Keep);
+    }
+
+    #[test]
+    fn only_a_persons_channel_labels_keep() {
+        let (dir, d) = stored(&[APPROVES_A]);
+        let through = |via: Option<&str>| {
+            let mut events = approved(&d[0], "ship");
+            events.pop();
+            let mut decided = serde_json::json!({ "type": "review_decided", "node": "g",
+                "decision": "ship", "note": "" });
+            if let Some(v) = via {
+                decided["via"] = serde_json::json!(v);
+            }
+            events.push(json_ev(6, decided));
+            label_in(dir.path(), events)
+        };
+        assert_eq!(through(Some("terminal")), Label::Keep);
+        assert_eq!(through(Some("dashboard_session")), Label::Keep);
+        for via in [
+            "mcp",
+            "run_step",
+            "cli_unattended",
+            "dashboard_keyless",
+            "http_bearer",
+            "scenario",
+            "a_newer_channel",
+        ] {
+            assert_eq!(
+                through(Some(via)),
+                Label::Unlabelled("the gate visit was decided through no person's channel"),
+                "{via}"
+            );
+        }
+        assert_eq!(
+            through(None),
+            Label::Unlabelled("the gate visit's decision records no channel")
+        );
+    }
+
+    #[test]
+    fn a_patch_while_the_gate_waits_leaves_it_unlabelled() {
+        // No re-ask: the request at 4 is decided after a patch at 6.
+        let (dir, d) = stored(&[APPROVES_A, APPROVES_A]);
+        let mut events = reply(&d[0]);
+        events.extend([
+            bound_request(4, 3),
+            started(5, "g"),
+            patched(6, &d[1]),
+            person_decided(7, "ship"),
+        ]);
+        assert_eq!(
+            label_in(dir.path(), events),
+            Label::Unlabelled("the gate's definition changed while it waited")
+        );
+    }
+
+    #[test]
+    fn the_final_requests_definition_is_read() {
+        // Resumed with other bytes while the gate waited: there `hold`
+        // approves and `ship` does not.
+        let (dir, d) = stored(&[
+            APPROVES_A,
+            "{ id: g, type: human_review, options: [ship, hold, reject], approves: { results: [a], options: [hold] } }",
+        ]);
+        let chain = |decision: &str| {
+            let mut events = reply(&d[0]);
+            events.extend([
+                bound_request(4, 3),
+                started(5, "g"),
+                boundary(6, &d[1]),
+                gate_withdrawn(7, crate::event::SCOPE_CHANGED_REASON),
+                bound_request(8, 3),
+                person_decided(9, decision),
+            ]);
+            events
+        };
+        assert_eq!(label_in(dir.path(), chain("hold")), Label::Keep);
+        assert_eq!(label_in(dir.path(), chain("ship")), NOT_APPROVED);
     }
 
     // --- 0.23.0 labellers (C9) ---
@@ -1365,12 +2005,19 @@ mod tests {
             l.label_with_rule(&r, &old),
             (Label::Keep, Some(RETRY_ADVICE_LEGACY_RULE))
         );
-        // Every other use has no rule.
+        // A use without rule versions has no rule; the completion check's
+        // is chosen by the code.
+        assert_eq!(
+            ReviewTriageLabeller
+                .label_with_rule(&decision(2, "a"), &old)
+                .1,
+            None
+        );
         assert_eq!(
             CompletionLabeller
                 .label_with_rule(&decision(2, "a"), &old)
                 .1,
-            None
+            Some(apb_core::decision_thresholds::COMPLETION_RULE)
         );
     }
 
