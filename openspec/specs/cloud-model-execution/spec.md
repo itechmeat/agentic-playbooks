@@ -1,7 +1,7 @@
 # cloud-model-execution Specification
 
 ## Purpose
-TBD - created by archiving change near-ai-cloud-models. Update Purpose after archive.
+A dsh step can run on a NEAR AI Cloud model without a hand-written provider config, with the key kept out of everything apb writes and models that cannot run an agent step refused.
 
 ## Requirements
 

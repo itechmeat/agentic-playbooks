@@ -1,7 +1,7 @@
 # step-started-runs Specification
 
 ## Purpose
-TBD - created by archiving change routine-operations. Update Purpose after archive.
+A run started from a run step names its starter, the starter's surfaces list the runs its steps started, and chains of such starts are bounded.
 
 ## Requirements
 

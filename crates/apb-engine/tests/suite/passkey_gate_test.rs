@@ -881,3 +881,31 @@ fn a_publish_gate_is_marked_passkey_required_for_the_terminal() {
         }
     });
 }
+
+/// A passkey enrolled leaves a plain form gate to the terminal (carried
+/// over decision 4): a gate with `show` is neither person-only nor bound,
+/// so its decision is never asked for an assertion. A terminal post that
+/// names its request is queued and the drive consumes it.
+#[test]
+fn a_passkey_enrolled_leaves_a_plain_form_gate_to_the_terminal() {
+    let _guard = common::env_lock();
+    with_fake_passkey_enrolled(|_| {
+        let dir = tempfile::tempdir().unwrap();
+        const SHOWN: &str = r#"schema: 2
+id: po
+name: po
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: g, type: human_review, options: [approve, reject], show: [{ label: L, text: the work }] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: g }
+  - { from: g, to: done }
+"#;
+        let (rd, seq, rx) = started(dir.path(), "po", SHOWN, &[], RunOptions::default());
+        post_decision_via(&rd, approve(), None, Some(seq), DecisionChannel::Terminal).unwrap();
+        let (outcome, _) = rx.recv_timeout(DEADLINE).unwrap();
+        assert_eq!(outcome, RunStatus::Succeeded, "the gate decided the run");
+    });
+}

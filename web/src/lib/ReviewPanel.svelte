@@ -6,6 +6,7 @@
   import { initialValues, invalidNumbers, toPayload } from './reviewform'
   import type { BoundSnapshot } from './api.gen'
   import UnattendedNote from './UnattendedNote.svelte'
+  import { pilotLine } from './listprogress'
 
   // The run page's pending human reviews: per gate its guidance, the
   // decision model's recommendation, what an unattended run does there, and
@@ -119,6 +120,9 @@
         {/if}
         {#if pr.unattended}
           <UnattendedNote outcome={pr.unattended} testid="review-unattended" />
+        {/if}
+        {#if pr.pilot && pilotLine(pr.pilot)}
+          <p class="scope" data-testid="review-pilot">{pilotLine(pr.pilot)}</p>
         {/if}
         {#if pr.scopeLine}
           <p class="scope" data-testid="review-scope">scope: {pr.scopeLine}</p>

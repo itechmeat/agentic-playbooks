@@ -1501,10 +1501,95 @@ records `list_started`, `list_batch_started` and `list_item_settled`, and
 the attempt, connector call, send intent and decision events of an item
 carry its id in `item`.
 
-**Compatibility.** The `list:` block is additive to schema 2. An older apb
-reads the playbook but ignores the block and would run the node once for
-the whole list, so start and resume list runs with this apb or a newer
-one.
+#### A pilot slice first (pilot)
+
+```yaml
+list:
+  items: { from: { node: find, field: files } }
+  check: { script: check-file.sh }
+  pilot: { items: 3, then: review, unattended: fail }
+  stop_when: { needs_look_at_least: 5 }
+```
+
+A visit with a `pilot` runs only the first `pilot.items` items that still
+need to run, journals them as `list_pilot`, and stops at a review gate on
+the list node before any other item is admitted. The gate offers exactly
+three options:
+
+- `continue`: the rest of the visit runs.
+- `revise`: every slice item runs again, and each later item prompt of the
+  visit ends with a `## reviewer note` section holding the note written
+  with the decision. The section names the channel the decision came
+  through ("The reviewer of the first items of this list asked for this
+  change (decided through {channel}).") rather than claiming a person,
+  and the note sits inside the same untrusted data fence as the item
+  section: whoever may decide the gate (an MCP host, a step of another
+  run) may have written it. An item whose send has an unknown outcome is
+  never interrupted: it keeps its needs-look record, stays in the slice as
+  needing a look, and is never run again until its send is resolved.
+- `stop`: the visit ends at once. The node fails with `stopped` in its
+  output (`{"reason": "pilot", "detail": ...}`), and the items outside the
+  slice stay pending.
+
+`then: continue` goes on without a gate when every slice item passed, and
+asks when one needs a look. `then: review` always asks. In an unattended
+run a pilot gate never waits: under `unattended: fail` (the default) the
+run ends `hitl_required`; under `unattended: continue` the engine decides
+`continue` (`decided_by: unattended`) only when every slice item passed,
+and fails the run `hitl_required` when one needs a look. The next actions
+of a parked pilot gate read that outcome the same way.
+
+Batches never cross the slice: a slice of 3 under `batch.size: 2` runs a
+batch of 2 and a batch of 1, and the gate is asked after exactly the slice,
+whatever the batch size. A rejected slice item retries inside the slice
+while `batch.retries` last, and the slice still holds the same items. A
+resume finishes an open slice before the gate is asked again, and a
+decided pilot is never run again: the slice, its round and its decision
+are read from the journal through the list fold, so a resume, a supervisor
+retry and a `rerun: not_passed` visit pick up where the visit stands. A
+new visit under `rerun: not_passed` pilots only the items that still need
+to run, never the carried ones, also when the drive died right after
+the visit started: the resumed visit carries the passed items first.
+
+A scenario answers the gate with a `review` answer on the list node, in
+the same visit answer as the node's item answers (`decision: continue`,
+`revise` or `stop`; anything else is refused). The pilot gate takes no
+field values, journals no work scope, and its decision names the request
+it answers (`--request review:<seq>`; every instruction and printed
+command of the gate carries it), like every form gate's: one that
+names none, or names a request the gate asked again since, is refused
+`decide_again`. A run whose list uses `pilot` or `stop_when` carries the
+run guard `list_pilot`.
+
+The validator checks the two blocks:
+
+| Code | Severity | What it means |
+|------|----------|---------------|
+| V240 | error | `pilot.items` is outside 1 to 50, is not below `items.max_items`, or would run every item of an inline list |
+| V241 | error | `stop_when` sets no rule, `needs_look_at_least` is 0, `needs_look_share` is not above 0 and at most 1, or `min_settled` is 0 or given without `needs_look_share` |
+| V242 | warning | `pilot.then: continue` on a list without an item check: every item passes, so the gate would never be asked |
+
+#### Ending a visit early (stop_when)
+
+`stop_when` ends a visit when too many of its settled items need a look:
+`needs_look_at_least` is a count, `needs_look_share` a share of the items
+settled (read once `min_settled` items settled, default 10). The rule
+counts only the items settled outside the latest pilot slice: a person who
+answered `continue` read the slice, so the rule judges what ran after that
+decision. It is read before a batch is admitted and after a batch whose
+items all settled; a batch that ended in a pause, a halt, a stop or a
+spent budget is honoured first, and the rule is not read while the pilot
+slice is incomplete or its gate is due or open. When the rule holds the
+visit journals `list_stopped` with the reason `stop_when` and a detail
+sentence, the node fails with `stopped` in its output, and the items it
+never ran stay pending.
+
+**Compatibility.** The `list:` block is additive to schema 2. A recent apb
+without this change reads the playbook and refuses it: the list block
+rejects unknown fields, and `pilot` and `stop_when` are new ones. An apb
+old enough to accept unknown fields in a list block drops them and would
+run every item without a pilot gate, so start and resume list runs with
+this apb or a newer one.
 
 ### Node working directory (workdir)
 
@@ -2432,6 +2517,140 @@ behind a second review is fine: the walk stops at the next gate, which an
 unattended run decides (or fails at) on its own terms. A
 `publish` node never has an unattended outcome: an unattended run fails
 there with `hitl_required`.
+### Before a playbook runs alone (readiness, unattended:)
+
+A playbook may say it means to run alone: a top-level `unattended:` block
+with the attended successes it wants first.
+
+```yaml
+unattended:
+  after_attended_successes: 3
+```
+
+The fit report (`apb adopt`, MCP `playbook_adopt_report`, the dashboard fit
+card) says whether the playbook is ready to run alone. Its items, in order:
+
+1. **done_defined**: the goal has at least one `script` criterion under
+   `goal.enforce: true`. A marker criterion reads the agent's own text, a
+   `list` criterion only accounts for items, and a criterion that is not
+   enforced is reported and never fails the run: none of them counts as
+   proof.
+2. **checked_actors**: every acting `agent_task` has a deterministic
+   check, which is one of: a `script` success_check (the `{ script }`
+   form with a `scope` included), a `script` list item check under
+   `on_needs_look: fail`, or an enforced `script` goal criterion. A
+   completion marker, an output-field item check, a connector or judge
+   item check, a list without a check, and any unenforced criterion are
+   the agent's or a model's own word.
+3. **bounded_actors**: every acting node has a boundary in each effect
+   domain it acts in. The working tree is bounded by `read_only`, by
+   `writes`, or by an isolation this machine enforces (`best_effort` that
+   falls back to no sandbox is not bounded; `max_changed_files` caps a
+   count, not what is written). Each connector binding is bounded by
+   `functions: read_only`, or by named functions with `max_calls`; a local
+   bound never bounds a connector. The network is bounded only by an
+   isolation this machine enforces with `network: none`: a script, or an
+   agent without such an isolation, is listed as not bounded externally
+   whatever its `read_only`. A `finish` with a prompt runs an agent and
+   cannot declare a local boundary, so it is listed as such.
+   A sub-playbook node and a `publish` node are not judged as actors:
+   the child's own report and probation judge the child, and a publish
+   node is a gate held by a person's consent.
+4. **budget**: a budget limits a run.
+5. **irreversible_gated**: every node whose own effects include
+   `irreversible` is reached only behind a gate, along the edges and
+   along the failure routes (`defaults.on_failure`, a `fail_fast` fork's
+   `on_failure` from its branches) a run can take. Every node kind but
+   `start` can fail in this walk, so a gate that times out has not been
+   passed. A gate is a `publish` node or a `human_review` that no
+   decision model may decide: a `human_review` with `auto_decide` and
+   `auto_decide_ok: true` is not a gate here.
+6. **probation**: the attended runs of this exact definition in this
+   project (below), shown as `{counted} of {required} attended runs`.
+
+The validator checks the block:
+
+| Code | Severity | What it means |
+|------|----------|---------------|
+| V249 | error | `unattended.after_attended_successes` is outside 1 to 100 |
+| V250 | warning | a playbook with a top-level `unattended:` block has an acting `agent_task` without a deterministic check (the readiness report lists the gap for every playbook) |
+
+**Probation.** An unattended start is refused `probation_required` until
+the playbook's probation ledger in this project
+(`.apb/probation/project/<id>.json`, signed by this installation) holds
+that many eligible attended runs of the exact definition the start
+loads ("attended" means only started without `--unattended`; the count
+never says that a person decided anything in them): the trust digest (the `playbook.yaml` and its scripts) and the
+definition digest must both match, so a new version, an edited playbook
+or a changed script restarts the count at zero. Each entry is written
+once, by the journal's terminal observer, after the run's terminal event
+is in the journal and with the outcome read from it. A run counts only
+when it is a production run that learns (not an eval, a scenario or an
+external-data run), it succeeded, it executed one definition from start
+to end (one `run_started` with a definition digest, no `patch_applied`,
+no `profile_rebound`, no `run_migrated`, every `run_resumed` on the same
+definition), it applied no run override, and it was not started from a
+run step (its launch record has no `started_by`). Whether a run was
+unattended comes from a record that exists, the manifest or else the
+run's `run.yaml`; when neither tells it, the run does not count. An unattended start
+that carries run overrides is refused `probation_required`, since
+probation counted the definition without them, unless it is waived. A
+run whose process died
+before its entry was written stays uncounted; there is no reconcile pass.
+Runs that ended before this change have no entry and do not count. A
+global playbook earns its probation per project. Each sub-playbook the
+run starts needs its own: the check covers every pinned child at the
+start (the refusal names the child and its node) and every child again
+where its run is created.
+
+A ledger that does not verify counts nothing: the unattended start is
+refused with a text naming the file unless it is waived (typed, or by
+the machine's `policy.yaml`), the run end writes nothing to it, and `apb
+doctor` names it. Moving the file aside starts the count again from
+zero. The ledger records its project (the workspace id registered at
+the project root, else the canonical root) under its signature, so a
+ledger copied or linked from another project does not verify, and it is
+opened without following a link.
+
+`policy.yaml` may ask the same of every playbook here
+(`unattended.after_attended_successes`, 1 to 100; a project file only
+raises the machine's) and may waive probation on a machine that runs
+alone (`unattended.waive_probation`, machine file only; a project cannot
+set it). Both files are read once per start; while either does not read,
+an unattended start is refused `probation_required` naming the file,
+unless it carries the typed waiver. A run step, or the CLI without a
+terminal, whose config dir is redirected to one that waives probation or
+asks for fewer attended runs than the default config dir is refused
+`policy_file_invalid`.
+
+**The waiver.** `apb run --waive-probation` waives probation for that
+start and every sub-playbook it starts. It always asks the playbook id
+typed at an interactive terminal, whatever the probation stands at (a
+child it cannot see may need it); it is refused in a run step and
+without a terminal, and it is not offered on MCP or HTTP. The waiver is
+recorded in the run's manifest and reaches every child run of the tree.
+It proves what every typed confirmation of the CLI proves: apb's
+initiator model, not that a person typed it.
+
+`apb run --unattended` warns when the loaded definition is not ready,
+naming what is missing on the version the gate selected. `apb run
+--unattended --require-ready` refuses the start `not_ready` when the
+readiness report of the loaded definition, or of a sub-playbook it
+starts, does not pass; the refusal comes from run preparation, and no
+run directory is created. A supervisor's patch of an unattended run is
+held to the same checks on the replacement definition (a
+`patch_rejected` whose reason starts `probation_required` or
+`not_ready`), and an attended run's patch is checked by neither.
+
+**Older apb binaries.** An apb older than this change ignores the
+top-level `unattended:` block and starts such a playbook unattended
+without probation, the way it drops every added playbook field. The
+playbook format has no way to demand a minimum apb (`requires` names
+files and commands only): keep every apb on a machine that runs these
+playbooks at this release or newer (`apb doctor` warns about others on
+`PATH`). For `pilot` and `stop_when`, apb 1.0.0-beta.1 and later older
+releases reject the definition (their list block denies unknown fields),
+while apb 0.25.0 drops the two fields and runs every item ungated.
 
 ### Approving exact results (approves, requires_approval)
 
@@ -2618,6 +2837,15 @@ scope. An unattended run decides again on the new request by its
 `unattended:` rule, so a withheld option then fails the run. The gate
 asks again only when the scope changed, so it never loops without
 progress.
+
+A decision on a gate that uses `max_scope`, `fields` or `show` names the
+request it answers (`apb review --request review:<seq>`, the `request`
+argument of MCP `review_decide` and of the HTTP route; every printed
+command and next action carries it). One that names none, or names a
+request the gate asked again since, is refused `decide_again`: read the
+gate's request again and decide on it. So a decision made on a scope the
+gate no longer asks about never answers the new request. A plain gate
+takes a decision without it, as before.
 
 `apb wait`, `apb run` and `apb runs <id>` print the scope, the withheld
 options, the shown entries and the fields under a pending gate.

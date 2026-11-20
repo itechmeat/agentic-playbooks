@@ -12,6 +12,8 @@ import {
   setupSummary,
   trustLine,
   trustSummary,
+  probationLine,
+  readinessLines,
 } from './fit'
 
 const report = (over: Partial<FitReport> = {}): FitReport => ({
@@ -27,6 +29,7 @@ const report = (over: Partial<FitReport> = {}): FitReport => ({
   consent: { irreversible: [], effects: [] },
   start_actions: [],
   launch: { policy: 'allow', sources: ['default'] },
+  readiness: { ready: true, items: [], probation: undefined },
   ...over,
 })
 
@@ -135,5 +138,79 @@ describe('launch', () => {
     expect(line).toBe(
       'resume all by agent mcp, confirmed by host relayed; policy ask (machine policy.yaml launch.agent)',
     )
+  })
+})
+
+describe('readinessLines', () => {
+  const base: FitReport = {
+    id: 'p',
+    scope: 'project',
+    version: '1.0.0',
+    ready: true,
+    trusted: true,
+    needs_consent: false,
+    compatibility: [],
+    setup: [],
+    trust: [],
+    consent: { irreversible: [], effects: [] },
+    start_actions: [],
+    launch: { policy: 'allow', sources: [] },
+    readiness: {
+      ready: false,
+      items: [
+        { code: 'done_defined', ok: true, detail: 'the goal has 1 enforced script criteria' },
+        { code: 'checked_actors', ok: true, detail: 'every acting agent_task has a deterministic check' },
+        { code: 'budget', ok: false, detail: 'no budget: a run alone spends without a limit' },
+      ],
+      probation: undefined,
+    },
+  }
+
+  it('lists what is missing', () => {
+    const { lines, okCount, ready } = readinessLines(base)
+    expect(lines).toEqual(['no budget: a run alone spends without a limit'])
+    expect(okCount).toBe(2)
+    expect(ready).toBe(false)
+  })
+
+  it('collapses the ok items', () => {
+    const all: FitReport = {
+      ...base,
+      readiness: {
+        ...base.readiness,
+        ready: true,
+        items: base.readiness.items.map((i) => ({ ...i, ok: true })),
+      },
+    }
+    const { lines, okCount, ready } = readinessLines(all)
+    expect(lines).toEqual([])
+    expect(okCount).toBe(3)
+    expect(ready).toBe(true)
+  })
+})
+
+describe('probationLine', () => {
+  const p = { required: 2, counted: 1, source: 'playbook', waived: false, ledger_ok: true }
+  it('counts attended runs and claims no person', () => {
+    expect(probationLine(p)).toBe('probation: 1 of 2 attended runs counted in this project')
+    expect(probationLine(p)).not.toMatch(/person/)
+  })
+  it('says a machine waiver, also over a ledger that does not verify', () => {
+    expect(probationLine({ ...p, waived: true })).toBe(
+      'probation: waived on this machine (1 of 2 attended runs counted in this project)',
+    )
+    expect(probationLine({ ...p, waived: true, ledger_ok: false, counted: 0 })).toBe(
+      'probation: waived on this machine (0 of 2 attended runs counted in this project, its ledger does not verify)',
+    )
+  })
+  it('names a ledger that does not verify', () => {
+    expect(probationLine({ ...p, ledger_ok: false, counted: 0 })).toBe(
+      'probation: the ledger of this playbook does not verify, so nothing counts until it is moved aside',
+    )
+  })
+  it('is carried by readinessLines when the playbook asks for one', () => {
+    const r = report({ readiness: { ready: false, items: [], probation: p } })
+    expect(readinessLines(r).probation).toBe('probation: 1 of 2 attended runs counted in this project')
+    expect(readinessLines(report()).probation).toBeNull()
   })
 })

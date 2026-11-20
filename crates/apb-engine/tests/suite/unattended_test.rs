@@ -530,7 +530,7 @@ fn a_decision_that_cannot_be_posted_fails_the_run() {
     assert_eq!(node.as_deref(), Some("gate"));
     assert!(
         reason.starts_with(
-            "hitl_required: human_review `gate` could not record its unattended decision `approve`:"
+            "hitl_required: gate `gate` could not record its unattended decision `approve`:"
         ),
         "{reason}"
     );
@@ -1025,4 +1025,59 @@ fn the_mode_implies_no_consent_and_no_launch_permission() {
         .to_string();
     assert!(err.contains("launch_unchecked"), "{err}");
     assert!(run_ids(&p.root()).is_empty());
+}
+
+/// An attended budget pause inside a pilot slice pauses the run once: the
+/// refused admission is not read as a slice waiting for its gate, so the
+/// node is not dispatched again in a loop.
+#[test]
+fn an_attended_budget_pause_inside_a_pilot_slice_pauses_once() {
+    let yaml = crate::list_run_test::playbook(
+        &format!(
+            "items: {{ inline: {} }}\nbatch: {{ size: 1, parallel: 1 }}\npilot: {{ items: 3, then: continue }}",
+            crate::list_run_test::inline_items(4)
+        ),
+        "",
+        "",
+    )
+    .replace("id: lst", "id: bud");
+    let p = crate::budget_gate_test::project(&yaml);
+    p.history(3);
+    let root = p.root().to_path_buf();
+    let res = bounded(p.root(), move || {
+        run(
+            &root,
+            "bud",
+            None,
+            RunOptions {
+                budget: tokens(500),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap()
+    });
+    assert_eq!(res.outcome, RunStatus::Paused);
+    let ev = read_all(&p.root().join(".apb/runs").join(&res.run_id)).unwrap();
+    assert_eq!(
+        count(&ev, |p| matches!(p, EventPayload::RunPaused { .. })),
+        1,
+        "the budget pause is journaled once"
+    );
+    assert_eq!(
+        count(
+            &ev,
+            |p| matches!(p, EventPayload::NodeStarted { node, .. } if node == "work")
+        ),
+        1,
+        "the node is not dispatched again"
+    );
+    assert_eq!(
+        count(&ev, |p| matches!(p, EventPayload::ReviewRequested { .. })),
+        0
+    );
+    let batches = count(&ev, |p| matches!(p, EventPayload::ListBatchStarted { .. }));
+    assert!(
+        batches < 3,
+        "the slice stopped at the refused batch: {batches}"
+    );
 }

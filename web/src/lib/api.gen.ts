@@ -379,7 +379,15 @@ export type ListOutcome = { node: string, total: number, processed: number, pass
  * How each item was checked (`connector asana.get_task`); absent when
  * the items passed on the agent's own report.
  */
-check?: string, };
+check?: string, 
+/**
+ * The visit's pilot, when the list runs one.
+ */
+pilot?: PilotView, 
+/**
+ * The visit ended early: the sentence its `list_stopped` carries.
+ */
+stopped?: string, };
 
 export type OutcomeSummary = { headline: string, needs_look?: NeedsLook, 
 /**
@@ -755,6 +763,18 @@ withheld?: Array<string>, withheld_reason?: string,
  */
 requested_at?: number, 
 /**
+ * The journal seq of the open request, set only for a gate whose
+ * decision must name it (`crate::review::requires_request`: a form
+ * gate, a list pilot gate): the `--request review:<seq>` of the CLI
+ * and the `request` of MCP `review_decide`.
+ */
+request?: number, 
+/**
+ * For a list node's pilot gate: the slice, its round and its counts,
+ * read from the list fold (`crate::list::view::PilotView`).
+ */
+pilot?: PilotView, 
+/**
  * The rendered `show:` entries the gate displays above its options
  * (people-in-the-loop D3).
  */
@@ -776,7 +796,15 @@ trigger: string,
  */
 instruction: string, options: Array<string>, how_to_decide: string, };
 
-export type ListProgress = { node: string, total: number, processed: number, passed: number, needs_look: number, running: number, };
+export type ListProgress = { node: string, total: number, processed: number, passed: number, needs_look: number, running: number, 
+/**
+ * The visit's pilot, when the list runs one.
+ */
+pilot?: PilotView, 
+/**
+ * The visit ended early: the sentence its `list_stopped` carries.
+ */
+stopped?: string, };
 
 export type RunListItem = { id: string, 
 /**
@@ -803,7 +831,25 @@ batch: number,
 /**
  * How many batches the visit needs at its batch size.
  */
-batches: number, items: Array<RunListItem>, };
+batches: number, items: Array<RunListItem>, 
+/**
+ * The visit's pilot, when the list runs one.
+ */
+pilot?: PilotView, 
+/**
+ * The visit ended early: the sentence its `list_stopped` carries.
+ */
+stopped?: string, };
+
+export type PilotView = { round: number, items: Array<string>, passed: number, needs_look: number, 
+/**
+ * Items of the visit outside the slice.
+ */
+rest: number, 
+/**
+ * `running`, `waiting`, `continued`, `revised` or `stopped`.
+ */
+state: string, };
 
 export type ProgressSummary = { percent: number, label: string | null, waiting_on: string | null, 
 /**
@@ -3252,7 +3298,11 @@ start_actions: Array<StartAction>,
 /**
  * The launch policy for an agent (see [`LaunchView`]).
  */
-launch: LaunchView, };
+launch: LaunchView, 
+/**
+ * Whether the playbook is fit to run alone (before-running-alone D5).
+ */
+readiness: Readiness, };
 
 export type FitSummary = { ready: boolean, 
 /**
@@ -3262,7 +3312,48 @@ compatible: boolean,
 /**
  * How many setup items there are.
  */
-setup: number, trusted: boolean, needs_consent: boolean, };
+setup: number, trusted: boolean, needs_consent: boolean, 
+/**
+ * The readiness report passes: nothing in it names what is missing
+ * from running alone.
+ */
+ready_alone: boolean, };
+
+export type Readiness = { 
+/**
+ * Every item holds.
+ */
+ready: boolean, items: Array<ReadinessItem>, probation?: ProbationView, };
+
+export type ReadinessItem = { code: string, ok: boolean, subject?: string, detail: string, };
+
+export type ProbationView = { 
+/**
+ * Successful attended runs (started without `--unattended`, not from
+ * a run step) asked for: the largest of the playbook's and the two
+ * `policy.yaml` files.
+ */
+required: number, 
+/**
+ * Eligible successful attended runs of this exact definition in this
+ * project's probation ledger. Attended says how a run was started,
+ * never that a person decided anything in it.
+ */
+counted: number, 
+/**
+ * `playbook`, `machine` or `project`: which asked for `required`.
+ */
+source: string, 
+/**
+ * The machine's `policy.yaml` waives probation here (an unverifiable
+ * ledger included).
+ */
+waived: boolean, 
+/**
+ * The ledger verified (or does not exist yet). False: nothing
+ * counts, and an unattended start is refused unless waived.
+ */
+ledger_ok: boolean, };
 
 export type Incompat = "removed" | "type_changed" | "option_gone" | "now_secret" | "pattern_mismatch";
 

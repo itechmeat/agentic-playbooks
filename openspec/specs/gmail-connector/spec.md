@@ -1,7 +1,7 @@
 # gmail-connector Specification
 
 ## Purpose
-TBD - created by archiving change google-connectors. Update Purpose after archive.
+apb ships a Gmail connector that sends composed messages, decodes message text and searches with one label filter.
 
 ## Requirements
 

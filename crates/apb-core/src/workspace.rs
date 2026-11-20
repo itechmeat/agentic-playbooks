@@ -40,6 +40,9 @@ pub const LOCAL_ENTRIES: &[&str] = &[
     "problems/",
     // The corrections people and runs left, signed by this installation.
     "corrections/",
+    // The probation ledger of each playbook, signed by this installation
+    // (`apb_core::probation`).
+    "probation/",
     // Scenario runs and their results index: never history, never shared.
     "scenario-runs/",
     // The open single-use challenges of billing confirmations.
@@ -262,6 +265,7 @@ mod tests {
             "memory/",
             "problems/",
             "corrections/",
+            "probation/",
             "scenario-runs/",
             "launch-challenges/",
             "handoff/",

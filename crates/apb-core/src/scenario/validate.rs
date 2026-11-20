@@ -70,8 +70,12 @@ const NODE_STATUSES: [&str; 6] = [
 
 /// The pairs of kinds one visit may carry, because one node crosses both
 /// boundaries: a list whose item check is a judge (`items` and `judge`),
-/// and a judge that may go on to its profile (`judge` and `attempts`).
-const PAIRS: [[&str; 2]; 2] = [[ITEMS, JUDGE], [JUDGE, ATTEMPTS]];
+/// a judge that may go on to its profile (`judge` and `attempts`), and a
+/// list whose pilot gate the visit answers (`items` and `review`).
+const PAIRS: [[&str; 2]; 3] = [[ITEMS, JUDGE], [JUDGE, ATTEMPTS], [ITEMS, REVIEW]];
+
+/// The one triple a visit may carry: a pilot over a judge item check.
+const TRIPLE: [&str; 3] = [ITEMS, JUDGE, REVIEW];
 
 /// Whether a visit carrying `kinds` asks for more than any node takes.
 fn too_many_kinds(kinds: &[&str]) -> bool {
@@ -80,6 +84,13 @@ fn too_many_kinds(kinds: &[&str]) -> bool {
         [a, b] => !PAIRS
             .iter()
             .any(|p| (p[0] == *a && p[1] == *b) || (p[0] == *b && p[1] == *a)),
+        [a, b, c] => {
+            let mut got = [*a, *b, *c];
+            got.sort_unstable();
+            let mut want = TRIPLE;
+            want.sort_unstable();
+            got != want
+        }
         _ => true,
     }
 }
@@ -182,7 +193,7 @@ pub fn file_problems(s: &Scenario, name: &str) -> Vec<String> {
             }
             if too_many_kinds(&kinds) {
                 p.push(format!(
-                    "{at} carries {} answers; a visit takes one kind, or `items` with `judge`, or `judge` with `attempts`",
+                    "{at} carries {} answers; a visit takes one kind, or `items` with `judge`, or `judge` with `attempts`, or `items` with `review` on a list pilot (and `judge` too when its item check is a judge)",
                     kinds.join(" and ")
                 ));
             }
@@ -244,12 +255,16 @@ fn expected_kind(node: &Node) -> Option<&'static str> {
 }
 
 /// Every answer kind a node takes: its own ([`expected_kind`]), plus
-/// `judge` for a list whose item check is a judge, and `attempts` for a
-/// judge that may emulate with its profile.
+/// `judge` for a list whose item check is a judge, `review` for a list
+/// whose pilot gate the visit answers, and `attempts` for a judge that
+/// may emulate with its profile.
 fn taken_kinds(node: &Node) -> Vec<&'static str> {
     let mut kinds: Vec<&'static str> = expected_kind(node).into_iter().collect();
     if list_judge(node).is_some() {
         kinds.push(JUDGE);
+    }
+    if node.list.as_ref().is_some_and(|l| l.pilot.is_some()) {
+        kinds.push(REVIEW);
     }
     if matches!(node.kind, NodeKind::Judge { .. }) && node.kind.runs_agent() {
         kinds.push(ATTEMPTS);
@@ -395,6 +410,23 @@ fn check_judge_edges(cx: &mut Ctx, node: &Node, at: &str, v: &VisitAnswer) {
 }
 
 fn check_values(cx: &mut Ctx, node: &Node, at: &str, v: &VisitAnswer) {
+    // A list pilot gate takes only its three options: a review answer on
+    // a pilot node is checked against them (the arm above matches a
+    // `human_review` only, so without this a pilot answer is checked by
+    // nothing).
+    if let Some(r) = &v.review
+        && node.list.as_ref().is_some_and(|l| l.pilot.is_some())
+        && !crate::list::PILOT_OPTIONS.contains(&r.decision.as_str())
+    {
+        cx.push(
+            "V148",
+            Some(&node.id),
+            format!(
+                "{at}: review decision `{}` is not a pilot option of `{}` (continue, revise, stop)",
+                r.decision, node.id
+            ),
+        );
+    }
     if let (Some(r), NodeKind::HumanReview { options, .. }) = (&v.review, &node.kind) {
         let options = crate::schema::effective_review_options(options);
         if !options.contains(&r.decision) {
@@ -844,5 +876,81 @@ mod tests {
     fn a_question_with_a_timed_out_attempt_needs_no_then() {
         let yaml = "schema: 1\nid: s\nanswers:\n  work:\n    - { visit: 1, attempts: [ { question: { text: q, answer: a }, then: { timed_out: true } } ] }\n";
         assert!(problems(yaml).is_empty(), "{:?}", problems(yaml));
+    }
+
+    /// A pilot list node takes its item answers and the pilot review
+    /// answer in one visit: no shape, fit or value issue.
+    #[test]
+    fn a_pilot_visit_takes_items_and_review() {
+        let issues = node_issues(PILOT_PB, PILOT_ANSWER_OK);
+        assert!(
+            issues
+                .iter()
+                .all(|i| !matches!(i.code, "V146" | "V147" | "V148")),
+            "{issues:?}"
+        );
+    }
+
+    /// A pilot answer outside its options is V148 with the pilot text.
+    #[test]
+    fn a_pilot_answer_outside_its_options_is_v148() {
+        let yaml = PILOT_ANSWER_OK.replace("decision: continue", "decision: approve");
+        let issues = node_issues(PILOT_PB, &yaml);
+        assert!(
+            issues.iter().any(|i| i.code == "V148"
+                && i.message
+                    .contains("review decision `approve` is not a pilot option of `work` (continue, revise, stop)")),
+            "{issues:?}"
+        );
+    }
+
+    /// A review answer on a list without a pilot does not fit: V147
+    /// naming `items`.
+    #[test]
+    fn a_review_answer_on_a_list_without_pilot_does_not_fit() {
+        let pb = PILOT_PB.replace("      pilot: { items: 1 }\n", "");
+        let issues = node_issues(&pb, PILOT_ANSWER_OK);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.code == "V147" && i.message.contains("items")),
+            "{issues:?}"
+        );
+    }
+
+    /// A pilot over a judge item check takes `items`, `judge` and
+    /// `review` in one visit; a fourth kind does not fit.
+    #[test]
+    fn a_pilot_over_a_judge_check_takes_three_kinds() {
+        let issues = node_issues(PILOT_JUDGE_PB, PILOT_ANSWER_OK);
+        assert!(
+            issues
+                .iter()
+                .all(|i| !matches!(i.code, "V146" | "V147" | "V148")),
+            "{issues:?}"
+        );
+        let yaml = PILOT_ANSWER_OK.replace(
+            "      review: { decision: continue }\n",
+            "      review: { decision: continue }\n      attempts: [ { status: succeeded } ]\n",
+        );
+        let issues = node_issues(PILOT_JUDGE_PB, &yaml);
+        assert!(
+            issues.iter().any(|i| matches!(i.code, "V146" | "V147")),
+            "four kinds do not pass: {issues:?}"
+        );
+    }
+
+    /// The pilot playbooks and answers the node-level tests share.
+    const PILOT_PB: &str = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - id: work\n    type: agent_task\n    prompt: one item\n    list:\n      items: { inline: [a, b] }\n      pilot: { items: 1 }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n";
+
+    const PILOT_JUDGE_PB: &str = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - id: work\n    type: agent_task\n    prompt: one item\n    list:\n      items: { inline: [a, b] }\n      check:\n        judge:\n          state: { subject: \"{{item}}\" }\n          instructions: is it fine?\n          criteria:\n            accept: fine.\n            reject: not fine.\n          min_confidence: 0.6\n          on_unavailable: reject\n      pilot: { items: 1 }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n";
+
+    const PILOT_ANSWER_OK: &str = "schema: 1\nid: s\nanswers:\n  work:\n    - visit: 1\n      items: { \"*\": { status: succeeded } }\n      review: { decision: continue }\n";
+
+    /// The node-level issues of `scenario` against `playbook_yaml`.
+    fn node_issues(playbook_yaml: &str, scenario_yaml: &str) -> Vec<Issue> {
+        let s: Scenario = yaml_serde::from_str(scenario_yaml).unwrap();
+        let pb = crate::schema::Playbook::from_yaml(playbook_yaml).unwrap();
+        validate_scenario("s", &s, &pb)
     }
 }

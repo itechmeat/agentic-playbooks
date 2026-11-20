@@ -23,14 +23,24 @@ pub const ITEM_MAX_BYTES: usize = 8 * 1024;
 pub const ITEM_ID_MAX_CHARS: usize = 128;
 /// The most re-runs of a rejected item (V85).
 pub const MAX_BATCH_RETRIES: u32 = 5;
+/// The most items a pilot slice holds (V240).
+pub const PILOT_MAX_ITEMS: u32 = 50;
+/// The options of a pilot gate, in the order they are offered.
+pub const PILOT_CONTINUE: &str = "continue";
+pub const PILOT_REVISE: &str = "revise";
+pub const PILOT_STOP: &str = "stop";
+pub const PILOT_OPTIONS: [&str; 3] = [PILOT_CONTINUE, PILOT_REVISE, PILOT_STOP];
+/// `stop_when.min_settled` when `needs_look_share` is given without it.
+pub const DEFAULT_MIN_SETTLED: u32 = 10;
 /// The fields of a list node's own output, which later nodes read by name.
-pub const LIST_OUTPUT_FIELDS: [&str; 7] = [
+pub const LIST_OUTPUT_FIELDS: [&str; 8] = [
     "total",
     "processed",
     "passed",
     "passed_with_note",
     "needs_look",
     "filtered_out",
+    "stopped",
     "items",
 ];
 /// The connector site of a list node's item check: `<node>#check`.
@@ -74,6 +84,12 @@ pub struct ListSpec {
     pub on_needs_look: OnNeedsLook,
     #[serde(default)]
     pub rerun: RerunPolicy,
+    /// Run the first items of a visit, then stop at a gate (V240, V242).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pilot: Option<PilotSpec>,
+    /// End a visit early when too many items need a look (V241).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_when: Option<StopWhen>,
 }
 
 impl ListSpec {
@@ -83,6 +99,83 @@ impl ListSpec {
             .iter()
             .map(|f| f.name().to_string())
             .collect()
+    }
+}
+
+/// A list's pilot slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PilotSpec {
+    /// How many items the slice runs, the first in source order that
+    /// still need to run.
+    pub items: u32,
+    #[serde(default)]
+    pub then: PilotThen,
+    #[serde(default)]
+    pub unattended: PilotUnattended,
+}
+
+/// What follows a settled pilot slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PilotThen {
+    /// Always ask a person.
+    #[default]
+    Review,
+    /// Go on by itself when every slice item passed; ask otherwise.
+    Continue,
+}
+
+/// What an unattended run does where a pilot gate would ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PilotUnattended {
+    /// The run fails (`hitl_required`).
+    #[default]
+    Fail,
+    /// The engine decides `continue` (journaled `decided_by: unattended`)
+    /// when every slice item passed; with an item that needs a look the
+    /// run fails (`hitl_required`) as under `fail`.
+    Continue,
+}
+
+/// When a visit ends early.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StopWhen {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_look_at_least: Option<u32>,
+    /// A share of the settled items, above 0 and at most 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_look_share: Option<f64>,
+    /// The settled items `needs_look_share` waits for (default 10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_settled: Option<u32>,
+}
+
+impl StopWhen {
+    /// The sentence the visit stops with when a rule holds over
+    /// `processed` settled items of which `needs_look` need a look. The
+    /// count rule is read first, the share second, and the share only
+    /// once `min_settled` items settled (default
+    /// [`DEFAULT_MIN_SETTLED`]).
+    pub fn holds(&self, processed: u32, needs_look: u32) -> Option<String> {
+        if let Some(k) = self.needs_look_at_least
+            && needs_look >= k
+        {
+            return Some(format!(
+                "{needs_look} of {processed} settled items need a look (stop_when: needs_look_at_least {k})"
+            ));
+        }
+        let s = self.needs_look_share?;
+        let min = self.min_settled.unwrap_or(DEFAULT_MIN_SETTLED);
+        if processed >= min && (needs_look as f64) >= s * processed as f64 {
+            let pct = ((needs_look as f64 / processed as f64) * 100.0).round();
+            return Some(format!(
+                "{needs_look} of {processed} settled items need a look, {pct}% (stop_when: needs_look_share {s})"
+            ));
+        }
+        None
     }
 }
 

@@ -1,7 +1,7 @@
 # dsh-agent Specification
 
 ## Purpose
-TBD - created by archiving change dsh-agent. Update Purpose after archive.
+dsh is a built-in agent: a headless launch form, the model in a run-scoped patch, its event stream read as machine output, session continuation and MCP registration through setup.
 
 ## Requirements
 

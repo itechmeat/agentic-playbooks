@@ -264,6 +264,15 @@ async fn run_fielded_gate_once() -> Result<(), String> {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
 
+    // The open request's seq, as the dashboard's panel names it.
+    let events = fs::read_to_string(runs.join(&run_id).join("events.jsonl")).unwrap();
+    let request = events
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .rfind(|v| v["type"] == "review_requested" && v["node"] == "gate")
+        .map(|v| v["seq"].as_u64().expect("the request's seq"))
+        .expect("the gate's open request");
+
     let app = build_router(AppState::new(dir.path().to_path_buf()));
     let (status, json) = post_json(
         app,
@@ -271,6 +280,7 @@ async fn run_fielded_gate_once() -> Result<(), String> {
         serde_json::json!({
             "node": "gate",
             "decision": "approved",
+            "request": request,
             "fields": { "amount": 1180.5 }
         }),
     )
@@ -3032,6 +3042,9 @@ async fn a_failing_workspace_listing_is_an_error_not_an_empty_result() {
 /// refused (`a_keyless_dashboard_refuses_a_publish_consent`).
 #[tokio::test]
 async fn a_keyless_dashboard_decides_a_publish_named_option_on_a_review_gate() {
+    // The seed starts a real run: inside the suite's config sandbox, so
+    // no concurrent test swaps APB_CONFIG_DIR while it resolves it.
+    let _cfg = common::config_sandbox().await;
     let dir = seed_with_run();
     let yaml = r#"
 schema: 1
@@ -3152,4 +3165,80 @@ async fn get_run_detail_shows_previous_success_without_values() {
         .expect("the seeded run");
     let (_, json) = get_json(app, &format!("/api/runs/{run_id}")).await;
     assert!(json.get("previous_success").is_none(), "{json}");
+}
+
+/// A form gate's review names the request it answers: a post that names
+/// none is a 409 whose text starts `decide_again`, and nothing is queued.
+#[tokio::test]
+async fn a_form_gate_review_without_request_is_409() {
+    let dir = seed_with_run();
+    // The request and its detail, as the drive journals them in one
+    // write: the form's checks fail closed on a request without it.
+    let detail = apb_engine::event::EventPayload::ReviewDetail {
+        node: "gate".into(),
+        request: 1,
+        scope: None,
+        show: Vec::new(),
+        fields: Vec::new(),
+        withheld: Vec::new(),
+        withheld_reason: None,
+    };
+    seed_gate_run_yaml(
+        dir.path(),
+        "gate-f",
+        FIELDS_GATE,
+        &[review_requested("gate"), detail],
+    );
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/runs/gate-f/review")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(
+                        &serde_json::json!({ "node": "gate", "decision": "approved", "note": "ok" }),
+                    )
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT, "{}", res.status());
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    assert!(text.contains("decide_again"), "{text}");
+    assert!(
+        !dir.path()
+            .join(".apb/runs/gate-f")
+            .join("reviews.jsonl")
+            .exists(),
+        "a refused decision is not queued"
+    );
+    // The named post is accepted.
+    let events =
+        fs::read_to_string(dir.path().join(".apb/runs/gate-f").join("events.jsonl")).unwrap();
+    let request = events
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v["type"] == "review_requested" && v["node"] == "gate")
+        .map(|v| v["seq"].as_u64().expect("the request's seq"))
+        .expect("the gate's open request");
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = post_json(
+        app,
+        "/api/runs/gate-f/review",
+        serde_json::json!({
+            "node": "gate",
+            "decision": "approved",
+            "note": "ok",
+            "request": request,
+            "fields": { "amount": 1180.5 }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(json["posted_seq"].is_number());
 }

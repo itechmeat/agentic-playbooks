@@ -556,9 +556,11 @@ fn review_decide_passes_fields() {
     });
     let run_id = run_dir.file_name().unwrap().to_str().unwrap().to_string();
 
+    // The open request's seq, as the next action's arguments carry it.
+    let request = open_request_seq(&run_dir);
     let mut fields = std::collections::BTreeMap::new();
     fields.insert("amount".to_string(), serde_json::json!(1180.5));
-    let res = review_decide(root, &run_id, "gate", "approve", "", None, None, &fields).unwrap();
+    let res = review_decide(root, &run_id, "gate", "approve", "", None, request, &fields).unwrap();
     assert!(res["posted_seq"].is_number());
 
     let result = rx
@@ -580,5 +582,106 @@ fn review_decide_passes_fields() {
                 if node == "gate" && f["amount"] == 1180.5
         )),
         "no ReviewFields event with amount 1180.5"
+    );
+}
+
+/// The open request's seq of the run's gate.
+fn open_request_seq(run_dir: &std::path::Path) -> Option<u64> {
+    apb_engine::event::read_all(run_dir)
+        .ok()
+        .and_then(|events| apb_engine::review::open_request(&events, "gate").map(|(seq, _)| seq))
+}
+
+/// A form gate's decision names the request it answers: without the
+/// `request` argument the tool returns a conflict naming `decide_again`,
+/// and with the open request's seq it posts and the run proceeds.
+#[test]
+fn review_decide_on_a_form_gate_needs_the_request() {
+    let _env = crate::common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    apb_core::registry::init_project(root).unwrap();
+    let pdir = root.join(".apb/playbooks/gated/1.0.0");
+    fs::create_dir_all(&pdir).unwrap();
+    fs::write(pdir.join("playbook.yaml"), FIELDS_GATE).unwrap();
+    fs::write(root.join(".apb/playbooks/gated/current"), "1.0.0").unwrap();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let driver_root = root.to_path_buf();
+    std::thread::spawn(move || {
+        let res = apb_engine::scheduler::run(
+            &driver_root,
+            "gated",
+            None,
+            apb_engine::scheduler::RunOptions::default(),
+        );
+        let _ = tx.send(res);
+    });
+    let run_dir = poll_until("the run directory", || {
+        let runs = root.join(".apb/runs");
+        fs::read_dir(&runs)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.is_dir())
+    });
+    poll_until("the gate's request", || {
+        let events = apb_engine::event::read_all(&run_dir).ok()?;
+        events
+            .iter()
+            .any(|e| matches!(&e.payload, apb_engine::event::EventPayload::ReviewRequested { node, .. } if node == "gate"))
+            .then_some(())
+    });
+    let run_id = run_dir.file_name().unwrap().to_str().unwrap().to_string();
+
+    let err = review_decide(
+        root,
+        &run_id,
+        "gate",
+        "approve",
+        "",
+        None,
+        None,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, apb_mcp::tools::ToolError::Conflict(ref m) if m.contains("decide_again")),
+        "{err:?}"
+    );
+    assert!(
+        !run_dir.join("reviews.jsonl").exists(),
+        "a refused decision is not queued"
+    );
+
+    // The request comes from the next action `run_status` answers: the
+    // `review_decide` call it names carries the open request.
+    let status = apb_mcp::tools::run::run_status(root, &run_id).unwrap();
+    let text = status.to_string();
+    let request = open_request_seq(&run_dir);
+    let seq = request.expect("an open request");
+    assert!(
+        text.contains("\"review_decide\"") && text.contains(&format!("\"request\":{seq}")),
+        "the next action names the request: {text}"
+    );
+    review_decide(
+        root,
+        &run_id,
+        "gate",
+        "reject",
+        "",
+        None,
+        request,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap();
+    let result = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("run did not finish")
+        .expect("run ok");
+    assert_eq!(
+        result.outcome,
+        apb_engine::state::RunStatus::Failed,
+        "the named decision consumed, the run proceeds on it"
     );
 }

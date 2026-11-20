@@ -606,8 +606,12 @@ pub struct ReviewDecideArgs {
     #[serde(default)]
     pub nonce: Option<String>,
     /// The journal seq of the request this answers: a next action's
-    /// `arguments.request`. When given, a request a later round replaced is
-    /// refused as a conflict, and so is one that already has an answer.
+    /// `arguments.request`. Required for a gate that uses `fields`, `show`
+    /// or `max_scope` and for a list pilot gate; one that names none, or a
+    /// request the gate replaced or withdrew, is refused `decide_again`,
+    /// which means: read the gate's request again and decide on it. When
+    /// given on any gate, a request a later round replaced is refused as a
+    /// conflict, and so is one that already has an answer.
     #[serde(default)]
     pub request: Option<u64>,
     /// workspace_id of another workspace (spec 7). None - the current one.

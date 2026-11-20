@@ -2,6 +2,8 @@
 
 use serde::Serialize;
 
+use super::readiness::Readiness;
+
 /// How much an item matters for running here.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -93,6 +95,8 @@ pub struct FitReport {
     pub start_actions: Vec<crate::next_action::start_action::StartAction>,
     /// The launch policy for an agent (see [`LaunchView`]).
     pub launch: LaunchView,
+    /// Whether the playbook is fit to run alone (before-running-alone D5).
+    pub readiness: Readiness,
 }
 
 /// The short form of a report, for a list.
@@ -106,6 +110,9 @@ pub struct FitSummary {
     pub setup: usize,
     pub trusted: bool,
     pub needs_consent: bool,
+    /// The readiness report passes: nothing in it names what is missing
+    /// from running alone.
+    pub ready_alone: bool,
 }
 
 impl FitReport {
@@ -116,6 +123,7 @@ impl FitReport {
             setup: self.setup.len(),
             trusted: self.trusted,
             needs_consent: self.needs_consent,
+            ready_alone: self.readiness.ready,
         }
     }
 }

@@ -132,6 +132,103 @@ pub(crate) fn apply_patch(
         return append_patch_rejected(log, reason);
     }
 
+    // An unattended run is held to the same checks its start passed, on
+    // the replacement definition and the run's pinned children, before
+    // the snapshot is replaced (before anything is stored, so a refused
+    // patch has written no guard and left `playbook.yaml` as it was). An
+    // attended run's patch is checked by neither; a forward patch changes
+    // later runs and meets both checks in their preparation.
+    // The mode comes from a record that exists
+    // (`manifest::recorded_mode`): the manifest, else the persisted
+    // `run.yaml`. A mode that cannot be told is fail-closed, and so is an
+    // unattended run whose manifest is gone: its waiver and readiness
+    // demand live only there.
+    let manifest = match crate::manifest::recorded_mode(run_dir) {
+        Ok(crate::manifest::RecordedMode::Attended) => None,
+        Ok(crate::manifest::RecordedMode::Unattended(Some(m))) => Some(m),
+        Ok(crate::manifest::RecordedMode::Unattended(None)) => {
+            return append_patch_rejected(
+                log,
+                format!(
+                    "{}: this run is unattended and its manifest is missing, so its probation waiver and readiness demand cannot be told; the patch is refused",
+                    crate::run_config::PROBATION_REQUIRED
+                ),
+            );
+        }
+        Err(why) => {
+            return append_patch_rejected(
+                log,
+                format!(
+                    "{}: {why}, so whether it runs unattended cannot be told; the patch is refused",
+                    crate::run_config::PROBATION_REQUIRED
+                ),
+            );
+        }
+    };
+    if let Some(manifest) = manifest {
+        // A `run.yaml` that does not read refuses the patch like a
+        // manifest that does not read: whether the run pinned children
+        // cannot be told.
+        let refusal = (|| -> Option<String> {
+            let cfg = match crate::run_config::read_run_config(run_dir) {
+                Ok(cfg) => cfg,
+                Err(_) => {
+                    return Some(format!(
+                        "{}: the run config of this run does not read, so its pinned sub-playbooks cannot be told; the patch is refused",
+                        crate::run_config::PROBATION_REQUIRED
+                    ));
+                }
+            };
+            let pins = if cfg.parent_run.is_none() {
+                cfg.expected_children
+            } else {
+                None
+            };
+            // The scope label is the run's origin, as preparation derives
+            // it and as the child spawns resolve their own playbooks.
+            let origin = super::parent_run_origin(run_dir);
+            let scope = match origin {
+                apb_core::scope::Origin::Global => "global",
+                _ => "project",
+            };
+            if let Err(refusal) = crate::gate::unattended::check_probation(
+                root,
+                scope,
+                &loaded,
+                pins.as_ref(),
+                manifest.probation_waived,
+                // The run's overrides were judged at its start.
+                false,
+            ) {
+                return Some(format!(
+                    "{}: {}",
+                    crate::run_config::PROBATION_REQUIRED,
+                    refusal["detail"].as_str().unwrap_or_default()
+                ));
+            }
+            if manifest.readiness_required {
+                let origin = match origin {
+                    apb_core::scope::Origin::Global => {
+                        apb_core::profile_store::PlaybookOrigin::Global
+                    }
+                    _ => apb_core::profile_store::PlaybookOrigin::Project,
+                };
+                return crate::fit::readiness::start_check(
+                    root,
+                    scope,
+                    &loaded,
+                    origin,
+                    pins.as_ref(),
+                )
+                .err();
+            }
+            None
+        })();
+        if let Some(detail) = refusal {
+            return append_patch_rejected(log, detail);
+        }
+    }
+
     let from_version = playbook.version.clone();
     let base = playbook.clone();
     // The run's secret set only grows: the declarations of the snapshot the
@@ -160,7 +257,7 @@ pub(crate) fn apply_patch(
     // patch_refusal` above); a guarded run whose patched definition names
     // none all the same ends its guard only once the patch is journaled.
     let guard = super::prepare::run_guard(&loaded.playbook, &events);
-    let was_guarded = latest_guard(&events).is_some_and(|r| !r.is_empty());
+    let was_guarded = crate::event::latest_run_guard(&events).is_some_and(|r| !r.is_empty());
     if let Some(guard) = guard.clone() {
         log.append(guard)?;
     }
@@ -193,15 +290,6 @@ pub(crate) fn apply_patch(
         continue_from,
         base,
     })))
-}
-
-/// The `requires` of the latest `run_guard` of `events`, `None` when the
-/// run never journaled one.
-pub(super) fn latest_guard(events: &[Event]) -> Option<&[String]> {
-    events.iter().rev().find_map(|e| match &e.payload {
-        EventPayload::RunGuard { requires } => Some(requires.as_slice()),
-        _ => None,
-    })
 }
 
 /// The rejection reason when `patched` declares consent sources that the
@@ -361,6 +449,9 @@ mod tests {
         std::fs::write(root.path().join(".apb/playbooks/p/current"), "1.0.0").unwrap();
         let run_dir = root.path().join(".apb/runs/r1");
         std::fs::create_dir_all(&run_dir).unwrap();
+        // Every run apb prepares has its `run.yaml`: the patch reads the
+        // run's mode from it.
+        std::fs::write(run_dir.join("run.yaml"), "unattended: false\n").unwrap();
         std::fs::write(run_dir.join("playbook.yaml"), RUNNING).unwrap();
         let mut log = EventLog::create(&run_dir).unwrap();
         for body in [
@@ -513,6 +604,9 @@ mod tests {
         std::fs::write(root.path().join(".apb/playbooks/g/current"), "1.0.0").unwrap();
         let run_dir = root.path().join(".apb/runs/r1");
         std::fs::create_dir_all(&run_dir).unwrap();
+        // Every run apb prepares has its `run.yaml`: the patch reads the
+        // run's mode from it.
+        std::fs::write(run_dir.join("run.yaml"), "unattended: false\n").unwrap();
         std::fs::write(run_dir.join("playbook.yaml"), running).unwrap();
         let mut log = EventLog::create(&run_dir).unwrap();
         log.append(EventPayload::RunStarted {
@@ -702,6 +796,9 @@ mod tests {
         std::fs::write(root.path().join(".apb/playbooks/p/current"), "1.0.0").unwrap();
         let run_dir = root.path().join(".apb/runs/r1");
         std::fs::create_dir_all(&run_dir).unwrap();
+        // Every run apb prepares has its `run.yaml`: the patch reads the
+        // run's mode from it.
+        std::fs::write(run_dir.join("run.yaml"), "unattended: false\n").unwrap();
         std::fs::write(run_dir.join("playbook.yaml"), running).unwrap();
         let mut log = EventLog::create(&run_dir).unwrap();
         log.append(EventPayload::RunStarted {

@@ -796,3 +796,45 @@ fn a_forged_workspace_id_does_not_match_another_projects_machine_entry() {
         assert_eq!(p.runs().len(), started, "{forged}: no run");
     }
 }
+
+/// A CLI without a terminal whose config dir is redirected away from the
+/// default one may not loosen the machine's unattended section there: a
+/// redirected dir that waives probation, or asks for fewer attended runs,
+/// is refused `policy_file_invalid`; one as strict as the default passes.
+#[test]
+fn a_redirected_config_dir_does_not_loosen_probation() {
+    let p = Project::new("pb", &pb("pb", None, ""));
+    let default = tempfile::tempdir().unwrap();
+    fs::write(
+        default.path().join("policy.yaml"),
+        "unattended:\n  after_attended_successes: 2\n",
+    )
+    .unwrap();
+    let start = |policy: &str| {
+        fs::write(p.cfg.path().join("policy.yaml"), policy).unwrap();
+        p.apb()
+            .env("APB_TEST_DEFAULT_CONFIG_DIR", default.path())
+            .args(["run", "pb", "--unattended"])
+            .assert()
+    };
+    for (policy, says) in [
+        (
+            "unattended:\n  waive_probation: true\n",
+            "waive probation where the default config dir's do not",
+        ),
+        (
+            "unattended:\n  after_attended_successes: 1\n",
+            "ask for 1 attended runs where the default config dir's ask for 2",
+        ),
+    ] {
+        let err = stderr_of(&start(policy).code(2));
+        assert!(err.contains("policy_file_invalid"), "{err}");
+        assert!(err.contains("redirected"), "{err}");
+        assert!(err.contains(says), "{err}");
+        assert!(p.runs().is_empty(), "no run");
+    }
+    // As strict as the default: the refusal is probation's own.
+    let err = stderr_of(&start("unattended:\n  after_attended_successes: 2\n").code(2));
+    assert!(!err.contains("policy_file_invalid"), "{err}");
+    assert!(err.contains("probation_required"), "{err}");
+}

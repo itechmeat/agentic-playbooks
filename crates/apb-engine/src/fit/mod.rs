@@ -18,6 +18,7 @@
 //!
 //! The same report backs every surface; nothing here writes.
 
+pub(crate) mod readiness;
 mod report;
 mod setup;
 mod trust;
@@ -33,6 +34,7 @@ use apb_core::run_memory::{MemoryKey, recall};
 use apb_core::scope::{Origin, PlaybookRef, origin_scope_label};
 use apb_core::trust::{Lifecycle, TrustStore, read_lifecycle};
 
+pub use readiness::{Readiness, ReadinessItem, not_ready_detail};
 pub use report::{ConsentView, FitItem, FitReport, FitSeverity, FitSummary, LaunchView, TrustItem};
 pub use setup::{ProfileFinding, UNTRUSTED, profile_findings};
 
@@ -83,6 +85,11 @@ pub fn unavailable(id: &str, version: &str) -> FitReport {
             sources: Vec::new(),
             floor: None,
             problem: Some("the fit report could not be made".to_string()),
+        },
+        readiness: Readiness {
+            ready: false,
+            items: vec![],
+            probation: None,
         },
     }
 }
@@ -258,10 +265,13 @@ pub fn assess(root: &Path, wref: &PlaybookRef) -> Result<FitReport, FitError> {
             .map(|e| crate::gate::effect_str(e).to_string())
             .collect(),
     };
+    let readiness = readiness::assess(root, origin_scope_label(&wref.origin), &loaded, origin);
     let mut report = FitReport {
         id: wref.id.clone(),
         scope: origin_scope_label(&wref.origin).to_string(),
         version: resolved.version,
+        // Readiness never changes `ready`: that stays "nothing blocks a run
+        // here".
         ready: !report::blocks(&compatibility) && !report::blocks(&setup),
         trusted: trust_items.iter().all(|t| t.approved),
         needs_consent: !consent.irreversible.is_empty(),
@@ -271,6 +281,7 @@ pub fn assess(root: &Path, wref: &PlaybookRef) -> Result<FitReport, FitError> {
         consent,
         start_actions: Vec::new(),
         launch: launch_view(root, playbook, &wref.origin, children.as_ref()),
+        readiness,
     };
     report.start_actions = crate::next_action::start::from_fit(&report);
     Ok(report)

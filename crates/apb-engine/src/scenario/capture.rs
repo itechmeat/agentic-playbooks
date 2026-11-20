@@ -150,6 +150,9 @@ impl Fold<'_> {
                 continue;
             };
             if schema_node.list.is_some() {
+                // A list node's per-item answers are not captured, so its
+                // replay would miss every item: a pilot's decision alone
+                // never makes it capturable.
                 self.gap(
                     "list_node",
                     Some(node),

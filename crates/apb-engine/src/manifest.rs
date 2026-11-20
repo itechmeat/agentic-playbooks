@@ -384,6 +384,15 @@ pub struct RunExecutionManifest {
     /// mode from here. Absent (false) for every other run.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unattended: bool,
+    /// A person waived this unattended run's probation at its start
+    /// (`apb run --waive-probation`); every child run of the tree records
+    /// it too. True only for an unattended run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub probation_waived: bool,
+    /// The start asked for `--require-ready`; a child run takes its
+    /// parent's demand. True only for an unattended run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub readiness_required: bool,
     /// The run processes data from outside the operator and keeps nothing
     /// for learning (`external_data: true` at start, see
     /// [`crate::external_data`]). Written once at start and never changed:
@@ -881,9 +890,78 @@ pub fn read(run_dir: &Path) -> Result<Option<RunExecutionManifest>, EngineError>
     Ok(Some(m))
 }
 
+/// The mode a run's records establish (before-running-alone): the
+/// write-once manifest, else the persisted `run.yaml` copy, never a
+/// default.
+#[derive(Debug)]
+pub enum RecordedMode {
+    /// Both records that exist say attended.
+    Attended,
+    /// The run is unattended; the manifest when it is there (the waiver
+    /// and the readiness demand live only in it).
+    Unattended(Option<Box<RunExecutionManifest>>),
+}
+
+/// Reads the run's mode from a record that exists. A manifest says it
+/// (with `run.yaml`'s copy also able to say unattended); without one, the
+/// persisted `run.yaml` says it. `Err` (the reason, worded) when the
+/// manifest does not read, or when there is no manifest and `run.yaml`
+/// is missing or does not read: the mode cannot be told, and no caller
+/// takes attended for it.
+pub fn recorded_mode(run_dir: &Path) -> Result<RecordedMode, String> {
+    let config = || -> Option<Result<crate::run_config::RunConfig, EngineError>> {
+        run_dir
+            .join("run.yaml")
+            .is_file()
+            .then(|| crate::run_config::read_run_config(run_dir))
+    };
+    match read(run_dir) {
+        Err(e) => Err(format!("the run's manifest does not read ({e})")),
+        Ok(Some(m)) => {
+            let copy = matches!(config(), Some(Ok(c)) if c.unattended);
+            Ok(if m.unattended || copy {
+                RecordedMode::Unattended(Some(Box::new(m)))
+            } else {
+                RecordedMode::Attended
+            })
+        }
+        Ok(None) => match config() {
+            None => Err("the run has neither a manifest nor a run config".to_string()),
+            Some(Err(e)) => Err(format!("the run's config does not read ({e})")),
+            Some(Ok(c)) if c.unattended => Ok(RecordedMode::Unattended(None)),
+            Some(Ok(_)) => Ok(RecordedMode::Attended),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mode comes from a record that exists, never a default: an
+    /// unattended `run.yaml` without a manifest is unattended, no record
+    /// at all and a manifest that does not read are not told.
+    #[test]
+    fn the_recorded_mode_never_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(recorded_mode(dir.path()).is_err(), "no record");
+        let cfg = crate::run_config::RunConfig {
+            unattended: true,
+            ..Default::default()
+        };
+        crate::run_config::write_run_config(dir.path(), &cfg).unwrap();
+        assert!(matches!(
+            recorded_mode(dir.path()),
+            Ok(RecordedMode::Unattended(None))
+        ));
+        crate::run_config::write_run_config(dir.path(), &Default::default()).unwrap();
+        assert!(matches!(
+            recorded_mode(dir.path()),
+            Ok(RecordedMode::Attended)
+        ));
+        std::fs::write(manifest_path(dir.path()), "{not yaml").unwrap();
+        assert!(recorded_mode(dir.path()).is_err(), "manifest does not read");
+    }
 
     /// `unattended` is write-once and authoritative: absent from an older
     /// manifest, which reads as attended and writes back without it; a set

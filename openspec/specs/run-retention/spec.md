@@ -1,7 +1,7 @@
 # run-retention Specification
 
 ## Purpose
-TBD - created by archiving change routine-health. Update Purpose after archive.
+A person can prune old runs with a dry run first: whole run families are removed or kept, runs something still needs are never removed, retention settings come from policy.yaml, and every removed run leaves a signed summary.
 
 ## Requirements
 

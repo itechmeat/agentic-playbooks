@@ -1,7 +1,7 @@
 # cloud-model-cost Specification
 
 ## Purpose
-TBD - created by archiving change near-ai-cloud-models. Update Purpose after archive.
+Attempts on NEAR AI Cloud catalog models are priced from the catalog, and budgets, estimates and stats count that cost.
 
 ## Requirements
 

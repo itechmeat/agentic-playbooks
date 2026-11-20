@@ -123,6 +123,7 @@ fn render_types() -> String {
         apb_engine::list::ListProgress::decl(&cfg),
         apb_engine::list::RunListItem::decl(&cfg),
         apb_engine::list::RunList::decl(&cfg),
+        apb_engine::list::view::PilotView::decl(&cfg),
         apb_engine::progress::ProgressSummary::decl(&cfg),
         apb_engine::run_view::ChildRun::decl(&cfg),
         apb_engine::run_view::RunUsage::decl(&cfg),
@@ -334,6 +335,9 @@ fn render_types() -> String {
         apb_engine::fit::LaunchView::decl(&cfg),
         apb_engine::fit::FitReport::decl(&cfg),
         apb_engine::fit::FitSummary::decl(&cfg),
+        apb_engine::fit::Readiness::decl(&cfg),
+        apb_engine::fit::ReadinessItem::decl(&cfg),
+        apb_engine::gate::ProbationView::decl(&cfg),
         // Remembered run input.
         apb_core::run_memory::Incompat::decl(&cfg),
         apb_core::run_memory::InstructionSource::decl(&cfg),

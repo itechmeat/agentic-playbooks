@@ -1,7 +1,7 @@
 # untrusted-connector-output Specification
 
 ## Purpose
-TBD - created by archiving change google-connectors. Update Purpose after archive.
+Connector functions that return outside text are marked as such, and the validator refuses a binding that leaves such text unmarked.
 
 ## Requirements
 

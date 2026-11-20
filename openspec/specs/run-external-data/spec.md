@@ -1,7 +1,7 @@
 # run-external-data Specification
 
 ## Purpose
-TBD - created by archiving change near-ai-cloud-models. Update Purpose after archive.
+A run can be marked as working on external data at start; the flag is fixed for its lifetime, inherited by its children and successors, shown on every surface, and keeps everything the run produces out of every learning store.
 
 ## Requirements
 

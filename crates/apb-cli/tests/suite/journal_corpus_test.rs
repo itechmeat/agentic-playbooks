@@ -40,6 +40,12 @@
 //! D1 to D6 and D8 that need no old binary run without one (D7's writer is
 //! beta.1, D9 needs none at all).
 //!
+//! Row G1 runs a definition whose list block carries `pilot:`: beta.1
+//! cannot parse it and refuses to start the playbook; 0.25.0 parses it,
+//! drops the pilot and runs every item (recorded: its list block does not
+//! deny unknown fields yet); both refuse to resume a run waiting at its
+//! pilot gate, appending nothing either way.
+//!
 //! Rows 3 and 4 start an `agent_launch: ask` playbook through the launch
 //! refusal's nonce, so the manifest holds a launch record; rows 6 and 9
 //! resume a run an old binary started, so `run_resumed` holds one. The old
@@ -4213,4 +4219,171 @@ fn f1_evidence_records_old_binaries_skip_them_and_route_the_same() {
         );
         case.stop(&reader, &run);
     }
+}
+
+/// Row G1's playbook: a script list over five inline items with a pilot of
+/// two. The script answers each item and changes nothing.
+const G1_PILOT: &str = r#"schema: 2
+id: corpus-pilot
+name: Journal corpus list pilot
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: work
+    type: script
+    script: "scripts/item.sh"
+    runner: sh
+    list:
+      items: { inline: [ { id: i1 }, { id: i2 }, { id: i3 }, { id: i4 }, { id: i5 } ] }
+      batch: { size: 2, parallel: 1, retries: 0 }
+      pilot: { items: 2 }
+  - { id: ok, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: ok }
+"#;
+
+const G1_ITEM_SH: &str = "echo 'item done'\n";
+
+/// Row G1: a definition whose list block carries `pilot:` is one an older
+/// apb cannot parse (`ListSpec` denies unknown fields), so each old binary
+/// refuses to start such a playbook (no run directory is created) and
+/// refuses to resume a run waiting at its pilot gate, appending nothing to
+/// the journal. The new binary resumes it, decides `continue` naming the
+/// request, and the visit runs to its end.
+#[test]
+fn g1_list_pilot_old_binaries_refuse_start_and_resume() {
+    let new = new_binary();
+    let mut case = Case::new("row G1 (new)");
+    case.seed_inline(&new, "corpus-pilot", G1_PILOT, &[("item.sh", G1_ITEM_SH)]);
+    let ran = case.run(&new, &["validate", "corpus-pilot"]);
+    assert!(ran.ok(), "row G1: the new binary validates: {ran:?}");
+    let run = case.start_inline(&new, "corpus-pilot", &[]);
+    let journal = case.wait_journal(&run, "the pilot gate", |j| {
+        j.iter()
+            .any(|e| e["type"] == "review_requested" && e["node"] == "work")
+    });
+    assert_run_guard_follows_last_checkpoint(&journal, "row G1", &["list_pilot"]);
+    case.kill_driver(&run);
+    case.save();
+
+    for (tag, name) in [(BETA1, "row G1 (beta.1)"), (V025, "row G1 (0.25.0)")] {
+        let mut case = Case::new(name);
+        let Some(old) = old_binary(tag, &case) else {
+            continue;
+        };
+        // Before-running-alone G1: v1.0.0-beta.1 and later older binaries
+        // reject `pilot` at parse (their list block denies unknown fields)
+        // and create no run directory. v0.25.0's list block does not deny
+        // unknown fields yet, so it starts the playbook, drops `pilot:`
+        // and runs every item without a pilot gate: the standing contract
+        // of an older binary meeting a new playbook field (GUARDRAILS.md
+        // "Older apb binaries").
+        case.seed_inline(&old, "corpus-pilot", G1_PILOT, &[("item.sh", G1_ITEM_SH)]);
+        let ran = case.run(&old, &["run", "corpus-pilot"]);
+        if tag == BETA1 {
+            assert!(!ran.ok(), "{name}: beta.1 refuses to start: {ran:?}");
+            let created = fs::read_dir(case.runs())
+                .map(|d| d.flatten().count())
+                .unwrap_or(0);
+            assert_eq!(created, 0, "{name}: no run directory exists");
+        } else {
+            assert!(
+                ran.ok(),
+                "{name}: 0.25.0 parses and starts the playbook: {ran:?}"
+            );
+            let run_dir = case.runs();
+            let journal: Vec<Value> = fs::read_dir(&run_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .find_map(|e| {
+                    let p = e.path().join("events.jsonl");
+                    fs::read_to_string(p).ok().map(|t| {
+                        t.lines()
+                            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                            .collect()
+                    })
+                })
+                .unwrap_or_default();
+            assert!(
+                !journal
+                    .iter()
+                    .any(|e| e["type"] == "review_requested" || e["type"] == "list_pilot"),
+                "{name}: 0.25.0 ran the visit without a pilot gate: {}",
+                summary(&journal)
+            );
+        }
+
+        // Resume: the writer's run waits at its pilot gate; either old
+        // binary refuses it and the journal stays what it was.
+        case.seed_inline(&new, "corpus-pilot", G1_PILOT, &[("item.sh", G1_ITEM_SH)]);
+        let run = case.start_inline(&new, "corpus-pilot", &[]);
+        case.wait_journal(&run, "the pilot gate", |j| {
+            j.iter()
+                .any(|e| e["type"] == "review_requested" && e["node"] == "work")
+        });
+        case.kill_driver(&run);
+        case.save();
+        case.restore();
+        let run_dir = case.runs().join(&run);
+        let before = fs::read(run_dir.join("events.jsonl")).unwrap();
+        let ran = case.run(&old, &["resume", &run]);
+        assert!(
+            !ran.ok(),
+            "{name}: the old binary refuses to resume: {ran:?}"
+        );
+        let after = fs::read(run_dir.join("events.jsonl")).unwrap();
+        assert_eq!(before, after, "{name}: the old binary appended nothing");
+    }
+
+    // The new binary resumes on a fresh copy, decides continue naming the
+    // request, and the visit runs to its end.
+    let mut case = Case::new("row G1 (new resume)");
+    case.seed_inline(&new, "corpus-pilot", G1_PILOT, &[("item.sh", G1_ITEM_SH)]);
+    let run = case.start_inline(&new, "corpus-pilot", &[]);
+    case.wait_journal(&run, "the pilot gate", |j| {
+        j.iter()
+            .any(|e| e["type"] == "review_requested" && e["node"] == "work")
+    });
+    let seq = case
+        .journal(&run)
+        .iter()
+        .rev()
+        .find(|e| e["type"] == "review_requested" && e["node"] == "work")
+        .map(|e| e["seq"].clone())
+        .expect("the request seq");
+    case.kill_driver(&run);
+    case.save();
+    case.restore();
+    let ran = case.run(
+        &new,
+        &[
+            "review",
+            &run,
+            "work",
+            "--decision",
+            "continue",
+            "--request",
+            &format!("review:{seq}"),
+        ],
+    );
+    assert!(ran.ok(), "row G1: the new binary decides: {ran:?}");
+    let ran = case.run(&new, &["resume", &run]);
+    assert!(ran.ok(), "row G1: the new binary resumes: {ran:?}");
+    let journal = case.journal(&run);
+    assert_eq!(
+        last_of(&journal, "run_finished").map(|e| e["outcome"].clone()),
+        Some(Value::from("succeeded")),
+        "row G1: {}",
+        summary(&journal)
+    );
+    let output = journal
+        .iter()
+        .rev()
+        .find(|e| e["type"] == "node_finished" && e["node"] == "work")
+        .and_then(|e| e["output"].as_str().map(str::to_string))
+        .expect("the list node's output");
+    let output: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(output["passed"], Value::from(5), "row G1: {output}");
+    assert_eq!(output["needs_look"], Value::from(0), "row G1: {output}");
 }

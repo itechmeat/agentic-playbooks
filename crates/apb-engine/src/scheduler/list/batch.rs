@@ -10,22 +10,19 @@
 //! one item stops admission and drains the rest; an abort ends the visit
 //! cancelled with its items open. None of these spends an item's round.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use apb_core::connector::idempotency::IdempotencyMode;
 use apb_core::list::verdict::{ItemEvent, NeedsLookReason, Transition, transition};
 
 use super::ItemExec;
 use super::check::{self, Checked};
 use super::run::{ListRun, Settlement, settled_output};
-use crate::connector::intent::{
-    IntentState, Ledger, chain_verdict, item_scope_floor, passed_floors,
-};
+use super::sends::ItemSends;
 use crate::control::Control;
 use crate::error::EngineError;
-use crate::event::{Event, EventPayload, read_all};
+use crate::event::{EventPayload, read_all};
 use crate::exec_key::ExecKey;
 use crate::list::ledger::{ListFold, RECONCILE, progress_label, settled};
 use crate::list::prompt::item_section;
@@ -48,6 +45,17 @@ pub(super) enum End {
     /// An unattended run's budget refused the next batch: no item is
     /// admitted, and the drive ends the run `budget_exhausted`.
     Exhausted,
+    /// The pilot slice settled and a person decides; the visit stays open.
+    PilotGate,
+    /// The visit ended early: a pilot `stop` or `stop_when`.
+    Stopped,
+}
+
+/// The visit's early-stop rule and the ids excluded from its count (the
+/// latest pilot slice).
+pub(super) struct StopRule<'a> {
+    pub(super) when: &'a apb_core::list::StopWhen,
+    pub(super) outside: Vec<String>,
 }
 
 /// What one item's execution came to, sent from a worker.
@@ -64,19 +72,92 @@ enum Ran {
     },
 }
 
-/// Runs the batches of `run` until every item is terminal or a stop.
+/// Runs the batches of `run` until every item is terminal or a stop. A
+/// visit with a pilot runs its slice first (to [`End::PilotGate`]), and a
+/// visit whose pilot gate was answered `stop` ends at once; the early-stop
+/// rule of `stop_when` is read outside the slice, before a batch is
+/// admitted and after one whose items all settled.
 pub(super) fn run_batches(run: &ListRun<'_, '_, '_>) -> Result<End, EngineError> {
-    let fold = ListFold::of(&read_all(run.ctx.run_dir)?, &run.node.id).unwrap_or_default();
-    let mut queue: VecDeque<String> = fold
+    let events = read_all(run.ctx.run_dir)?;
+    let fold = ListFold::of(&events, &run.node.id).unwrap_or_default();
+    // A drive that crashed between `list_stopped` and `node_finished`.
+    if fold.stopped.is_some() {
+        return Ok(End::Stopped);
+    }
+    let mut batch_no = fold.batch;
+    if let Some(spec) = run.spec.pilot {
+        let sends = ItemSends::of(&events, &run.node.id);
+        match super::pilot::step(run, &spec, &fold, &sends)? {
+            super::pilot::Step::Slice(ids) => {
+                // The queue holds the slice's pending ids only, and
+                // `stop_when` is never evaluated inside the slice.
+                // A pause, cancel or exhaustion inside the slice ends the
+                // visit as it is: it is never read as a slice waiting for
+                // its gate.
+                if let Some(end) = run_queue(run, VecDeque::from(ids), &mut batch_no, None)? {
+                    return Ok(end);
+                }
+                let events = read_all(run.ctx.run_dir)?;
+                let fold = ListFold::of(&events, &run.node.id).unwrap_or_default();
+                if crate::list::ledger::pilot_phase(&spec, &fold)
+                    != crate::list::ledger::PilotPhase::Done
+                {
+                    return Ok(End::PilotGate);
+                }
+            }
+            super::pilot::Step::Wait => return Ok(End::PilotGate),
+            super::pilot::Step::Stop => return Ok(End::Stopped),
+            super::pilot::Step::Go => {}
+        }
+    }
+    let events = read_all(run.ctx.run_dir)?;
+    let fold = ListFold::of(&events, &run.node.id).unwrap_or_default();
+    let outside = fold
+        .pilot
+        .as_ref()
+        .map(|p| p.items.clone())
+        .unwrap_or_default();
+    let stop = run
+        .spec
+        .stop_when
+        .as_ref()
+        .map(|when| StopRule { when, outside });
+    let queue: VecDeque<String> = fold
         .remaining(run.items.iter().map(|i| i.id.as_str()))
         .into_iter()
         .map(str::to_string)
         .collect();
-    let mut batch_no = fold.batch;
+    match run_queue(run, queue, &mut batch_no, stop.as_ref())? {
+        Some(end) => Ok(end),
+        None => Ok(End::Done),
+    }
+}
+
+/// Runs `queue` until it empties or a stop: the loop body the visits share.
+/// A batch that ended `Halted`, `Pause`, `Cancelled` or `Exhausted` is
+/// honoured first, and the early-stop rule is not evaluated after it (its
+/// unsettled items go back to pending, and the resumed visit evaluates the
+/// rule before its next batch). `stop` is `None` inside a pilot slice.
+fn run_queue(
+    run: &ListRun<'_, '_, '_>,
+    mut queue: VecDeque<String>,
+    batch_no: &mut u32,
+    stop: Option<&StopRule<'_>>,
+) -> Result<Option<End>, EngineError> {
     let size = run.spec.batch.size.max(1) as usize;
     while !queue.is_empty() {
         if let Some(end) = stopped(run) {
-            return Ok(end);
+            return Ok(Some(end));
+        }
+        // The early-stop rule, before a batch is admitted: a resumed visit
+        // that already meets it ends before one more batch runs.
+        if let Some(detail) = stop_when_holds(run, stop)? {
+            run.ctx.journal.append(EventPayload::ListStopped {
+                node: run.node.id.clone(),
+                reason: "stop_when".into(),
+                detail,
+            })?;
+            return Ok(Some(End::Stopped));
         }
         let take = queue.len().min(size);
         // A batch the budget refuses never starts: its items stay pending.
@@ -85,28 +166,52 @@ pub(super) fn run_batches(run: &ListRun<'_, '_, '_>) -> Result<End, EngineError>
                 run.ctx.run_dir,
                 run.ctx.journal,
                 run.node,
-                batch_no + 1,
+                *batch_no + 1,
                 take,
             )? {
                 Admission::Go => {}
-                Admission::Pause(p) => return Ok(End::Pause(p)),
-                Admission::Exhausted => return Ok(End::Exhausted),
+                Admission::Pause(p) => return Ok(Some(End::Pause(p))),
+                Admission::Exhausted => return Ok(Some(End::Exhausted)),
             }
         }
         let ids: Vec<String> = queue.drain(..take).collect();
-        batch_no += 1;
+        *batch_no += 1;
         run.ctx.journal.append(EventPayload::ListBatchStarted {
             node: run.node.id.clone(),
-            batch: batch_no,
+            batch: *batch_no,
             items: ids.clone(),
         })?;
         let ended = run_batch(run, ids, &mut queue)?;
         progress(run)?;
         if let Some(end) = ended {
-            return Ok(end);
+            return Ok(Some(end));
+        }
+        // The rule again, after a batch whose items all settled: a stop
+        // never leaves an item running.
+        if let Some(detail) = stop_when_holds(run, stop)? {
+            run.ctx.journal.append(EventPayload::ListStopped {
+                node: run.node.id.clone(),
+                reason: "stop_when".into(),
+                detail,
+            })?;
+            return Ok(Some(End::Stopped));
         }
     }
-    Ok(End::Done)
+    Ok(None)
+}
+
+/// The early-stop rule over the items settled outside the pilot slice.
+fn stop_when_holds(
+    run: &ListRun<'_, '_, '_>,
+    stop: Option<&StopRule<'_>>,
+) -> Result<Option<String>, EngineError> {
+    let Some(rule) = stop else {
+        return Ok(None);
+    };
+    let events = read_all(run.ctx.run_dir)?;
+    let fold = ListFold::of(&events, &run.node.id).unwrap_or_default();
+    let c = fold.counts_excluding(&rule.outside);
+    Ok(rule.when.holds(c.processed, c.needs_look))
 }
 
 /// Why admission stops: an abort the watcher latched, the run's deadline
@@ -259,10 +364,27 @@ fn run_item(run: &ListRun<'_, '_, '_>, fold: &ListFold, id: &str) -> Result<Ran,
         .ok_or_else(|| EngineError::Invalid(format!("list item `{id}` is not in the visit")))?;
     let ordinal = run.items.iter().position(|i| i.id == id).unwrap_or(0) + 1;
     let files = run.files(item, None)?;
+    // The reviewer's note of a revised pilot: every later item run of the
+    // visit is told it, the slice it revises included.
+    let guidance = fold
+        .pilot
+        .as_ref()
+        .and_then(|p| {
+            p.guidance.as_deref().map(|note| {
+                crate::list::prompt::guidance_section(
+                    note,
+                    p.guidance_via.as_deref().unwrap_or("unknown"),
+                )
+            })
+        })
+        .unwrap_or_default();
     let exec = ItemExec {
         id: id.to_string(),
         template: run.template.clone(),
-        section: item_section(item, ordinal, run.items.len(), run.previous(fold, id)),
+        section: format!(
+            "{}{guidance}",
+            item_section(item, ordinal, run.items.len(), run.previous(fold, id))
+        ),
         outputs: run.spec.item_outputs.clone(),
         checked: run.spec.check.is_some(),
         file: files.item,
@@ -442,49 +564,5 @@ pub(super) fn failure_note(reason: NeedsLookReason, output: &str) -> Option<Stri
             Some("a send's outcome is unknown; a person resolves it before a retry".into())
         }
         _ => None,
-    }
-}
-
-/// The sends of one list node's items, folded once from one journal read:
-/// what a batch's settlements and a visit's start ask of every item,
-/// without a fold per item.
-pub(super) struct ItemSends {
-    ledger: Ledger,
-    /// Per item, the first seq after its last passed settlement.
-    passed: HashMap<String, u64>,
-    now_ms: u64,
-}
-
-impl ItemSends {
-    pub(super) fn of(events: &[Event], node: &str) -> Self {
-        ItemSends {
-            ledger: Ledger::fold(events),
-            passed: passed_floors(events, node),
-            now_ms: apb_core::clock::now_ms_u64(),
-        }
-    }
-
-    /// The mode of a send of the item `key` whose outcome is unknown, if
-    /// any, within the item's effect scope.
-    pub(super) fn unknown(&self, key: ExecKey<'_>) -> Option<IdempotencyMode> {
-        let passed = key
-            .item
-            .and_then(|i| self.passed.get(i))
-            .copied()
-            .unwrap_or(0);
-        let alive = &crate::liveness::pid_alive;
-        let floor = item_scope_floor(&self.ledger, key, passed, self.now_ms, alive);
-        self.ledger
-            .records()
-            .iter()
-            .filter(|r| r.seq >= floor && r.key.exec_key() == key && r.superseded_by.is_none())
-            .find_map(|tip| {
-                let v = chain_verdict(&self.ledger, tip, self.now_ms);
-                matches!(
-                    v.state,
-                    IntentState::Unknown { .. } | IntentState::Pending { .. }
-                )
-                .then_some(v.member.mode)
-            })
     }
 }

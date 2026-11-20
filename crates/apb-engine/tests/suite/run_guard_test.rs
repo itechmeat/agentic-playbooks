@@ -272,6 +272,11 @@ fn a_child_of_a_keyed_playbook_is_not_guarded_for_concurrency() {
         EnvVar::set("APB_AGENT_CMD", agent(root, "0")),
         EnvVar::set("APB_CONFIG_DIR", cfg.path()),
     ];
+    // The parent run the child names: an attended run, as its `run.yaml`
+    // records (a child takes its parent's mode from a record that exists).
+    let parent_dir = root.join(".apb/runs/kc-parent");
+    std::fs::create_dir_all(&parent_dir).unwrap();
+    std::fs::write(parent_dir.join("run.yaml"), "unattended: false\n").unwrap();
     let opts = RunOptions {
         parent_run: Some("kc-parent".into()),
         ..RunOptions::default()

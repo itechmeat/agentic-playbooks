@@ -1,7 +1,7 @@
 # stall-exit Specification
 
 ## Purpose
-TBD - created by archiving change node-contracts. Update Purpose after archive.
+A node that keeps getting the same rejection stops instead of retrying, through a fingerprint on every rejection, a routing rule for the stall and a notification.
 
 ## Requirements
 

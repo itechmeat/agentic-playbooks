@@ -1,7 +1,7 @@
 # typed-inbox-reads Specification
 
 ## Purpose
-TBD - created by archiving change typed-inbox-reads. Update Purpose after archive.
+An inbox read can filter by event type without hiding a gap, and only a caller that may acknowledge moves a cursor.
 
 ## Requirements
 

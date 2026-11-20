@@ -1,13 +1,14 @@
 //! The `reviews` row of `apb doctor --run`: decisions in the review channel
 //! that a gate binding snapshots or taking only a person's decision never
-//! consumes (no request stamp, a request it never opened, another binding,
-//! or a channel that is not a person's). Writes nothing.
+//! consumes (no request stamp, a request it never opened, a request it
+//! withdrew or replaced, another binding, or a channel that is not a
+//! person's). Writes nothing.
 
 use std::path::Path;
 
 use super::check::{RunCheck, WARN};
 use crate::event::{Event, EventPayload};
-use crate::review::{ReviewEntry, is_stamped_gate, read_reviews_after};
+use crate::review::{ReviewEntry, consumes_stamped, read_reviews_after};
 
 const SUBJECT: &str = "reviews";
 
@@ -29,7 +30,7 @@ pub(super) fn review_check(run_dir: &Path, events: &[Event]) -> Option<RunCheck>
     let ignored: Vec<String> = entries
         .iter()
         .filter_map(|e| {
-            let gate = playbook.node(&e.cmd.node).filter(|g| is_stamped_gate(g))?;
+            let gate = playbook.node(&e.cmd.node).filter(|g| consumes_stamped(g))?;
             ignored_because(run_dir, events, e, gate.person_only)
                 .map(|why| format!("#{} for `{}` ({why})", e.seq, e.cmd.node))
         })
@@ -82,6 +83,27 @@ fn ignored_because(
         } else {
             "no passkey assertion"
         });
+    }
+    // The request the gate withdrew or replaced: the drive consumes only
+    // the open request's entries, so this one never answers anything
+    // until a person decides again. Classified by the request's own close
+    // event (the first decision, withdrawal or new request after it),
+    // never by counting later decisions of other requests.
+    let close = events
+        .iter()
+        .filter(|ev| ev.seq > request)
+        .find_map(|ev| match &ev.payload {
+            EventPayload::ReviewDecided { node, .. } if *node == e.cmd.node => Some(true),
+            EventPayload::ReviewWithdrawn { node, .. }
+            | EventPayload::ReviewRequested { node, .. }
+                if *node == e.cmd.node =>
+            {
+                Some(false)
+            }
+            _ => None,
+        });
+    if close == Some(false) {
+        return Some("a request the gate withdrew or replaced");
     }
     None
 }

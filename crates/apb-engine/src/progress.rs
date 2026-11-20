@@ -144,6 +144,18 @@ pub struct PendingReview {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub requested_at: Option<u64>,
+    /// The journal seq of the open request, set only for a gate whose
+    /// decision must name it (`crate::review::requires_request`: a form
+    /// gate, a list pilot gate): the `--request review:<seq>` of the CLI
+    /// and the `request` of MCP `review_decide`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub request: Option<u64>,
+    /// For a list node's pilot gate: the slice, its round and its counts,
+    /// read from the list fold (`crate::list::view::PilotView`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub pilot: Option<crate::list::view::PilotView>,
     /// The rendered `show:` entries the gate displays above its options
     /// (people-in-the-loop D3).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -192,12 +204,14 @@ fn pending_publish(
         recommendation: None,
         publish: Some(plan),
         binding: None,
+        pilot: None,
         person_only,
         scope: None,
         scope_line: None,
         withheld: Vec::new(),
         withheld_reason: None,
         requested_at: None,
+        request: None,
         show: Vec::new(),
         fields: Vec::new(),
     };
@@ -230,6 +244,9 @@ fn fill_detail(events: &[crate::event::Event], pr: &mut PendingReview) {
 /// the recommendation, the snapshots it binds and whether only a person
 /// decides it.
 struct OpenRequest {
+    /// The request's journal seq: what a decision on a gate that must
+    /// name its request carries (`crate::review::requires_request`).
+    seq: u64,
     recommendation: Option<crate::event::ReviewRecommendation>,
     binding: Option<crate::approval::ReviewBinding>,
     person_only: bool,
@@ -245,6 +262,7 @@ fn open_request(events: &[crate::event::Event], node: &str) -> Option<OpenReques
             person_only,
             ..
         } if n == node => Some(OpenRequest {
+            seq: e.seq,
             recommendation: recommendation.clone(),
             binding: binding.clone(),
             person_only: *person_only,
@@ -269,7 +287,10 @@ fn pending_gate(
         return pr;
     };
     let asked_again = asked_again(events, &node.id);
-    if open.person_only || open.binding.is_some() {
+    // A gate whose decision must name its request shows the command that
+    // names it, so the command a person follows is accepted.
+    let named = crate::review::requires_request(node).then_some(open.seq);
+    if open.person_only || open.binding.is_some() || named.is_some() {
         pr.instruction = instruction::review_instruction_for(
             &node.id,
             node.title.as_deref(),
@@ -277,10 +298,15 @@ fn pending_gate(
             prompt,
             open.person_only,
         );
+        if let Some(seq) = named {
+            pr.instruction =
+                instruction::name_request(&pr.instruction, &node.id, open.person_only, seq);
+        }
         pr.how_to_decide = instruction::gate_how_to_decide(
             &node.id,
             open.person_only,
             open.binding.as_ref().map(|b| b.nonce.as_str()),
+            named,
         );
     }
     if let Some(b) = &open.binding {
@@ -297,6 +323,7 @@ fn pending_gate(
     }
     pr.binding = open.binding;
     pr.person_only = open.person_only;
+    pr.request = named;
     pr
 }
 
@@ -355,12 +382,14 @@ pub fn pending_review(
         recommendation: None,
         publish: None,
         binding: None,
+        pilot: None,
         person_only: false,
         scope: None,
         scope_line: None,
         withheld: Vec::new(),
         withheld_reason: None,
         requested_at: None,
+        request: None,
         show: Vec::new(),
         fields: Vec::new(),
     }
@@ -1068,6 +1097,11 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
     // decision channel's own pending check, so the two surfaces cannot drift
     // on what "pending" means.
     let review_pending = |id: &str| crate::event::review_open_count(events, id) > 0;
+    // A list node's pilot gate is a review request of the node: pending
+    // like any gate's, carrying the slice from the list fold.
+    let pilot_pending = |n: &apb_core::schema::Node| {
+        n.list().is_some_and(|l| l.pilot.is_some()) && review_pending(&n.id)
+    };
     let open_gates: Vec<(&apb_core::schema::Node, WaitingKind)> = playbook
         .nodes
         .iter()
@@ -1075,6 +1109,7 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
             NodeKind::HumanReview { .. } | NodeKind::Publish { .. } if review_pending(&n.id) => {
                 Some((n, WaitingKind::HumanReview))
             }
+            _ if pilot_pending(n) => Some((n, WaitingKind::HumanReview)),
             NodeKind::Wait { .. } if status(&n.id) == NodeStatus::Running => {
                 Some((n, WaitingKind::Wait))
             }
@@ -1088,6 +1123,17 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
                 options, prompt, ..
             } => Some(pending_gate(events, n, options, prompt.as_deref())),
             NodeKind::Publish { .. } => pending_publish(events, n),
+            _ if pilot_pending(n) => {
+                let options: Vec<String> = apb_core::list::PILOT_OPTIONS
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect();
+                let mut pr = pending_gate(events, n, &options, None);
+                pr.pilot = crate::list::ListFold::of(events, &n.id)
+                    .as_ref()
+                    .and_then(crate::list::view::PilotView::of);
+                Some(pr)
+            }
             _ => None,
         })
         .collect();

@@ -1,7 +1,7 @@
 # routine-health Specification
 
 ## Purpose
-TBD - created by archiving change routine-health. Update Purpose after archive.
+A playbook's health rules are evaluated across its runs and send one notice per trip and per recovery, and a person can clear or mute them.
 
 ## Requirements
 

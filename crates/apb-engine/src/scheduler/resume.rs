@@ -903,7 +903,7 @@ fn try_journal_resumed(
                 *deadline = Some(granted);
             }
             // The run's guard names the deadline from here on.
-            let mut requires: Vec<String> = super::patch::latest_guard(&events)
+            let mut requires: Vec<String> = crate::event::latest_run_guard(&events)
                 .map(<[String]>::to_vec)
                 .unwrap_or_default();
             let name = apb_core::validate::GuardedFeature::Deadline.as_str();

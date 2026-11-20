@@ -124,6 +124,7 @@ fn check_review_target(
     cmd: &ReviewCommand,
     nonce: Option<String>,
     fields: &std::collections::BTreeMap<String, serde_json::Value>,
+    named: Option<u64>,
     poster: Poster,
 ) -> Result<Stamps, EngineError> {
     use apb_core::publish::OPTION_PUBLISH;
@@ -144,13 +145,28 @@ fn check_review_target(
             let kind = gate.map(|n| &n.kind);
             let publish = matches!(kind, Some(NodeKind::Publish { .. }));
             let formed = kind.is_some_and(apb_core::schema::NodeKind::needs_review_detail);
-            if !publish && !matches!(kind, Some(NodeKind::HumanReview { .. })) {
+            let pilot = gate.is_some_and(|g| g.list().is_some_and(|l| l.pilot.is_some()));
+            if !publish && !matches!(kind, Some(NodeKind::HumanReview { .. })) && !pilot {
                 return Err(EngineError::NotFound(format!(
-                    "node `{node}` is not a human_review or publish node of this run's playbook `{}`",
+                    "node `{node}` is not a human_review, publish or list pilot node of this run's playbook `{}`",
                     playbook.id
                 )));
             }
-            if let Some(gate) = gate.filter(|g| is_stamped_gate(g)) {
+            if pilot {
+                // A pilot gate takes only its three options, and a nonce
+                // answers a publish node only.
+                if !apb_core::list::PILOT_OPTIONS.contains(&cmd.decision.as_str()) {
+                    return Err(EngineError::Invalid(format!(
+                        "node `{node}` is a list pilot gate; decide continue, revise or stop"
+                    )));
+                }
+                if nonce.is_some() {
+                    return Err(EngineError::Invalid(format!(
+                        "node `{node}` is a list pilot gate; a nonce answers a publish node only"
+                    )));
+                }
+            }
+            if let Some(gate) = gate.filter(|g| consumes_stamped(g)) {
                 if gate.person_only {
                     crate::review::channel::refuse_for_person_only(
                         run_dir,
@@ -160,7 +176,7 @@ fn check_review_target(
                     )?;
                 }
                 if !publish {
-                    let stamps = check_bound_decision(run_dir, gate, cmd, nonce, poster)?;
+                    let stamps = check_bound_decision(run_dir, gate, cmd, nonce, named, poster)?;
                     // The form's checks hold for a stamped gate too.
                     check_form(run_dir, gate, cmd, fields)?;
                     return Ok(stamps);
@@ -193,11 +209,30 @@ fn check_review_target(
                         "the playbook of node `{node}` cannot be read right now; decide again"
                     )));
                 }
-                Ok(events) => (
-                    crate::publish::latest_plan(&events, node).is_some(),
-                    false,
-                    false,
-                ),
+                Ok(events) => {
+                    // A run whose run guard names a review form feature or
+                    // the list pilot never lets its unreadable snapshot
+                    // make a gate plain: the post is refused until the
+                    // write-once snapshot reads again. A publish node is
+                    // answered by its nonce, not its definition.
+                    if crate::publish::latest_plan(&events, node).is_none()
+                        && crate::event::latest_run_guard(&events).is_some_and(|guard| {
+                            guard
+                                .iter()
+                                .any(|f| form_guard_features().contains(&f.as_str()))
+                        })
+                    {
+                        return Err(EngineError::Conflict(scrubbed_refusal(
+                            run_dir,
+                            decide_again_unreadable_definition(node),
+                        )));
+                    }
+                    (
+                        crate::publish::latest_plan(&events, node).is_some(),
+                        false,
+                        false,
+                    )
+                }
                 Err(_) if consent || nonce.is_some() => {
                     return Err(EngineError::Conflict(format!(
                         "the journal of node `{node}` cannot be read right now; decide again"
@@ -328,6 +363,14 @@ fn check_form_unscrubbed(
         ..
     } = &gate.kind
     else {
+        // A list pilot gate takes no fields either: its decision is one
+        // option word, the same text a `human_review` without fields
+        // gives.
+        if gate.list().is_some_and(|l| l.pilot.is_some()) && !fields.is_empty() {
+            return Err(EngineError::Invalid(format!(
+                "gate `{node}` takes no fields"
+            )));
+        }
         return Ok(());
     };
     if spec.is_empty() && !fields.is_empty() {
@@ -422,6 +465,149 @@ pub fn is_stamped_gate(gate: &apb_core::schema::Node) -> bool {
     gate.person_only || gate.approves.is_some()
 }
 
+/// Whether a decision on `gate` must name the request it answers: a gate
+/// that uses a form feature (`fields`, `show` or `max_scope`) and, once
+/// list pilots exist, a list gate with a `pilot`. Its entry is stamped with
+/// the request and the drive consumes nothing else, so a decision made on
+/// a request the gate asked again since never answers the newer one.
+pub fn requires_request(gate: &apb_core::schema::Node) -> bool {
+    gate.kind.needs_review_detail() || gate.list().is_some_and(|l| l.pilot.is_some())
+}
+
+/// Whether `gate` consumes its decisions only from entries stamped with
+/// its open request: the stamped gates (`is_stamped_gate`) and every gate
+/// whose decision must name its request (`requires_request`).
+pub fn consumes_stamped(gate: &apb_core::schema::Node) -> bool {
+    is_stamped_gate(gate) || requires_request(gate)
+}
+
+/// The refusal code a decision on a request-naming gate carries when it
+/// names no request, or one the gate replaced or withdrew: the caller
+/// reads the gate's request again and decides on it.
+pub const DECIDE_AGAIN: &str = "decide_again";
+
+/// The guarded features whose gate a decision must never read as a plain
+/// one while the run's definition snapshot does not read.
+fn form_guard_features() -> [&'static str; 3] {
+    [
+        apb_core::validate::GuardedFeature::ReviewFields.as_str(),
+        apb_core::validate::GuardedFeature::ReviewMaxScope.as_str(),
+        apb_core::validate::GuardedFeature::ListPilot.as_str(),
+    ]
+}
+
+/// The refusal texts of [`DECIDE_AGAIN`], built from definition text and
+/// passed through the run's redactor as the form's refusals are.
+fn decide_again_none_named(node: &str, open: u64) -> String {
+    format!(
+        "{DECIDE_AGAIN}: gate `{node}` takes a decision only for the request it answers, and this decision names none; read its open request (seq {open}) and decide on it"
+    )
+}
+
+fn decide_again_replaced(node: &str, seq: u64, latest: u64) -> String {
+    format!(
+        "{DECIDE_AGAIN}: the request of gate `{node}` at seq {seq} was replaced by the request at seq {latest}; read that request and decide on it"
+    )
+}
+
+fn decide_again_withdrawn(node: &str, seq: u64) -> String {
+    format!(
+        "{DECIDE_AGAIN}: the request of gate `{node}` at seq {seq} was withdrawn; read the gate's request again when it asks"
+    )
+}
+
+fn decide_again_unreadable_definition(node: &str) -> String {
+    format!(
+        "{DECIDE_AGAIN}: the playbook of node `{node}` cannot be read right now and this run uses review forms or a list pilot; read its request again and decide on it"
+    )
+}
+
+/// A refusal reason through the run's redactor, as the form's refusals go.
+fn scrubbed_refusal(run_dir: &Path, text: String) -> String {
+    let redactor = crate::run_redact::RunRedactor::for_run_dir(run_dir);
+    crate::review::form::refusal_text(&redactor, &text)
+}
+
+/// The refusal for a post that names request seq `s` of `node` while the
+/// open request is another one, classified on the same journal read the
+/// open request came from: no request at `s` is not found, one the node
+/// decided is already answered, one the node withdrew or replaced asks the
+/// caller to read the gate's request again.
+fn classify_named_request(
+    run_dir: &Path,
+    events: &[crate::event::Event],
+    node: &str,
+    s: u64,
+    open: u64,
+) -> EngineError {
+    use crate::event::EventPayload;
+    let asked = events.iter().any(|e| {
+        e.seq == s
+            && matches!(&e.payload, EventPayload::ReviewRequested { node: n, .. } if n == node)
+    });
+    if !asked {
+        return EngineError::NotFound(format!(
+            "node `{node}` requested no review at journal seq {s}"
+        ));
+    }
+    // The first later event that says what became of `s`: a decision, a
+    // withdrawal, or a new request that replaced it.
+    let mut first_close: Option<bool> = None;
+    let mut reasked: Option<u64> = None;
+    for e in events.iter().filter(|e| e.seq > s) {
+        match &e.payload {
+            EventPayload::ReviewRequested { node: n, .. } if n == node => {
+                reasked = Some(e.seq);
+                break;
+            }
+            EventPayload::ReviewDecided { node: n, .. } if n == node => {
+                first_close = Some(true);
+                break;
+            }
+            EventPayload::ReviewWithdrawn { node: n, .. } if n == node => {
+                first_close = Some(false);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let conflict = |text: String| EngineError::Conflict(scrubbed_refusal(run_dir, text));
+    match (first_close, reasked) {
+        (Some(true), _) => EngineError::AlreadyAnswered(format!(
+            "the review of node `{node}` at seq {s} is already decided"
+        )),
+        (Some(false), _) => conflict(decide_again_withdrawn(node, s)),
+        (_, Some(latest)) => conflict(decide_again_replaced(node, s, latest)),
+        // Nothing later names the request and it is not the open one: fall
+        // back to the open request this same read found.
+        (None, None) => conflict(decide_again_replaced(node, s, open)),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only hook: `check_bound_decision` calls it right after its
+    /// journal read and nowhere else, so a test can change the journal
+    /// between the read and the stamp. A one-shot closure; absent from
+    /// every build without `cfg(test)`. Kept because the race it shows (a
+    /// request re-asked between the one read and the stamp) cannot be
+    /// timed from the integration boundary: the window is a few
+    /// instructions wide, and the integration tests only see its outcome.
+    static AFTER_BOUND_READ: std::cell::RefCell<Option<Box<dyn FnOnce() + 'static>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs the test-only hook [`AFTER_BOUND_READ`] once, when set. No-op
+/// outside tests.
+#[cfg(test)]
+pub(crate) fn run_after_bound_read() {
+    AFTER_BOUND_READ.with(|h| {
+        if let Some(f) = h.borrow_mut().take() {
+            f();
+        }
+    });
+}
+
 /// A publish decision carries its nonce and the open request seq: a
 /// person-only one also the channel. The request is stamped on every
 /// publish entry, person-only or not, because the passkey assertion is
@@ -453,20 +639,29 @@ fn latest_request(events: &[crate::event::Event], node: &str) -> Option<u64> {
     })
 }
 
-/// The decision on a gate that binds snapshots or that only a person
-/// decides, under the reviews lock: it answers the open request, which
-/// cannot be judged on a journal or channel that does not read (a
-/// conflict to retry, never "accept"). On a bound request an approving
-/// option needs the binding's nonce, a non-approving one without a nonce
-/// is stamped with it, a stale nonce is a conflict naming the current
-/// binding, and a second decision for the request is refused. Entries no
-/// poster stamped (a hand-written line, an older apb) neither answer nor
-/// block the request.
+/// The decision on a gate that binds snapshots, that only a person
+/// decides, or whose decision must name the request it answers
+/// ([`consumes_stamped`]), under the reviews lock: it answers the open
+/// request, which cannot be judged on a journal or channel that does not
+/// read (a conflict to retry, never "accept"). The request the decision
+/// names is compared with the open request on this one journal read, and
+/// that seq is what the entry is stamped with: a request asked again
+/// between a check and a later stamp never receives a decision made for
+/// the one before. One that names no request is refused
+/// [`DECIDE_AGAIN`] on a gate where [`requires_request`] holds (the
+/// engine's own posts always name one); on the other stamped gates the
+/// open request is stamped without being named, as before. On a bound
+/// request an approving option needs the binding's nonce, a
+/// non-approving one without a nonce is stamped with it, a stale nonce is
+/// a conflict naming the current binding, and a second decision for the
+/// request is refused. Entries no poster stamped (a hand-written line, an
+/// older apb) neither answer nor block the request.
 fn check_bound_decision(
     run_dir: &Path,
     gate: &apb_core::schema::Node,
     cmd: &ReviewCommand,
     nonce: Option<String>,
+    named: Option<u64>,
     poster: Poster,
 ) -> Result<Stamps, EngineError> {
     let node = gate.id.as_str();
@@ -475,18 +670,48 @@ fn check_bound_decision(
             "the journal of gate `{node}` cannot be read right now; decide again"
         ))
     })?;
+    #[cfg(test)]
+    run_after_bound_read();
     let Some((request, binding)) = open_request(&events, node) else {
+        // A post naming a request while none is open (withdrawn, not asked
+        // again yet) is told what became of it.
+        if let Some(s) = named {
+            return Err(classify_named_request(run_dir, &events, node, s, s));
+        }
         return Err(EngineError::Conflict(format!(
             "node `{node}` has no review decision pending"
         )));
     };
+    // The request the decision names, decided on this one read: the stamp
+    // is always the seq the check compared, never a second read's.
+    match named {
+        Some(s) if s == request => {}
+        Some(s) => return Err(classify_named_request(run_dir, &events, node, s, request)),
+        None if requires_request(gate) && !poster.engine => {
+            return Err(EngineError::Conflict(scrubbed_refusal(
+                run_dir,
+                decide_again_none_named(node, request),
+            )));
+        }
+        // A person-only or bound gate without a form feature keeps main's
+        // behaviour: the open request is stamped without being named.
+        None => {}
+    }
     let queued = read_reviews_after(run_dir, None).map_err(|_| {
         EngineError::Conflict(format!(
             "the review channel of gate `{node}` cannot be read right now; decide again"
         ))
     })?;
     if queued.iter().any(|e| {
-        e.cmd.node == node && answers_stamped(run_dir, e, request, binding, gate.person_only)
+        e.cmd.node == node
+            && answers_stamped(
+                run_dir,
+                e,
+                request,
+                binding,
+                gate.person_only,
+                is_stamped_gate(gate),
+            )
     }) {
         return Err(EngineError::Conflict(format!(
             "a decision is already queued for the request of node `{node}` at seq {request}"
@@ -537,19 +762,23 @@ fn check_bound_decision(
 /// Whether channel entry `e` answers the stamped request at seq `request`
 /// of its gate: stamped with that request, with the request's binding
 /// nonce on a bound request, and through a channel that decides a
-/// person-only gate when the gate is one. The drive consumes nothing else
-/// for such a gate, and nothing else stands in the way of a decision.
+/// person-only gate when the gate is one. `passkey` is the consumer's own
+/// answer to whether the gate takes a passkey stamp (`is_stamped_gate`): a
+/// form gate that is neither person-only nor bound must not demand one.
+/// The drive consumes nothing else for such a gate, and nothing else
+/// stands in the way of a decision.
 pub(crate) fn answers_stamped(
     run_dir: &Path,
     e: &ReviewEntry,
     request: u64,
     binding: Option<&crate::approval::ReviewBinding>,
     person_only: bool,
+    passkey: bool,
 ) -> bool {
     e.request == Some(request)
         && binding.is_none_or(|b| e.nonce.as_deref() == Some(b.nonce.as_str()))
         && (!person_only || decides_person_only_entry(run_dir, e))
-        && passkey_stamp_ok(run_dir, e, person_only)
+        && (!passkey || passkey_stamp_ok(run_dir, e, person_only))
 }
 
 /// Whether a channel entry carries the passkey stamp this machine demands:
@@ -1111,14 +1340,30 @@ fn append_decision(
     // would decide the gate's next visit unseen.
     let _lock = apb_core::fsutil::lock_dir(run_dir, "reviews.jsonl.lock")?;
     repair_tail(&run_dir.join("reviews.jsonl"))?;
-    if let Some(seq) = request {
-        check_review_request(run_dir, &cmd.node, seq)?;
-    }
     let passkey_prefix = poster.passkey.clone();
     let poster_channel = poster.channel;
     let poster_engine = poster.engine;
     let poster_proof = poster.proof.clone();
-    let stamps = check_review_target(run_dir, &cmd, nonce, &fields, poster)?;
+    // A gate whose decision must name the request it answers has its
+    // whole check on one journal read in `check_bound_decision`, the
+    // named seq included; the named-request check here stays for every
+    // other gate (a plain gate, a publish node, an unreadable
+    // definition).
+    let stamped_consume = crate::progress::load_run_playbook(run_dir).is_some_and(|p| {
+        p.node(&cmd.node)
+            .map(|g| {
+                // A publish node goes down the publish path, never into
+                // `check_bound_decision`, so its named request is checked
+                // here even when it is person-only.
+                crate::review::consumes_stamped(g)
+                    && !matches!(g.kind, apb_core::schema::NodeKind::Publish { .. })
+            })
+            .unwrap_or(false)
+    });
+    if let Some(seq) = request.filter(|_| !stamped_consume) {
+        check_review_request(run_dir, &cmd.node, seq)?;
+    }
+    let stamps = check_review_target(run_dir, &cmd, nonce, &fields, request, poster)?;
 
     // The passkey gate: while this machine holds at least one passkey, a
     // person-only gate and a bound approval take a decision only with a
@@ -1264,7 +1509,15 @@ fn check_review_request(run_dir: &Path, node: &str, seq: u64) -> Result<(), Engi
     if let Some(gate) = stamped {
         let binding = open_request(&events, node).and_then(|(_, b)| b);
         if read_reviews_after(run_dir, None)?.iter().any(|e| {
-            e.cmd.node == node && answers_stamped(run_dir, e, seq, binding, gate.person_only)
+            e.cmd.node == node
+                && answers_stamped(
+                    run_dir,
+                    e,
+                    seq,
+                    binding,
+                    gate.person_only,
+                    is_stamped_gate(&gate),
+                )
         }) {
             return Err(EngineError::AlreadyAnswered(format!(
                 "the review of node `{node}` at seq {seq} already has a decision queued"
@@ -1738,5 +1991,200 @@ mod tests {
             ..entry(visit1)
         };
         assert!(!engine_own_entry(&rd, &unstamped, false));
+    }
+
+    /// A post naming a request the gate withdrew while no request is open
+    /// yet is told the request was withdrawn (`decide_again`), not that
+    /// nothing is pending.
+    #[test]
+    fn a_post_naming_a_withdrawn_request_with_none_open_says_withdrawn() {
+        use crate::decision_channel::DecisionChannel;
+        use crate::event::{EventLog, EventPayload};
+        let dir = tempfile::tempdir().unwrap();
+        let rd = dir.path().join("r1");
+        std::fs::create_dir_all(&rd).unwrap();
+        std::fs::write(
+            rd.join("playbook.yaml"),
+            "schema: 2\nid: ap\nname: ap\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: g, type: human_review, options: [approve, reject], show: [{ label: L, text: t }] }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: g }\n  - { from: g, to: done }\n",
+        )
+        .unwrap();
+        let mut log = EventLog::create(&rd).unwrap();
+        let seq_a = log
+            .append(EventPayload::ReviewRequested {
+                node: "g".into(),
+                options: vec!["approve".into(), "reject".into()],
+                title: None,
+                instruction: String::new(),
+                prompt: None,
+                recommendation: None,
+                plan_digest: None,
+                binding: None,
+                person_only: false,
+            })
+            .unwrap()
+            .seq;
+        log.append(EventPayload::ReviewDetail {
+            node: "g".into(),
+            request: seq_a,
+            scope: None,
+            show: Vec::new(),
+            fields: Vec::new(),
+            withheld: Vec::new(),
+            withheld_reason: None,
+        })
+        .unwrap();
+        log.append(EventPayload::ReviewWithdrawn {
+            node: "g".into(),
+            reason: "scope_changed".into(),
+        })
+        .unwrap();
+        drop(log);
+        let err = post_decision_via(
+            &rd,
+            ReviewCommand {
+                node: "g".into(),
+                decision: "approve".into(),
+                note: String::new(),
+            },
+            None,
+            Some(seq_a),
+            DecisionChannel::Terminal,
+        )
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains(DECIDE_AGAIN), "{text}");
+        assert!(text.contains("was withdrawn"), "{text}");
+    }
+
+    /// The request a decision names is the one it is stamped with, decided
+    /// on one journal read: a request asked again between the check's read
+    /// and the stamp never receives a decision made for the one before
+    /// (carried-over decision 2, review round 2 blocker 1). The hook
+    /// withdraws the open request A and opens B right after the read; a
+    /// post naming A is still stamped A, which never answers B.
+    #[test]
+    fn a_request_reasked_between_the_check_and_the_stamp_keeps_the_named_stamp() {
+        use crate::decision_channel::DecisionChannel;
+        use crate::event::{EventLog, EventPayload};
+        let dir = tempfile::tempdir().unwrap();
+        let rd = dir.path().join("r1");
+        std::fs::create_dir_all(&rd).unwrap();
+        std::fs::write(
+            rd.join("playbook.yaml"),
+            "schema: 2\nid: ap\nname: ap\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: g, type: human_review, options: [approve, reject], show: [{ label: L, text: t }] }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: g }\n  - { from: g, to: done }\n",
+        )
+        .unwrap();
+        let mut log = EventLog::create(&rd).unwrap();
+        let seq_a = log
+            .append(EventPayload::ReviewRequested {
+                node: "g".into(),
+                options: vec!["approve".into(), "reject".into()],
+                title: None,
+                instruction: String::new(),
+                prompt: None,
+                recommendation: None,
+                plan_digest: None,
+                binding: None,
+                person_only: false,
+            })
+            .unwrap()
+            .seq;
+        // The form detail a `show` gate's request journals beside itself.
+        log.append(EventPayload::ReviewDetail {
+            node: "g".into(),
+            request: seq_a,
+            scope: None,
+            show: Vec::new(),
+            fields: Vec::new(),
+            withheld: Vec::new(),
+            withheld_reason: None,
+        })
+        .unwrap();
+        drop(log);
+        // The hook, one shot: withdraw A and open B the moment the check
+        // has read the journal.
+        {
+            let rd = rd.clone();
+            AFTER_BOUND_READ.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move || {
+                    let mut log = EventLog::open(&rd).unwrap();
+                    log.append(EventPayload::ReviewWithdrawn {
+                        node: "g".into(),
+                        reason: "supervisor".into(),
+                    })
+                    .unwrap();
+                    let seq_b = log
+                        .append(EventPayload::ReviewRequested {
+                            node: "g".into(),
+                            options: vec!["approve".into(), "reject".into()],
+                            title: None,
+                            instruction: String::new(),
+                            prompt: None,
+                            recommendation: None,
+                            plan_digest: None,
+                            binding: None,
+                            person_only: false,
+                        })
+                        .unwrap()
+                        .seq;
+                    log.append(EventPayload::ReviewDetail {
+                        node: "g".into(),
+                        request: seq_b,
+                        scope: None,
+                        show: Vec::new(),
+                        fields: Vec::new(),
+                        withheld: Vec::new(),
+                        withheld_reason: None,
+                    })
+                    .unwrap();
+                }));
+            });
+        }
+        let cmd = ReviewCommand {
+            node: "g".into(),
+            decision: "approve".into(),
+            note: String::new(),
+        };
+        post_decision_via(
+            &rd,
+            cmd.clone(),
+            None,
+            Some(seq_a),
+            DecisionChannel::Terminal,
+        )
+        .expect("the post naming the request it read is accepted");
+        let events = crate::event::read_all(&rd).unwrap();
+        let seq_b = events
+            .iter()
+            .rev()
+            .find_map(|e| match &e.payload {
+                EventPayload::ReviewRequested { node, .. } if node == "g" => Some(e.seq),
+                _ => None,
+            })
+            .unwrap();
+        assert_ne!(seq_a, seq_b, "the hook opened a new request");
+        let entries = read_reviews_after(&rd, None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].request,
+            Some(seq_a),
+            "the entry keeps the stamp of the request it named, never the newer one"
+        );
+        // The drive would not consume that entry for B.
+        let binding = open_request(&events, "g").and_then(|(_, b)| b.cloned());
+        assert!(!answers_stamped(
+            &rd,
+            &entries[0],
+            seq_b,
+            binding.as_ref(),
+            false,
+            false,
+        ));
+        // A post naming B is accepted and stamped B.
+        post_decision_via(&rd, cmd, None, Some(seq_b), DecisionChannel::Terminal)
+            .expect("the post naming the open request is accepted");
+        let entries = read_reviews_after(&rd, None).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].request, Some(seq_b));
     }
 }

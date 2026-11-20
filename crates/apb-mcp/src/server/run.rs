@@ -761,6 +761,36 @@ impl WfMcp {
         } else {
             tools::playbook_run(&self.root, &id, version.as_deref(), start)
         };
+        // An unattended start that is not ready relays the readiness report
+        // (a host relays it to the person) of the version the start
+        // loaded, which a candidate trial makes differ from the requested
+        // one; it decides nothing.
+        let started = if unattended
+            && let Ok(serde_json::Value::Object(obj)) = &started
+            && let Ok(report) = apb_engine::fit::assess(
+                &self.root,
+                &apb_core::scope::PlaybookRef {
+                    origin,
+                    id: id.clone(),
+                    version: obj
+                        .get("run_id")
+                        .and_then(|r| r.as_str())
+                        .and_then(|r| apb_engine::scheduler::run_playbook_ref(&self.root, r).ok())
+                        .map(|(_, v)| v)
+                        .or_else(|| version.clone()),
+                },
+            )
+            && !report.readiness.ready
+        {
+            let mut obj = obj.clone();
+            obj.insert(
+                "readiness".to_string(),
+                serde_json::to_value(&report.readiness).unwrap_or(serde_json::Value::Null),
+            );
+            Ok(serde_json::Value::Object(obj))
+        } else {
+            started
+        };
         with_execution(
             to_call_tool_result(with_warnings(started, &warnings)),
             &resolved,

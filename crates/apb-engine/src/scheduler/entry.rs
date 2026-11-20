@@ -140,6 +140,14 @@ pub struct RunOptions {
     /// run. Recorded write-once in the manifest; a resume cannot change it,
     /// and a child inherits its parent's.
     pub unattended: bool,
+    /// A person at a terminal typed the confirmation that waives probation
+    /// for this unattended start and every child run it starts (`apb run
+    /// --waive-probation`); a child takes its parent's.
+    pub waive_probation: bool,
+    /// Refuse this unattended start, and every child run it starts, when
+    /// the readiness report of its loaded definition does not pass (`apb
+    /// run --require-ready`); a child takes its parent's.
+    pub require_ready: bool,
     /// The run processes external data and keeps nothing for learning
     /// (`external_data: true` on every start surface, see
     /// [`crate::external_data`]): the effective value from

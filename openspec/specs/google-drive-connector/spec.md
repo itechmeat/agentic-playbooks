@@ -1,7 +1,7 @@
 # google-drive-connector Specification
 
 ## Purpose
-TBD - created by archiving change google-connectors. Update Purpose after archive.
+apb ships a Google Drive connector whose document readers need no projection and whose responses pass one content-type check, live and offline.
 
 ## Requirements
 

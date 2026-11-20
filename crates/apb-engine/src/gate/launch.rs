@@ -591,12 +591,45 @@ pub fn effective_for(
             strict.policy,
             strict.sources.join(", ")
         ))),
-        Ok(_) => Ok(out),
+        Ok(_) => match unattended_laxer(here.as_deref(), default.as_deref()) {
+            Some(detail) => Err(redirected(detail)),
+            None => Ok(out),
+        },
         Err(e) => Err(redirected(format!(
             "whose launch settings do not read ({})",
             e["detail"].as_str().unwrap_or_default()
         ))),
     }
+}
+
+/// Why the machine `unattended:` section of the redirected config dir
+/// `here` is laxer than the default one's (`default`): it waives
+/// probation the default one does not, or asks for fewer attended runs.
+/// `None` when it is not laxer. A file that does not read here is left to
+/// the probation check, which refuses it.
+fn unattended_laxer(here: Option<&Path>, default: Option<&Path>) -> Option<String> {
+    let machine = |dir: Option<&Path>| {
+        let path = dir.map(|d| d.join(apb_core::policy_file::POLICY_FILE));
+        apb_core::policy_file::Policies::load_with(None, path.as_deref())
+    };
+    let strict = match machine(default) {
+        Ok(p) => p,
+        Err(e) => return Some(format!("whose settings do not read ({e})")),
+    };
+    let lax = machine(here).ok()?;
+    if lax.waives_probation() && !strict.waives_probation() {
+        return Some(
+            "whose unattended settings waive probation where the default config dir's do not"
+                .into(),
+        );
+    }
+    let floor = |p: &apb_core::policy_file::Policies| p.probation_floor().map_or(0, |(n, _)| n);
+    let (asked, kept) = (floor(&lax), floor(&strict));
+    (asked < kept).then(|| {
+        format!(
+            "whose unattended settings ask for {asked} attended runs where the default config dir's ask for {kept}"
+        )
+    })
 }
 
 /// The machine inputs a member is read with.

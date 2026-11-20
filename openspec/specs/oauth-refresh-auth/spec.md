@@ -1,7 +1,7 @@
 # oauth-refresh-auth Specification
 
 ## Purpose
-TBD - created by archiving change google-connectors. Update Purpose after archive.
+A connector account can authenticate with an OAuth refresh token: the access token lives in memory only, is refreshed before expiry and once after a 401, scopes are checked, and only a person's terminal runs the consent.
 
 ## Requirements
 

@@ -1,7 +1,7 @@
 # concurrency-key Specification
 
 ## Purpose
-TBD - created by archiving change routine-health. Update Purpose after archive.
+A playbook's concurrency key allows one active and one waiting run per key, with supersede and refuse modes, for starts and resumes alike.
 
 ## Requirements
 

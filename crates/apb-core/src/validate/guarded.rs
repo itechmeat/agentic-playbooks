@@ -9,7 +9,9 @@
 //! the untrusted markers drops them and would run the node without the
 //! prompt section; one that does not know `deadline` would continue the
 //! run without its limit; one that does not know a gate's `fields`,
-//! `show` or `max_scope` would decide the gate as a plain one. A run whose definition uses any of them carries a `run_guard`
+//! `show` or `max_scope` would decide the gate as a plain one; one that
+//! does not know `list.pilot` or `stop_when` would run every item of a
+//! list without its pilot gate or its early stop. A run whose definition uses any of them carries a `run_guard`
 //! naming them after every checkpoint, so such an apb refuses to continue
 //! it. A later release adds names here instead of a new guard.
 
@@ -56,11 +58,14 @@ pub enum GuardedFeature {
     /// A gate withholds options above a scope limit (`max_scope`); an older
     /// apb drops it and would offer every option.
     ReviewMaxScope,
+    /// A list node runs a pilot slice and stops at a gate, or ends early
+    /// (`list.pilot`, `list.stop_when`).
+    ListPilot,
 }
 
 impl GuardedFeature {
     /// Every feature this binary knows, in declaration order.
-    pub const ALL: [GuardedFeature; 11] = [
+    pub const ALL: [GuardedFeature; 12] = [
         GuardedFeature::ApprovalBinding,
         GuardedFeature::PersonOnly,
         GuardedFeature::RequiredApproval,
@@ -72,6 +77,7 @@ impl GuardedFeature {
         GuardedFeature::Concurrency,
         GuardedFeature::ReviewFields,
         GuardedFeature::ReviewMaxScope,
+        GuardedFeature::ListPilot,
     ];
 
     /// The name a `run_guard` carries.
@@ -88,6 +94,7 @@ impl GuardedFeature {
             GuardedFeature::Concurrency => "concurrency",
             GuardedFeature::ReviewFields => "review_fields",
             GuardedFeature::ReviewMaxScope => "review_max_scope",
+            GuardedFeature::ListPilot => "list_pilot",
         }
     }
 
@@ -132,6 +139,12 @@ pub fn guarded_features(playbook: &Playbook) -> Vec<GuardedFeature> {
                 used.insert(GuardedFeature::ReviewMaxScope);
             }
         }
+        if node
+            .list()
+            .is_some_and(|l| l.pilot.is_some() || l.stop_when.is_some())
+        {
+            used.insert(GuardedFeature::ListPilot);
+        }
     }
     // The namespace and the untrusted markers are per-playbook checks: a
     // feature is in force when the definition reads or marks anything,
@@ -165,7 +178,7 @@ mod tests {
     /// Each declaration names its own feature, a definition using several
     /// names each once in declaration order, and a definition using none
     /// needs no guard.
-    /// `deadline:` names `deadline`, and this binary knows eleven features.
+    /// `deadline:` names `deadline`, and this binary knows twelve features.
     #[test]
     fn a_deadline_is_a_guarded_feature() {
         let pb = Playbook::from_yaml(
@@ -173,10 +186,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(guarded_features(&pb), vec![GuardedFeature::Deadline]);
-        assert_eq!(GuardedFeature::ALL.len(), 11);
+        assert_eq!(GuardedFeature::ALL.len(), 12);
         assert_eq!(
             GuardedFeature::parse("deadline"),
             Some(GuardedFeature::Deadline)
+        );
+    }
+
+    /// A list node with `pilot` or with `stop_when` alone names
+    /// `list_pilot`, and the name round-trips.
+    #[test]
+    fn a_list_pilot_is_guarded() {
+        let pilot = playbook(
+            "  - { id: l, type: script, script: s.sh, runner: sh, list: { items: { inline: [a, b] }, pilot: { items: 1 } } }\n",
+        );
+        assert_eq!(guarded_features(&pilot), vec![GuardedFeature::ListPilot]);
+        let stop = playbook(
+            "  - { id: l, type: script, script: s.sh, runner: sh, list: { items: { inline: [a, b] }, stop_when: { needs_look_at_least: 2 } } }\n",
+        );
+        assert_eq!(guarded_features(&stop), vec![GuardedFeature::ListPilot]);
+        assert_eq!(
+            GuardedFeature::parse("list_pilot"),
+            Some(GuardedFeature::ListPilot)
         );
     }
 
@@ -321,13 +352,13 @@ mod tests {
         assert!(guarded_features(&plain).is_empty());
     }
 
-    /// `ALL` knows eleven features, `review_max_scope` the last one.
+    /// `ALL` knows twelve features, `list_pilot` the last one.
     #[test]
-    fn all_has_eleven_entries_in_order() {
-        assert_eq!(GuardedFeature::ALL.len(), 11);
+    fn all_has_twelve_entries_in_order() {
+        assert_eq!(GuardedFeature::ALL.len(), 12);
         assert_eq!(
             GuardedFeature::ALL[GuardedFeature::ALL.len() - 1],
-            GuardedFeature::ReviewMaxScope
+            GuardedFeature::ListPilot
         );
     }
 

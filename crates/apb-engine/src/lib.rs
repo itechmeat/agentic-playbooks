@@ -73,6 +73,7 @@ pub mod previous_success;
 pub mod deadline_hooks;
 pub mod pause;
 pub mod people;
+pub mod probation;
 pub mod proc;
 pub mod progress;
 pub mod publish;

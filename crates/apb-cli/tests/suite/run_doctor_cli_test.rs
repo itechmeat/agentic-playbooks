@@ -219,6 +219,8 @@ fn doctor_run_warns_autonomy_for_a_node_with_no_non_interactive_flag() {
         cloud: None,
     };
     let manifest = apb_engine::manifest::RunExecutionManifest {
+        probation_waived: false,
+        readiness_required: false,
         profiles: vec![apb_engine::manifest::ManifestProfile {
             scope: "project".into(),
             name: "x".into(),

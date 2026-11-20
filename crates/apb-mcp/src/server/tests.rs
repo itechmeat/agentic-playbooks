@@ -2750,6 +2750,7 @@ mod notify;
 mod problems;
 // Run quality: grading sessions, grades and the candidate.
 mod quality;
+mod readiness;
 // A run's secret values on the run surfaces, in every spelling apb writes.
 mod redaction;
 // The scenario capture preview on the run tools.

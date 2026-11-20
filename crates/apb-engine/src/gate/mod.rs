@@ -28,7 +28,9 @@ pub use params::{
     PARAM_NEEDS_VALUE, PARAM_PATTERN_MISMATCH, check_params, check_params_with,
     short_secret_warning,
 };
-pub use unattended::{UnattendedStart, check_start as check_unattended};
+pub use unattended::{
+    ProbationView, UnattendedStart, check_probation, check_start as check_unattended, probation,
+};
 
 use std::path::Path;
 

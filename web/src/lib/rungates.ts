@@ -7,6 +7,7 @@ import type {
   NextAction,
   PendingHostTask,
   FieldView,
+  PilotView,
   ReviewBinding,
   ReviewRecommendation,
   ShownEntry,
@@ -55,6 +56,9 @@ export interface ReviewEntry extends GateRequest {
   /** The options `max_scope` withholds above the scope, with the reason. */
   withheld?: string[]
   withheldReason?: string
+  /** For a list node's pilot gate: the slice, its round and its counts,
+   * from the list fold. */
+  pilot?: PilotView
   /** The rendered `show:` entries the gate displays above its options. */
   show?: ShownEntry[]
   /** The typed fields the gate takes, with their rendered defaults. */
@@ -138,7 +142,7 @@ export function runGates(detail: RunDetail): RunGates {
   return {
     reviews: p.pending_reviews
       .filter((r) => !r.publish)
-      .map(({ node, options, prompt, recommendation, binding, person_only, scope_line, withheld, withheld_reason, show, fields }) => {
+      .map(({ node, options, prompt, recommendation, binding, person_only, scope_line, withheld, withheld_reason, show, fields, pilot }) => {
         const entry: ReviewEntry = { node, options, ...(prompt ? { prompt } : {}), ...req('decide_review', node) }
         const note = recommendationNote(recommendation)
         if (note) entry.recommendation = note
@@ -154,6 +158,7 @@ export function runGates(detail: RunDetail): RunGates {
         }
         if (show?.length) entry.show = show
         if (fields?.length) entry.fields = fields
+        if (pilot) entry.pilot = pilot
         return entry
       }),
     publishes: p.pending_reviews.flatMap(({ node, publish, prompt, scope_line }) =>

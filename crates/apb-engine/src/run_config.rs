@@ -49,6 +49,17 @@ impl ChildExpectation {
     /// The definition this pin names, at its pinned version; `None` when it
     /// no longer resolves or no longer matches the pinned digest.
     pub fn load(&self, root: &std::path::Path) -> Option<apb_core::schema::Playbook> {
+        self.load_definition(root).map(|l| l.playbook)
+    }
+
+    /// The pinned child as the whole loaded playbook, on the same terms
+    /// [`ChildExpectation::load`] reads it (the digest must match): what
+    /// the probation and readiness checks judge each pinned sub-playbook
+    /// by.
+    pub fn load_definition(
+        &self,
+        root: &std::path::Path,
+    ) -> Option<apb_core::registry::LoadedPlaybook> {
         use apb_core::profile::ProfileScope;
         use apb_core::scope::{Origin, PlaybookRef};
         let origin = match self.scope {
@@ -68,7 +79,6 @@ impl ChildExpectation {
             .ok()?
             .load(&resolved.id, Some(&resolved.version))
             .ok()
-            .map(|l| l.playbook)
     }
 }
 
@@ -267,6 +277,13 @@ pub const BUDGET_EXHAUSTED: &str = "budget_exhausted";
 /// The start refusal of an unattended start the mode cannot hold (host
 /// execution, a supervised mode).
 pub const UNATTENDED_UNSUPPORTED: &str = "unattended_unsupported";
+/// The refusal code of an unattended start whose probation is not done
+/// (before-running-alone D5).
+pub const PROBATION_REQUIRED: &str = "probation_required";
+/// The refusal code of a `--require-ready` start whose readiness report
+/// does not pass. The word is also a next-action field's name (`NextAction
+/// .not_ready`); the two never meet.
+pub const NOT_READY: &str = "not_ready";
 
 /// The settings of an eval repetition's run (`apb eval`).
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]

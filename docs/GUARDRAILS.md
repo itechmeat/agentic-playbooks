@@ -259,6 +259,25 @@ and runs plain gates. Every apb on a machine that runs these playbooks
 must be this release or newer; `apb doctor` warns about other `apb`
 binaries on `PATH`.
 
+The run guard names cover `evidence`, a run's `deadline`, a `concurrency:`
+key, a gate's `fields`, `show` or `max_scope`, and a list node's
+`pilot` or `stop_when` (`list_pilot`), among the features each change
+added. A definition whose list block carries `pilot` or `stop_when` is
+refused outright by apb 1.0.0-beta.1 and every later release without this
+change: their list block rejects unknown fields, so such a binary neither
+starts such a playbook nor resumes such a run and appends nothing to its
+journal. apb 0.25.0 accepts unknown fields in a list block: it drops the
+two fields and runs every item of the list with no pilot gate and no early
+stop, which is what every older binary does with a playbook field it does
+not know. In the same way an apb older than this release ignores the
+top-level `unattended:` block and starts such a playbook unattended
+without probation, and reads a `policy.yaml` with an `unattended:` section
+as invalid, as for every earlier key of that file. The playbook format has
+no way to demand a minimum apb (`requires` names files and commands only),
+so no marker fences older binaries: the machine holds the guarantee. Keep
+every apb on a machine that runs these playbooks at this release or newer;
+`apb doctor` warns about other `apb` binaries on `PATH`.
+
 ## Passkeys on person-only gates and approvals
 
 A channel refusal proves a caller type, not a person: whoever holds a
@@ -622,6 +641,88 @@ these three refusals, each answered before anything is written:
 The flag is a record of where the data came from, not a sandbox: it never
 weakens trust, consent, the launch policy or billing, and it does not reach
 what an agent CLI keeps by itself.
+
+## Running alone: readiness and probation
+
+A playbook may say it means to run alone (`unattended:
+after_attended_successes`), and the fit report then says whether it is
+ready: done defined by an enforced script goal criterion, every acting
+agent step checked by a script, every acting node bounded in each effect
+domain it acts in (the working tree, each connector, and the network,
+which only an enforced isolation with `network: none` closes; a
+sub-playbook node and a `publish` node are not judged as actors there), a
+budget, every irreversible step behind a gate along the paths a run can
+take (the failure routes of every node but the start included; a
+`human_review` a decision model may decide, `auto_decide` with
+`auto_decide_ok: true`, is not a gate there), and its probation.
+
+The refusal codes are `probation_required` (an unattended start whose
+playbook, or a sub-playbook it pins, has not counted its attended runs in
+this project; an unattended start that carries run overrides, since
+probation counted the definition without them: "an unattended start runs
+the definition its probation counted; start it without --overrides or
+waive probation at a terminal"; and an unattended start while a
+`policy.yaml`, the machine's or the project's, does not read, naming the
+file and its error: the floor it might set is unknown, so the start fails
+closed) and `not_ready` (`--require-ready`, a refusal
+of the readiness report on the loaded definition and its pins). Both are
+decided once in run preparation, on the definition preparation itself
+loaded; no launch surface judges them on a definition of its own. A
+supervisor's patch of an unattended run is held to the same checks on the
+replacement definition, refused as a patch whose reason starts with the
+same code; an attended run's patch is checked by neither.
+
+**Probation is counted from a signed ledger** (`.apb/probation/`), one
+per playbook and project, written by the journal's terminal observer once
+per run, after the run's terminal event is in the journal and with the
+outcome read from it. Eligible means: a production run that learned, it
+succeeded, it executed one definition from start to end with no patch,
+rebind, migration or override, and it was not started from a run step
+(its launch record has no `started_by`). "Attended" means only that the
+run was started without `--unattended`: the count is of attended runs,
+and no surface claims that a person decided anything in them. The check counts only entries whose trust
+digest (definition and scripts) and definition digest equal the loaded
+definition's, so a new version, an edit or a changed script restarts the
+count. A global playbook earns its probation per project. Each
+sub-playbook needs its own. Runs that ended before this change do not
+count, and a run whose process died before its entry was written stays
+uncounted (no reconcile pass). The ledger records the project it belongs
+to (the workspace id registered at the project root, else the canonical
+project root), covered by its signature and compared when it is read, so
+a ledger copied or linked from another project does not verify; it is
+opened without following a link. A ledger that does not verify counts
+nothing: unattended starts are refused until it is moved aside or the
+start is waived (`apb doctor` names it; the count then starts again from
+zero).
+
+**The waiver** is `apb run --waive-probation`, which always asks the
+playbook id typed at an interactive terminal (also for a playbook that
+asks for no probation, since a child it cannot see may need it), is
+refused in a run step and without a terminal, and is not offered on MCP
+or HTTP. It is recorded in the run's manifest and reaches every child run
+of the tree. A machine that runs alone may set
+`unattended.waive_probation` in its `policy.yaml`; a project file cannot
+(a project never waives probation). The machine waiver also passes a
+ledger that does not verify, and the fit report's probation item says so.
+A run step, or the CLI without a terminal, whose config dir is redirected
+away from the default one (`APB_CONFIG_DIR`, `XDG_CONFIG_HOME`) is
+refused `policy_file_invalid` when the redirected `policy.yaml` waives
+probation or asks for fewer attended runs than the default config dir's,
+the same rule that keeps a redirect from hiding a stricter launch policy.
+The policy files are read once per start, and the floor and the waiver
+come from that one read. apb does not claim the waiver proves
+a person: it is apb's initiator model, the same typed confirmation a
+person-only gate takes at a terminal.
+
+Why a project cannot waive: probation is counted per project on purpose.
+An attended success in project A says nothing about the data, connectors
+and working tree of project B; a machine-wide record would let a playbook
+proven on one project run alone on another, which is what probation
+exists to prevent.
+
+**Older apb binaries.** Probation and the list pilot hold with this apb
+or newer only; what an older apb does with `unattended:`, `pilot` and
+`stop_when` is in [Older apb binaries](#older-apb-binaries) above.
 
 ## Choosing where a rule goes
 

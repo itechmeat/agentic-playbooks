@@ -8,9 +8,11 @@
     batchLabel,
     itemText,
     listChips,
+    pilotLine,
     processedLabel,
     processedPercent,
     stateLabel,
+    stoppedLine,
     unlistedPending,
     visibleItems,
     type ItemFilter,
@@ -47,6 +49,12 @@
     >
       <span class="fill" style:width={`${processedPercent(l)}%`}></span>
     </div>
+    {#if l.pilot}
+      <p class="pilot" data-testid="run-list-pilot">{pilotLine(l.pilot)}</p>
+    {/if}
+    {#if l.stopped}
+      <p class="pilot stopped" data-testid="run-list-stopped">{stoppedLine(l.stopped)}</p>
+    {/if}
     <ul class="chips">
       {#each listChips(l) as c (c.key)}
         <li class="chip {c.key}" class:zero={c.count === 0} data-testid="run-list-chip" data-key={c.key}>
@@ -98,6 +106,13 @@
 {/each}
 
 <style>
+  .pilot {
+    margin: 0.25rem 0 0;
+    color: var(--text-muted);
+  }
+  .pilot.stopped {
+    color: var(--destructive, var(--text-muted));
+  }
   .summary {
     display: flex;
     flex-wrap: wrap;

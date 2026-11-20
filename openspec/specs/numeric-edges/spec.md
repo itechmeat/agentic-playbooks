@@ -1,7 +1,7 @@
 # numeric-edges Specification
 
 ## Purpose
-TBD - created by archiving change node-contracts. Update Purpose after archive.
+An edge can route on a numeric threshold of an output field, where an unreadable value never matches.
 
 ## Requirements
 

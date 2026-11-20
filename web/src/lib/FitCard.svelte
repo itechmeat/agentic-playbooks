@@ -15,6 +15,7 @@
     itemLine,
     launchDetail,
     launchSummary,
+    readinessLines,
     setupSummary,
     trustLine,
     trustSummary,
@@ -26,6 +27,8 @@
     loading = false,
     error = null,
   }: { report?: FitReport | null; loading?: boolean; error?: string | null } = $props()
+
+  const readiness = $derived(report ? readinessLines(report) : null)
 
   const badges = $derived(report ? fitBadges(report) : [])
 </script>
@@ -95,6 +98,33 @@
           <h3>Launch</h3>
           <p class="summary" class:blocking={!!report.launch.problem}>{launchSummary(report.launch)}</p>
           <p class="muted" data-testid="fit-launch-detail">{launchDetail(report.launch)}</p>
+        </section>
+      {/if}
+
+      {#if report.readiness}
+        <section data-testid="fit-readiness">
+          <h3>Running alone</h3>
+          {#if report.readiness.ready}
+            <p class="summary">ready to run alone</p>
+          {:else}
+            <p class="summary blocking">not ready to run alone</p>
+          {/if}
+          {#if readiness?.lines.length}
+            <ul class="readiness">
+              {#each readiness.lines as line (line)}
+                <li>{line}</li>
+              {/each}
+            </ul>
+          {/if}
+          {#if readiness?.probation}
+            <p class="muted" data-testid="fit-probation">{readiness.probation}</p>
+          {/if}
+          {#if readiness && readiness.okCount > 0}
+            <p class="muted">
+              {readiness.okCount} other item{readiness.okCount === 1 ? '' : 's'}
+              hold
+            </p>
+          {/if}
         </section>
       {/if}
 
