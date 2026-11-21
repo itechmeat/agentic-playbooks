@@ -76,6 +76,33 @@ pub struct LaunchRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub started_by: Option<StartedBy>,
+    /// The rule that started this run. Absent for every other start. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub triggered_by: Option<TriggeredBy>,
+}
+
+/// The rule that started a run (start rules). Written once into the
+/// launch record; never a person, never a run step. Additive.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggeredBy {
+    /// The rule's name.
+    pub rule: String,
+    /// The rule's incarnation (which creation of that name started the run).
+    pub incarnation: String,
+    /// What the rule listens to: "inbox".
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub connector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub account: Option<String>,
+    /// The inbox seq of the event the run was started for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub event_seq: Option<u64>,
 }
 
 /// The run whose step started a run, as the new run's launch record keeps
@@ -267,6 +294,7 @@ mod tests {
             sources: vec![DEFAULT_SOURCE.into()],
             billing: None,
             started_by: None,
+            triggered_by: None,
         }
     }
 

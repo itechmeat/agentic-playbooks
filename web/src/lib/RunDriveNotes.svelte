@@ -14,11 +14,13 @@
     RunDeadlineView,
     StartedBy,
     StartedRunView,
+    TriggeredBy,
     UntrustedNode,
   } from './api.gen'
   import { releasedLine } from './retrywait'
   import { previousSuccessLine, untrustedLine } from './previoussuccess'
   import { deadlineLine } from './rundeadline'
+  import { triggeredByLine } from './triggers'
   import { TRUNCATED_NOTE, runHref, startedByLine, startedRunLabel, starterHref } from './startedruns'
 
   // The one wording of the key line, shared with the report.
@@ -37,6 +39,7 @@
     externalData = false,
     deadline,
     startedBy,
+    triggeredBy,
     startedRuns,
     startedRunsTruncated = false,
     startKey,
@@ -51,6 +54,8 @@
     externalData?: boolean
     deadline?: RunDeadlineView | null
     startedBy?: StartedBy | null
+    /** The rule that started the run; absent for every other start. */
+    triggeredBy?: TriggeredBy | null
     startedRuns?: StartedRunView[]
     startedRunsTruncated?: boolean
     startKey?: string | null
@@ -84,6 +89,9 @@
       {startedByLine(startedBy, workspace)}
     {/if}
   </p>
+{/if}
+{#if triggeredBy}
+  <p class="previous-success" data-testid="run-triggered-by">{triggeredByLine(triggeredBy)}</p>
 {/if}
 {#if (startedRuns && startedRuns.length > 0) || startedRunsTruncated}
   <p class="previous-success" data-testid="run-started-runs">

@@ -93,6 +93,11 @@ pub enum Initiator {
     DashboardKeyless,
     /// The engine resuming a paused run on its own.
     Engine { by: EngineResume },
+    /// A rule a person wrote starts the run (start rules): never a person,
+    /// decided like the CLI without a terminal.
+    Trigger {
+        by: Box<apb_core::launch::TriggeredBy>,
+    },
 }
 
 impl Initiator {
@@ -136,6 +141,7 @@ impl Initiator {
             Initiator::Dashboard => "dashboard".into(),
             Initiator::DashboardKeyless => "dashboard_keyless".into(),
             Initiator::Engine { by } => format!("engine:{}", by.as_str()),
+            Initiator::Trigger { by } => format!("trigger:{}", by.rule),
         }
     }
 
@@ -144,7 +150,9 @@ impl Initiator {
     pub fn checks_redirect(&self) -> bool {
         matches!(
             self,
-            Initiator::RunStep { .. } | Initiator::CliUnattested { terminal: false }
+            Initiator::RunStep { .. }
+                | Initiator::CliUnattested { terminal: false }
+                | Initiator::Trigger { .. }
         )
     }
 
@@ -285,6 +293,11 @@ pub struct LaunchContext {
     /// The start processes external data ([`crate::external_data`]): the
     /// gate never chooses a waiting candidate for it.
     pub external_data: bool,
+    /// The approval binding a person approved for this rule (start rules):
+    /// `Gate::admit` compares it with the binding it resolves, before
+    /// [`launch::decide`], and an equal one is the confirmation an `ask`
+    /// policy needs for [`Initiator::Trigger`].
+    pub approved_binding: Option<String>,
 }
 
 impl LaunchContext {
@@ -296,12 +309,20 @@ impl LaunchContext {
             launch_version: None,
             launch_choice: None,
             external_data: false,
+            approved_binding: None,
         }
     }
 
     /// The same caller for a start that processes external data or not.
     pub fn with_external_data(mut self, external_data: bool) -> Self {
         self.external_data = external_data;
+        self
+    }
+
+    /// With the approval binding a person approved for this rule. No
+    /// `LaunchConfirmation` variant is added: a rule stores no launch nonce.
+    pub fn with_approved_binding(mut self, digest: String) -> Self {
+        self.approved_binding = Some(digest);
         self
     }
 
@@ -445,6 +466,7 @@ impl LaunchGrant {
                 billing: parent.billing.clone(),
                 // A child is never marked: its run step is its parent's.
                 started_by: None,
+                triggered_by: None,
             },
             permit_digest: None,
             policy_state: None,
@@ -462,6 +484,8 @@ impl LaunchGrant {
 /// Refusal codes.
 pub const ASK_POLICY: &str = "launch_requires_confirmation";
 pub const DENY_POLICY: &str = "launch_requires_person";
+pub const TRIGGER_POLICY: &str = "launch_requires_rule_approval";
+pub const BINDING_CHANGED: &str = "binding_changed";
 pub const STEP_POLICY: &str = "launch_refused_in_run_step";
 pub const ENGINE_POLICY: &str = "launch_refused_for_engine";
 pub const CHOICE_CHANGED: &str = "launch_choice_changed";
@@ -835,6 +859,29 @@ pub fn nonce(
     apb_core::content::short_nonce("launch", &lines)
 }
 
+/// The binding a rule's approval covers (`apb trigger approve`): one digest
+/// over the permit it was approved for, the launch policy in force with its
+/// sources, and the full billing decision ([`BillingCheck::binding_lines`]),
+/// so a changed profile, connector or account, a stricter or looser launch
+/// policy and a changed billing decision each change it. `Gate::admit`
+/// resolves it on the permit it is admitting and compares it with the
+/// approval's ([`LaunchContext::approved_binding`]) before [`decide`] runs.
+pub fn approval_binding(
+    subject: &Subject<'_>,
+    effective: &EffectivePolicy,
+    billing: &BillingCheck,
+) -> String {
+    let mut sources = effective.sources.clone();
+    sources.sort();
+    let mut lines = vec![
+        subject.permit_digest.clone(),
+        effective.policy.as_str().to_string(),
+        sources.join("\n"),
+    ];
+    lines.extend(billing.binding_lines());
+    apb_core::content::short_nonce("rule-approval", &lines)
+}
+
 /// The run step a new start is made from ([`crate::step_start::resolve`]),
 /// or its refusal `start_chain_too_deep`. Only a run step's new start (a
 /// start, a trial, an executed plan, a continue) names one: a resume keeps
@@ -877,6 +924,19 @@ pub fn decide(
             None,
         ));
     }
+    // A rule start never confirms billed use: nobody is there to ask, and
+    // no single-use challenge is issued for it.
+    if matches!(ctx.initiator, Initiator::Trigger { .. }) && billing.required() == LaunchPolicy::Ask
+    {
+        return Err(billing_refusal(
+            super::billing::BILLING_TRIGGER,
+            ctx,
+            subject,
+            effective,
+            billing,
+            None,
+        ));
+    }
     let started_by = started_by(ctx, subject.root)?;
     let expected = nonce(subject, effective, &ctx.kind, billing);
     let grant = |confirmation: Option<String>, billed: Option<String>| LaunchGrant {
@@ -888,6 +948,10 @@ pub fn decide(
             sources: effective.sources.clone(),
             billing: Some(billing.record(billed)),
             started_by: started_by.clone(),
+            triggered_by: match &ctx.initiator {
+                Initiator::Trigger { by } => Some((**by).clone()),
+                _ => None,
+            },
         },
         permit_digest: Some(subject.permit_digest.clone()),
         policy_state: Some(policy_state(effective)),
@@ -1012,7 +1076,7 @@ fn echoes_on_its_channel(ctx: &LaunchContext) -> bool {
         ) | (
             Initiator::Dashboard | Initiator::DashboardKeyless,
             Some(LaunchConfirmation::DashboardNonce { .. })
-        )
+        ) | (Initiator::Trigger { .. }, _)
     )
 }
 
@@ -1040,6 +1104,7 @@ pub(crate) fn billing_confirmation(
     match (&ctx.initiator, &ctx.confirmation) {
         (Initiator::RunStep { .. }, _) => Err(super::billing::BILLING_STEP),
         (Initiator::Engine { .. }, _) => Err(super::billing::BILLING_ENGINE),
+        (Initiator::Trigger { .. }, _) => Err(super::billing::BILLING_TRIGGER),
         (Initiator::CliUnattested { terminal: true }, Some(LaunchConfirmation::TerminalPrompt)) => {
             Ok("terminal_prompt")
         }
@@ -1084,6 +1149,14 @@ fn launch_confirmation(
         Initiator::Dashboard => confirmed_by("dashboard"),
         Initiator::Engine { .. } => refuse(ENGINE_POLICY, false),
         Initiator::RunStep { .. } => refuse(STEP_POLICY, false),
+        // `Gate::admit` let this start through only with an approved binding
+        // equal to the resolved one, which covers the policy in force: that
+        // is what an `ask` policy needs.
+        Initiator::Trigger { .. } => match &ctx.approved_binding {
+            Some(_) if ask => confirmed_by("rule_approval"),
+            _ if ask => refuse(TRIGGER_POLICY, false),
+            _ => refuse(DENY_POLICY, false),
+        },
         Initiator::AgentMcp { .. } => match &ctx.confirmation {
             Some(LaunchConfirmation::HostRelayed { nonce }) if ask && nonce_matches(nonce) => {
                 confirmed_by("host_relayed")
@@ -1150,6 +1223,12 @@ fn refusal(
         ),
         DENY_POLICY => format!(
             "only a person launches playbook `{}` (agent_launch `{}`: {}); a person starts it from a terminal, or from a dashboard signed in with a key",
+            subject.id,
+            effective.policy,
+            effective.sources.join(", ")
+        ),
+        TRIGGER_POLICY => format!(
+            "playbook `{}` needs a person's approval of the rule that starts it (agent_launch `{}`: {}): apb trigger approve <rule>",
             subject.id,
             effective.policy,
             effective.sources.join(", ")
@@ -1237,6 +1316,14 @@ pub fn refusal_line(v: &Value) -> String {
     )
 }
 
+/// The binding a `binding_changed` refusal names: what a rule's fire reads
+/// to revoke its approval durably. `None` for any other refusal.
+pub fn binding_changed_of(v: &Value) -> Option<String> {
+    (v["policy"].as_str() == Some(BINDING_CHANGED))
+        .then(|| v["binding"].as_str().map(str::to_string))
+        .flatten()
+}
+
 /// Whether the child run `child_run` may be continued under its parent: it
 /// holds its own authorization, its parent holds none (an unchecked run,
 /// left as it always was), or its snapshot is exactly the parent's pin for
@@ -1259,5 +1346,216 @@ pub fn child_covered(
         _ => Err(format!(
             "{CHILD_NOT_COVERED}: child run `{child_run}` was not started from its verified pin, so its parent's authorization does not cover it; start the playbook again"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apb_core::agents::CostBasis;
+    use apb_core::billing::{BillingEntry, EffectiveBilling};
+
+    fn rule() -> apb_core::launch::TriggeredBy {
+        apb_core::launch::TriggeredBy {
+            rule: "news".into(),
+            incarnation: "news-i1".into(),
+            source: "inbox".into(),
+            connector: Some("gmail".into()),
+            account: Some("work".into()),
+            event_seq: Some(7),
+        }
+    }
+
+    fn trigger_ctx() -> LaunchContext {
+        LaunchContext::new(
+            Initiator::Trigger {
+                by: Box::new(rule()),
+            },
+            LaunchKind::Start,
+        )
+    }
+
+    fn subject<'a>(root: &'a Path) -> Subject<'a> {
+        Subject {
+            root,
+            id: "p",
+            global: false,
+            version: "1.0.0",
+            choice: Choice::Current,
+            definition_digest: "sha256:definition",
+            permit_digest: "permit-1".into(),
+            children_digest: "children-1".into(),
+        }
+    }
+
+    fn effective(policy: LaunchPolicy) -> EffectivePolicy {
+        EffectivePolicy {
+            policy,
+            sources: vec!["default".into()],
+        }
+    }
+
+    fn billing(billed: LaunchPolicy, unknown: LaunchPolicy) -> BillingCheck {
+        BillingCheck {
+            effective: EffectiveBilling {
+                billed,
+                unknown_basis: unknown,
+                budget_counts_subscription: true,
+                sources: vec!["machine policy.yaml billing.billed".into()],
+            },
+            predicted: vec![BillingEntry {
+                agent: "codex".into(),
+                basis: CostBasis::Unknown,
+            }],
+        }
+    }
+
+    fn billing_allow() -> BillingCheck {
+        BillingCheck::nothing(EffectiveBilling {
+            billed: LaunchPolicy::Allow,
+            unknown_basis: LaunchPolicy::Allow,
+            budget_counts_subscription: true,
+            sources: Vec::new(),
+        })
+    }
+
+    /// Every file under `root` as `(relative path, bytes as text)`, sorted.
+    fn tree_of(root: &Path) -> Vec<(String, String)> {
+        fn walk(dir: &Path, rel: &str, out: &mut Vec<(String, String)>) {
+            let mut entries: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().collect();
+            entries.sort_by_key(|e| e.file_name());
+            for e in entries {
+                let name = if rel.is_empty() {
+                    e.file_name().to_string_lossy().into_owned()
+                } else {
+                    format!("{rel}/{}", e.file_name().to_string_lossy())
+                };
+                if e.path().is_dir() {
+                    walk(&e.path(), &name, out);
+                } else {
+                    let bytes = std::fs::read(e.path()).unwrap_or_default();
+                    out.push((name, String::from_utf8_lossy(&bytes).into_owned()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, "", &mut out);
+        out
+    }
+
+    #[test]
+    fn a_child_grant_records_no_rule() {
+        let parent = LaunchRecord {
+            kind: "start".into(),
+            initiator: "trigger:news".into(),
+            confirmation: None,
+            policy: LaunchPolicy::Allow,
+            sources: Vec::new(),
+            billing: None,
+            started_by: None,
+            triggered_by: Some(rule()),
+        };
+        let child = LaunchGrant::child("p-1", &parent);
+        assert_eq!(child.record.initiator, "child_of:p-1");
+        assert_eq!(child.record.triggered_by, None);
+    }
+
+    #[test]
+    fn a_rule_start_is_decided_like_a_cli_without_a_terminal() {
+        let root = tempfile::tempdir().unwrap();
+        let subject = subject(root.path());
+        // `allow` runs.
+        let g = decide(
+            &trigger_ctx(),
+            &subject,
+            &effective(LaunchPolicy::Allow),
+            &billing_allow(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(g.record.policy, LaunchPolicy::Allow);
+        assert_eq!(g.record.confirmation, None);
+        // `ask` is refused with no approved binding.
+        let r = decide(
+            &trigger_ctx(),
+            &subject,
+            &effective(LaunchPolicy::Ask),
+            &billing_allow(),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(r["policy"], TRIGGER_POLICY);
+        assert!(r["binding"].is_null());
+        // `deny` is refused.
+        let r = decide(
+            &trigger_ctx(),
+            &subject,
+            &effective(LaunchPolicy::Deny),
+            &billing_allow(),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(r["policy"], DENY_POLICY);
+    }
+
+    /// `decide` takes the approved binding as the confirmation of an `ask`
+    /// policy; whether it equals the resolved one is compared before, in
+    /// `Gate::admit` (`the_binding_is_compared_in_admission`).
+    #[test]
+    fn an_approved_binding_confirms_an_ask_launch_in_decide() {
+        let root = tempfile::tempdir().unwrap();
+        let subject = subject(root.path());
+        let eff = effective(LaunchPolicy::Ask);
+        let check = billing_allow();
+        let binding = approval_binding(&subject, &eff, &check);
+        let ctx = trigger_ctx().with_approved_binding(binding);
+        let g = decide(&ctx, &subject, &eff, &check, false).unwrap();
+        assert_eq!(g.record.policy, LaunchPolicy::Ask);
+        assert_eq!(g.record.confirmation.as_deref(), Some("rule_approval"));
+    }
+
+    #[test]
+    fn a_deny_playbook_is_refused_even_with_an_approval() {
+        let root = tempfile::tempdir().unwrap();
+        let subject = subject(root.path());
+        let eff = effective(LaunchPolicy::Deny);
+        let check = billing_allow();
+        let binding = approval_binding(&subject, &eff, &check);
+        let ctx = trigger_ctx().with_approved_binding(binding);
+        let r = decide(&ctx, &subject, &eff, &check, false).unwrap_err();
+        assert_eq!(r["policy"], DENY_POLICY);
+    }
+
+    #[test]
+    fn a_rule_billing_ask_writes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".apb")).unwrap();
+        std::fs::write(root.path().join(".apb/keep"), "x").unwrap();
+        let before = tree_of(root.path());
+        let subject = subject(root.path());
+        let eff = effective(LaunchPolicy::Allow);
+        let check = billing(LaunchPolicy::Ask, LaunchPolicy::Ask);
+        let r = decide(&trigger_ctx(), &subject, &eff, &check, false).unwrap_err();
+        assert_eq!(r["policy"], crate::gate::billing::BILLING_TRIGGER);
+        // The project tree is byte-equal: no launch challenge was written.
+        assert_eq!(tree_of(root.path()), before);
+        assert!(!root.path().join(".apb/launch-challenges").exists());
+    }
+
+    #[test]
+    fn a_rule_grant_records_its_rule() {
+        let root = tempfile::tempdir().unwrap();
+        let subject = subject(root.path());
+        let g = decide(
+            &trigger_ctx(),
+            &subject,
+            &effective(LaunchPolicy::Allow),
+            &billing_allow(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(g.record.initiator, "trigger:news");
+        assert_eq!(g.record.triggered_by, Some(rule()));
+        assert_eq!(g.permit_digest.as_deref(), Some("permit-1"));
     }
 }

@@ -826,7 +826,7 @@ fn key_lookup(
         Ok(apb_engine::start_key::Lookup::Started { run_id, .. }) => {
             Some(already_started(root, &run_id, detached))
         }
-        Ok(apb_engine::start_key::Lookup::Conflict { run_id }) => {
+        Ok(apb_engine::start_key::Lookup::Conflict { run_id, .. }) => {
             eprintln!(
                 "run refused ({}): the key names run {run_id}, started with other params or instruction; use another key",
                 apb_engine::start_key::CONFLICT
@@ -2362,6 +2362,17 @@ fn run_detail_text(
             )
         );
     }
+    // The start rule a run was started from (`docs/TRIGGERS.md`); absent
+    // for every other start and for a run whose record lost the field.
+    if let Some(by) = apb_engine::trigger::view::triggered_by(&run_dir) {
+        say!(
+            "  {}",
+            sanitize_for_terminal(
+                &apb_engine::trigger::view::triggered_by_line(&by),
+                QUESTION_TEXT_MAX
+            )
+        );
+    }
     let started = apb_engine::run_view::started_runs(root, run_id);
     if !started.runs.is_empty() || started.truncated {
         say!(
@@ -3018,6 +3029,27 @@ pub(crate) fn resume_all_cmd(root: &Path, launch: &crate::launch::LaunchFlags) -
                         }
                     }
                     Err(e) => eprintln!("health: {r}: {e}"),
+                }
+            }
+            // Start rules (docs/TRIGGERS.md): one pass over the project's
+            // rules after the health sweep, what a machine that was off
+            // owes its deliveries. A run step sweeps nothing and reads
+            // nothing: no journal line, no position moves, no start.
+            if apb_core::step_env::StepCaller::from_env()
+                .describe()
+                .is_some()
+            {
+                println!("rule sweep skipped: apb resume --all runs inside a run step");
+            } else if apb_core::projects::registered_id(root).is_some() {
+                for (rule, res) in apb_mcp::tools::trigger::sweep_root(root) {
+                    match res {
+                        Ok(sweep) => {
+                            for run_id in &sweep.started {
+                                println!("trigger: {rule}: started run {run_id}");
+                            }
+                        }
+                        Err(e) => eprintln!("trigger: {rule}: {e}"),
+                    }
                 }
             }
             ExitCode::SUCCESS

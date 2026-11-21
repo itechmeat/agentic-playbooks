@@ -29,6 +29,7 @@ pub mod stats;
 pub mod supervisor;
 pub mod templates;
 pub mod trial;
+pub mod trigger;
 
 pub use capture::*;
 pub use decision::*;
@@ -103,6 +104,7 @@ impl From<apb_core::signed_store::StoreError> for ToolError {
             )),
             StoreError::Io(e) => ToolError::Engine(e.to_string()),
             e @ StoreError::Unverified(_) => ToolError::Conflict(e.to_string()),
+            e @ StoreError::TooLarge { .. } => ToolError::Conflict(e.to_string()),
         }
     }
 }

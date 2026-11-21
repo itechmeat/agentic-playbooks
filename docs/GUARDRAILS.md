@@ -452,11 +452,23 @@ A playbook can say how far an agent may launch it on its own, with
 run gate decides it for every launch surface, on the exact permit the run
 will use:
 
-| Effective policy | Agent over MCP | Run step (MCP or CLI) | CLI at a terminal | CLI without a terminal | Dashboard with keys | Dashboard without keys | Engine (waker, quota probe, `resume --all`) |
-|---|---|---|---|---|---|---|---|
-| `allow` | runs | runs | runs | runs | runs | runs | runs |
-| `ask` | runs with the refusal's nonce (`confirm_launch`), else refused | refused | asks the person, or `--confirm-launch` | `--confirm-launch` only | runs | runs after the dashboard confirms the refusal's nonce | refused |
-| `deny` | refused | refused | asks the person | refused | runs | refused | refused |
+| Effective policy | Agent over MCP | Run step (MCP or CLI) | CLI at a terminal | CLI without a terminal | Dashboard with keys | Dashboard without keys | Engine (waker, quota probe, `resume --all`) | Rule start (start rules, docs/TRIGGERS.md) |
+|---|---|---|---|---|---|---|---|---|
+| `allow` | runs | runs | runs | runs | runs | runs | runs | runs with the rule's approval |
+| `ask` | runs with the refusal's nonce (`confirm_launch`), else refused | refused | asks the person, or `--confirm-launch` | `--confirm-launch` only | runs | runs after the dashboard confirms the refusal's nonce | refused | runs while the approval's binding matches what the gate resolves, else refused (`launch_requires_rule_approval`): the person's approval of the rule is the confirmation |
+| `deny` | refused | refused | asks the person | refused | runs | refused | refused | refused, approval or not |
+
+A rule start is never a person: the gate decides it like the CLI without a
+terminal, and it carries no nonce of its own. What puts a person behind it is
+the rule's approval: a rule is changed and approved like a person's command,
+at a terminal with the rule's name typed or in a signed-in dashboard session,
+never from MCP or a run step. Like the launch floors and the other signed
+stores, that approval guards against mistakes and against agents acting
+through apb's surfaces, not against another process of the same user that
+writes the signed file; docs/TRIGGERS.md states the boundary once and says
+what the approval's binding covers (the permit digest, the launch policy in
+force and the billing decision), and what a changed binding does to the
+approval.
 
 A dashboard without keys counts as the CLI without a terminal, since
 anything on the machine can reach its port: issue a key with `apb server key
@@ -604,6 +616,7 @@ and bases, and a nonce that covers that exact set:
 | CLI without a terminal | `--confirm-launch` only | refused |
 | Dashboard (with or without keys) | the refusal's nonce, after the dashboard asked the person | refused |
 | Engine (waker, `resume --all`) | refused (`billing_refused_for_engine`) | refused |
+| Rule start (start rules, docs/TRIGGERS.md) | refused (`billing_refused_for_trigger`): a rule never confirms it, so a rule needs `allow` for the basis of its executors | refused |
 
 A run step or a CLI without a terminal whose config dir was redirected
 (`APB_CONFIG_DIR`, `XDG_CONFIG_HOME`, `HOME`) is also held to the settings

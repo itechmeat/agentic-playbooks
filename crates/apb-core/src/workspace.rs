@@ -62,6 +62,12 @@ pub const LOCAL_ENTRIES: &[&str] = &[
     "health/",
     // The signed summaries of removed run directories (`apb_engine::retention`).
     "runs-archive/",
+    // The start rules a person wrote and approved, signed by this
+    // installation (`apb_core::trigger`).
+    "triggers/",
+    // The trigger state and journals of the start rules, signed by this
+    // installation (`apb_core::trigger`).
+    "trigger-state/",
 ];
 
 /// The projects `dir` lies in, nearest first: `dir` itself and every
@@ -327,7 +333,13 @@ mod tests {
     /// are listed, so a checkout with a state file never shares it.
     #[test]
     fn the_enforcement_state_directories_are_local_entries() {
-        for entry in ["concurrency/", "health/", "runs-archive/"] {
+        for entry in [
+            "concurrency/",
+            "health/",
+            "runs-archive/",
+            "triggers/",
+            "trigger-state/",
+        ] {
             assert!(
                 LOCAL_ENTRIES.contains(&entry),
                 "{entry} is missing from LOCAL_ENTRIES"

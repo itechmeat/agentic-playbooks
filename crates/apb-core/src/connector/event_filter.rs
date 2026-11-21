@@ -88,10 +88,12 @@ pub struct EventFilter {
 
 /// One condition over the event body: the value at `path` equals
 /// `equals` (a string, number, bool or null; never an object or array).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BodyCondition {
     pub path: String,
+    #[cfg_attr(feature = "ts", ts(type = "string | number | boolean | null"))]
     pub equals: Value,
 }
 

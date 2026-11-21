@@ -107,7 +107,7 @@ pub fn or_already_started(
     }
 }
 
-/// What a keyed start's lookup leaves a start surface.
+/// What a keyed start's lookup leaves a person's start surface.
 pub enum Keyed {
     /// The start goes ahead with this request.
     Go(apb_core::start_key::StartKeyRequest),
@@ -115,8 +115,26 @@ pub enum Keyed {
     Answer(Value),
 }
 
+/// What a rule's start reads from the key ([`keyed_lookup_holding`],
+/// [`keyed_peek`]): the run the key names, with whether it is bound.
+pub enum KeyAnswer {
+    /// The start goes ahead with this request.
+    Go(apb_core::start_key::StartKeyRequest),
+    /// The key names a run: the same request, or (`conflict`) another one.
+    /// `bound`: bound to a started run; `false` while another start is
+    /// still preparing it (its entry pending under a live owner), so the
+    /// run may yet never start and a rule holds the event instead of
+    /// consuming it.
+    Named {
+        run_id: String,
+        conflict: bool,
+        bound: bool,
+    },
+}
+
 /// The key checked, the request captured and looked up; the refusal JSON
-/// (`policy`, `detail`, and `run_id` for a conflict) otherwise.
+/// (`policy`, `detail`, and `run_id` for a conflict) otherwise. A person's
+/// surface answers a run still being prepared as already started.
 pub fn keyed_lookup(
     root: &std::path::Path,
     scope_label: &str,
@@ -125,26 +143,112 @@ pub fn keyed_lookup(
     reuse: bool,
     fields: &apb_core::start_key::StartRequestFields,
 ) -> Result<Keyed, Value> {
+    match keyed(root, scope_label, id, raw, reuse, fields, Probe::Lookup)? {
+        KeyAnswer::Go(req) => Ok(Keyed::Go(req)),
+        KeyAnswer::Named {
+            run_id,
+            conflict: false,
+            ..
+        } => Ok(Keyed::Answer(already_started(root, &run_id))),
+        KeyAnswer::Named { run_id, .. } => Err(conflict_refusal(&run_id)),
+    }
+}
+
+/// The `start_key_conflict` refusal of a key that names another request.
+fn conflict_refusal(run_id: &str) -> Value {
+    json!({
+        "policy": apb_engine::start_key::CONFLICT,
+        "detail": format!("the key names run `{run_id}`, started with other params or instruction; use another key"),
+        "run_id": run_id,
+    })
+}
+
+/// The lookup of a rule's start: [`keyed_lookup`]'s checks, the answer as
+/// a [`KeyAnswer`] that keeps a run still being prepared apart.
+pub fn keyed_lookup_holding(
+    root: &std::path::Path,
+    scope_label: &str,
+    id: &str,
+    raw: &str,
+    fields: &apb_core::start_key::StartRequestFields,
+) -> Result<KeyAnswer, Value> {
+    keyed(root, scope_label, id, raw, false, fields, Probe::Lookup)
+}
+
+/// [`keyed_lookup_holding`]'s no-write twin, the dry start surface's
+/// answer: the same result with
+/// [`apb_core::start_key::StartRequest::capture_if_keyed`] and
+/// [`apb_engine::start_key::peek`] in place of `capture` and `lookup`, so
+/// nothing is created, judged or removed: no lock file, no directory, no
+/// installation key. `None` (no key) is the `trigger_key_unavailable`
+/// refusal: a caller that only reads never writes one.
+pub fn keyed_peek(
+    root: &std::path::Path,
+    scope_label: &str,
+    id: &str,
+    raw: &str,
+    fields: &apb_core::start_key::StartRequestFields,
+) -> Result<KeyAnswer, Value> {
+    keyed(root, scope_label, id, raw, false, fields, Probe::Peek)
+}
+
+/// Which read of the key store a [`keyed`] call makes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    Lookup,
+    Peek,
+}
+
+/// The one body of [`keyed_lookup`], [`keyed_lookup_holding`] and
+/// [`keyed_peek`]. A conflict is an answer here (`Named`); only the
+/// person's lookup turns it into the refusal.
+fn keyed(
+    root: &std::path::Path,
+    scope_label: &str,
+    id: &str,
+    raw: &str,
+    reuse: bool,
+    fields: &apb_core::start_key::StartRequestFields,
+    probe: Probe,
+) -> Result<KeyAnswer, Value> {
+    use apb_engine::start_key::Lookup;
     let refusal = |code: &str, detail: String| json!({ "policy": code, "detail": detail });
     let key = apb_core::start_key::StartKey::parse(raw)
         .map_err(|e| refusal(apb_core::start_key::INVALID, e))?;
-    let request = apb_core::start_key::StartRequest::capture(fields)
-        .map_err(|e| refusal(apb_core::start_key::INVALID, e.to_string()))?;
+    let request = match probe {
+        Probe::Lookup => apb_core::start_key::StartRequest::capture(fields)
+            .map_err(|e| refusal(apb_core::start_key::INVALID, e.to_string()))?,
+        Probe::Peek => {
+            apb_core::start_key::StartRequest::capture_if_keyed(fields).ok_or_else(|| {
+                refusal(
+                    "trigger_key_unavailable",
+                    "this installation has no key; the start-key store cannot be read without one"
+                        .to_string(),
+                )
+            })?
+        }
+    };
     let req = apb_core::start_key::StartKeyRequest {
         key,
         reuse,
         request,
     };
-    match apb_engine::start_key::lookup(root, scope_label, id, &req) {
-        Ok(apb_engine::start_key::Lookup::Free) => Ok(Keyed::Go(req)),
-        Ok(apb_engine::start_key::Lookup::Started { run_id, .. }) => {
-            Ok(Keyed::Answer(already_started(root, &run_id)))
-        }
-        Ok(apb_engine::start_key::Lookup::Conflict { run_id }) => Err(json!({
-            "policy": apb_engine::start_key::CONFLICT,
-            "detail": format!("the key names run `{run_id}`, started with other params or instruction; use another key"),
-            "run_id": run_id,
-        })),
+    let looked = match probe {
+        Probe::Lookup => apb_engine::start_key::lookup(root, scope_label, id, &req),
+        Probe::Peek => apb_engine::start_key::peek(root, scope_label, id, &req),
+    };
+    match looked {
+        Ok(Lookup::Free) => Ok(KeyAnswer::Go(req)),
+        Ok(Lookup::Started { run_id, bound, .. }) => Ok(KeyAnswer::Named {
+            run_id,
+            conflict: false,
+            bound,
+        }),
+        Ok(Lookup::Conflict { run_id, bound }) => Ok(KeyAnswer::Named {
+            run_id,
+            conflict: true,
+            bound,
+        }),
         Err(e) => {
             let msg = match &e {
                 apb_engine::error::EngineError::Conflict(m)
@@ -153,7 +257,10 @@ pub fn keyed_lookup(
             };
             let (code, detail) = msg
                 .split_once(": ")
-                .filter(|(c, _)| c.starts_with("start_key_"))
+                .filter(|(c, _)| {
+                    c.starts_with("start_key_")
+                        || (probe == Probe::Peek && c.starts_with("trigger_key_"))
+                })
                 .map(|(c, d)| (c.to_string(), d.to_string()))
                 .unwrap_or_else(|| ("start_key_state_unreadable".to_string(), msg.clone()));
             Err(refusal(&code, detail))
@@ -390,6 +497,12 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
     }
     if let Some(by) = apb_engine::run_view::started_by(&dir) {
         out["started_by"] = json!(by);
+    }
+    // Start rules: the rule that started the run (its manifest's launch
+    // record); absent for a run no rule started and for one whose record
+    // lost the field.
+    if let Some(by) = apb_engine::trigger::view::triggered_by(&dir) {
+        out["triggered_by"] = json!(by);
     }
     let started = apb_engine::run_view::started_runs(root, run_id);
     if !started.runs.is_empty() {

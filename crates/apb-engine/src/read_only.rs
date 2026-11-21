@@ -256,6 +256,7 @@ mod tests {
                     sources: Vec::new(),
                     billing: None,
                     started_by: None,
+                    triggered_by: None,
                 },
             );
             let e = crate::launch_handoff::write(dir.path(), &crate::launch_handoff::Handoff::Resume(grant))

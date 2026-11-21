@@ -64,7 +64,13 @@ engine, mcp, and core <- mcp-client <- engine. Do not introduce import cycles
   launch surface, `StartKeyRequest`, and `StartKeysFile`, the signed
   per-playbook file of key MACs under `.apb/start-keys/`, with pending and
   bound entries), `LaunchRecord.started_by` (`StartedBy`, the run step a
-  run was started from, and `MAX_START_CHAIN`),
+  run was started from, and `MAX_START_CHAIN`), start rules (`trigger/`:
+  `rule` the rule a person writes, its signed per-project store, the
+  incarnation and `rule_digest` and the locked writes, `model` the leaf
+  data types the store, the checks and the state share, `render` the
+  templates of the key and the params, `validate` the rule's own codes
+  V260-V267, `state` the signed position state and the per-incarnation
+  journal with its line ids, `evaluate` the pure verdict of one event),
   the signed store's `transact` with `Unsigned::Refuse` (`signed_store.rs`)
   and `fsutil::try_hold_lock`, the one-attempt probe of a `HeldLock`, the
   billed use (`billing.rs`: the `billing:` section of `policy.yaml`,
@@ -104,7 +110,8 @@ engine, mcp, and core <- mcp-client <- engine. Do not introduce import cycles
   function's send-once declaration and the connector's `identity`
   (`connector/idempotency.rs`) and the hidden send marker
   (`connector/marker.rs`), the `types` and `where` filter of an inbox read,
-  whose `explain` never carries body text (`connector/event_filter.rs`), the
+  whose `explain` never carries body text (`connector/event_filter.rs`; a
+  start rule's `types` and `where` are the same `EventFilter`), the
   inbox wait's site, its matching and its declared values (`inbox_wait.rs`), the
   OAuth pure helpers (the token response,
   scopes, PKCE, the authorization URL, the callback;
@@ -547,7 +554,12 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   held as a pending entry whose owner's `HeldLock` decides it, `attach`
   after `allocate_run`, `bind` after `run_provenance`, the `Drop` that
   keeps a failed start's key and frees a refused one, the run check of an
-  entry, `EngineError::AlreadyStarted` and the doctor line), runs started
+  entry, `EngineError::AlreadyStarted` and the doctor line), start rules
+  (`trigger/`: `mod` the sweep, one pass over a project's rules, each new
+  event started at once or recorded with its reason, the hourly cap read
+  from the runs' own launch records; `view` the listener heartbeat, the
+  run's rule and the words every surface renders a journal code with),
+  runs started
   from a run step (`step_start.rs`: `CallerSnapshot`, `resolve` through
   the connector layer's attempt binding, never storing the token,
   `chain_of` and the `start_chain_too_deep` bound, called from
@@ -900,6 +912,9 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   an approved version and is refused from a run step and a dashboard
   without keys) and `scenario_capture` the preview of a run's capture
   (a save is a person's act on the CLI or the dashboard, never MCP),
+  `trigger` the fire every rule start goes through, the approval a person
+  compares and posts back, the dry test and the sweep root the listener
+  calls (`trigger_list` and `trigger_test` the only tools, both reads),
   `problems` for a
   playbook's known problems, a person's decision, a recheck and a scan,
   `corrections` for a playbook's corrections ledger (the list and a
@@ -1000,6 +1015,10 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   inside a run step, at an interactive terminal; the enrollment code is
   stored only after the person typed it back, and every removal needs a
   typed code, last passkey or not).
+  `trigger.rs` is `apb trigger` (`set`, `list`, `show`, `approve`,
+  `enable`, `disable`, `remove`, `log`, `test`; the mutations are a
+  person's, at an interactive terminal with the rule's name typed, and
+  refused inside a run step; docs/TRIGGERS.md).
   `eval.rs` is `apb eval` and holds `EvalLevel` (`deep`, `quick`, `smoke`);
   `scenario.rs` is `apb eval --level quick|smoke` (the version's validator
   errors refused first, the smoke checks, one bounded `apb __scenario-run`
@@ -1019,7 +1038,11 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   promotion that names what it saw, `judge` for the judge sandbox and
   labelled examples, `scenario` for scenario runs, `demo` for the keyless
   demo, `health_sweep.rs` the dashboard's sweep of every watched playbook
-  every ten minutes, `passkeys` for the enrollment and assertion ceremonies over the
+  every ten minutes, `trigger_sweep.rs` the trigger sweep task the ingest
+  listener hosts (started by `apb ingest` and by `apb dashboard` with
+  `ingest.enabled`, woken by a stored delivery), `triggers` for the start
+  rules (reads on every channel, writes only from a signed-in session),
+  `passkeys` for the enrollment and assertion ceremonies over the
   machine's passkey store (the assertion challenge for a decision
   derived from the run, gate, decision, request and nonce the engine
   re-derives), `problems` for
@@ -1082,6 +1105,67 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   send, a run a live start key or a slot names, or a parent of a run it
   keeps; it removes a family whole, writing its signed summary before the
   directories move to staging, and commits by one rename.
+
+- **Start rules** (spec
+  `docs/superpowers/specs/2026-11-20-start-rules-design.md`,
+  `docs/TRIGGERS.md`): a person writes the rule, in a registered project,
+  into the signed per-project store (`.apb/triggers/`, bound to the
+  registered workspace id, read with no link followed); each creation of a
+  rule, and each change of its source, gets a random incarnation to which
+  its state, journal and start keys are bound; the rule registers no inbox
+  consumer and journals one `gap` when retention removed events it had not
+  seen. A pass judges each event in order: the filter's `types` first, then
+  each `where` condition in the rule's order, then the own-send marker, the
+  key and the params, the first failure deciding the skip reason; each
+  event starts its run now or is recorded with its reason, nothing queued
+  or merged; exactly three verdicts leave the position before the event
+  and end the pass (`start_key_busy`, which also holds a key another
+  start is still preparing, not yet bound to its run; the rule's hourly
+  cap; a changed approval `binding_changed`), and a pass that ends early
+  (a waiting change, the per-pass start bound, a journal write error, a
+  rule that changed under it) also resumes before the event it did not
+  decide. The rendered key is the run's start key and the only dedupe,
+  living `runs.start_key_days` like any start key, and a key bound to a
+  started run answers `already_started` before the hourly cap and the
+  per-pass bound are counted (the fire asks them through
+  `FireRequest.admit`); the cap fails closed (a run of the incarnation
+  whose journal is missing counts); how many runs run at once is the
+  playbook's `concurrency:` block. The sweep and every list surface use
+  milliseconds (`apb_core::clock::Millis`; `sweep_root`, `list` and
+  `doctor_line` take no clock), a pass reads the rule's state only under
+  its sweep lock, `position_at_head` is a compare and set, a line already
+  in the journal is synced again before the state commit it justifies,
+  the journal is read and written with no link followed, a marker's run
+  counts only as a direct child of this project's runs
+  (`apb_engine::trigger::own_run`), and a rule name is checked at the
+  lock boundary (`checked_rule_name`). The start is
+  `Initiator::Trigger`, never a person, and every rule needs an approval,
+  bound to the rule's digest and one binding over the permit digest, the
+  launch policy in force and the billing decision, compared once in
+  `Gate::admit` before the launch decision (for an `ask` policy the equal
+  approval is the confirmation; a start attempted under a changed binding
+  revokes the approval for good, a change restored with no start attempted
+  revokes nothing; like the launch floors and the other signed stores the
+  approval guards against mistakes and agents acting through apb's
+  surfaces, not against another process of the same user that writes the
+  signed file). A rule's run is always unattended and keeps its driver on
+  a long timer wait; `enabled` is changed only by `enable` and `disable`.
+  The sweep keeps five invariants: I1, only a person changes a rule, and it
+  fires only while enabled and approved under its approved binding; I2, the
+  event is the unit and its journal line, codes and condition marks only,
+  is appended and synced before the state transaction moves the position
+  past it; I3, the start key is the only dedupe and the hourly cap reads
+  the runs' own launch records; I4, one holder per rule, a mutation holding
+  a change lock the pass probes before every start and yields to; I5, the
+  position lives only in the signed state, set by the pass alone, and the
+  first pass after `approve` or `enable` positions the rule at the head it
+  reads and starts nothing in that pass. The sweep runs in the ingest
+  listener (`apb ingest`, or `apb dashboard` with `ingest.enabled`) and
+  once in `apb resume --all`, never inside a run step; `apb trigger test`
+  runs the checks before preparation and names probation, readiness,
+  concurrency and the working tree as checked at start, never "would
+  start"; the trigger journal decides nothing; time-based starts come
+  after 1.0, an outside timer calling `apb run --start-key`.
 
 - **Run quality** (`docs/QUALITY.md`): a playbook's `quality:` block names
   the built-in criteria and at most three of its own. The rules grader

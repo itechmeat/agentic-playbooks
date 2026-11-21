@@ -60,8 +60,10 @@ pub trait SignedDoc: Serialize + DeserializeOwned + Clone {
     }
 }
 
-/// The most bytes a [`SignedDoc::NO_LINKS`] file is read up to.
-const NO_LINKS_CAP: u64 = 8 * 1024 * 1024;
+/// The most bytes a [`SignedDoc::NO_LINKS`] file is read up to, and the one
+/// limit a write of such a file is refused past: the reader's constant,
+/// named once, so a save can never make a store its reader refuses.
+pub const NO_LINKS_CAP: u64 = 8 * 1024 * 1024;
 
 /// The bytes of `playbook`'s file read beneath `root` with no link
 /// followed: `Ok(None)` when there is none, `Err(None)` when an entry is
@@ -109,6 +111,20 @@ pub enum StoreError {
     /// that refuses to replace it ([`Unsigned::Refuse`]).
     #[error("{} does not verify", .0.display())]
     Unverified(PathBuf),
+    /// A write the reader's own cap refuses: the signed bytes of the
+    /// replacement would be more than the read takes, so the stored file
+    /// would stop reading. Nothing was written.
+    #[error(
+        "{} would be {} bytes, over the {} bytes its reader reads; nothing was written",
+        .path.display(),
+        .wrote,
+        .limit
+    )]
+    TooLarge {
+        path: PathBuf,
+        wrote: u64,
+        limit: u64,
+    },
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -305,6 +321,19 @@ fn write<T: SignedDoc>(
     let covered = bytes_of(&value)?;
     f.set_mac(Some(crate::run_origin::tag(T::MAC_DOMAIN, &covered)?));
     let bytes = serde_json::to_vec_pretty(&f).map_err(io::Error::other)?;
+    // A file the reader caps is never written over its own read limit: a
+    // save that would make the store unreadable is refused here, before
+    // the replacement, and the stored file stays as it was.
+    if T::NO_LINKS {
+        let wrote = bytes.len() as u64;
+        if wrote > NO_LINKS_CAP {
+            return Err(StoreError::TooLarge {
+                path: file::<T>(root, scope, playbook),
+                wrote,
+                limit: NO_LINKS_CAP,
+            });
+        }
+    }
     Ok(atomic_write_private(
         &file::<T>(root, scope, playbook),
         &bytes,
@@ -541,5 +570,133 @@ mod tests {
         let loaded = read::<Doc>(&root, Scope::Project, "p").unwrap();
         assert!(loaded.signed, "the MAC does not verify");
         assert_eq!(loaded.file.entries.len(), 200);
+    }
+
+    /// A doc the reader caps: a save whose signed bytes would pass the
+    /// read limit is refused and leaves the stored file as it was, and
+    /// every earlier save still reads as it was written.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+    struct CappedDoc {
+        schema: u32,
+        scope: String,
+        playbook: String,
+        #[serde(default)]
+        entries: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mac: Option<String>,
+    }
+
+    impl SignedDoc for CappedDoc {
+        const MAC_DOMAIN: &'static str = "apb-test-capped-doc-v1";
+        const SCHEMA: u32 = 1;
+        const DIR: &'static str = "test-capped-docs";
+        const ENTRIES_KEY: &'static str = "entries";
+        const NO_LINKS: bool = true;
+
+        fn fresh(scope: Scope, playbook: &str) -> Self {
+            CappedDoc {
+                schema: Self::SCHEMA,
+                scope: scope.as_str().to_string(),
+                playbook: playbook.to_string(),
+                entries: Vec::new(),
+                mac: None,
+            }
+        }
+
+        fn identity(&self) -> (&str, &str) {
+            (&self.scope, &self.playbook)
+        }
+
+        fn mac(&self) -> Option<&str> {
+            self.mac.as_deref()
+        }
+
+        fn set_mac(&mut self, mac: Option<String>) {
+            self.mac = mac;
+        }
+
+        fn set_schema(&mut self, schema: u32) {
+            self.schema = schema;
+        }
+    }
+
+    /// A signed document of exactly the read cap is taken; one byte more
+    /// is refused and the stored file stays at the cap.
+    #[test]
+    fn a_write_of_exactly_the_read_cap_is_taken_and_one_byte_more_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let scope = Scope::Project;
+        let path = file::<CappedDoc>(root, scope, "p");
+        // One small entry, then one entry grown so the signed bytes land
+        // exactly on the cap: an entry's characters are the file's bytes
+        // one for one, and the mac's length does not move.
+        transact(root, scope, "p", Unsigned::Refuse, |f: &mut CappedDoc| {
+            f.entries.push("x".to_string());
+            Ok::<_, StoreError>(((), true))
+        })
+        .unwrap();
+        let small = std::fs::read(&path).unwrap().len() as u64;
+        let delta = (NO_LINKS_CAP - small) as usize;
+        transact(root, scope, "p", Unsigned::Refuse, |f: &mut CappedDoc| {
+            f.entries = vec!["x".repeat(1 + delta)];
+            Ok::<_, StoreError>(((), true))
+        })
+        .unwrap();
+        let at_cap = std::fs::read(&path).unwrap();
+        assert_eq!(
+            at_cap.len() as u64,
+            NO_LINKS_CAP,
+            "the boundary write is taken"
+        );
+        // One byte more: refused, the file stays exactly at the cap.
+        let refused = transact(root, scope, "p", Unsigned::Refuse, |f: &mut CappedDoc| {
+            f.entries = vec!["x".repeat(2 + delta)];
+            Ok::<_, StoreError>(((), true))
+        });
+        match refused {
+            Err(StoreError::TooLarge { wrote, limit, .. }) => {
+                assert_eq!(wrote, NO_LINKS_CAP + 1, "{wrote}");
+                assert_eq!(limit, NO_LINKS_CAP);
+            }
+            other => panic!("one byte over the cap is TooLarge: {other:?}"),
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), at_cap, "nothing written");
+    }
+
+    #[test]
+    fn a_write_past_the_read_cap_is_refused_and_the_file_stays() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let scope = Scope::Project;
+        // Entries of about a megabyte each, until one save would cross the
+        // reader's limit.
+        let big = "x".repeat(1024 * 1024);
+        let path = file::<CappedDoc>(root, scope, "p");
+        for i in 0..100 {
+            let before = std::fs::read(&path).unwrap_or_default();
+            let saved = i;
+            let refused = transact(root, scope, "p", Unsigned::Refuse, |f: &mut CappedDoc| {
+                f.entries.push(format!("{big}{saved}"));
+                Ok::<_, StoreError>(((), true))
+            })
+            .is_err();
+            if refused {
+                // The stored file is exactly what the last good save wrote.
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    before,
+                    "the refused write left the file as it was"
+                );
+                // Everything saved before still reads as this build wrote it.
+                let loaded = read::<CappedDoc>(root, scope, "p").unwrap();
+                assert!(loaded.signed, "the store still reads");
+                assert_eq!(loaded.file.entries.len(), i, "every earlier entry");
+                // And a read of the bytes is inside the cap.
+                assert!((before.len() as u64) <= NO_LINKS_CAP, "saved under the cap");
+                return;
+            }
+        }
+        panic!("no save was refused past the read cap");
     }
 }

@@ -322,9 +322,12 @@ mod beneath {
         // `fsutil::beneath`.
         std::fs::rename(anchor.join("out"), anchor.join("moved")).unwrap();
         symlink(&outside, anchor.join("out")).unwrap();
+        // The refusal names the component the link sits at.
         assert_eq!(
             refusal(b.read_regular_capped("out/report.md", 1024).unwrap()),
-            ReadRefusal::Link
+            ReadRefusal::LinkAt {
+                component: "out".to_string()
+            }
         );
         // A link at the last component is refused too.
         symlink(outside.join("report.md"), anchor.join("moved/linked.md")).unwrap();

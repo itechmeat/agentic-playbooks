@@ -112,6 +112,32 @@ pub fn list() -> Vec<ConnectorSummary> {
     out
 }
 
+/// One installed connector's manifest by name, read directly and without
+/// [`load`]'s whole-folder `content::tree_digest` (the digest belongs to
+/// the dashboard's approval flow, never to a path an unauthenticated caller
+/// reaches per request, such as ingest), or `None`: a name that is not one
+/// connector slug (`[a-z0-9-]`, one safe path segment), a directory that
+/// resolves outside the connectors root (a planted link; `load`'s
+/// containment check, restored here since `load` is skipped), or a
+/// manifest that does not read or parse. The one resolution ingest's
+/// delivery path and a start rule's checks share; neither requires a
+/// webhook block here (each caller judges that itself).
+pub fn read_doc_contained(name: &str) -> Option<ConnectorDoc> {
+    if !crate::registry::is_safe_segment(name) {
+        return None;
+    }
+    crate::profile::validate_profile_name(name).ok()?;
+    let base = connectors_dir()?;
+    let cand = base.join(name);
+    let canonical_path = std::fs::canonicalize(&cand).ok()?;
+    let canonical_root = std::fs::canonicalize(&base).unwrap_or_else(|_| base.clone());
+    if !canonical_path.starts_with(&canonical_root) {
+        return None;
+    }
+    let yaml = std::fs::read_to_string(canonical_path.join("connector.yaml")).ok()?;
+    ConnectorDoc::from_yaml(&yaml, name).ok()
+}
+
 /// Every connector directory name under `connectors_dir()` whose folder name
 /// is a valid slug and holds a `connector.yaml`, sorted, WITHOUT parsing the
 /// manifest. Unlike [`list`], a directory whose manifest fails to parse is

@@ -15,6 +15,7 @@ a store that later runs, statistics or learning tools read.
 | MCP | `external_data: true` on `playbook_run`, `playbook_trial`, `playbook_execute_plan` and `playbook_scenario_run` |
 | HTTP | `external_data: true` in the body of `POST /api/playbooks/{id}/run` and of the scenario run route |
 | Dashboard | the Run dialog's "External data: keep nothing for learning" box |
+| Start rules | a rule's run carries the flag: the rule's `external_data` field, `true` by default, so a run a start rule began is flagged unless the rule says `external_data: false` (docs/TRIGGERS.md) |
 
 The flag is fixed for the run's lifetime. It is written once into the
 run's `manifest.yaml` (`external_data: true`, the origin `external_data`

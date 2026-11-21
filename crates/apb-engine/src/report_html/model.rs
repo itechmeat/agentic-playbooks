@@ -62,6 +62,8 @@ pub(super) struct Report {
     pub(super) start_key: Option<String>,
     /// The run step this run was started from, as a line.
     pub(super) started_by: Option<String>,
+    /// The rule that started the run, as a line (start rules).
+    pub(super) triggered_by: Option<String>,
     /// The runs a step of this run started in this project, as a line.
     pub(super) started_runs: Option<String>,
     /// The nodes that render untrusted text, as the start recorded them.
@@ -154,6 +156,8 @@ impl Report {
         let here = apb_core::projects::registered_id(root);
         let started_by = crate::run_view::started_by(run_dir)
             .map(|by| crate::run_view::started_by_line(&by, here.as_deref()));
+        let triggered_by = crate::trigger::view::triggered_by(run_dir)
+            .map(|by| crate::trigger::view::triggered_by_line(&by));
         let started = crate::run_view::started_runs(root, &run_id);
         let started_runs = (!started.runs.is_empty() || started.truncated)
             .then(|| crate::run_view::started_runs_line(&started));
@@ -173,6 +177,7 @@ impl Report {
             concurrency,
             start_key,
             started_by,
+            triggered_by,
             started_runs,
             untrusted,
             goal: readout.goal,
@@ -323,5 +328,66 @@ mod tests {
     fn the_report_marks_fast_decisions_by_the_shared_rule() {
         assert!(review_lines(&journal(DecisionChannel::Terminal))[0].fast);
         assert!(!review_lines(&journal(DecisionChannel::Scenario))[0].fast);
+    }
+
+    /// A run directory with the report's minimal journal and, when
+    /// `with_rule`, a manifest whose launch record names a start rule.
+    fn report_page(dir: &std::path::Path, with_rule: bool) -> String {
+        let d = dir.join(".apb/runs/p-1");
+        std::fs::create_dir_all(&d).unwrap();
+        // A run with a manifest must have its run config, or the redactor
+        // withholds the whole page.
+        std::fs::write(d.join("run.yaml"), "params: {}\n").unwrap();
+        std::fs::write(
+            d.join("events.jsonl"),
+            "{\"seq\":0,\"ts\":1,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n\
+             {\"seq\":1,\"ts\":5,\"type\":\"run_finished\",\"outcome\":\"success\"}\n",
+        )
+        .unwrap();
+        if with_rule {
+            crate::manifest::write(
+                &d,
+                &crate::manifest::RunExecutionManifest {
+                    launch: Some(apb_core::launch::LaunchRecord {
+                        kind: "start".to_string(),
+                        initiator: "engine:trigger".to_string(),
+                        confirmation: None,
+                        policy: apb_core::launch::LaunchPolicy::Allow,
+                        sources: Vec::new(),
+                        billing: None,
+                        started_by: None,
+                        triggered_by: Some(apb_core::launch::TriggeredBy {
+                            rule: "triage-new-issues".to_string(),
+                            incarnation: "inc1".to_string(),
+                            source: "inbox".to_string(),
+                            connector: Some("github".to_string()),
+                            account: Some("main".to_string()),
+                            event_seq: Some(42),
+                        }),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        crate::report_html::render(dir, &d).unwrap()
+    }
+
+    /// The report's header names the rule that started the run (start
+    /// rules): a run whose manifest launch record carries `triggered_by`
+    /// shows the line, a run no rule started shows no row.
+    #[test]
+    fn the_report_names_the_rule_that_started_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let html = report_page(dir.path(), true);
+        assert!(
+            html.contains(
+                "triggered by: started by rule `triage-new-issues` (inbox github/main, event 42)",
+            ),
+            "{html}"
+        );
+        let dir2 = tempfile::tempdir().unwrap();
+        let plain = report_page(dir2.path(), false);
+        assert!(!plain.contains("triggered by:"), "{plain}");
     }
 }

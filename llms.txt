@@ -136,6 +136,7 @@ apb decide          ask the configured decision providers a bounded question (ho
 apb decisions       decision-model report, stored thresholds, replay
 apb stats           cross-run metrics per playbook version and node (read-only)
 apb health          routine health of watched playbooks (apb health [<id>] [--json]; check [<id>]: evaluate now, exit 3 on hold; a person's clear <id>, mute <id> --until <time|duration>, unmute <id>)
+apb trigger          start rules a person writes and approves (apb trigger set <rule> --file <path>; list, show <rule>, approve <rule>, enable <rule>, disable <rule>, remove <rule>, log <rule>, test <rule> [--event <seq>]; a person changes a rule at an interactive terminal or in a signed-in dashboard)
 apb diagram         the flowchart text derived from a playbook version (apb diagram <id> [--version V] [--scope project|global] [--out PATH]; --rebuild <id>|--all writes playbook.mmd again)
 apb grade <run>     grade an ended run by rules (built-in quality criteria) or by the decision model (--model: the playbook's own criteria); --show, --json, --reopen; --backfill <playbook> [--version] [--last N] [--model]
 apb candidate <id>  a playbook's candidate compared with current by quality, with the summary a person reads first (--promote --expect <version>@<digest> [--ack <summary_id>], --keep-current [--reason])

@@ -68,6 +68,7 @@ fi
 echo $$ > "$D/pid.log"
 pwd > "$D/cwd.log"
 ls -A > "$D/cwd_entries.log"
+if [ -f "$D/fd1.flag" ]; then L=$(readlink "/proc/$$/fd/1"); printf '%s\n' "$L" > "$D/stdout.link"; fi
 env | sed 's/=.*//' > "$D/env.log"
 env > "$D/env.values"
 : > "$D/args.log"
@@ -165,7 +166,11 @@ while IFS= read -r line; do
       esac
       # A line written right after the answer, in a write of its own
       # (read before the answer, so nothing starts between the two).
-      if [ -n "$suffix" ]; then printf '%s\n' "$suffix"; fi ;;
+      # The first answer only: the file is gone afterwards.
+      if [ -n "$suffix" ]; then printf '%s\n' "$suffix"; rm -f "$D/call_suffix"; fi
+      # The half line the server writes after its answer and never
+      # completes: the reader holds it as a line without its newline.
+      if [ -f "$D/call_half_line.flag" ]; then printf '%s' "$(cat "$D/call_half_line.flag")"; fi ;;
     *)
       printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"Method not found"}}\n' "$id" ;;
   esac
@@ -173,6 +178,23 @@ done
 if [ -f "$D/ignore_eof.flag" ]; then
   trap '' TERM
   while :; do sleep 1; done
+fi
+# The close's drain test: bytes written only at end of input, after the
+# client cancelled the service and its reader is gone.
+if [ -f "$D/eof_bytes.flag" ]; then cat "$D/eof_bytes.flag"; fi
+if [ -f "$D/eof_log.flag" ]; then
+  printf '%s\n' "$(cat "$D/eof_log.flag")"
+fi
+# A writer of its own session that keeps the pipe open for a while, so the
+# pipe never ends its output and the drain meets no end of input. Its pid
+# is recorded, so a test can kill it.
+if [ -f "$D/orphan_writer.flag" ]; then
+  setsid sh -c 'echo $$ > "$1/orphan.pid"; exec sleep 30' sh "$D" </dev/null &
+fi
+# The same writer, but it fills the pipe with bytes that carry no newline
+# and never pause: the drain reads and reads.
+if [ -f "$D/orphan_flow.flag" ]; then
+  setsid sh -c 'echo $$ > "$1/orphan.pid"; while :; do printf "%s" "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; done' sh "$D" </dev/null &
 fi
 exit 0
 "#;
@@ -426,9 +448,32 @@ impl StubServer {
     }
 
     /// Writes `dir/call_suffix`: one line (without its newline) the stub
-    /// writes right after each `tools/call` answer, in a write of its own.
+    /// writes right after its first `tools/call` answer, in a write of its
+    /// own. The file is gone afterwards, so the later answers write none.
     pub fn set_call_suffix(&self, bytes: &[u8]) -> std::io::Result<()> {
         std::fs::write(self.dir.join("call_suffix"), bytes)
+    }
+
+    /// Writes `dir/call_half_line.flag`: the text the stub writes to its
+    /// stdout right after its `tools/call` answer, in a write of its own,
+    /// and never completes: the reader holds it as a line without its
+    /// newline. `None` removes the flag.
+    pub fn set_call_half_line(&self, text: Option<&str>) -> std::io::Result<()> {
+        let path = self.dir.join("call_half_line.flag");
+        match text {
+            Some(text) => std::fs::write(path, text),
+            None => match std::fs::remove_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            },
+        }
+    }
+
+    /// Writes `dir/eof_bytes.flag`: the bytes the stub writes to its
+    /// stdout when it reads end of input, after the client cancelled the
+    /// service and its reader is gone. They are written as they are.
+    pub fn set_eof_bytes(&self, bytes: &[u8]) -> std::io::Result<()> {
+        std::fs::write(self.dir.join("eof_bytes.flag"), bytes)
     }
 
     /// Writes `dir/list_before`: raw lines the stub writes before each
@@ -473,6 +518,77 @@ impl StubServer {
                 _ => Ok(()),
             }
         }
+    }
+
+    /// Writes `dir/eof_log.flag`: one line (without its newline) the stub
+    /// writes to its stdout only when it reads end of input, after the
+    /// client cancelled the service. `None` removes the flag.
+    pub fn set_eof_log(&self, line: Option<&str>) -> std::io::Result<()> {
+        let path = self.dir.join("eof_log.flag");
+        match line {
+            Some(text) => std::fs::write(path, text),
+            None => match std::fs::remove_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            },
+        }
+    }
+
+    /// Creates or removes `dir/orphan_writer.flag`: with it, the stub
+    /// leaves behind a `setsid sleep 30` of its own session that holds its
+    /// stdout, so the pipe never ends its output. Its pid is in
+    /// `dir/orphan.pid`, so a test can kill it.
+    pub fn set_orphan_writer(&self, on: bool) -> std::io::Result<()> {
+        let path = self.dir.join("orphan_writer.flag");
+        if on {
+            std::fs::write(path, "")
+        } else {
+            match std::fs::remove_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    /// Creates or removes `dir/orphan_flow.flag`: with it, the stub leaves
+    /// behind a writer of its own session that fills the pipe with bytes
+    /// that carry no newline and never pause. Its pid is in
+    /// `dir/orphan.pid`, so a test can kill it.
+    pub fn set_orphan_flow(&self, on: bool) -> std::io::Result<()> {
+        let path = self.dir.join("orphan_flow.flag");
+        if on {
+            std::fs::write(path, "")
+        } else {
+            match std::fs::remove_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    /// The pid of the orphan the last start left (`dir/orphan.pid`), for a
+    /// test that kills it. Nothing is sent to it here.
+    pub fn orphan_pid(&self) -> Option<u32> {
+        lines_of(&self.dir.join("orphan.pid"))
+            .into_iter()
+            .next()
+            .and_then(|l| l.trim().parse().ok())
+    }
+
+    /// Makes the next start record the link of its stdout
+    /// (`dir/stdout.link`, `pipe:[inode]`), for a descriptor-inheritance
+    /// check in tests only.
+    pub fn record_stdout_link(&self) -> std::io::Result<()> {
+        std::fs::write(self.dir.join("fd1.flag"), "")
+    }
+
+    /// The recorded link of the last start's stdout (`dir/stdout.link`).
+    /// No link for an empty recording: an empty link is a substring of
+    /// every string, so a missing recording would read as a match.
+    pub fn stdout_link(&self) -> Option<String> {
+        lines_of(&self.dir.join("stdout.link"))
+            .into_iter()
+            .find(|l| !l.is_empty())
     }
 }
 
@@ -617,6 +733,18 @@ mod tests {
         let out = drive(&stub, &[], &[request(6, "tools/call", json!({}))]);
         assert_eq!(out[0]["result"]["content"][0]["text"], "a".repeat(100));
         assert_eq!(stub.calls().len(), 4);
+    }
+
+    /// A recording of nothing is no link: an empty link would be a
+    /// substring of every string, so a missing recording would read as a
+    /// match instead of a failure.
+    #[test]
+    fn an_empty_recording_is_no_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = StubServer::write(tmp.path(), StubEra::Modern).unwrap();
+        stub.record_stdout_link().unwrap();
+        std::fs::write(stub.dir.join("stdout.link"), "\n").unwrap();
+        assert_eq!(stub.stdout_link(), None, "an empty recording is no link");
     }
 
     #[test]

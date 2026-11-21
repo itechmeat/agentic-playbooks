@@ -577,6 +577,12 @@ impl Inbox {
         })
     }
 
+    /// The highest stored seq, 0 for an empty log: the private `last_seq`,
+    /// which stays private and unchanged.
+    pub fn head_seq(&self) -> Result<u64, InboxError> {
+        self.last_seq()
+    }
+
     /// Counts for one consumer, derived from the first and last stored events
     /// plus the cursor. Reads no lock: an approximate answer under concurrent
     /// delivery is fine for a probe and a dashboard panel.
@@ -1036,6 +1042,20 @@ mod tests {
                 .as_deref()
                 .is_some_and(|t| types.iter().any(|want| want == t))
         }
+    }
+
+    /// `head_seq` answers the private `last_seq`: 0 over an empty log, then
+    /// the seq the first append was handed.
+    #[test]
+    fn head_seq_is_zero_for_an_empty_log() {
+        let t = temp_inbox();
+        assert_eq!(t.inbox.head_seq().expect("head_seq"), 0);
+        let stored = t
+            .inbox
+            .append_typed("p1", Some("issues"), &json!({}))
+            .expect("append");
+        assert_eq!(stored, Appended::Stored(1), "the first append gets seq 1");
+        assert_eq!(t.inbox.head_seq().expect("head_seq"), 1);
     }
 
     /// A match the read does not return (a limit of 0) still stops the

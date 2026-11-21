@@ -927,6 +927,33 @@ impl Gate<'_> {
             self.launch.initiator.checks_redirect(),
             self.launch.handed_config_dir(),
         );
+        // A rule's start is admitted only on the binding its approval names
+        // (start rules): resolved here, on the very permit, policy and
+        // billing decision that are then decided and handed to the engine.
+        // An unapproved rule never reaches `launch::decide`; the refusal
+        // carries what an approval binds, and a changed binding is refused
+        // as such.
+        if matches!(self.launch.initiator, launch::Initiator::Trigger { .. }) {
+            let binding = launch::approval_binding(&subject, &effective, &billing);
+            match self.launch.approved_binding.as_deref() {
+                None => {
+                    return Err(json!({
+                        "policy": launch::TRIGGER_POLICY,
+                        "binding": binding,
+                        "permit_digest": subject.permit_digest,
+                        "launch_policy": effective.policy,
+                        "billing": billing.binding_lines(),
+                    }));
+                }
+                Some(d) if !apb_core::secret::ct_eq_str(d, &binding) => {
+                    return Err(json!({
+                        "policy": launch::BINDING_CHANGED,
+                        "binding": binding,
+                    }));
+                }
+                _ => {}
+            }
+        }
         let grant = launch::decide(self.launch, &subject, &effective, &billing, tolerant)?;
         permit.launch = Some(grant);
         permit.launch_warnings = warnings;
@@ -1717,5 +1744,141 @@ fn check_requires(root: &Path, req: &apb_core::schema::Requires, id: &str) -> Re
         Err(RequiresRefusal::UnsafeCommand(c)) => {
             Err(json!({ "policy": "requires_unsafe_command", "id": id, "command": c }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apb_core::launch::TriggeredBy;
+    use std::collections::BTreeMap;
+
+    fn rule() -> TriggeredBy {
+        TriggeredBy {
+            rule: "news".into(),
+            incarnation: "news-i1".into(),
+            source: "inbox".into(),
+            connector: None,
+            account: None,
+            event_seq: Some(7),
+        }
+    }
+
+    /// A project holding playbook `p` 1.0.0 (a start and a finish), with its
+    /// `current` pointed at it and the version loaded.
+    fn seeded() -> (
+        tempfile::TempDir,
+        PlaybookRef,
+        apb_core::registry::LoadedPlaybook,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let vdir = dir.path().join(".apb/playbooks/p/1.0.0");
+        std::fs::create_dir_all(&vdir).unwrap();
+        std::fs::write(
+            vdir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: s, to: done }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join(".apb/playbooks/p/current"), "1.0.0").unwrap();
+        let base = dir.path().join(".apb");
+        let reg = Registry::open_dir(&base).unwrap();
+        let loaded = reg.load("p", None).unwrap();
+        let wref = PlaybookRef {
+            origin: Origin::Project { workspace_id: None },
+            id: "p".into(),
+            version: None,
+        };
+        (dir, wref, loaded)
+    }
+
+    fn permit(digest: &str) -> RunPermit {
+        RunPermit {
+            playbook_digest: digest.into(),
+            profile_bundles: BTreeMap::new(),
+            children: BTreeMap::new(),
+            connectors: BTreeMap::new(),
+            connector_accounts: BTreeMap::new(),
+            warnings: Vec::new(),
+            irreversible: Vec::new(),
+            playbook_id: "p".into(),
+            candidate: None,
+            candidate_skipped: None,
+            launch: None,
+            launch_warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_binding_is_compared_in_admission() {
+        let (dir, wref, loaded) = seeded();
+        let ctx = launch::LaunchContext::new(
+            launch::Initiator::Trigger {
+                by: Box::new(rule()),
+            },
+            launch::LaunchKind::Start,
+        );
+        let digest = permit("sha256:definition").permit_digest();
+        // An unapproved rule is refused in admission, before `launch::decide`,
+        // with what an approval would bind.
+        let gate = Gate {
+            root: dir.path(),
+            wref: &wref,
+            acknowledge_untrusted: false,
+            supervised: false,
+            launch: &ctx,
+        };
+        let refusal = gate
+            .admit(
+                permit("sha256:definition"),
+                &loaded,
+                "1.0.0",
+                launch::Choice::Current,
+            )
+            .unwrap_err();
+        assert_eq!(refusal["policy"], launch::TRIGGER_POLICY);
+        let binding = refusal["binding"].as_str().unwrap().to_string();
+        assert!(!binding.is_empty());
+        assert_eq!(refusal["permit_digest"], json!(digest));
+        assert_eq!(refusal["launch_policy"], json!("allow"));
+        assert!(refusal["billing"].is_array());
+        // An approval naming another binding refuses `binding_changed`, with
+        // the resolved binding. `decide` never ran: no challenge was written
+        // and the permit carries no grant.
+        let ctx = ctx.with_approved_binding(format!("{binding}-changed"));
+        let gate = Gate {
+            root: dir.path(),
+            wref: &wref,
+            acknowledge_untrusted: false,
+            supervised: false,
+            launch: &ctx,
+        };
+        let refusal = gate
+            .admit(
+                permit("sha256:definition"),
+                &loaded,
+                "1.0.0",
+                launch::Choice::Current,
+            )
+            .unwrap_err();
+        assert_eq!(refusal["policy"], launch::BINDING_CHANGED);
+        assert_eq!(refusal["binding"], json!(binding));
+        assert!(!dir.path().join(".apb/launch-challenges").exists());
+        // The equal binding is admitted, with no trust acknowledgement (a
+        // rule is never one): the comparison is the one that confirms.
+        let ctx = ctx.with_approved_binding(binding.clone());
+        let gate = Gate {
+            root: dir.path(),
+            wref: &wref,
+            acknowledge_untrusted: false,
+            supervised: false,
+            launch: &ctx,
+        };
+        let admitted = gate.admit(
+            permit("sha256:definition"),
+            &loaded,
+            "1.0.0",
+            launch::Choice::Current,
+        );
+        assert!(admitted.is_ok(), "{:?}", admitted.err());
     }
 }

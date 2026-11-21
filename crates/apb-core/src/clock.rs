@@ -30,6 +30,19 @@ pub fn now_ms_u64() -> u64 {
     since_epoch().as_millis() as u64
 }
 
+/// A wall-clock reading in milliseconds since the Unix epoch, typed so a
+/// caller cannot hand a reading in seconds where milliseconds are meant
+/// (the trigger sweep and its journal times).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Millis(pub u64);
+
+impl Millis {
+    /// Now, from [`now_ms_u64`].
+    pub fn now() -> Self {
+        Millis(now_ms_u64())
+    }
+}
+
 /// Whole seconds since the Unix epoch.
 pub fn now_secs() -> u64 {
     since_epoch().as_secs()

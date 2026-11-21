@@ -29,4 +29,5 @@ pub mod stats;
 pub mod suggestions;
 pub(crate) mod templates;
 pub mod trash;
+pub mod triggers;
 pub mod trust;

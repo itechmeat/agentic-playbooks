@@ -35,12 +35,13 @@ pub const BILLING_ASK: &str = "billing_requires_confirmation";
 pub const BILLING_DENIED: &str = "billing_denied";
 pub const BILLING_STEP: &str = "billing_refused_in_run_step";
 pub const BILLING_ENGINE: &str = "billing_refused_for_engine";
+pub const BILLING_TRIGGER: &str = "billing_refused_for_trigger";
 
 /// Whether `policy` is one of the billing refusal codes.
 pub fn is_billing_refusal(policy: &str) -> bool {
     matches!(
         policy,
-        BILLING_ASK | BILLING_DENIED | BILLING_STEP | BILLING_ENGINE
+        BILLING_ASK | BILLING_DENIED | BILLING_STEP | BILLING_ENGINE | BILLING_TRIGGER
     )
 }
 
@@ -90,6 +91,44 @@ impl BillingCheck {
             self.effective.billed, self.effective.unknown_basis
         )];
         lines.extend(self.predicted.iter().map(BillingEntry::label));
+        lines
+    }
+
+    /// The canonical lines of the full billing decision, for every case
+    /// (`allow`, `ask` and `deny` alike): what an approval binding covers
+    /// (`super::launch::approval_binding`). Unlike [`Self::nonce_lines`],
+    /// never empty: a change between `allow` and `deny` must move the
+    /// binding. In this order: the effective settings, the strictest policy
+    /// any predicted entry falls under, each setting sorted, and each
+    /// predicted entry with the policy it falls under, sorted.
+    pub fn binding_lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            format!(
+                "billing {} {}",
+                self.effective.billed, self.effective.unknown_basis
+            ),
+            format!("required {}", self.required().as_str()),
+        ];
+        let mut sources = self.effective.sources.clone();
+        sources.sort();
+        lines.extend(sources);
+        let mut predicted = self
+            .predicted
+            .iter()
+            .map(|e| {
+                format!(
+                    "{} {}",
+                    e.label(),
+                    self.effective.policy_for(e.basis).as_str()
+                )
+            })
+            .collect::<Vec<_>>();
+        predicted.sort();
+        if predicted.is_empty() {
+            lines.push("predicted none".to_string());
+        } else {
+            lines.extend(predicted);
+        }
         lines
     }
 
@@ -157,6 +196,9 @@ pub(crate) fn refusal(code: &str, check: &BillingCheck, nonce: Option<&str>) -> 
         ),
         BILLING_ENGINE => format!(
             "the engine does not start agent work that is billed or of unknown basis ({held}) without a person's confirmation ({sources}); a person resumes the run"
+        ),
+        BILLING_TRIGGER => format!(
+            "a rule cannot confirm agent work that is billed or of unknown basis ({held}; {sources}); allow the basis in policy.yaml or start the playbook from a terminal"
         ),
         _ => format!(
             "this run would start agent work that is billed or of unknown basis ({held}; {sources}); ask the person whether to start it, then call again with confirm_launch set to the launch_nonce and the same launch_version and launch_choice (CLI: --confirm-launch)"
@@ -413,5 +455,54 @@ mod tests {
                 e.sources
             );
         }
+    }
+
+    #[test]
+    fn binding_lines_differ_for_allow_and_deny() {
+        let entry = BillingEntry {
+            agent: "codex".into(),
+            basis: CostBasis::Unknown,
+        };
+        let check = |billed: LaunchPolicy, unknown: LaunchPolicy| BillingCheck {
+            effective: EffectiveBilling {
+                billed,
+                unknown_basis: unknown,
+                budget_counts_subscription: true,
+                sources: vec!["machine policy.yaml billing.billed".into()],
+            },
+            predicted: vec![entry.clone()],
+        };
+        let allow = check(LaunchPolicy::Allow, LaunchPolicy::Allow);
+        let deny = check(LaunchPolicy::Deny, LaunchPolicy::Deny);
+        assert_eq!(allow.binding_lines()[0], "billing allow allow");
+        assert_eq!(deny.binding_lines()[0], "billing deny deny");
+        assert_eq!(allow.binding_lines()[1], "required allow");
+        assert_eq!(deny.binding_lines()[1], "required deny");
+        assert!(
+            allow
+                .binding_lines()
+                .iter()
+                .any(|l| *l == "codex: unknown allow")
+        );
+        assert!(
+            deny.binding_lines()
+                .iter()
+                .any(|l| *l == "codex: unknown deny")
+        );
+        assert_ne!(allow.binding_lines(), deny.binding_lines());
+        // `nonce_lines` is empty for both: it only covers an `ask`, so a
+        // change between `allow` and `deny` would not move a nonce.
+        assert!(allow.nonce_lines().is_empty());
+        assert!(deny.nonce_lines().is_empty());
+        // An empty prediction is the line `predicted none`.
+        assert_eq!(
+            BillingCheck::nothing(allow.effective.clone()).binding_lines(),
+            vec![
+                "billing allow allow".to_string(),
+                "required allow".to_string(),
+                "machine policy.yaml billing.billed".to_string(),
+                "predicted none".to_string(),
+            ]
+        );
     }
 }

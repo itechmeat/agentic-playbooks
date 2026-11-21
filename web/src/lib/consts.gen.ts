@@ -164,6 +164,12 @@ export const FLAGS_WORDING = "Worth a look"
 /** How a package's own completeness statement is shown. */
 export const COLLECTOR_COMPLETE_WORDING = "the collector says the package is complete"
 
+/** Every code a trigger journal line records. */
+export const TRIGGER_CODES = ['type', 'where', 'own_send', 'key_missing', 'key_not_scalar', 'key_too_long', 'key_invalid', 'param_missing', 'param_not_scalar', 'param_too_long', 'param_pattern_mismatch', 'rate_cap', 'rate_cap_unknown', 'start_key_busy', 'start_key_conflict', 'check_rule', 'binding_changed'] as const
+
+/** The fixed words of each trigger journal code. */
+export const TRIGGER_CODE_WORDS = { type: "the event's type is not one the rule listens for", where: "the event did not pass the rule's where conditions", own_send: "the delivery is this installation's own send", key_missing: "the start key template found nothing in the event", key_not_scalar: "the start key template found a value that is not text", key_too_long: "the rendered start key is too long", key_invalid: "the rendered start key is not a valid start key", param_missing: "a param of the rule found nothing in the event", param_not_scalar: "a param of the rule found a value that is not text", param_too_long: "a rendered param is too long", param_pattern_mismatch: "a rendered param did not match its pattern", rate_cap: "the rule's hourly start cap is reached", rate_cap_unknown: "the hourly cap could not be counted, so the rule starts nothing this pass", start_key_busy: "the start key names a run still being prepared; the event is tried again next pass", start_key_conflict: "the start key names a run started with other params", check_rule: "the rule no longer passes its own checks", binding_changed: "the resolved binding is not the approval's; the approval is revoked" } as const
+
 /** The most terms a run search takes, and the longest value it lists or matches, in characters. */
 export const RUN_SEARCH_MAX_TERMS = 8
 export const RUN_SEARCH_MAX_VALUE_CHARS = 200

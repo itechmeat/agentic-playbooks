@@ -316,6 +316,7 @@ mod tests {
                 sources: vec![],
                 billing: None,
                 started_by: None,
+                triggered_by: None,
             },
             permit_digest: Some("p".into()),
             policy_state: Some("s".into()),

@@ -88,6 +88,7 @@ impl BudgetLimit {
 
 /// A budget passed as a run argument. Each field it sets overrides the
 /// playbook's block.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BudgetRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]

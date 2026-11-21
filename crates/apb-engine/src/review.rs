@@ -1303,24 +1303,12 @@ fn refuse_secret_fields(
 /// keeps it by getting its newline (the drive may already have consumed
 /// it), a partial one is cut (its poster never returned success, so no
 /// caller was told its decision was recorded). Only posters write, under
-/// the lock this runs under.
+/// the lock this runs under. The body is `fsutil::repair_line_tail`, the
+/// repair every JSON-lines appender shares, with the parse of a
+/// `ReviewEntry`.
 fn repair_tail(path: &Path) -> Result<(), EngineError> {
-    let Ok(bytes) = std::fs::read(path) else {
-        return Ok(());
-    };
-    if bytes.is_empty() || bytes.ends_with(b"\n") {
-        return Ok(());
-    }
-    let (_, tail) = split_reviews(&bytes);
-    let mut file = apb_core::fsutil::open_append_private(path)?;
-    if tail.is_some_and(|t| serde_json::from_slice::<ReviewEntry>(t).is_ok()) {
-        file.write_all(b"\n")?;
-    } else {
-        let cut = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-        file.set_len(cut as u64)?;
-    }
-    file.flush()?;
-    Ok(())
+    apb_core::fsutil::repair_line_tail(path, |line| serde_json::from_str::<ReviewEntry>(line).ok())
+        .map_err(EngineError::from)
 }
 
 fn append_decision(

@@ -164,6 +164,33 @@ fn render_types() -> String {
         apb_engine::event::DeadlineSource::decl(&cfg),
         // Runs started from a run step: the starter and the reverse links.
         apb_core::launch::StartedBy::decl(&cfg),
+        // Start rules: the rule a run was started from, and the surfaces
+        // the trigger routes answer with.
+        apb_core::launch::TriggeredBy::decl(&cfg),
+        apb_engine::trigger::view::RuleView::decl(&cfg),
+        apb_core::trigger::LogEntry::decl(&cfg),
+        apb_core::trigger::Verdict::decl(&cfg),
+        apb_core::trigger::ConditionMark::decl(&cfg),
+        apb_core::connector::event_filter::ConditionResult::decl(&cfg),
+        apb_core::connector::event_filter::BodyCondition::decl(&cfg),
+        apb_core::trigger::Rule::decl(&cfg),
+        apb_core::trigger::RulePlaybook::decl(&cfg),
+        apb_core::trigger::RuleScope::decl(&cfg),
+        apb_core::trigger::RuleSource::decl(&cfg),
+        apb_core::trigger::InboxSource::decl(&cfg),
+        apb_core::trigger::RuleLimits::decl(&cfg),
+        apb_core::budget::BudgetRequest::decl(&cfg),
+        crate::routes::triggers::RuleDetail::decl(&cfg),
+        apb_mcp::tools::trigger::ApprovalNeed::decl(&cfg),
+        apb_mcp::tools::trigger::TestReport::decl(&cfg),
+        apb_mcp::tools::trigger::FilterVerdict::decl(&cfg),
+        apb_mcp::tools::trigger::ParamCheck::decl(&cfg),
+        apb_mcp::tools::trigger::KeyReport::decl(&cfg),
+        apb_mcp::tools::trigger::RenderFailure::decl(&cfg),
+        apb_mcp::tools::trigger::KeyUse::decl(&cfg),
+        apb_mcp::tools::trigger::CheckId::decl(&cfg),
+        apb_mcp::tools::trigger::CheckState::decl(&cfg),
+        apb_mcp::tools::trigger::CheckLine::decl(&cfg),
         apb_engine::run_view::StartedRunView::decl(&cfg),
         apb_engine::run_view::StartedRuns::decl(&cfg),
         apb_engine::event::UntrustedNode::decl(&cfg),
@@ -684,6 +711,7 @@ fn render_consts() -> String {
     render_route_consts(&mut out);
     render_close_consts(&mut out);
     render_check_consts(&mut out);
+    render_trigger_consts(&mut out);
     out.push_str(&format!(
         "\n/** The most terms a run search takes, and the longest value it lists or matches, in characters. */\nexport const RUN_SEARCH_MAX_TERMS = {}\nexport const RUN_SEARCH_MAX_VALUE_CHARS = {}\n",
         apb_core::run_search::MAX_TERMS,
@@ -853,6 +881,21 @@ fn render_close_consts(out: &mut String) {
     out.push_str(&format!(
         "\n/** The estimate key version that matches history by profile, skill set and executor; an older snapshot used the profile-only key. */\nexport const ESTIMATE_KEY_VERSION = {}\n",
         apb_engine::run_estimate::ESTIMATE_KEY_VERSION
+    ));
+}
+
+/// The trigger journal's closed set of codes and the fixed words of each,
+/// so the dashboard words a journal line exactly as the CLI does.
+fn render_trigger_consts(out: &mut String) {
+    use apb_engine::trigger::view::CODE_WORDS;
+    let codes: Vec<&str> = CODE_WORDS.iter().map(|(code, _)| *code).collect();
+    out.push_str(&format!(
+        "\n/** Every code a trigger journal line records. */\nexport const TRIGGER_CODES = {}\n",
+        ts_string_array(&codes)
+    ));
+    out.push_str(&format!(
+        "\n/** The fixed words of each trigger journal code. */\nexport const TRIGGER_CODE_WORDS = {{ {} }} as const\n",
+        label_entries(CODE_WORDS.iter().map(|(code, words)| (code.to_string(), *words)))
     ));
 }
 

@@ -100,5 +100,7 @@ mod stats_api_test;
 mod suggestions_api_test;
 #[path = "suite/templates_api_test.rs"]
 mod templates_api_test;
+#[path = "suite/triggers_api_test.rs"]
+mod triggers_api_test;
 #[path = "suite/ws_test.rs"]
 mod ws_test;

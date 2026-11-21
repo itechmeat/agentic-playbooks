@@ -47,6 +47,7 @@
   const loadTrashList = () => import('./pages/TrashList.svelte')
   const loadTrustList = () => import('./pages/TrustList.svelte')
   const loadDiscoverPage = () => import('./pages/DiscoverPage.svelte')
+  const loadTriggerList = () => import('./pages/TriggerList.svelte')
   const loadPasskeysPage = () => import('./pages/Passkeys.svelte')
 
   const dec = decodeSegment
@@ -87,6 +88,7 @@
     if (h === '#/trash') return { ...base, page: 'trash' }
     if (h === '#/trust') return { ...base, page: 'trust' }
     if (h === '#/discover') return { ...base, page: 'discover' }
+    if (h === '#/triggers') return { ...base, page: 'triggers' }
     if (h === '#/passkeys') return { ...base, page: 'passkeys' }
     if (h === '#/profiles') return { ...base, page: 'profiles' }
     if (h === '#/profile-new') return { ...base, page: 'profile-new' }
@@ -160,6 +162,12 @@
   {:catch error}<ChunkError {error} />{/await}
 {:else if route.page === 'discover'}
   {#await loadDiscoverPage()}
+    <ChunkPending />
+  {:then { default: Page }}
+    <Page />
+  {:catch error}<ChunkError {error} />{/await}
+{:else if route.page === 'triggers'}
+  {#await loadTriggerList()}
     <ChunkPending />
   {:then { default: Page }}
     <Page />

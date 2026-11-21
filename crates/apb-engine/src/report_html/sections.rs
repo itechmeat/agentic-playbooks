@@ -167,6 +167,7 @@ pub(super) fn header(w: &Writer, title: &str, report: &Report) -> Markup {
     let concurrency = meta("concurrency", report.concurrency.clone());
     let start_key = meta("start key", report.start_key.clone());
     let started_by = meta("started by", report.started_by.clone());
+    let triggered_by = meta("triggered by", report.triggered_by.clone());
     let started_runs = meta("started runs in this project", report.started_runs.clone());
     let external = if report.external_data {
         Markup::el(
@@ -185,6 +186,7 @@ pub(super) fn header(w: &Writer, title: &str, report: &Report) -> Markup {
         concurrency,
         start_key,
         started_by,
+        triggered_by,
         started_runs,
         external,
     ])

@@ -128,6 +128,53 @@ pub fn carries_exactly(text: &str, marker: &str) -> bool {
     !marker.is_empty() && text.trim_end().ends_with(marker) && text.matches(marker).count() == 1
 }
 
+/// The fixed frame [`render`] writes around the four fields. Kept beside
+/// [`render`], and pinned to it by the round-trip cases of
+/// `trailing_marker_reads_only_the_exact_trailing_marker` below: a change to
+/// the rendered form must change these with it.
+const FRAME_PREFIX: &str = "<!-- apb-intent v1 run=";
+const FRAME_NODE: &str = " node=";
+const FRAME_ATTEMPT: &str = " attempt=";
+const FRAME_NONCE: &str = " nonce=";
+const FRAME_SUFFIX: &str = " -->";
+
+/// The inverse of [`render`]: the fields of the well-formed marker `text`
+/// ends with, or `None`. Well-formed means the exact bytes [`render`] writes
+/// (trailing whitespace ignored) and the rule [`carries_exactly`] applies:
+/// that one marker occurs nowhere else in the text. apb neutralizes the
+/// keyword in every text it stamps before it appends its one marker, so a
+/// second marker of any fields anywhere in the text is a quoted or tampered
+/// text, never a send of apb's own, and reads as `None` too.
+pub fn trailing_marker(text: &str) -> Option<MarkerFields> {
+    let body = text.trim_end();
+    // One keyword occurrence in the whole text: the marker's own. Every
+    // frame holds the keyword, so this makes the frame below unique before
+    // it is looked for.
+    if body.matches(KEYWORD).count() != 1 {
+        return None;
+    }
+    let rest = body.strip_suffix(FRAME_SUFFIX)?;
+    let at = rest.find(FRAME_PREFIX)?;
+    let rest = &rest[at + FRAME_PREFIX.len()..];
+    let (run, rest) = rest.split_once(FRAME_NODE)?;
+    let (node, rest) = rest.split_once(FRAME_ATTEMPT)?;
+    let (attempt, nonce) = rest.split_once(FRAME_NONCE)?;
+    let attempt = match attempt {
+        "-" => None,
+        digits => Some(digits.parse::<u32>().ok()?),
+    };
+    let fields = MarkerFields {
+        run: run.to_string(),
+        node: node.to_string(),
+        attempt,
+        nonce: nonce.to_string(),
+    };
+    // The parse must render back to the exact trailing bytes (a non-canonical
+    // number such as `attempt=02` reads as None), ending the text.
+    let rendered = render(MarkerFormat::HtmlComment, &fields);
+    carries_exactly(text, &rendered).then_some(fields)
+}
+
 /// A fresh nonce: 24 lowercase base32 characters from the first 120 bits of
 /// a random (v4) uuid. Six of those bits are the uuid's fixed version and
 /// variant, so a nonce carries 114 random bits, ample for telling sends
@@ -205,6 +252,65 @@ mod tests {
         assert!(!carries_exactly(&format!("{m} then more"), &m));
         assert!(!carries_exactly(&format!("{m}\n\n{m}"), &m));
         assert!(!carries_exactly("body", &m));
+    }
+
+    /// `trailing_marker` reads only a text that ends with one well-formed
+    /// marker: the exact bytes `render` wrote, trailing whitespace ignored,
+    /// and that one occurrence in the whole text.
+    #[test]
+    fn trailing_marker_reads_only_the_exact_trailing_marker() {
+        let fields = fields();
+        let m = render(MarkerFormat::HtmlComment, &fields);
+
+        // (a) The exact bytes render wrote parse back to the same fields,
+        // with and without an attempt, and on a stamped body.
+        assert_eq!(trailing_marker(&m), Some(fields.clone()));
+        let mut quiet = fields.clone();
+        quiet.attempt = None;
+        assert_eq!(
+            trailing_marker(&render(MarkerFormat::HtmlComment, &quiet)),
+            Some(quiet)
+        );
+        assert_eq!(
+            trailing_marker(&append(Some("Summary."), &m)),
+            Some(fields.clone())
+        );
+
+        // (b) Trailing whitespace is ignored.
+        assert_eq!(trailing_marker(&format!("{m}\n\n  ")), Some(fields.clone()));
+
+        // (c) A marker earlier in the text but not at the end is not read.
+        assert_eq!(trailing_marker(&format!("{m}\nand more text")), None);
+
+        // (d) A marker mid-text plus other trailing text is not read.
+        assert_eq!(trailing_marker(&format!("head {m} tail")), None);
+
+        // (e) Two markers with one at the end: exactly one occurrence.
+        assert_eq!(trailing_marker(&format!("{m}\n\n{m}")), None);
+        let other = MarkerFields {
+            nonce: "zzz".into(),
+            ..fields.clone()
+        };
+        assert_eq!(
+            trailing_marker(&format!(
+                "{}\n{m}",
+                render(MarkerFormat::HtmlComment, &other)
+            )),
+            None
+        );
+
+        // (f) A malformed or tampered marker at the end is not read.
+        assert_eq!(trailing_marker(&m.replace("-->", "--&gt;")), None);
+        assert_eq!(trailing_marker(&neutralize(&m)), None);
+        assert_eq!(
+            trailing_marker("<!-- apb-intent v1 run=r node=n attempt=x nonce=abc -->"),
+            None
+        );
+        assert_eq!(trailing_marker(&m.replace("attempt=2", "attempt=02")), None);
+
+        // (g) No marker at all.
+        assert_eq!(trailing_marker("plain text"), None);
+        assert_eq!(trailing_marker(""), None);
     }
 
     #[test]

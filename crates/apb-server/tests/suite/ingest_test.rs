@@ -309,7 +309,7 @@ async fn an_unknown_connector_or_account_is_a_flat_404() {
 
 /// A connector directory that is itself a symlink resolving outside
 /// `connectors_dir()` must be refused, not read. This is the containment
-/// check `load_connector_doc` restores (mirroring `store::load`'s
+/// check `connector::store::read_doc_contained` restores (mirroring `store::load`'s
 /// defense-in-depth): the name is already a validated `[a-z0-9-]` slug, but a
 /// symlink planted at `connectors_dir()/<name>` could still point anywhere.
 #[cfg(unix)]

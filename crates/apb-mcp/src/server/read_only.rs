@@ -66,6 +66,11 @@ pub const READ_ONLY: &[(&str, ReadOnlyUse)] = &[
     ("agents_detect", ReadOnlyUse::Restricted),
     // `action: get` only.
     ("playbook_memory", ReadOnlyUse::Restricted),
+    // Start rules: the list and the dry test read and write nothing (the
+    // test peeks the start key and writes no key of its own); there is no
+    // write tool, a person changes a rule.
+    ("trigger_list", ReadOnlyUse::Full),
+    ("trigger_test", ReadOnlyUse::Full),
 ];
 
 /// Every other tool of the full server: what starts or controls a run,

@@ -55,6 +55,9 @@ impl From<StoreError> for ProblemsError {
             StoreError::Io(e) => ProblemsError::Io(e),
             // Only a `Refuse` transaction returns it; this store replaces.
             e @ StoreError::Unverified(_) => ProblemsError::Io(io::Error::other(e.to_string())),
+            // This store's file never grows that far through its own
+            // writes; the sentence names the file and the cap.
+            e @ StoreError::TooLarge { .. } => ProblemsError::Io(io::Error::other(e.to_string())),
         }
     }
 }

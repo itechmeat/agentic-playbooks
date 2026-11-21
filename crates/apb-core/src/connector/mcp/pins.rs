@@ -307,6 +307,11 @@ fn load_in(dir: &Path) -> Result<PinStore, PinError> {
         Ok(CappedRead::Refused(ReadRefusal::Link)) => {
             return Err(unreadable("it is a link, which is never followed".into()));
         }
+        Ok(CappedRead::Refused(ReadRefusal::LinkAt { component })) => {
+            return Err(unreadable(format!(
+                "{component} is a link, which is never followed"
+            )));
+        }
         Ok(CappedRead::Refused(ReadRefusal::NotRegular)) => {
             return Err(unreadable("it is not a regular file".into()));
         }

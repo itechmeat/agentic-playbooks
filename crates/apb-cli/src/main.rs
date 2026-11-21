@@ -77,6 +77,7 @@ mod templates;
 // host execution mode (0.23.0)
 mod tasks;
 mod trash;
+mod trigger;
 mod trust;
 mod util;
 mod version;
@@ -621,6 +622,11 @@ enum Command {
     /// evaluates now and exits 3 on hold; a person's `clear`, `mute` and
     /// `unmute`
     Health(crate::health::HealthArgs),
+    /// The start rules of the project (docs/TRIGGERS.md): list, show and
+    /// test them (read-only), and the person's writes: set, approve,
+    /// enable, disable and remove. A mutation is refused inside a run step
+    /// and asks for the rule's name typed at a terminal
+    Trigger(crate::trigger::TriggerArgs),
     /// The Mermaid flowchart of a playbook version (people-in-the-loop D6):
     /// print it, write it with --out, or rewrite the playbook.mmd files
     /// beside every playbook.yaml (--rebuild, --all). Display only: the
@@ -1383,6 +1389,7 @@ fn main() -> ExitCode {
         Some(Command::Discover(args)) => discover::discover_cmd(&root, args),
         // --- 0.23.0 stats (C3) ---
         Some(Command::Health(args)) => health::health_cmd(&root, args),
+        Some(Command::Trigger(args)) => crate::trigger::trigger_cmd(&root, args),
         Some(Command::Diagram(args)) => diagram::diagram_cmd(&root, args),
         Some(Command::Stats {
             playbook,
