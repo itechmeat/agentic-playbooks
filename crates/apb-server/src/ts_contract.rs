@@ -339,6 +339,8 @@ fn render_types() -> String {
         apb_engine::fit::Readiness::decl(&cfg),
         apb_engine::fit::ReadinessItem::decl(&cfg),
         apb_engine::gate::ProbationView::decl(&cfg),
+        // The template gallery: the summaries the templates routes answer.
+        apb_core::templates::TemplateSummary::decl(&cfg),
         // Remembered run input.
         apb_core::run_memory::Incompat::decl(&cfg),
         apb_core::run_memory::InstructionSource::decl(&cfg),

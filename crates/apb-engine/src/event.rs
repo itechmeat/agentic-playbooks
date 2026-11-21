@@ -4197,6 +4197,13 @@ pub(crate) fn parse_lossy_tail(bytes: &[u8]) -> Result<JournalRead, EngineError>
     parse_journal(bytes, true).map_err(Unreadable::into_error)
 }
 
+/// The journal read whole: every line parses (a torn tail is an error once
+/// the append lock shows no writer is mid-line), and the events of unknown
+/// types are skipped and listed, not refused.
+pub(crate) fn read_journal_whole(run_dir: &Path) -> Result<JournalRead, EngineError> {
+    read_journal_with(run_dir, false)
+}
+
 fn read_journal_with(run_dir: &Path, tolerate_torn_tail: bool) -> Result<JournalRead, EngineError> {
     read_journal_snapshot(run_dir, tolerate_torn_tail).map(|(journal, _)| journal)
 }

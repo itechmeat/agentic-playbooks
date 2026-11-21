@@ -206,7 +206,9 @@ engine, mcp, and core <- mcp-client <- engine. Do not introduce import cycles
   (`signed_store.rs`: `SignedDoc`, `read`, `update`, the MAC, the lock and
   the no-clobber write), the corrections ledger
   (`corrections/`: `mod` the types and the fold, `normalize` the key,
-  `store` the `SignedDoc` impl), the follow-up check a playbook reads
+  `store` the `SignedDoc` impl), the template gallery
+  (`templates.rs`: embedded from `examples/playbooks/`, `TemplateSummary`,
+  `install_evals`), the follow-up check a playbook reads
   once after a successful run (`follow_up.rs`, with `validate/follow_up`
   for V183 to V186), the readiness rules a run-alone verdict
   shares (`readiness.rs`: `has_deterministic_check`, the top-level
@@ -744,7 +746,16 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   visit and attempt identity from event order (`identity.rs`), the
   definitions a run executed and the segments they cover
   (`run_definitions.rs`, over the write-once content-addressed run files of
-  `run_store.rs`), the execution identity of an attempt
+  `run_store.rs`), the rule that a run of a global definition never
+  settles, re-decides or patches a project playbook's candidate line
+  (`run_origin::origin_of_events`, the one parse of the origin label,
+  with `scope_of_events` and `scope_of_label` over it for every reader
+  that decides by scope (known problems, concurrency, start keys, the run
+  listing, health, `previous_success`, scenario capture), and
+  `run_scope` with its three answers `RunScope::Project`, `Global` and
+  `Unreadable`, a run whose journal is missing or does not read counting
+  for neither side; `candidate::runs::project_runs_of`, `patch_global_unsupported`,
+  `patch_origin_unreadable`), the execution identity of an attempt
   (`execution_identity/`: `mod` the `ExecStep` on `attempt_started` with
   `entered`, the reason its step was entered, and the binding snapshots
   under `runs/<id>/bindings/`; `close` the close reasons; `fold` every
@@ -893,6 +904,8 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   `corrections` for a playbook's corrections ledger (the list and a
   person's dismiss or reopen; marking a fix is the CLI's and the
   dashboard's),
+  `templates` the one install entry shared with the HTTP API and the CLI
+  (`write_draft` shared with `capture`, refused from a run step),
   `results` for a run's result snapshots (`run_results`, `run_result_read`,
   the raw and live reads and `apb results clean`), `evidence` for
   `run_evidence_read` and `apb evidence read` (a session found by id, a
@@ -925,7 +938,11 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   is replaced only through the plan's `--replace-modified` actions; the MCP tools `setup_plan` and `setup_howto`
   (`docs/AGENT-SETUP.md`) sit over it, applying is CLI only.
 - `apb-cli` - package name `apb` (bin `apb`, `main.rs`); thin dispatch over
-  core/engine/mcp. `apb init` runs a short interactive questionnaire in a
+  core/engine/mcp. `apb run --scope global` starts a global playbook in the
+  current project through the resolved engine starts (`run_resolved`,
+  `start_detached_resolved`, `run_background_resolved`), `--supervise`
+  refused for it (`supervise_global_unsupported`). `apb init` runs a short
+  interactive questionnaire in a
   terminal (feedback-loop consent into CLAUDE.md/AGENTS.md, agent
   subscriptions survey); non-TTY runs skip it, and its flags
   (`--standing-block`, `--feedback-loop`, `--subscriptions`, `--json`)
@@ -935,7 +952,9 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   over `apb_mcp::setup`. `health.rs` is `apb health` (the state, `check`
   with exit 3 on hold, a person's `clear`, `mute` and `unmute`, refused
   inside a run step), `prune.rs` is `apb runs prune` (a dry run unless
-  `--yes`, a person's command). `hook.rs` is `apb hook stop`, Claude Code's Stop
+  `--yes`, a person's command). `templates.rs` is `apb templates
+  list|show|install` (the gallery, one install entry through
+  `apb_mcp::tools::templates`). `hook.rs` is `apb hook stop`, Claude Code's Stop
   hook over `apb_core::save_nudge`, which prints the host's answer or
   nothing and always exits 0. `apb self-update` updates
   installer-based installs in place, then runs the hidden `apb
@@ -988,7 +1007,9 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   (the preview, the terminal question, `--save --yes`).
 - `apb-server` - axum web API: a thin router in `lib.rs`, one module per
   resource in `routes/` (`estimate` for the estimate route and the run and
-  resume budgets, `fit` for the fit report (`?version=` for one version),
+  resume budgets, `templates` for the template gallery and its install,
+  `playbooks` with the `scope` of the playbook list and detail (`origin_of`,
+  shared with `fit`), `fit` for the fit report (`?version=` for one version),
   `graph` for the editor's
   draft validation and the overlay of a run on a version, `memory` for remembered run
   input, `notify` for the machine's notify target and a live run's change,
@@ -1507,8 +1528,8 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   uncovered work pauses the run and only a person's resume adds it (a held
   supervisor is journaled and pauses the run, `hold_for_supervisor`). Tests set `APB_TEST_BILLING_DEFAULT=allow`
   (a `testing` seam) so stand-in agents of unknown basis are not held;
-  the `testing` features of apb-core, apb-engine and apb-decide are a
-  compile error without debug assertions, so no release binary has a seam.
+  the `testing` features of apb-core, apb-engine, apb-mcp and apb-decide
+  are a compile error without debug assertions, so no release binary has a seam.
 - An **operator pause** (issue #200) goes through
   `apb_engine::pause::request_pause`: a live driver gets `Control::Pause`
   (drain: no new node; now: the stop watcher fires a separate pause fanout,

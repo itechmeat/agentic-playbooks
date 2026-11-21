@@ -124,16 +124,13 @@ pub struct RunListing {
 /// The longest start definition a listing reads for search fields.
 const MAX_DEFINITION_BYTES: usize = 1 << 20;
 
-/// `project` or `global`: the run's `run_provenance.origin`, `project`
-/// without one (the only kind before provenance existed).
+/// `project` or `global`: the scope `run_origin::origin_of_events` reads
+/// from the run's `run_provenance`, `project` without a label (the only
+/// kind before provenance existed).
 fn scope_of(events: &[crate::event::Event]) -> String {
-    events
-        .iter()
-        .find_map(|e| match &e.payload {
-            EventPayload::RunProvenance { origin, .. } => origin.clone(),
-            _ => None,
-        })
-        .unwrap_or_else(|| "project".to_string())
+    crate::run_origin::scope_of_events(events)
+        .as_str()
+        .to_string()
 }
 
 /// The run's search fields from its own start definition (the digest its
@@ -386,4 +383,82 @@ fn list_runs_with(
     }
     out.sort_by_key(|(s, _)| std::cmp::Reverse(s.started_ts));
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apb_core::scope::Scope;
+
+    fn journal(lines: &[&str]) -> Vec<crate::event::Event> {
+        lines
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    /// Every reader that decides by a run's scope answers what
+    /// `run_origin::origin_of_events` answers: the known problems store,
+    /// the concurrency slot, this listing's scope and the start key's run
+    /// check, the concurrency run check and the scenario capture, over a
+    /// journal whose first label is unknown and a later one `global`, and
+    /// over one whose first provenance has no label.
+    #[test]
+    fn every_scope_reader_answers_the_one_parser() {
+        let started = r#"{"seq":1,"ts":1,"type":"run_started","playbook":"dup","version":"1.0.0"}"#;
+        let journals = [
+            journal(&[
+                started,
+                r#"{"seq":2,"ts":2,"type":"run_provenance","origin":"weird"}"#,
+                r#"{"seq":3,"ts":3,"type":"run_provenance","origin":"global"}"#,
+            ]),
+            journal(&[
+                started,
+                r#"{"seq":2,"ts":2,"type":"run_provenance"}"#,
+                r#"{"seq":3,"ts":3,"type":"run_provenance","origin":"global"}"#,
+            ]),
+        ];
+        for (i, events) in journals.iter().enumerate() {
+            let want = match crate::run_origin::origin_of_events(events) {
+                crate::run_origin::RunScope::Global => Scope::Global,
+                _ => Scope::Project,
+            };
+            let other = match want {
+                Scope::Global => Scope::Project,
+                Scope::Project => Scope::Global,
+            };
+            assert_eq!(
+                crate::known_problems::started(events).map(|(_, s)| s),
+                Some(want),
+                "journal {i}: known problems"
+            );
+            assert_eq!(
+                crate::concurrency::run_scope_of(events),
+                want,
+                "journal {i}: concurrency"
+            );
+            assert_eq!(scope_of(events), want.as_str(), "journal {i}: listing");
+            assert!(
+                crate::start_key::provenance_names(events, want),
+                "journal {i}: start key names {want:?}"
+            );
+            assert!(
+                !crate::start_key::provenance_names(events, other),
+                "journal {i}: start key does not name {other:?}"
+            );
+            assert!(
+                crate::concurrency::provenance_is(events, want),
+                "journal {i}: concurrency run check names {want:?}"
+            );
+            assert!(
+                !crate::concurrency::provenance_is(events, other),
+                "journal {i}: concurrency run check does not name {other:?}"
+            );
+            assert_eq!(
+                crate::scenario::capture::capture_scope(events),
+                Some(want),
+                "journal {i}: scenario capture"
+            );
+        }
+    }
 }

@@ -139,15 +139,7 @@ impl Report {
             .filter(|_| status == crate::state::RunStatus::Paused)
             .map(crate::pause::PauseInfo::line);
         let concurrency = {
-            let scope = view
-                .events
-                .iter()
-                .find_map(|e| match &e.payload {
-                    crate::event::EventPayload::RunProvenance { origin, .. } => origin.clone(),
-                    _ => None,
-                })
-                .and_then(|o| apb_core::scope::Scope::parse(&o))
-                .unwrap_or(apb_core::scope::Scope::Project);
+            let scope = crate::run_origin::scope_of_events(&view.events);
             crate::run_view::concurrency(
                 root,
                 &run_id,

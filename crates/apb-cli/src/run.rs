@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use apb_core::fsutil::atomic_write;
 use apb_core::registry::{Registry, is_safe_segment};
+use apb_core::scope::{Origin, PlaybookRef};
 use apb_core::validate::{Severity, ValidationContext, validate};
 use apb_engine::control::Control;
 use apb_engine::run_config::CacheRunMode;
@@ -15,6 +16,53 @@ use apb_engine::{
 };
 
 use crate::util::{QUESTION_TEXT_MAX, open_registry, sanitize_for_terminal};
+
+/// A supervised run of a global playbook is refused: the supervised start
+/// crosses a detached spawn with its launch decision bound to the
+/// definition in a handoff file, and MCP does not offer the pair either.
+const SUPERVISE_GLOBAL: &str = "supervise_global_unsupported";
+
+/// The playbook `apb run` was asked for: `name` in `scope`.
+fn playbook_ref(name: &str, version: Option<&str>, scope: &str) -> Result<PlaybookRef, String> {
+    let origin = match apb_core::scope::Scope::parse(scope) {
+        Some(apb_core::scope::Scope::Project) => Origin::Project { workspace_id: None },
+        Some(apb_core::scope::Scope::Global) => Origin::Global,
+        None => return Err("--scope must be project or global".into()),
+    };
+    Ok(PlaybookRef {
+        origin,
+        id: name.to_string(),
+        version: version.map(str::to_string),
+    })
+}
+
+/// What a start of `apb run` runs: a project playbook by its id, or a
+/// global one resolved once at the version the gate selected.
+enum StartTarget {
+    Project,
+    Global(Box<apb_core::store::ResolvedPlaybook>),
+}
+
+/// `wref` at `version`, the version the run gate selected: the one
+/// reference every check after the gate reads.
+fn at_version(wref: &PlaybookRef, version: Option<&str>) -> PlaybookRef {
+    PlaybookRef {
+        version: version.map(str::to_string),
+        ..wref.clone()
+    }
+}
+
+/// The target of `selected` (a reference at the version the run gate
+/// selected). A global playbook is resolved here, once; a resolver error
+/// is the start's error.
+fn start_target(root: &Path, selected: &PlaybookRef) -> Result<StartTarget, String> {
+    match selected.origin {
+        Origin::Project { .. } => Ok(StartTarget::Project),
+        Origin::Global => apb_core::store::resolve(root, selected)
+            .map(|r| StartTarget::Global(Box::new(r)))
+            .map_err(|e| e.to_string()),
+    }
+}
 
 /// Runs the one run gate every launch surface uses
 /// (`apb_engine::gate::check_run`) for a CLI start - foreground `apb run`,
@@ -42,21 +90,16 @@ use crate::util::{QUESTION_TEXT_MAX, open_registry, sanitize_for_terminal};
 /// The grant goes to `opts.launch` with the rest of the permit.
 fn gate_run(
     root: &Path,
-    name: &str,
-    version: Option<&str>,
+    wref: &PlaybookRef,
     supervised: bool,
     opts: &mut RunOptions,
     how: &crate::consent::CliConsent,
     launch: &apb_engine::gate::launch::LaunchContext,
 ) -> Result<(Option<crate::consent::Granted>, Option<String>), String> {
-    let wref = apb_core::scope::PlaybookRef {
-        origin: apb_core::scope::Origin::Project { workspace_id: None },
-        id: name.to_string(),
-        version: version.map(str::to_string),
-    };
+    let version = wref.version.as_deref();
     let refused = |refusal: serde_json::Value| {
         let actions = apb_engine::next_action::start::from_refusal(
-            apb_engine::next_action::start::StartOf::of(&wref),
+            apb_engine::next_action::start::StartOf::of(wref),
             &refusal,
         );
         let launch_refusal = refusal["policy"]
@@ -74,7 +117,7 @@ fn gate_run(
         message
     };
     let permit = crate::launch::with_prompt(launch, |ctx| {
-        apb_engine::gate::check_run(root, &wref, true, supervised, ctx)
+        apb_engine::gate::check_run(root, wref, true, supervised, ctx)
     })
     .map_err(refused)?;
     for w in &permit.launch_warnings {
@@ -457,6 +500,10 @@ fn validate_profile_models(root: &Path, names: &[String]) -> bool {
 #[derive(clap::Args, Debug)]
 pub(crate) struct RunArgs {
     pub name: String,
+    /// Definition scope: project (default) or global; a global playbook
+    /// runs in this project
+    #[arg(long, value_name = "SCOPE", default_value = "project")]
+    pub scope: String,
     #[arg(long)]
     pub version: Option<String>,
     #[arg(long)]
@@ -600,14 +647,13 @@ pub(crate) struct RunArgs {
 /// and prints what was kept and refused (names and reasons, never values).
 fn remember_input(
     root: &Path,
-    name: &str,
+    wref: &PlaybookRef,
     params: &BTreeMap<String, String>,
     instruction: Option<&str>,
 ) {
-    let wref = apb_core::scope::PlaybookRef {
-        origin: apb_core::scope::Origin::Project { workspace_id: None },
-        id: name.to_string(),
+    let wref = PlaybookRef {
         version: None,
+        ..wref.clone()
     };
     let result = apb_mcp::tools::memory::remember_for_ref(root, &wref, params, instruction);
     match result {
@@ -770,11 +816,12 @@ pub(crate) fn start_request(a: &StartRequestArgs<'_>) -> apb_core::start_key::St
 /// foreground, waits for it like `apb wait`; another request is refused).
 fn key_lookup(
     root: &Path,
-    name: &str,
+    wref: &PlaybookRef,
     req: &apb_core::start_key::StartKeyRequest,
     detached: bool,
 ) -> Option<ExitCode> {
-    match apb_engine::start_key::lookup(root, "project", name, req) {
+    let scope = apb_core::scope::origin_scope_label(&wref.origin);
+    match apb_engine::start_key::lookup(root, scope, &wref.id, req) {
         Ok(apb_engine::start_key::Lookup::Free) => None,
         Ok(apb_engine::start_key::Lookup::Started { run_id, .. }) => {
             Some(already_started(root, &run_id, detached))
@@ -833,6 +880,7 @@ fn parse_params(params: Vec<String>) -> Result<BTreeMap<String, String>, String>
 pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
     let RunArgs {
         name,
+        scope,
         version,
         instruction,
         params,
@@ -901,6 +949,26 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
                 return ExitCode::from(2);
             }
         }
+    }
+    // The playbook the command was asked for, and the two scope refusals,
+    // both before any definition is read and before any run or remembered
+    // input is written.
+    let wref = match playbook_ref(&name, version.as_deref(), &scope) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    if supervise && wref.origin == Origin::Global {
+        eprintln!(
+            "run refused ({SUPERVISE_GLOBAL}): a supervised run of a global playbook is not supported; start it without --supervise"
+        );
+        return ExitCode::from(2);
+    }
+    if eval_settings.is_some() && wref.origin == Origin::Global {
+        eprintln!("--eval-settings is only for a project playbook");
+        return ExitCode::from(2);
     }
     let (name, version) = (name.as_str(), version.as_deref());
     // A deadline argument that does not parse is refused before anything.
@@ -1040,7 +1108,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            if let Some(exit) = key_lookup(root, name, &req, detach || supervise) {
+            if let Some(exit) = key_lookup(root, &wref, &req, detach || supervise) {
                 return exit;
             }
             Some(req)
@@ -1066,11 +1134,6 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         },
     };
     if let Err(refusal) = apb_engine::gate::check_unattended(root, &unattended_start) {
-        let wref = apb_core::scope::PlaybookRef {
-            origin: apb_core::scope::Origin::Project { workspace_id: None },
-            id: name.to_string(),
-            version: version.map(str::to_string),
-        };
         let actions = apb_mcp::tools::actions::start_actions(
             apb_engine::next_action::start::StartOf::of(&wref),
             &refusal,
@@ -1101,8 +1164,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
     if estimate {
         return crate::budget::estimate_cmd(
             root,
-            name,
-            version,
+            &wref,
             execution_name,
             budget.as_ref(),
             overrides.as_ref(),
@@ -1149,14 +1211,17 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
             external_data,
             ..Default::default()
         };
-        let (granted, start_version) =
-            match gate_run(root, name, version, true, &mut probe, &how, &launch) {
-                Ok(g) => g,
-                Err(msg) => {
-                    eprintln!("run failed: {msg}");
-                    return ExitCode::from(2);
-                }
-            };
+        // The supervised start crosses a detached spawn bound to the
+        // project playbook: `wref` is a project reference here (a global
+        // one is refused above).
+        let (granted, start_version) = match gate_run(root, &wref, true, &mut probe, &how, &launch)
+        {
+            Ok(g) => g,
+            Err(msg) => {
+                eprintln!("run failed: {msg}");
+                return ExitCode::from(2);
+            }
+        };
         // The child gets the launch decision and the consent in a handoff
         // file (never on argv), with the version and choice this gate made:
         // its own gate makes no draw and must reach the same permit.
@@ -1166,15 +1231,15 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         };
         let requested = version;
         let version = start_version.as_deref();
-        let budget =
-            match crate::budget::prestart(root, name, version, execution_name, budget, None) {
-                Ok(b) => b.budget,
-                Err(e) => {
-                    eprintln!("run failed: {e}");
-                    return ExitCode::from(2);
-                }
-            };
-        if let Err(e) = crate::notify::start_check(root, name, notify.as_ref()) {
+        let selected = at_version(&wref, version);
+        let budget = match crate::budget::prestart(root, &selected, execution_name, budget, None) {
+            Ok(b) => b.budget,
+            Err(e) => {
+                eprintln!("run failed: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        if let Err(e) = crate::notify::start_check(root, &selected, notify.as_ref()) {
             eprintln!("run failed: {e}");
             return ExitCode::from(2);
         }
@@ -1185,7 +1250,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
             return ExitCode::from(2);
         }
         if remember {
-            remember_input(root, name, &parsed, instruction.as_deref());
+            remember_input(root, &wref, &parsed, instruction.as_deref());
         }
         // Background (non-blocking) supervised run: the engine itself spawns
         // a background agent and watches its heartbeat. The drive loop
@@ -1262,7 +1327,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
     opts.start_key = start_key;
     // The consent and the `expected_*` pins come from the run gate
     // (`gate_run`).
-    let start_version = match gate_run(root, name, version, false, &mut opts, &how, &launch) {
+    let start_version = match gate_run(root, &wref, false, &mut opts, &how, &launch) {
         Ok((_, v)) => v,
         Err(msg) => {
             eprintln!("run failed: {msg}");
@@ -1270,18 +1335,14 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
         }
     };
     let version = start_version.as_deref();
+    // The same reference the gate resolved (`gate_run`), at the version
+    // it selected.
+    let selected = at_version(&wref, version);
     // An unattended start warns when the version the gate selected is not
     // ready to run alone: it decides nothing, and the refusal of
     // --require-ready comes from preparation.
-    // The same reference the gate resolved (`gate_run`), at the version
-    // it selected.
     if unattended {
-        let wref = apb_core::scope::PlaybookRef {
-            origin: apb_core::scope::Origin::Project { workspace_id: None },
-            id: name.to_string(),
-            version: version.map(str::to_string),
-        };
-        match apb_engine::fit::assess(root, &wref) {
+        match apb_engine::fit::assess(root, &selected) {
             Ok(report) => {
                 if let Some(d) = apb_engine::fit::not_ready_detail(&report.readiness) {
                     eprintln!(
@@ -1307,8 +1368,7 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
     let host = host && resolved.is_ok_and(|r| r.mode == apb_core::execution::ExecutionMode::Host);
     match crate::budget::prestart(
         root,
-        name,
-        version,
+        &selected,
         execution_name,
         budget,
         opts.overrides.as_ref(),
@@ -1322,39 +1382,71 @@ pub(crate) fn run_cmd(root: &Path, args: RunArgs) -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    if let Err(e) = crate::notify::start_check(root, name, notify.as_ref()) {
+    if let Err(e) = crate::notify::start_check(root, &selected, notify.as_ref()) {
         eprintln!("run failed: {e}");
         return ExitCode::from(2);
     }
     opts.notify = notify;
     if remember {
-        remember_input(root, name, &opts.params, opts.instruction.as_deref());
+        remember_input(root, &selected, &opts.params, opts.instruction.as_deref());
     }
+    // The target of the version the gate selected, resolved once for a
+    // global playbook; a resolver error is the start's error.
+    let target = match start_target(root, &selected) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("run failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
     if detach {
-        return match apb_engine::start_detached(root, name, version, opts) {
-            Err(apb_engine::error::EngineError::AlreadyStarted(id)) => {
-                already_started(root, &id, true)
-            }
-            Ok(run_id) => {
-                println!("run started: {run_id}");
-                print_recalled(root, &run_id);
-                if host {
-                    println!(
-                        "host execution mode: its agent steps wait as host tasks; `apb tasks {run_id}` lists them"
-                    );
-                }
-                ExitCode::SUCCESS
-            }
-            Err(e) => {
-                eprintln!("run failed: {e}");
-                ExitCode::from(2)
-            }
+        let started = match target {
+            StartTarget::Project => apb_engine::start_detached(root, name, version, opts),
+            StartTarget::Global(resolved) => apb_engine::start_detached_resolved(&resolved, opts),
         };
+        return detached_started(root, started, host);
     }
     if host {
-        return run_host_foreground(root, name, version, opts);
+        return run_host_foreground(root, name, version, &target, opts);
     }
-    match run(root, name, version, opts) {
+    let finished = match target {
+        StartTarget::Project => run(root, name, version, opts),
+        StartTarget::Global(resolved) => apb_engine::run_resolved(&resolved, opts),
+    };
+    foreground_finished(root, finished)
+}
+
+/// What a `--detach` start prints and exits with, for either scope.
+fn detached_started(
+    root: &Path,
+    started: Result<String, apb_engine::error::EngineError>,
+    host: bool,
+) -> ExitCode {
+    match started {
+        Err(apb_engine::error::EngineError::AlreadyStarted(id)) => already_started(root, &id, true),
+        Ok(run_id) => {
+            println!("run started: {run_id}");
+            print_recalled(root, &run_id);
+            if host {
+                println!(
+                    "host execution mode: its agent steps wait as host tasks; `apb tasks {run_id}` lists them"
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("run failed: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// What a synchronous start prints and exits with, for either scope.
+fn foreground_finished(
+    root: &Path,
+    finished: Result<apb_engine::scheduler::RunResult, apb_engine::error::EngineError>,
+) -> ExitCode {
+    match finished {
         Err(apb_engine::error::EngineError::AlreadyStarted(id)) => {
             already_started(root, &id, false)
         }
@@ -1385,9 +1477,14 @@ fn run_host_foreground(
     root: &Path,
     name: &str,
     version: Option<&str>,
+    target: &StartTarget,
     opts: RunOptions,
 ) -> ExitCode {
-    let run_id = match apb_engine::run_background(root, name, version, opts) {
+    let started = match target {
+        StartTarget::Project => apb_engine::run_background(root, name, version, opts),
+        StartTarget::Global(resolved) => apb_engine::run_background_resolved(resolved, opts),
+    };
+    let run_id = match started {
         Ok(id) => id,
         Err(apb_engine::error::EngineError::AlreadyStarted(id)) => {
             return already_started(root, &id, false);
@@ -1663,7 +1760,8 @@ pub(crate) fn drive_supervised_child(
         );
         return ExitCode::from(2);
     }
-    let start_version = match gate_run(root, name, version, true, &mut opts, &how, &launch) {
+    let child_wref = playbook_ref(name, version, "project").expect("the project scope parses");
+    let start_version = match gate_run(root, &child_wref, true, &mut opts, &how, &launch) {
         Ok((_, v)) => v,
         Err(msg) => {
             let _ = atomic_write(handshake, format!("ERR: {msg}").as_bytes());
@@ -2236,15 +2334,7 @@ fn run_detail_text(
     }
     // The run's concurrency key, when its start took a slot.
     {
-        let scope = view
-            .events
-            .iter()
-            .find_map(|e| match &e.payload {
-                apb_engine::event::EventPayload::RunProvenance { origin, .. } => origin.clone(),
-                _ => None,
-            })
-            .and_then(|o| apb_core::scope::Scope::parse(&o))
-            .unwrap_or(apb_core::scope::Scope::Project);
+        let scope = apb_engine::run_origin::scope_of_events(&view.events);
         if let Some(v) =
             apb_engine::run_view::concurrency(root, run_id, scope, &playbook, &view.events)
         {

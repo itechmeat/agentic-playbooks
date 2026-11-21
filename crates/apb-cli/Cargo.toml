@@ -37,6 +37,9 @@ libc = "0.2"
 [dev-dependencies]
 # `APB_TEST_BILLING_DEFAULT` in the `apb` the suites spawn.
 apb-core = { path = "../apb-core", features = ["testing"] }
+# The start key's lookup barrier (`start_key::testing`) in the `apb` the
+# suites spawn.
+apb-engine = { path = "../apb-engine", features = ["testing"] }
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
 tempfile = "3.27.0"

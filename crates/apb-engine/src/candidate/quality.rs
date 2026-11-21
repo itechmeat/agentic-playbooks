@@ -59,8 +59,7 @@ enum Runs<'a> {
 /// or hand-made run folder or grade file is left out. Every run of the
 /// playbook is looked at, however many other runs the project has.
 fn side(line: &Line, version: &str, runs: Runs<'_>) -> Side {
-    let dirs: Vec<PathBuf> =
-        crate::run_history::all_runs_of(std::slice::from_ref(&line.root), &line.id, Some(version));
+    let dirs: Vec<PathBuf> = super::runs::project_runs_of(&line.root, &line.id, Some(version));
     let mut out = Side {
         grades: Vec::new(),
         runs: 0,

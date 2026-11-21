@@ -2,15 +2,24 @@
   import { deletePlaybook, fetchPlaybook, fetchPlaybooks, fetchRuns, fetchStats, installDemo } from '../lib/api'
   import { formatDuration } from '../lib/format'
   import { storeDraftYaml, suggestDuplicateId } from '../lib/playbookdupe'
-  import { ALL_PROJECTS, filterByProject, projectFilter } from '../lib/projectfilter'
+  import {
+    ALL_PROJECTS,
+    filterScopedByProject,
+    filterByProject,
+    projectFilter,
+    projectScopeItems,
+  } from '../lib/projectfilter'
   import {
     finishedCount,
     glyphLetter,
+    groupKey,
+    groupLabel,
     healthBadge,
     medianRunTime,
     playbookKey,
     runHistory,
     runsByPlaybook,
+    sortGroups,
     startedToday,
     successRate,
   } from '../lib/playbooklist'
@@ -52,7 +61,9 @@
   const statsFailedAt = new Map<string, number>()
   const STATS_RETRY_MS = 60_000
 
-  const filtered = $derived(filterByProject(items, $projectFilter))
+  // A global playbook is on every project's list (its definition is not a
+  // project's), so the scope-aware filter keeps it under every selection.
+  const filtered = $derived(filterScopedByProject(items, $projectFilter))
   const filteredRuns = $derived(filterByProject(runs, $projectFilter))
   const runsOf = $derived(runsByPlaybook(runs))
 
@@ -61,18 +72,22 @@
   const groups = $derived.by(() => {
     const m = new Map<string, { key: string; project: string; items: PlaybookSummary[] }>()
     for (const w of filtered) {
-      const k = w.workspace_id || '_'
+      const k = groupKey(w)
       if (!m.has(k)) m.set(k, { key: k, project: w.project || 'this project', items: [] })
       m.get(k)!.items.push(w)
     }
-    return [...m.values()].sort((a, b) => a.project.localeCompare(b.project))
+    return sortGroups([...m.values()].map((g) => ({ ...g, project: groupLabel(g.key, g.project) })))
   })
+
+  // The groups of projects: the global group is on every project's list
+  // and is no project, so the count and the label leave it out.
+  const projectGroups = $derived(groups.filter((g) => g.key !== 'global'))
 
   // The project shown in the heading and the top bar: the filtered one, or
   // the only one there is.
   const projectLabel = $derived(
-    groups.length === 1 && ($projectFilter !== ALL_PROJECTS || items.length > 0)
-      ? groups[0].project
+    projectGroups.length === 1 && ($projectFilter !== ALL_PROJECTS || items.length > 0)
+      ? projectGroups[0].project
       : '',
   )
 
@@ -261,7 +276,9 @@
 
   const key = (w: PlaybookSummary) => playbookKey(w.workspace_id, w.id)
   const href = (w: PlaybookSummary) =>
-    `#/playbook/${encodeURIComponent(w.workspace_id)}/${encodeURIComponent(w.id)}`
+    w.scope === 'global'
+      ? `#/global-playbook/${encodeURIComponent(w.id)}`
+      : `#/playbook/${encodeURIComponent(w.workspace_id)}/${encodeURIComponent(w.id)}`
   const runHref = (r: RunSummary) =>
     `#/run/${encodeURIComponent(r.workspace_id)}/${encodeURIComponent(r.run_id)}`
   const fmtTime = (ms: number) => new Date(ms).toLocaleString()
@@ -283,12 +300,12 @@
         {#if projectLabel}<span>project · {projectLabel}</span>{/if}
         {#if loaded}
           <span class="text-muted-foreground">
-            {filtered.length} playbook{filtered.length === 1 ? '' : 's'}{#if groups.length > 1}{` · ${groups.length} projects`}{/if}
+            {filtered.length} playbook{filtered.length === 1 ? '' : 's'}{#if projectGroups.length > 1}{` · ${projectGroups.length} projects`}{/if}
           </span>
         {/if}
       {/snippet}
       {#snippet actions()}
-        <ProjectFilter {items} class="" />
+        <ProjectFilter items={projectScopeItems(items)} class="" />
         <Button href="#/trash" variant="outline" size="sm" class="max-sm:px-2">
           <Trash2 data-icon="inline-start" />
           <span class="max-sm:sr-only">Trash</span>
@@ -394,30 +411,32 @@
                   </div>
                 </div>
 
-                <div
-                  class="relative z-10 col-start-3 row-start-1 flex justify-end gap-0.5 lg:order-last lg:col-start-auto lg:row-start-auto"
-                >
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    onclick={() => duplicate(w)}
-                    title={`Duplicate as ${suggestDuplicateId(w.id)}`}
-                    aria-label="Duplicate"
+                {#if w.scope !== 'global'}
+                  <div
+                    class="relative z-10 col-start-3 row-start-1 flex justify-end gap-0.5 lg:order-last lg:col-start-auto lg:row-start-auto"
                   >
-                    <Copy />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    class="hover:text-destructive"
-                    onclick={() => askRemove(w)}
-                    disabled={deleting === k}
-                    title="Delete"
-                    aria-label="Delete"
-                  >
-                    <Trash2 />
-                  </Button>
-                </div>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onclick={() => duplicate(w)}
+                      title={`Duplicate as ${suggestDuplicateId(w.id)}`}
+                      aria-label="Duplicate"
+                    >
+                      <Copy />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      class="hover:text-destructive"
+                      onclick={() => askRemove(w)}
+                      disabled={deleting === k}
+                      title="Delete"
+                      aria-label="Delete"
+                    >
+                      <Trash2 />
+                    </Button>
+                  </div>
+                {/if}
 
                 <!-- The facts: one wrapped line under the name below lg, grid
                      cells from lg up (`lg:contents`). -->
@@ -439,6 +458,9 @@
                   </span>
                   <!-- Mouse shortcuts to the last runs; out of the tab order (the
                        runs page lists them), so a row is not twelve tab stops. -->
+                  {#if w.scope === 'global'}
+                    <span class="per-project" title="A global playbook's runs are listed per project">runs and statistics are per project</span>
+                  {:else}
                   <span class="relative z-10 flex gap-[3px]" title="Last runs, newest on the right">
                     {#each runHistory(pbRuns) as r, i (r?.run_id ?? `empty-${i}`)}
                       {#if r}
@@ -477,6 +499,7 @@
                   >
                     {#if median}{formatDuration(median.ms)}{:else}<span class="text-muted-foreground">-</span>{/if}
                   </span>
+                  {/if}
                 </div>
               </li>
             {/each}
@@ -517,6 +540,9 @@
     flex-wrap: wrap;
     justify-content: center;
     gap: 8px;
+  }
+  .per-project {
+    color: var(--muted-foreground);
   }
   .demo-note {
     margin: 0;

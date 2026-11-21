@@ -245,7 +245,7 @@ fn embedded(section: &str) -> BTreeMap<String, FileMap> {
 }
 
 /// The files of `files` under `<dir>/`, with that prefix stripped.
-fn sub_tree(files: &FileMap, dir: &str) -> FileMap {
+pub(crate) fn sub_tree(files: &FileMap, dir: &str) -> FileMap {
     let prefix = format!("{dir}/");
     files
         .iter()

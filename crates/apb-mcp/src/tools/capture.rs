@@ -42,6 +42,9 @@ pub enum CaptureOrigin<'a> {
         result: &'a str,
         edited: bool,
     },
+    /// A person installed a template of the gallery: its id and the
+    /// digest of its yaml.
+    Template { id: &'a str, digest: &'a str },
 }
 
 impl CaptureOrigin<'_> {
@@ -59,6 +62,12 @@ impl CaptureOrigin<'_> {
                 "pattern": pattern,
                 "result": result,
                 "edited": edited,
+            }),
+            CaptureOrigin::Template { id, digest } => json!({
+                "created_by": apb_core::templates::CREATED_BY,
+                "title": title,
+                "template": id,
+                "template_digest": digest,
             }),
         }
     }
@@ -144,40 +153,19 @@ pub fn capture_draft(root: &Path, req: CaptureRequest<'_>) -> Result<Value, Tool
         }
     }
 
-    // Draft creation. A Conflict from core -> duplicate_id.
-    let store_origin = if selected_scope == "global" {
-        apb_core::profile_store::PlaybookOrigin::Global
-    } else {
-        apb_core::profile_store::PlaybookOrigin::Project
-    };
-    // A capture offers a definition an agent or a discovery drafted: it may
-    // not declare a looser launch policy than a floor the id kept from an
-    // earlier playbook (`launch_policy_loosened`).
-    let version = match apb_core::versioning::create_draft_in_by(
+    let (version, provenance, _) = match write_draft(
         &parent,
         &id,
         yaml,
-        store_origin,
-        apb_core::launch::floor::SaveChannel::Agent,
-    ) {
-        Ok(v) => v,
-        Err(apb_core::versioning::VersioningError::Conflict(_)) => {
-            return Ok(json!({ "rejected": "duplicate_id", "id": id }));
-        }
-        Err(e) => return Err(ToolError::from(e)),
+        selected_scope == "global",
+        origin,
+        synopsis.get("title").and_then(|t| t.as_str()).unwrap_or(""),
+    )? {
+        // A duplicate_id rejection the capture answers (a possible_duplicate
+        // one was answered before the draft).
+        Err(rejected) => return Ok(rejected),
+        Ok(written) => written,
     };
-
-    // Mark it draft and write provenance. The digest is NOT approved - capture is not a
-    // local approval (spec 8.3).
-    let playbook_dir = parent.join("playbooks").join(&id);
-    apb_core::trust::write_lifecycle(&playbook_dir, apb_core::trust::Lifecycle::Draft)
-        .map_err(|e| ToolError::Engine(e.to_string()))?;
-    let provenance =
-        origin.provenance(synopsis.get("title").and_then(|t| t.as_str()).unwrap_or(""));
-    let _ = apb_core::fsutil::atomic_write(
-        &playbook_dir.join("provenance.json"),
-        provenance.to_string().as_bytes(),
-    );
 
     Ok(json!({
         "id": id,
@@ -187,6 +175,90 @@ pub fn capture_draft(root: &Path, req: CaptureRequest<'_>) -> Result<Value, Tool
         "trusted": false,
         "provenance": provenance,
     }))
+}
+
+/// Writes `yaml` as draft `id` 1.0.0 under `parent` through the agent
+/// channel (a draft never lowers a launch floor), marks it a draft and
+/// writes its provenance. `Ok(Err(value))` is the `duplicate_id` rejection
+/// the capture answers; `Ok(Ok((version, provenance, written)))`
+/// otherwise, `written` saying whether the provenance file was stored.
+/// Refuses a draft write into `parent` (a project's `.apb` or the global
+/// store directory) when a component beneath the store's root is a
+/// symbolic link: its `playbooks` directory or the playbook's own directory
+/// `playbooks/<id>`. A write there would land in whatever store the link
+/// names. The root itself is resolved first (`canonicalize`), so a root a
+/// person links on purpose (a linked config dir or `.apb`), or a link
+/// above it, is followed; beneath it each existing component is read with
+/// `symlink_metadata`. A check before the write, not a write anchored to a
+/// descriptor: a link swapped in after it is not covered.
+pub(crate) fn refuse_linked_store(parent: &Path, id: &str) -> Result<(), ToolError> {
+    // A root that does not exist yet holds nothing beneath it to check.
+    let Ok(root) = std::fs::canonicalize(parent) else {
+        return Ok(());
+    };
+    let playbooks = root.join("playbooks");
+    let own = playbooks.join(id);
+    for path in [playbooks, own] {
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(ToolError::Engine(format!(
+                "store_path_linked: {} is a link; a draft is written only into the store itself",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn write_draft(
+    parent: &Path,
+    id: &str,
+    yaml: &str,
+    global: bool,
+    origin: CaptureOrigin<'_>,
+    title: &str,
+) -> Result<Result<(String, Value, bool), Value>, ToolError> {
+    refuse_linked_store(parent, id)?;
+    let store_origin = if global {
+        apb_core::profile_store::PlaybookOrigin::Global
+    } else {
+        apb_core::profile_store::PlaybookOrigin::Project
+    };
+    // A capture offers a definition an agent or a discovery drafted: it may
+    // not declare a looser launch policy than a floor the id kept from an
+    // earlier playbook (`launch_policy_loosened`).
+    let version = match apb_core::versioning::create_draft_in_by(
+        parent,
+        id,
+        yaml,
+        store_origin,
+        apb_core::launch::floor::SaveChannel::Agent,
+    ) {
+        Ok(v) => v,
+        Err(apb_core::versioning::VersioningError::Conflict(_)) => {
+            return Ok(Err(json!({ "rejected": "duplicate_id", "id": id })));
+        }
+        Err(e) => return Err(ToolError::from(e)),
+    };
+
+    // Mark it draft and write provenance. The digest is NOT approved - capture is not a
+    // local approval (spec 8.3).
+    let playbook_dir = parent.join("playbooks").join(id);
+    apb_core::trust::write_lifecycle(&playbook_dir, apb_core::trust::Lifecycle::Draft)
+        .map_err(|e| ToolError::Engine(e.to_string()))?;
+    let provenance = origin.provenance(title);
+    let write = || {
+        #[cfg(feature = "testing")]
+        if super::install_faults::fails(super::install_faults::Fault::Provenance) {
+            return Err(std::io::Error::other("injected provenance failure"));
+        }
+        apb_core::fsutil::atomic_write(
+            &playbook_dir.join("provenance.json"),
+            provenance.to_string().as_bytes(),
+        )
+    };
+    let written = write().is_ok();
+
+    Ok(Ok((version, provenance, written)))
 }
 
 /// One `suggestion_dismiss` call. `kind` and `scope` are the raw strings the

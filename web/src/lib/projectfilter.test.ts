@@ -6,7 +6,7 @@ import {
   PROJECT_FILTER_KEY,
   createProjectFilterStore,
   filterByProject,
-  filterProfilesByProject,
+  filterScopedByProject,
   nestProjectOptions,
   projectOptions,
   projectScopeItems,
@@ -74,7 +74,7 @@ describe('filterByProject', () => {
   })
 })
 
-describe('filterProfilesByProject', () => {
+describe('filterScopedByProject', () => {
   const items = [
     { workspace_id: 'ws-a', scope: 'project', id: '1' },
     { workspace_id: 'ws-b', scope: 'project', id: '2' },
@@ -82,18 +82,44 @@ describe('filterProfilesByProject', () => {
   ]
 
   it('returns all items for ALL_PROJECTS', () => {
-    expect(filterProfilesByProject(items, ALL_PROJECTS)).toEqual(items)
+    expect(filterScopedByProject(items, ALL_PROJECTS)).toEqual(items)
   })
 
   it('keeps global rows and matching-project rows, drops other projects', () => {
-    expect(filterProfilesByProject(items, 'ws-a')).toEqual([
+    expect(filterScopedByProject(items, 'ws-a')).toEqual([
       { workspace_id: 'ws-a', scope: 'project', id: '1' },
       { workspace_id: '_', scope: 'global', id: '3' },
     ])
   })
 
   it('falls back to all items for an unknown project id', () => {
-    expect(filterProfilesByProject(items, 'ws-gone')).toEqual(items)
+    expect(filterScopedByProject(items, 'ws-gone')).toEqual(items)
+  })
+
+  const row = (id: string, scope?: string, ws = 'w1') =>
+    ({ id, scope, workspace_id: ws })
+
+  it('a selected project keeps global playbooks', () => {
+    const items = [row('a', 'project'), row('g', 'global')]
+    const out = filterScopedByProject(items, 'w1')
+    expect(out.map((r) => r.id)).toEqual(['a', 'g'])
+  })
+
+  it('an entry without a scope counts as a project entry', () => {
+    const items = [row('a', undefined), row('g', 'global')]
+    expect(filterScopedByProject(items, 'w1').map((r) => r.id)).toEqual(['a', 'g'])
+    // An unknown selection among the project rows falls back to every item,
+    // as `filterByProject` always has.
+    expect(filterScopedByProject(items, 'w2').map((r) => r.id)).toEqual(['a', 'g'])
+    const scoped = [row('a', 'project', 'w1'), row('b', undefined, 'w1'), row('g', 'global')]
+    expect(filterScopedByProject(scoped, 'w1').map((r) => r.id)).toEqual(['a', 'b', 'g'])
+  })
+
+  it('a list of global playbooks only offers no project option', () => {
+    const items = [row('g1', 'global'), row('g2', 'global')]
+    expect(projectScopeItems(items)).toEqual([])
+    const mixed = [row('a', 'project'), row('g1', 'global')]
+    expect(projectScopeItems(mixed).map((r) => r.id)).toEqual(['a'])
   })
 })
 

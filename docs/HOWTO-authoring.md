@@ -5832,6 +5832,24 @@ by env or config key name, or a `secret: true` param (see "Secret params").
 Concrete secret-looking values are rejected at capture and should never be
 committed to a definition.
 
+## Starting from a template
+
+The example playbooks apb ships are templates: every one installs as a draft
+in your project, or in the global scope, with its eval scenarios:
+
+```sh
+apb templates list
+apb templates show <id>
+apb templates install <id> [--scope project|global] [--as <other id>]
+```
+
+The dashboard's Templates page installs the same way. A template installs as
+a draft apb approves nothing for: run a trial, or approve it before a normal
+start. The install answer carries the fit report of the new draft and names
+what it still needs (a connector account, a profile); the next commands it
+prints are `apb adopt <id> --scope <scope>` and `apb run <id> --scope
+<scope>`.
+
 ## Sharing a playbook
 
 `apb export <id> --out file.json` writes one version as a bundle: the YAML
@@ -5925,6 +5943,11 @@ global profile counts as different when its own files or the content of a
 skill it uses differ). Once applied, the answer ends with the global
 playbook's fit report for this project (none, with a warning, when it
 cannot be built); a dry run and a blocked run answer with the plan only.
+
+A global playbook is started in any project with `apb run <id> --scope
+global` (also with `--detach`); `--supervise` is refused for it. What the
+start remembers is kept for the global playbook, not for the project one:
+`apb memory show <id> --scope global` shows it.
 
 ## Recurring review findings go into project memory
 

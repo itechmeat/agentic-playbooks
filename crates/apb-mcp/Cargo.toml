@@ -27,8 +27,13 @@ ts-rs = { version = "12", optional = true }
 
 [features]
 ts = ["dep:ts-rs", "apb-engine/ts", "apb-core/ts"]
+# Test-only seams for the integration tests (`tools::install_faults`).
+# Refused at compile time in a build without debug assertions (`lib.rs`).
+testing = []
 
 [dev-dependencies]
+# The crate's own `testing` seams for its integration tests.
+apb-mcp = { path = ".", features = ["testing"] }
 # `apb_core::process_mode::testing`: guard tests in a read-only child process.
 apb-core = { path = "../apb-core", features = ["testing"] }
 apb-decide = { path = "../apb-decide", features = ["testing"] }

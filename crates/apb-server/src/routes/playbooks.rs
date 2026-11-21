@@ -11,17 +11,34 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use serde::Deserialize;
 
+/// The definition origin a `scope` query value names: `project` when
+/// absent. Any other value is 400 "scope must be project or global".
+#[allow(clippy::result_large_err)]
+pub(crate) fn origin_of(
+    scope: Option<&str>,
+) -> Result<apb_core::scope::Origin, axum::response::Response> {
+    match apb_core::scope::Scope::parse(scope.unwrap_or("project")) {
+        Some(apb_core::scope::Scope::Project) => {
+            Ok(apb_core::scope::Origin::Project { workspace_id: None })
+        }
+        Some(apb_core::scope::Scope::Global) => Ok(apb_core::scope::Origin::Global),
+        None => Err((StatusCode::BAD_REQUEST, "scope must be project or global").into_response()),
+    }
+}
+
 /// Serializes a playbook summary and tags it with its owning project, so the
 /// global list can show playbook-to-project affiliation.
 pub(crate) fn tag_summary(
     summary: &PlaybookSummary,
     workspace_id: &str,
     project: &str,
+    scope: &str,
 ) -> serde_json::Value {
     let mut v = serde_json::to_value(summary).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = v.as_object_mut() {
         obj.insert("workspace_id".into(), serde_json::json!(workspace_id));
         obj.insert("project".into(), serde_json::json!(project));
+        obj.insert("scope".into(), serde_json::json!(scope));
     }
     v
 }
@@ -778,7 +795,7 @@ pub(crate) async fn list_playbooks(State(state): State<AppState>) -> impl IntoRe
         };
         let now = apb_core::clock::now_ms_u64();
         for summary in &list {
-            let mut entry = tag_summary(summary, &workspace_id, &project);
+            let mut entry = tag_summary(summary, &workspace_id, &project, "project");
             // Routine health: a watched playbook's state, or one whose
             // state file remains.
             if let Ok(Some(health)) =
@@ -787,6 +804,17 @@ pub(crate) async fn list_playbooks(State(state): State<AppState>) -> impl IntoRe
                 entry["health"] = serde_json::json!(health);
             }
             out.push(entry);
+        }
+    }
+    // The global store is listed once, after the workspace loop: whatever
+    // the number of projects. A store that is missing or does not open adds
+    // nothing, and a global entry carries no health.
+    if let Some(parent) = apb_core::store::global_playbooks_parent()
+        && let Ok(reg) = Registry::open_dir(&parent)
+        && let Ok(list) = reg.list()
+    {
+        for summary in &list {
+            out.push(tag_summary(summary, "", "", "global"));
         }
     }
     Json(out).into_response()
@@ -802,23 +830,17 @@ pub(crate) fn validation_issues(
     root: &std::path::Path,
     version_dir: &std::path::Path,
     playbook: &apb_core::schema::Playbook,
+    origin: apb_core::profile_store::PlaybookOrigin,
 ) -> Vec<apb_core::validate::IssueView> {
-    let ctx =
-        ValidationContext::for_registry(reg, apb_core::profile_store::PlaybookOrigin::Project)
-            .with_child_outputs(playbook, reg);
+    let ctx = ValidationContext::for_registry(reg, origin).with_child_outputs(playbook, reg);
     let mut report = validate(playbook, &ctx);
     report.issues.extend(
-        apb_core::preflight::missing_references(
-            root,
-            apb_core::profile_store::PlaybookOrigin::Project,
-            version_dir,
-            playbook,
-        )
-        .into_iter()
-        .map(|mut i| {
-            i.severity = Severity::Warning;
-            i
-        }),
+        apb_core::preflight::missing_references(root, origin, version_dir, playbook)
+            .into_iter()
+            .map(|mut i| {
+                i.severity = Severity::Warning;
+                i
+            }),
     );
     report.issues.iter().map(Into::into).collect()
 }
@@ -827,6 +849,8 @@ pub(crate) fn validation_issues(
 pub(crate) struct DetailQuery {
     version: Option<String>,
     workspace: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 pub(crate) async fn get_playbook(
@@ -837,13 +861,55 @@ pub(crate) async fn get_playbook(
     if !is_safe_id(&id) {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
-    let root = match resolve_root(&state, q.workspace.as_deref()) {
-        Ok(r) => r,
+    let origin = match origin_of(q.scope.as_deref()) {
+        Ok(o) => o,
         Err(e) => return e,
     };
-    let reg = match Registry::open(&root) {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    let global = match origin {
+        apb_core::scope::Origin::Global => {
+            // A global detail needs no workspace: its store lives in the
+            // config dir, and a missing one is 404.
+            let root = resolve_root_for_scope(&state, q.workspace.as_deref(), "global");
+            let parent = match apb_core::store::global_playbooks_parent() {
+                Some(p) => p,
+                None => return (StatusCode::NOT_FOUND, "not found").into_response(),
+            };
+            let reg = match Registry::open_dir(&parent) {
+                Ok(r) => r,
+                Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+            };
+            Some(match root {
+                Ok(r) => (
+                    r,
+                    reg,
+                    apb_core::profile_store::PlaybookOrigin::Global,
+                    "global",
+                ),
+                Err(e) => return e,
+            })
+        }
+        _ => None,
+    };
+    let (root, reg, playbook_origin, scope) = match global {
+        Some(g) => g,
+        None => {
+            let root = match resolve_root(&state, q.workspace.as_deref()) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            let reg = match Registry::open(&root) {
+                Ok(r) => r,
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+                }
+            };
+            (
+                root,
+                reg,
+                apb_core::profile_store::PlaybookOrigin::Project,
+                "project",
+            )
+        }
     };
     match reg.load(&id, q.version.as_deref()) {
         Ok(loaded) => {
@@ -852,9 +918,11 @@ pub(crate) async fn get_playbook(
                 &root,
                 &reg.version_dir(&id, &loaded.version),
                 &loaded.playbook,
+                playbook_origin,
             );
             Json(serde_json::json!({
                 "id": id,
+                "scope": scope,
                 "version": loaded.version,
                 "yaml": loaded.yaml,
                 "playbook": loaded.playbook,

@@ -38,6 +38,8 @@
   const loadPlaybookEdit = () => import('./pages/PlaybookEdit.svelte')
   const loadRunView = () => import('./pages/RunView.svelte')
   const loadRunList = () => import('./pages/RunList.svelte')
+  const loadGlobalPlaybookView = () => import('./pages/GlobalPlaybookView.svelte')
+  const loadTemplateList = () => import('./pages/TemplateList.svelte')
   const loadProfileList = () => import('./pages/ProfileList.svelte')
   const loadProfileEdit = () => import('./pages/ProfileEdit.svelte')
   const loadConnectorList = () => import('./pages/ConnectorList.svelte')
@@ -77,7 +79,10 @@
     if (h === '#/new') return { ...base, page: 'new' }
     if (h.startsWith('#/edit/')) return { ...base, page: 'edit', ...wsId(h.slice(7)) }
     if (h.startsWith('#/playbook/')) return { ...base, page: 'playbook', ...wsId(h.slice(11)) }
+    if (h.startsWith('#/global-playbook/'))
+      return { ...base, page: 'global-playbook', id: dec(h.slice('#/global-playbook/'.length)) }
     if (h.startsWith('#/run/')) return { ...base, page: 'run', ...wsId(h.slice(6)) }
+    if (h === '#/templates') return { ...base, page: 'templates' }
     if (h.startsWith('#/runs')) return { ...base, page: 'runs' }
     if (h === '#/trash') return { ...base, page: 'trash' }
     if (h === '#/trust') return { ...base, page: 'trust' }
@@ -122,6 +127,18 @@
     <ChunkPending />
   {:then { default: Page }}
     <Page id={route.id} workspace={route.workspace} run={split.focus.run} />
+  {:catch error}<ChunkError {error} />{/await}
+{:else if route.page === 'templates'}
+  {#await loadTemplateList()}
+    <ChunkPending />
+  {:then { default: Page }}
+    <Page />
+  {:catch error}<ChunkError {error} />{/await}
+{:else if route.page === 'global-playbook'}
+  {#await loadGlobalPlaybookView()}
+    <ChunkPending />
+  {:then { default: Page }}
+    <Page id={route.id} />
   {:catch error}<ChunkError {error} />{/await}
 {:else if route.page === 'run'}
   {#await loadRunView()}

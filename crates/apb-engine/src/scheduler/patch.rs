@@ -96,6 +96,16 @@ pub(crate) fn apply_patch(
         return append_patch_rejected(log, "invalid playbook id".into());
     }
 
+    // A candidate lives in a project: a run of a global definition has no
+    // project definition to patch, and the project playbook of the same id
+    // is not the run's. Read from the events already in hand, which the
+    // drive read whole, so the scope is never unknown here.
+    if let Some((code, why)) =
+        crate::run_origin::patch_refusal(crate::run_origin::origin_of_events(&events))
+    {
+        return append_patch_rejected(log, format!("{code}: {why}"));
+    }
+
     let loaded = match Registry::open(root)
         .and_then(|registry| registry.load(&playbook_id, Some(&version)))
     {

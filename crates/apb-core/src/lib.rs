@@ -117,6 +117,7 @@ pub mod stats;
 pub mod step_env;
 pub mod store;
 pub mod template;
+pub mod templates;
 pub mod text;
 pub mod token_shape;
 pub(crate) mod tree_install;

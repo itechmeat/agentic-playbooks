@@ -74,14 +74,7 @@ pub(crate) fn started(events: &[Event]) -> Option<(String, Scope)> {
         EventPayload::RunStarted { playbook, .. } => Some(playbook.clone()),
         _ => None,
     })?;
-    let scope = events
-        .iter()
-        .find_map(|e| match &e.payload {
-            EventPayload::RunProvenance { origin, .. } => origin.as_deref().and_then(Scope::parse),
-            _ => None,
-        })
-        .unwrap_or(Scope::Project);
-    Some((id, scope))
+    Some((id, crate::run_origin::scope_of_events(events)))
 }
 
 /// Adds what the run at `run_dir` (under project `root`) saw to its

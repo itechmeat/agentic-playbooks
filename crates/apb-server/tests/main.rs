@@ -98,5 +98,7 @@ mod secret_runs;
 mod stats_api_test;
 #[path = "suite/suggestions_api_test.rs"]
 mod suggestions_api_test;
+#[path = "suite/templates_api_test.rs"]
+mod templates_api_test;
 #[path = "suite/ws_test.rs"]
 mod ws_test;

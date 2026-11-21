@@ -27,6 +27,8 @@ export interface PlaybookSummary {
   // Owning project (global dashboard). Empty on the pinned-root test server.
   workspace_id: string
   project: string
+  // Definition scope: project (the default an older server implies) or global.
+  scope?: 'project' | 'global'
   // Routine health of a watched playbook; absent without a health block.
   health?: HealthView
 }

@@ -271,17 +271,14 @@ fn about_text(on: &[Transition], finished: &[FinishOutcome]) -> String {
         .join(", ")
 }
 
-/// Prints the warnings of the notify check of a start of project playbook
-/// `playbook`, or refuses the start.
+/// Prints the warnings of the notify check of a start of the playbook
+/// `wref` names, or refuses the start.
 pub(crate) fn start_check(
     root: &Path,
-    playbook: &str,
+    wref: &apb_core::scope::PlaybookRef,
     req: Option<&NotifyRequest>,
 ) -> Result<(), String> {
-    let key = apb_core::policy_file::PlaybookKey {
-        id: playbook,
-        global: false,
-    };
+    let key = apb_core::policy_file::PlaybookKey::of(wref);
     match apb_mcp::tools::notify::start_check(root, Some(&key), req) {
         Ok(warnings) => {
             for w in warnings {

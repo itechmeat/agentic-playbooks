@@ -23,6 +23,7 @@ import type {
 import type {
   FinishOutcome,
   FitReport,
+  TemplateSummary,
   Graded,
   History,
   Moved,
@@ -240,8 +241,8 @@ export const fetchSkills = (scope: string, workspace = '') =>
   )
 
 export const fetchPlaybooks = () => getJson<PlaybookSummary[]>('/api/playbooks')
-export const fetchPlaybook = (id: string, workspace = '', version?: string) =>
-  getJson<PlaybookDetail>(`${pb(id)}${qs({ workspace, version })}`)
+export const fetchPlaybook = (id: string, workspace = '', version?: string, scope?: 'global') =>
+  getJson<PlaybookDetail>(`${pb(id)}${qs({ workspace, version, scope })}`)
 
 // Remembered run input of a playbook in a project (`/memory`): the param
 // values and instruction a start that passes none uses. `scope` names the
@@ -287,6 +288,36 @@ export const clearMemory = (
 // "Will it fit here?": the four-section report of a run in this project.
 export const fetchFit = (id: string, workspace = '', scope?: MemoryScope) =>
   getJson<FitReport>(`${pb(id)}/fit${qs({ workspace, scope })}`)
+
+// The template gallery: the example playbooks apb ships, installed as
+// drafts through one entry the CLI and the dashboard share.
+export const fetchTemplates = () =>
+  getJson<{ templates: TemplateSummary[] }>('/api/templates').then((r) => r.templates)
+export const fetchTemplate = (id: string) =>
+  getJson<{ template: TemplateSummary; yaml: string }>(`/api/templates/${encodeURIComponent(id)}`)
+export const installTemplate = (
+  id: string,
+  body: { scope?: string; as?: string; workspace?: string },
+) =>
+  requestJson<TemplateInstallAnswer>(`/api/templates/${encodeURIComponent(id)}/install`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+    headers: { 'content-type': 'application/json' },
+  })
+
+// The install answer: the draft (or a `rejected` value on a duplicate id).
+export type TemplateInstallAnswer = {
+  id: string
+  version: string
+  scope: string
+  template: string
+  lifecycle: string
+  scenarios: number
+  fit: FitReport | null
+  needs: string[]
+  warnings: string[]
+  rejected?: string
+}
 
 export const fetchRuns = () => getJson<RunSummary[]>('/api/runs')
 // GET /api/runs?search=1&field=name:value: the listing with every run's

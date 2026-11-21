@@ -42,6 +42,14 @@ impl EnvVar {
         unsafe { std::env::set_var(key, value) };
         EnvVar { key, prior }
     }
+
+    /// Unsets `key` for the test, restoring its prior value on drop.
+    pub fn unset(key: &'static str) -> Self {
+        let prior = std::env::var_os(key);
+        // SAFETY: the caller holds ENV_LOCK, so no other test touches the env.
+        unsafe { std::env::remove_var(key) };
+        EnvVar { key, prior }
+    }
 }
 
 impl Drop for EnvVar {

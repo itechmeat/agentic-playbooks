@@ -73,6 +73,7 @@ mod setup;
 mod stats;
 // --- end of 0.23.0 stats ---
 mod suggestions;
+mod templates;
 // host execution mode (0.23.0)
 mod tasks;
 mod trash;
@@ -106,6 +107,7 @@ use crate::serve::{ask_server_cmd, dashboard, dev_cmd, ingest_cmd, mcp_cmd};
 use crate::server::{ServerAction, server_cmd};
 use crate::suggestions::{SuggestionsAction, suggestions_cmd};
 use crate::tasks::{TasksAction, tasks_cmd};
+use crate::templates::{TemplatesArgs, templates_cmd};
 use crate::trash::{TrashAction, trash_cmd};
 use crate::trust::{TrustAction, trust_cmd};
 use crate::util::{resolve_bind, resolve_port};
@@ -244,6 +246,8 @@ enum Command {
         #[command(subcommand)]
         action: SuggestionsAction,
     },
+    /// List, show and install the example playbooks apb ships, as drafts
+    Templates(TemplatesArgs),
     /// List playbooks and versions
     List,
     /// Validate playbooks, the profiles and scripts they reference, profile
@@ -1476,6 +1480,7 @@ fn main() -> ExitCode {
             subscriptions_cmd(set, decline, json)
         }
         Some(Command::Suggestions { action }) => suggestions_cmd(&root, action),
+        Some(Command::Templates(args)) => templates_cmd(&root, args),
         Some(Command::DriveSupervised {
             name,
             version,

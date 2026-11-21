@@ -66,6 +66,12 @@ pub fn build_router(state: AppState) -> Router {
             delete(routes::passkeys::remove_handler),
         )
         .route("/api/projects", get(routes::meta::list_projects_handler))
+        .route("/api/templates", get(routes::templates::get_templates))
+        .route("/api/templates/{id}", get(routes::templates::get_template))
+        .route(
+            "/api/templates/{id}/install",
+            post(routes::templates::post_install),
+        )
         .route(
             "/api/playbooks",
             get(routes::playbooks::list_playbooks).post(routes::playbooks::create_playbook),

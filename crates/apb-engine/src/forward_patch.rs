@@ -26,7 +26,7 @@
 use std::path::Path;
 
 use apb_core::candidate::{CreatedCandidate, ForwardPatch, SCOPE_NEXT_RUNS, create_forward_patch};
-use apb_core::registry::{Registry, is_safe_segment};
+use apb_core::registry::Registry;
 use apb_core::schema::Playbook;
 use apb_core::scope::Origin;
 use apb_core::versioning::list_versions_with_provenance;
@@ -85,12 +85,14 @@ pub fn create(
             format!("`{}` must be `improvement`", req.classification),
         ));
     }
-    if !is_safe_segment(run_id) {
-        return Err(EngineError::NotFound(run_id.to_string()));
-    }
-    let run_dir = root.join(".apb/runs").join(run_id);
-    if !run_dir.is_dir() {
-        return Err(EngineError::NotFound(run_id.to_string()));
+    let run_dir = crate::scheduler::run_dir_of(root, run_id)?;
+    // A candidate lives in a project: a run of a global definition has no
+    // project definition to patch, the project playbook of the same id is
+    // not the run's, and a run of unknown scope is neither.
+    if let Some((code, why)) =
+        crate::run_origin::patch_refusal(crate::run_origin::run_scope(&run_dir))
+    {
+        return Err(refused(code, why));
     }
     // A run that processed external data teaches the next runs nothing.
     crate::external_data::refuse_if_flagged(&run_dir, "a forward patch")?;

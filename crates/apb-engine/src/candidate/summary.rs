@@ -415,7 +415,7 @@ fn digest_of(reg: &Registry, id: &str, version: &str) -> Result<String, String> 
 /// recorded a trust digest other than `digest`: the version's content was
 /// edited in place since that run.
 fn edited_since(root: &Path, id: &str, version: &str, digest: &str) -> Option<(String, String)> {
-    let dirs = crate::run_history::all_runs_of(&[root.to_path_buf()], id, Some(version));
+    let dirs = super::runs::project_runs_of(root, id, Some(version));
     dirs.iter().find_map(|d| {
         let events = crate::run_view::read_events(d).ok()?;
         let ran = events.iter().find_map(|e| match &e.payload {
@@ -817,5 +817,33 @@ mod tests {
         ] {
             assert!(bad.parse::<VersionDigest>().is_err(), "accepted `{bad}`");
         }
+    }
+
+    #[test]
+    fn a_global_run_does_not_mark_the_candidate_edited() {
+        use crate::candidate::runs::testing::{child, seeded_run};
+        child(
+            "candidate::summary::tests::a_global_run_does_not_mark_the_candidate_edited",
+            |root| {
+                seeded_run(root, "dup-p", None, "sha256:d1", false);
+                seeded_run(root, "dup-g", Some("global"), "sha256:d2", false);
+                // The global run carries another digest: it never marks the
+                // project candidate edited.
+                assert_eq!(edited_since(root, "dup", "1.0.0", "sha256:d1"), None);
+            },
+        );
+    }
+
+    #[test]
+    fn a_global_run_with_a_torn_journal_does_not_mark_the_candidate_edited() {
+        use crate::candidate::runs::testing::{child, seeded_run};
+        child(
+            "candidate::summary::tests::a_global_run_with_a_torn_journal_does_not_mark_the_candidate_edited",
+            |root| {
+                seeded_run(root, "dup-p", None, "sha256:d1", false);
+                seeded_run(root, "dup-g", Some("global"), "sha256:d2", true);
+                assert_eq!(edited_since(root, "dup", "1.0.0", "sha256:d1"), None);
+            },
+        );
     }
 }

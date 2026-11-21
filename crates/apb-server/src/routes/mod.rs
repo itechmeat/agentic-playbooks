@@ -27,5 +27,6 @@ pub mod scenario;
 pub mod stats;
 // --- end of 0.23.0 stats ---
 pub mod suggestions;
+pub(crate) mod templates;
 pub mod trash;
 pub mod trust;

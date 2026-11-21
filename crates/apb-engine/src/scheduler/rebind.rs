@@ -85,20 +85,14 @@ pub(crate) fn effective_for_node(
 /// profile exactly as run start resolves node profiles. Absent provenance (old
 /// logs) defaults to project.
 pub(crate) fn run_origin(run_dir: &Path) -> Result<PlaybookOrigin, EngineError> {
-    for event in read_all(run_dir)? {
-        if let EventPayload::RunProvenance {
-            origin: Some(origin),
-            ..
-        } = &event.payload
-        {
-            return Ok(if origin == "global" {
-                PlaybookOrigin::Global
-            } else {
+    Ok(
+        match crate::run_origin::origin_of_events(&read_all(run_dir)?) {
+            crate::run_origin::RunScope::Global => PlaybookOrigin::Global,
+            crate::run_origin::RunScope::Project | crate::run_origin::RunScope::Unreadable => {
                 PlaybookOrigin::Project
-            });
-        }
-    }
-    Ok(PlaybookOrigin::Project)
+            }
+        },
+    )
 }
 
 /// A rebind request handed to the drive loop from a `Control::Rebind`.

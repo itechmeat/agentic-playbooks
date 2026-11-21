@@ -11,6 +11,8 @@ pub mod decision;
 pub mod discover;
 pub mod evidence;
 pub mod grade;
+#[cfg(feature = "testing")]
+pub mod install_faults;
 pub mod intent;
 pub mod judge;
 pub mod memory;
@@ -25,6 +27,7 @@ pub mod scenario;
 pub mod scenario_capture;
 pub mod stats;
 pub mod supervisor;
+pub mod templates;
 pub mod trial;
 
 pub use capture::*;

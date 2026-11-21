@@ -41,10 +41,20 @@ pub struct RunHead {
     pub version: String,
     /// The `run_started` time, Unix milliseconds.
     pub ts: u128,
-    /// The run's origin label from its `run_provenance` (`project` or
+    /// The run's first origin label from its `run_provenance` (`project` or
     /// `global`); `None` on an older journal without provenance, read as
     /// `project` by the scope matching of a history lookup.
     pub origin: Option<String>,
+}
+
+impl RunHead {
+    /// The scope the origin label names (`run_origin::scope_of_label`),
+    /// `None` without a label.
+    pub fn scope(&self) -> Option<apb_core::scope::Scope> {
+        self.origin
+            .as_deref()
+            .map(crate::run_origin::scope_of_label)
+    }
 }
 
 /// The playbook, version and start time a run's journal opens with, read
@@ -108,8 +118,12 @@ pub(crate) fn started_checked(run_dir: &Path) -> Result<Option<RunHead>, &'stati
                     origin: None,
                 });
             }
+            // The first label is the run's, as `run_origin::origin_of_events`
+            // reads it.
             EventPayload::RunProvenance { origin, .. } => {
-                if let Some(h) = &mut head {
+                if let Some(h) = &mut head
+                    && h.origin.is_none()
+                {
                     h.origin = origin;
                 }
             }
@@ -318,6 +332,22 @@ mod tests {
                 let head = super::started_checked(&with).unwrap().unwrap();
                 assert_eq!(head.origin.as_deref(), Some("global"));
                 assert_eq!(head.playbook, "p");
+
+                // Two labels: the first one is the run's, as
+                // `run_origin::origin_of_events` reads it.
+                seed(root, "two", 4, Some(RunOrigin::Production));
+                let two = root.join(".apb/runs/two");
+                for label in ["weird", "global"] {
+                    let line = serde_json::json!({"seq": 2, "ts": 1, "type": "run_provenance", "origin": label});
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(two.join("events.jsonl"))
+                        .unwrap()
+                        .write_all(format!("{line}\n").as_bytes())
+                        .unwrap();
+                }
+                let head = super::started_checked(&two).unwrap().unwrap();
+                assert_eq!(head.origin.as_deref(), Some("weird"));
 
                 // Without provenance: absent reads as None.
                 seed(root, "without", 2, Some(RunOrigin::Production));

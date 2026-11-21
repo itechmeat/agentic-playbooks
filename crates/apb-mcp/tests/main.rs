@@ -106,6 +106,8 @@ mod stats_tool_test;
 mod subplaybook_policy_test;
 #[path = "suite/supervisor_tools_test.rs"]
 mod supervisor_tools_test;
+#[path = "suite/templates_tool_test.rs"]
+mod templates_tool_test;
 #[path = "suite/trial_tools_test.rs"]
 mod trial_tools_test;
 #[path = "suite/write_tools_test.rs"]
