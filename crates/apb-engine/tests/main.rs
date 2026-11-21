@@ -80,9 +80,18 @@ extern "C" fn isolate_config() {
     }) {
         return;
     }
-    // Routine health observes every run end, as the `apb` binary does.
-    apb_engine::health::install();
-    apb_engine::probation::install();
+    // Routine health observes every run end, as the `apb` binary does,
+    // except in the child process of the scenario scripts-mode test, which
+    // installs its own terminal observer. That test, and so its child, is
+    // unix only: elsewhere no process is that child.
+    #[cfg(unix)]
+    let scenario_child = std::env::var_os(list_skip_test::SCENARIO_CHILD).is_some();
+    #[cfg(not(unix))]
+    let scenario_child = false;
+    if !scenario_child {
+        apb_engine::health::install();
+        apb_engine::probation::install();
+    }
     let parent = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
     let _ = std::fs::create_dir_all(parent);
     let created = own_dir(parent, "apb-engine-test-xdg");
@@ -439,6 +448,9 @@ mod list_resume_test;
 mod list_run_test;
 #[path = "suite/list_runs_resilient_test.rs"]
 mod list_runs_resilient_test;
+#[cfg(unix)]
+#[path = "suite/list_skip_test.rs"]
+mod list_skip_test;
 #[path = "suite/loop_edges_test.rs"]
 mod loop_edges_test;
 #[path = "suite/marker_test.rs"]
@@ -609,6 +621,9 @@ mod script_node_test;
 mod script_test;
 #[path = "suite/send_intent_test.rs"]
 mod send_intent_test;
+#[cfg(unix)]
+#[path = "suite/session_fork_test.rs"]
+mod session_fork_test;
 #[cfg(unix)]
 #[path = "suite/session_handoff_test.rs"]
 mod session_handoff_test;

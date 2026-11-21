@@ -252,6 +252,19 @@ pub enum EventPayload {
         )]
         previous_success: Option<PreviousSuccess>,
     },
+    /// The skip set of one list node (`list.skip`), read once at start
+    /// (or once a queued run got its concurrency key, or at the first
+    /// drive that found none). Every visit of the run reads this record,
+    /// never the history. One line per list node with `skip`, all of a
+    /// run's lines in one write, bounded by `LIST_SKIP_MAX_ENTRIES` and
+    /// `LIST_SKIP_MAX_BYTES`. Not a checkpoint: safe to skip up to the
+    /// first `node_finished`; a run that has it carries the `list_skip`
+    /// guard.
+    ListSkipRead {
+        node: String,
+        #[serde(default)]
+        set: crate::list::skip_record::SkipSet,
+    },
     NodeStarted {
         node: String,
         attempt: u32,
@@ -1410,6 +1423,11 @@ pub enum EventPayload {
         warm: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        /// `fork` when the node forked its source's session (warm or
+        /// cold); absent for a continuation and in older journals.
+        /// Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<String>,
     },
     // --- host execution mode (0.23.0) ---
     /// An agent attempt of a host-mode run became a host task (see
@@ -2126,6 +2144,12 @@ pub enum EventPayload {
         parallel: u32,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         reopened: bool,
+        /// Why the visit of a list with `skip` skips nothing, decided once
+        /// when the visit starts and read, never recomputed, by its opening
+        /// steps and their recovery; absent when the visit may skip and for
+        /// every list without `skip`. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skip_refused: Option<String>,
     },
     /// The ids admitted into batch `batch` (from 1) of a list visit. Safe to
     /// skip like `list_started`. Additive variant.
@@ -2168,6 +2192,23 @@ pub enum EventPayload {
         /// visit shows an item what it reported before only then.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         digest: Option<String>,
+        /// The earlier run this item passed in, for an item a `list.skip`
+        /// settled without running it in this visit. A skipped row is
+        /// never carried into a later visit. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skipped_from: Option<String>,
+        /// The skip digest of the item (a `list.skip` compares it): minted
+        /// by a fresh settlement whose step executed in this visit, kept by
+        /// a carried row as it had it, the source's stamp on a skipped row.
+        /// Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skip_digest: Option<String>,
+        /// Why the visit stopped stamping, on the first settlement after a
+        /// skipping list saw the run's scripts copy differ from the pin at
+        /// either end of an item: once per list execution, display only.
+        /// Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skip_latched: Option<String>,
         /// The item snapshot taken for this settlement, with the item's
         /// full output; absent when none was taken. Display and storage
         /// only, read leniently. Additive.
@@ -2966,12 +3007,43 @@ impl EventLog {
         match self.append_lines(
             Build::Plain(Box::new(first)),
             false,
-            Some(Box::new(second)),
+            vec![Box::new(second)],
             Some(Box::new(name)),
+            None,
+            None,
         )? {
             Some(event) => Ok(event),
             None => unreachable!("an unconditional append always writes"),
         }
+    }
+
+    /// Appends every event `build` makes of the journal as it stands under
+    /// the append lock, in one write (nothing when it returns none), and
+    /// syncs them before the lock is released. The general form of
+    /// [`Self::append_pair`] for a decided group: the list skip's sets of
+    /// every node of a run (incremental lists D2), so a crash leaves all or
+    /// none, up to a torn last line. The lock is required, as for
+    /// [`Self::append_decided_synced`]: a journal that cannot be locked
+    /// fails the append before `build` runs, so two racing writers never
+    /// both decide: it is waited for at most `lock_wait`, then the append
+    /// fails with a [`JOURNAL_LOCKED`] conflict. Returns how many events it
+    /// wrote. None of them is a
+    /// checkpoint.
+    pub(crate) fn append_group_decided(
+        &mut self,
+        lock_wait: std::time::Duration,
+        build: impl FnOnce(&[Event]) -> Vec<EventPayload>,
+    ) -> Result<usize, EngineError> {
+        let mut count = 0;
+        let written = self.append_lines(
+            Build::DecidedGroup(Box::new(build)),
+            true,
+            Vec::new(),
+            None,
+            Some(&mut count),
+            Some(lock_wait),
+        )?;
+        Ok(if written.is_some() { count } else { 0 })
     }
 
     /// [`Self::append`] of an event that names its own seq: `name` gets
@@ -2987,8 +3059,10 @@ impl EventLog {
         match self.append_lines(
             Build::Plain(Box::new(payload)),
             false,
-            None,
+            Vec::new(),
             Some(Box::new(name)),
+            None,
+            None,
         )? {
             Some(event) => Ok(event),
             None => unreachable!("an unconditional append always writes"),
@@ -3000,7 +3074,7 @@ impl EventLog {
         build: Build<'_>,
         durable: bool,
     ) -> Result<Option<Event>, EngineError> {
-        self.append_lines(build, durable, None, None)
+        self.append_lines(build, durable, Vec::new(), None, None, None)
     }
 
     #[allow(clippy::type_complexity)]
@@ -3008,30 +3082,39 @@ impl EventLog {
         &mut self,
         build: Build<'_>,
         durable: bool,
-        follow: Option<Box<dyn FnOnce(u64) -> EventPayload + '_>>,
+        follow: Vec<Box<dyn FnOnce(u64) -> EventPayload + '_>>,
         name: Option<Box<dyn FnOnce(&mut EventPayload, u64) + '_>>,
+        written: Option<&mut usize>,
+        lock_wait: Option<std::time::Duration>,
     ) -> Result<Option<Event>, EngineError> {
         apb_core::process_mode::guard()?;
         self.last_append = AppendMark::NotWritten;
         let file = self.file.try_clone()?;
         // A durable decision (a send intent) must not race another writer:
         // without the lock it is refused, and nothing is sent.
-        let lock = if durable {
-            JournalLock::required(&file)?
-        } else {
-            JournalLock::on(&file)
+        let lock = match (durable, lock_wait) {
+            (_, Some(wait)) => JournalLock::required_within(&file, wait)?,
+            (true, None) => JournalLock::required(&file)?,
+            (false, None) => JournalLock::on(&file),
         };
         // Only a decided append re-reads the journal; the drive's own
         // appends stay O(1).
-        let payload = match build {
-            Build::Plain(payload) => *payload,
-            Build::Decided(decide) => {
-                let events = match self.run_dir() {
-                    Some(dir) => read_all_lossy_tail(&dir)?,
-                    None => Vec::new(),
-                };
-                match decide(&events) {
-                    Some(payload) => payload,
+        let read = |log: &Self| -> Result<Vec<Event>, EngineError> {
+            match log.run_dir() {
+                Some(dir) => read_all_lossy_tail(&dir),
+                None => Ok(Vec::new()),
+            }
+        };
+        let (payload, grouped) = match build {
+            Build::Plain(payload) => (*payload, Vec::new()),
+            Build::Decided(decide) => match decide(&read(self)?) {
+                Some(payload) => (payload, Vec::new()),
+                None => return Ok(None),
+            },
+            Build::DecidedGroup(decide) => {
+                let mut group = decide(&read(self)?).into_iter();
+                match group.next() {
+                    Some(first) => (first, group.collect()),
                     None => return Ok(None),
                 }
             }
@@ -3065,15 +3148,26 @@ impl EventLog {
             ts,
             payload,
         };
+        let first_seq = self.next_seq;
         let mut lines = vec![event];
-        // A paired event follows its first in the same write.
-        if let Some(follow) = follow {
+        // A decided group's other events, then a paired event, follow the
+        // first in the same write.
+        for payload in grouped {
+            debug_assert!(!payload.is_checkpoint(), "a grouped event is no checkpoint");
             lines.push(Event {
-                seq: self.next_seq + 1,
+                seq: first_seq + lines.len() as u64,
                 ts,
-                payload: follow(self.next_seq),
+                payload,
             });
         }
+        for follow in follow {
+            lines.push(Event {
+                seq: first_seq + lines.len() as u64,
+                ts,
+                payload: follow(first_seq),
+            });
+        }
+        let group_len = lines.len();
         // While a deferral stays open, a checkpoint is never the journal's
         // last event: its guard follows in the same write, so an apb that
         // cannot honour the deferral refuses to continue the run.
@@ -3118,6 +3212,9 @@ impl EventLog {
             self.run_guard.apply(line.payload.run_guard_requires());
         }
         self.deferrals.set_folded_to(self.known_len);
+        if let Some(written) = written {
+            *written = group_len;
+        }
         let event = lines.swap_remove(0);
         if syncs_before_release(durable, &event.payload) {
             self.file.sync_data()?;
@@ -3247,6 +3344,9 @@ enum Build<'a> {
     Plain(Box<EventPayload>),
     #[allow(clippy::type_complexity)]
     Decided(Box<dyn FnOnce(&[Event]) -> Option<EventPayload> + 'a>),
+    /// A decision that makes several events, written together.
+    #[allow(clippy::type_complexity)]
+    DecidedGroup(Box<dyn FnOnce(&[Event]) -> Vec<EventPayload> + 'a>),
 }
 
 /// An advisory exclusive lock on a run's `events.jsonl` (`flock` on unix),
@@ -3279,6 +3379,41 @@ impl<'a> JournalLock<'a> {
         Ok(JournalLock { file: Some(file) })
     }
 }
+
+impl<'a> JournalLock<'a> {
+    /// [`Self::required`] waited for at most `wait`: a lock another writer
+    /// holds longer, or one the file system cannot take, fails as a
+    /// [`JOURNAL_LOCKED`] conflict, told apart from every other I/O error.
+    pub(crate) fn required_within(
+        file: &'a File,
+        wait: std::time::Duration,
+    ) -> Result<Self, EngineError> {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(JournalLock { file: Some(file) }),
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(EngineError::Conflict(format!(
+                        "{JOURNAL_LOCKED}: another writer held the run journal's lock for longer than {} ms",
+                        wait.as_millis()
+                    )));
+                }
+                Err(std::fs::TryLockError::Error(e)) => {
+                    return Err(EngineError::Conflict(format!(
+                        "{JOURNAL_LOCKED}: the run journal could not be locked: {e}"
+                    )));
+                }
+            }
+        }
+    }
+}
+
+/// The marker of a conflict a journal lock that could not be taken raises
+/// ([`JournalLock::required_within`]).
+pub(crate) const JOURNAL_LOCKED: &str = "journal_locked";
 
 impl Drop for JournalLock<'_> {
     fn drop(&mut self) {

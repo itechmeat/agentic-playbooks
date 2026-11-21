@@ -33,13 +33,14 @@ pub const PILOT_OPTIONS: [&str; 3] = [PILOT_CONTINUE, PILOT_REVISE, PILOT_STOP];
 /// `stop_when.min_settled` when `needs_look_share` is given without it.
 pub const DEFAULT_MIN_SETTLED: u32 = 10;
 /// The fields of a list node's own output, which later nodes read by name.
-pub const LIST_OUTPUT_FIELDS: [&str; 8] = [
+pub const LIST_OUTPUT_FIELDS: [&str; 9] = [
     "total",
     "processed",
     "passed",
     "passed_with_note",
     "needs_look",
     "filtered_out",
+    "skipped",
     "stopped",
     "items",
 ];
@@ -90,7 +91,44 @@ pub struct ListSpec {
     /// End a visit early when too many items need a look (V241).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_when: Option<StopWhen>,
+    /// Items that passed in the previous successful run and are not
+    /// worked again (V283). Absent: every item runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip: Option<ListSkip>,
 }
+
+/// `list.skip`: which earlier run counts, and what makes an item new
+/// again.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListSkip {
+    /// The one earlier run the set is read from.
+    pub passed_in: PassedIn,
+    /// Top-level item fields whose values must be the same as when the
+    /// item passed. Absent: the whole item must be the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unless_changed: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PassedIn {
+    /// The run `run.previous_success` names: the latest earlier
+    /// top-level production run of the playbook in this scope that
+    /// ended succeeded. The one value; a later source is an additive
+    /// value.
+    PreviousSuccess,
+}
+
+/// How many item entries one node's skip set keeps.
+pub const LIST_SKIP_MAX_ENTRIES: usize = 1000;
+/// How many bytes of entries one node's skip set keeps, so its
+/// `list_skip_read` line stays under 200 KiB.
+pub const LIST_SKIP_MAX_BYTES: usize = 192 * 1024;
+/// The most bytes of one item's carried output a skip set keeps: the cap a
+/// list settlement already clips an item's output at, so an output that
+/// was clipped is never carried.
+pub const LIST_SKIP_OUTPUT_MAX_BYTES: usize = 2048;
 
 impl ListSpec {
     /// The names of `item_outputs`, in declaration order.

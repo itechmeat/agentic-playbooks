@@ -14,6 +14,23 @@ use crate::connector::intent::{Ledger, holds_send_open};
 /// beside its state ([`RunListItem::unresolved_send`]), on every surface.
 pub const UNRESOLVED_SEND_TEXT: &str = "earlier send unresolved";
 
+/// What the skip line says after the count of rows a visit took back
+/// (`SkipView.reworked`), for one row and for more: the count is of
+/// take-backs, not of rows worked since.
+pub const SKIP_TAKEN_BACK_ONE: &str = "skipped item taken back because its skip no longer held";
+/// [`SKIP_TAKEN_BACK_ONE`] for more than one row.
+pub const SKIP_TAKEN_BACK_MANY: &str = "skipped items taken back because their skip no longer held";
+
+/// The count of rows taken back with its words, as every surface prints it.
+pub fn skip_taken_back(n: u32) -> String {
+    let words = if n == 1 {
+        SKIP_TAKEN_BACK_ONE
+    } else {
+        SKIP_TAKEN_BACK_MANY
+    };
+    format!("{n} {words}")
+}
+
 /// One list node's visit with its items.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -42,6 +59,11 @@ pub struct RunList {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub stopped: Option<String>,
+    /// The list's skip (`list.skip`): what the run's set holds and how
+    /// many items of the visit it settled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub skip: Option<super::skip_record::SkipView>,
 }
 
 /// One item of a [`RunList`].
@@ -74,6 +96,11 @@ pub struct RunListItem {
     #[serde(skip)]
     #[cfg_attr(feature = "ts", ts(skip))]
     pub check_rejected: bool,
+    /// The earlier run it passed in, for an item a `list.skip` settled
+    /// without running it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub skipped_from: Option<String>,
 }
 
 /// A list node's counts, for the progress summary.
@@ -86,6 +113,10 @@ pub struct ListProgress {
     pub passed: u32,
     pub needs_look: u32,
     pub running: u32,
+    /// Items a `list.skip` settled (they count in `passed` too).
+    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
+    pub skipped: u32,
     /// The visit's pilot, when the list runs one.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
@@ -94,6 +125,34 @@ pub struct ListProgress {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub stopped: Option<String>,
+}
+
+/// The skip view of one node for the run surfaces: `None` when the node
+/// skipped nothing and the run journaled no set for it.
+pub fn skip_view(
+    fold: &ListFold,
+    set: Option<&super::skip_record::SkipSet>,
+) -> Option<super::skip_record::SkipView> {
+    let skipped = fold.counts().skipped;
+    if skipped == 0 && set.is_none() {
+        return None;
+    }
+    Some(super::skip_record::SkipView {
+        skipped,
+        read_items: set.map_or(0, |s| s.items.len() as u32),
+        source: set.and_then(|s| s.source.clone()),
+        truncated: set.is_some_and(|s| s.truncated),
+        refused: set
+            .and_then(|s| s.refused.clone())
+            .or_else(|| fold.skip_refused.clone()),
+        not_inherited: set.map_or(0, |s| s.not_inherited),
+        stopped_stamping: fold.skip_latched.clone(),
+        reworked: fold.skip_reworked,
+    })
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl RunList {
@@ -134,6 +193,7 @@ impl RunList {
                 .collect(),
             pilot: PilotView::of(fold),
             stopped: fold.stopped.as_ref().map(|(_, d)| d.clone()),
+            skip: skip_view(fold, None),
         }
     }
 }
@@ -180,6 +240,7 @@ impl RunListItem {
             reason: r.reason.clone(),
             attempts: r.attempts,
             check_rejected: r.check_rejected,
+            skipped_from: r.skipped_from.clone(),
         }
     }
 }
@@ -195,6 +256,7 @@ impl ListProgress {
             passed: c.passed,
             needs_look: c.needs_look,
             running: c.running,
+            skipped: c.skipped,
             pilot: PilotView::of(fold),
             stopped: fold.stopped.as_ref().map(|(_, d)| d.clone()),
         }
@@ -298,8 +360,14 @@ pub fn run_lists(
     nodes
         .into_iter()
         .filter_map(|(id, title)| {
-            ListFold::of(events, id)
-                .map(|f| RunList::with_open_sends(&f, title, &open_send_items(&ledger, id, now_ms)))
+            ListFold::of(events, id).map(|f| {
+                let mut list =
+                    RunList::with_open_sends(&f, title, &open_send_items(&ledger, id, now_ms));
+                // The run's journaled set, beside what the fold alone says.
+                let set = super::ledger::recorded_skip_set(events, id);
+                list.skip = skip_view(&f, set.as_ref());
+                list
+            })
         })
         .collect()
 }

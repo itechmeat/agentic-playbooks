@@ -112,11 +112,14 @@ pub(super) fn run_batches(run: &ListRun<'_, '_, '_>) -> Result<End, EngineError>
     }
     let events = read_all(run.ctx.run_dir)?;
     let fold = ListFold::of(&events, &run.node.id).unwrap_or_default();
-    let outside = fold
+    // The early stop judges the items worked: never the pilot slice a
+    // person read, nor an item a skip settled.
+    let mut outside = fold
         .pilot
         .as_ref()
         .map(|p| p.items.clone())
         .unwrap_or_default();
+    outside.extend(fold.skipped_ids());
     let stop = run
         .spec
         .stop_when
@@ -209,8 +212,13 @@ fn stop_when_holds(
         return Ok(None);
     };
     let events = read_all(run.ctx.run_dir)?;
-    let fold = ListFold::of(&events, &run.node.id).unwrap_or_default();
-    let c = fold.counts_excluding(&rule.outside);
+    let mut fold = ListFold::of(&events, &run.node.id).unwrap_or_default();
+    // The excluded ids are taken out of the fold's item map by key, so a
+    // long skip list costs one lookup per id, never a scan per row.
+    for id in &rule.outside {
+        fold.items.remove(id);
+    }
+    let c = fold.counts();
     Ok(rule.when.holds(c.processed, c.needs_look))
 }
 
@@ -363,6 +371,9 @@ fn run_item(run: &ListRun<'_, '_, '_>, fold: &ListFold, id: &str) -> Result<Ran,
         .item(id)
         .ok_or_else(|| EngineError::Invalid(format!("list item `{id}` is not in the visit")))?;
     let ordinal = run.items.iter().position(|i| i.id == id).unwrap_or(0) + 1;
+    // The scripts as the item's work starts: a copy another item rewrote
+    // latches the visit, so this item's settlement stamps nothing.
+    run.scripts_held();
     let files = run.files(item, None)?;
     // The reviewer's note of a revised pilot: every later item run of the
     // visit is told it, the slice it revises included.
@@ -388,6 +399,9 @@ fn run_item(run: &ListRun<'_, '_, '_>, fold: &ListFold, id: &str) -> Result<Ran,
         outputs: run.spec.item_outputs.clone(),
         checked: run.spec.check.is_some(),
         file: files.item,
+        // An item of a skip visit runs with the visit's resolved execution,
+        // the value its stamp's work is computed from.
+        exec: run.spec.skip.as_ref().and_then(|_| run.execution().ok()),
     };
     let journal = run.ctx.journal.for_item(Some(id));
     let ctx = NodeCtx {
@@ -497,6 +511,9 @@ fn finished(
         round: rec.round,
         check: kind,
         ran: Some((status, output)),
+        check_decided: checked
+            .as_ref()
+            .is_some_and(|c| c.verdict.is_some() && !c.fallback),
         ..Settlement::default()
     };
     let digest = run.item(id).map(|i| i.digest.as_str());

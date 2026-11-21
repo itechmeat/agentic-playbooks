@@ -89,6 +89,15 @@ pub(crate) fn execute(
         root: super::judge::cfg_root(ctx.run_dir),
         spawn_env: ctx.cfg.spawn_env(),
         earlier: None,
+        skip_allowed: std::sync::atomic::AtomicBool::new(false),
+        work: std::sync::OnceLock::new(),
+        pin: std::sync::OnceLock::new(),
+        stamp_block: std::sync::OnceLock::new(),
+        scripts_diverged: std::sync::atomic::AtomicBool::new(false),
+        latch_journaled: std::sync::atomic::AtomicBool::new(false),
+        execution: std::sync::OnceLock::new(),
+        pins_diverged: std::sync::atomic::AtomicBool::new(false),
+        runtimes_diverged: std::sync::atomic::AtomicBool::new(false),
     };
     let events = open_visit(&run, loaded.filtered_out)?;
     // Under `rerun: not_passed` an item run again in a later visit is told
@@ -140,13 +149,35 @@ fn open_visit(run: &ListRun<'_, '_, '_>, filtered_out: u32) -> Result<Vec<Event>
         // first batch or pilot slice may have left the opening steps
         // undone: they are completed before anything runs, against the
         // journal as the first pass read it.
+        run.skip_allowed.store(
+            run.spec.skip.is_some() && same.is_some_and(|f| f.skip_refused.is_none()),
+            std::sync::atomic::Ordering::SeqCst,
+        );
         complete_opening(run, &events)?;
+        recheck_skipped(run)?;
         let events = read_all(run.ctx.run_dir)?;
         settle_too_large(run, ListFold::of(&events, node).as_ref())?;
         return read_all(run.ctx.run_dir);
     }
     let reopen = same.is_some_and(|f| retried_after_failure(&events, node, f.started_seq));
     let sends = sends::ItemSends::of(&events, node);
+    // A new visit of a list with `skip` decides once, on the state at its
+    // start, whether it skips; its opening steps and their recovery read
+    // the decision from its `list_started`. A reopen keeps its visit's.
+    let skip_refused = if run.spec.skip.is_some() && !reopen {
+        skip_decision(run, &events)?
+    } else {
+        None
+    };
+    run.skip_allowed.store(
+        run.spec.skip.is_some()
+            && if reopen {
+                same.is_some_and(|f| f.skip_refused.is_none())
+            } else {
+                skip_refused.is_none()
+            },
+        std::sync::atomic::Ordering::SeqCst,
+    );
     run.ctx.journal.append(EventPayload::ListStarted {
         node: node.clone(),
         total: run.items.len() as u32,
@@ -155,11 +186,156 @@ fn open_visit(run: &ListRun<'_, '_, '_>, filtered_out: u32) -> Result<Vec<Event>
         batch_size: run.spec.batch.size.max(1),
         parallel: run.workers as u32,
         reopened: reopen,
+        skip_refused: skip_refused.clone(),
     })?;
-    opening_steps(run, reopen, fold.as_ref(), &sends, &BTreeSet::new())?;
+    let set = crate::list::skip::recorded(&events, node);
+    opening_steps(
+        run,
+        reopen,
+        fold.as_ref(),
+        &sends,
+        &BTreeSet::new(),
+        Skip {
+            set: set.as_ref(),
+            refused: skip_refused.as_deref(),
+        },
+    )?;
+    if reopen {
+        recheck_skipped(run)?;
+    }
     let events = read_all(run.ctx.run_dir)?;
     settle_too_large(run, ListFold::of(&events, node).as_ref())?;
     Ok(events)
+}
+
+/// A skipped row is valid only under the work it was skipped with. When a
+/// visit is continued (a resume, a drive after a crash) or reopened (a
+/// supervisor retry after a patch or a rebind), every row the visit holds
+/// as skipped is checked again: when the visit may not hold skips at all
+/// ([`visit_refusal`], the one rule a new visit is decided on too), every
+/// skipped row goes back to pending with that refusal's reason
+/// (`skip_supervisor_note` for a note in force, else
+/// `skip_config_changed`); otherwise a row whose skip digest no longer
+/// matches the work as this execution resolves it goes back to pending
+/// with `skip_config_changed`. Rows the visit actually worked are left as
+/// they are, as on main.
+fn recheck_skipped(run: &ListRun<'_, '_, '_>) -> Result<(), EngineError> {
+    use crate::list::skip as s;
+    if run.spec.skip.is_none() {
+        return Ok(());
+    }
+    let events = read_all(run.ctx.run_dir)?;
+    let Some(fold) = ListFold::of(&events, &run.node.id) else {
+        return Ok(());
+    };
+    let refused = visit_refusal(run, &events).map(|(reason, _)| reason);
+    let work = run.work();
+    for (id, rec) in &fold.items {
+        if rec.skipped_from.is_none() || rec.state != Some(ItemState::Passed) {
+            continue;
+        }
+        let holds = refused.is_none()
+            && match (&work, run.item(id)) {
+                (Ok(w), Some(item)) => {
+                    rec.skip_digest.as_deref()
+                        == Some(s::skip_digest(id, &run.item_part(item), w).as_str())
+                }
+                _ => false,
+            };
+        if !holds {
+            run.settle(Settlement {
+                id,
+                state: settled::INTERRUPTED,
+                reason: Some(refused.unwrap_or(s::SKIP_CONFIG_CHANGED)),
+                round: rec.round,
+                ..Settlement::default()
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Why a new visit of a list with `skip` skips nothing, decided on the
+/// state at its start: the set's refusal, then [`visit_refusal`]. `None`:
+/// the visit may skip. A node with no recorded set refuses the visit.
+fn skip_decision(
+    run: &ListRun<'_, '_, '_>,
+    events: &[Event],
+) -> Result<Option<String>, EngineError> {
+    use crate::list::skip;
+    let Some(set) = skip::recorded(events, &run.node.id) else {
+        return Err(no_set(run));
+    };
+    if let Some(refused) = set.refused {
+        return Ok(Some(refused));
+    }
+    Ok(visit_refusal(run, events).map(|(_, why)| why))
+}
+
+/// The one rule whether a visit may hold skips, on the journal as it
+/// stands, for a new visit ([`skip_decision`]) and a continued or reopened
+/// one ([`recheck_skipped`]) alike: a field `unless_changed` names that no
+/// item has, the work that does not read, scripts that differ from the
+/// pin, a supervisor note in force. `Some((reason, why))`: the visit may
+/// not, with the settlement reason a retained skipped row goes back to
+/// pending with and the sentence a new visit records.
+fn visit_refusal(run: &ListRun<'_, '_, '_>, events: &[Event]) -> Option<(&'static str, String)> {
+    use crate::list::skip;
+    let changed = |why: String| Some((skip::SKIP_CONFIG_CHANGED, why));
+    // A field `unless_changed` names that no item of the visit has (a
+    // misspelled name) would make every item's part constant: the visit
+    // skips nothing.
+    if let Some(fields) = run
+        .spec
+        .skip
+        .as_ref()
+        .and_then(|s| s.unless_changed.as_ref())
+        && let Some(f) = fields
+            .iter()
+            .find(|f| !run.items.iter().any(|i| i.value.get(f.as_str()).is_some()))
+    {
+        return changed(format!(
+            "{}: no item of the visit has the field `{f}` unless_changed names, so every item works",
+            skip::UNLESS_CHANGED_ABSENT
+        ));
+    }
+    if let Err(why) = run.work() {
+        return changed(why);
+    }
+    if !run.scripts_pinned() {
+        return changed(format!(
+            "{}: the run's scripts copy differs from the one pinned at start, so every item works",
+            skip::SCRIPTS_CHANGED
+        ));
+    }
+    if !crate::context::applied_supervisor_notes(events).is_empty() {
+        return Some((
+            skip::SUPERVISOR_NOTE,
+            format!(
+                "{}: a supervisor note is in force, so every item works",
+                skip::SUPERVISOR_NOTE
+            ),
+        ));
+    }
+    None
+}
+
+/// The refusal of a visit of a node that declares `skip` and has no
+/// recorded set.
+fn no_set(run: &ListRun<'_, '_, '_>) -> EngineError {
+    EngineError::Invalid(format!(
+        "{}: node {} declares skip and the run recorded no skip set for it; start a new run",
+        crate::list::skip::INCOMPLETE,
+        run.node.id
+    ))
+}
+
+/// A visit's skip as its opening steps read it: the run's recorded set and
+/// the visit's recorded refusal.
+#[derive(Clone, Copy)]
+struct Skip<'s> {
+    set: Option<&'s crate::list::skip::SkipSet>,
+    refused: Option<&'s str>,
 }
 
 /// The opening steps of a visit, right after its `list_started`: a
@@ -174,18 +350,89 @@ fn opening_steps(
     previous: Option<&ListFold>,
     sends: &sends::ItemSends,
     done: &BTreeSet<String>,
+    skip: Skip<'_>,
 ) -> Result<(), EngineError> {
     if reopen {
         if let Some(previous) = previous {
             requeue_for_retry(run, previous, sends, done)?;
         }
     } else {
+        let mut carried = BTreeSet::new();
         if run.spec.rerun == RerunPolicy::NotPassed
             && let Some(previous) = previous
         {
-            carry_passed(run, previous, done)?;
+            carried = carry_passed(run, previous, done)?;
+        }
+        if run.spec.skip.is_some() {
+            skip_passed(run, skip, sends, done, &carried)?;
         }
         park_unknown_sends(run, sends, done)?;
+    }
+    Ok(())
+}
+
+/// A new visit of a list with `skip`: every item of the run's recorded set
+/// whose skip digest still matches is settled passed without running, with
+/// the earlier run it passed in. Nothing when the visit's start recorded a
+/// refusal. The scripts pin is checked right before the settlements: a
+/// difference fails the visit and no item is settled as skipped.
+fn skip_passed(
+    run: &ListRun<'_, '_, '_>,
+    skip: Skip<'_>,
+    sends: &sends::ItemSends,
+    done: &BTreeSet<String>,
+    carried: &BTreeSet<String>,
+) -> Result<(), EngineError> {
+    use crate::list::skip as s;
+    let Some(set) = skip.set else {
+        return Err(no_set(run));
+    };
+    if skip.refused.is_some() {
+        return Ok(());
+    }
+    let Ok(work) = run.work() else {
+        return Ok(());
+    };
+    // A skipped item carries the output its source settlement recorded
+    // (the set holds it, read on the one read the set came from), or none
+    // when the source item produced none.
+    let skipped: Vec<(&str, &String, Option<&String>)> = run
+        .items
+        .iter()
+        .filter(|item| {
+            !done.contains(&item.id)
+                && !carried.contains(&item.id)
+                && sends.unknown(run.key(&item.id)).is_none()
+        })
+        .filter_map(|item| {
+            let entry = set.items.get(&item.id)?;
+            let output = set.outputs.get(&item.id);
+            (s::skip_digest(&item.id, &run.item_part(item), &work) == *entry).then_some((
+                item.id.as_str(),
+                entry,
+                output,
+            ))
+        })
+        .collect();
+    if skipped.is_empty() {
+        return Ok(());
+    }
+    if !run.scripts_pinned() {
+        return Err(EngineError::Invalid(format!(
+            "{}: the run's scripts copy changed before the skip settlements were written",
+            s::SCRIPTS_CHANGED_FAIL
+        )));
+    }
+    for (id, entry, output) in skipped {
+        run.settle(Settlement {
+            id,
+            state: settled::PASSED,
+            carried: true,
+            output: output.cloned(),
+            skipped_from: set.source.clone(),
+            skip_digest: Some(entry.clone()),
+            ..Settlement::default()
+        })?;
     }
     Ok(())
 }
@@ -219,14 +466,30 @@ fn complete_opening(run: &ListRun<'_, '_, '_>, events: &[Event]) -> Result<(), E
             _ => {}
         }
     }
-    let reopen = matches!(
-        &events[at].payload,
-        EventPayload::ListStarted { reopened: true, .. }
-    );
+    let (reopen, refused) = match &events[at].payload {
+        EventPayload::ListStarted {
+            reopened,
+            skip_refused,
+            ..
+        } => (*reopened, skip_refused.clone()),
+        _ => (false, None),
+    };
     let before = &events[..at];
     let previous = ListFold::of(before, node);
     let sends = sends::ItemSends::of(before, node);
-    opening_steps(run, reopen, previous.as_ref(), &sends, &done)
+    // The visit's skip decision as its start recorded it, never recomputed.
+    let set = crate::list::skip::recorded(events, node);
+    opening_steps(
+        run,
+        reopen,
+        previous.as_ref(),
+        &sends,
+        &done,
+        Skip {
+            set: set.as_ref(),
+            refused: refused.as_deref(),
+        },
+    )
 }
 
 /// Whether a supervisor retried `node` after the visit starting at `seq`
@@ -302,14 +565,17 @@ fn park_unknown_sends(
     Ok(())
 }
 
-/// `rerun: not_passed`: items that passed in the previous visit with the
-/// same content are carried over as passed. One whose recorded content
-/// digest is missing or different runs again.
+/// `rerun: not_passed`: items that were worked and passed in the previous
+/// visit with the same content are carried over as passed. One whose
+/// recorded content digest is missing or different runs again, and a row a
+/// skip settled is never carried: each visit decides it again. Returns the
+/// ids it carried; a carried row keeps the skip digest it had.
 fn carry_passed(
     run: &ListRun<'_, '_, '_>,
     previous: &ListFold,
     done: &BTreeSet<String>,
-) -> Result<(), EngineError> {
+) -> Result<BTreeSet<String>, EngineError> {
+    let mut carried = BTreeSet::new();
     for item in &run.items {
         if done.contains(&item.id) {
             continue;
@@ -318,6 +584,7 @@ fn carry_passed(
             continue;
         };
         if rec.state != Some(ItemState::Passed)
+            || rec.skipped_from.is_some()
             || rec.digest.as_deref() != Some(item.digest.as_str())
         {
             continue;
@@ -334,10 +601,14 @@ fn carry_passed(
             carried: true,
             check: None,
             digest: Some(item.digest.clone()),
+            skipped_from: None,
+            skip_digest: rec.skip_digest.clone(),
+            skip_latched: None,
             result: None,
         })?;
+        carried.insert(item.id.clone());
     }
-    Ok(())
+    Ok(carried)
 }
 
 /// Items too large to hand a step need a look before they ever run.
@@ -376,13 +647,17 @@ fn compose(run: &ListRun<'_, '_, '_>) -> Result<AttemptOutcome, EngineError> {
                 .as_deref()
                 .and_then(|o| serde_json::from_str::<Value>(o).ok())
                 .unwrap_or(Value::Null);
-            json!({
+            let mut row = json!({
                 "id": item.id,
                 "state": rec.state.map_or("pending", ItemState::as_str),
                 "note": rec.note,
                 "item": item.value,
                 "output": output,
-            })
+            });
+            if let Some(from) = &rec.skipped_from {
+                row["skipped_from"] = json!(from);
+            }
+            row
         })
         .collect();
     let mut output = serde_json::Map::new();
@@ -392,6 +667,11 @@ fn compose(run: &ListRun<'_, '_, '_>) -> Result<AttemptOutcome, EngineError> {
     output.insert("passed_with_note".into(), json!(c.passed_with_note));
     output.insert("needs_look".into(), json!(c.needs_look));
     output.insert("filtered_out".into(), json!(fold.filtered_out));
+    // Only a list with `skip` writes the count, so a plain list's output is
+    // what it always was.
+    if run.spec.skip.is_some() {
+        output.insert("skipped".into(), json!(c.skipped));
+    }
     output.insert("items".into(), json!(items));
     // A visit that ended early: `stopped` in its output, the node fails
     // whatever `on_needs_look` says.

@@ -85,25 +85,30 @@ fn marker_contract() -> String {
 /// A session an earlier attempt of this execution ran in (issue #136 item 2).
 enum KnownSession {
     /// The id is known. `workdir` is where it ran (`None` for the session an
-    /// answer round inherits from the asking attempt).
+    /// answer round inherits from the asking attempt). With `fork`, the id is
+    /// a source session the next attempt forks instead of continuing.
     Id {
         id: String,
         workdir: Option<PathBuf>,
+        fork: bool,
     },
     /// Only the title is known; the id is looked up on first use.
     Titled { title: String, workdir: PathBuf },
 }
 
-/// The id and directory of the session `binding` left behind, resolving a
-/// titled one through the agent's own listing (and caching the id). `None`
-/// when there is none or the lookup finds none.
+/// The id and directory of the session `binding` left behind, and whether
+/// the next attempt forks it, resolving a titled one through the agent's own
+/// listing (and caching the id). `None` when there is none or the lookup
+/// finds none.
 fn resolve_session(
     sessions: &mut BTreeMap<(String, String), KnownSession>,
     binding: &(String, String),
     program: &Path,
-) -> Option<(String, Option<PathBuf>)> {
+) -> Option<(String, Option<PathBuf>, bool)> {
     let found = match sessions.get(binding)? {
-        KnownSession::Id { id, workdir } => return Some((id.clone(), workdir.clone())),
+        KnownSession::Id { id, workdir, fork } => {
+            return Some((id.clone(), workdir.clone(), *fork));
+        }
         KnownSession::Titled { title, workdir } => {
             crate::invocation::lookup_titled_session(&binding.0, program, workdir, title)
                 .map(|id| (id, workdir.clone()))
@@ -116,9 +121,10 @@ fn resolve_session(
                 KnownSession::Id {
                     id: id.clone(),
                     workdir: Some(workdir.clone()),
+                    fork: false,
                 },
             );
-            Some((id, Some(workdir)))
+            Some((id, Some(workdir), false))
         }
         None => {
             sessions.remove(binding);
@@ -972,18 +978,23 @@ fn execute_node_kind(
                 .unwrap_or_default();
             let live_default: Option<String> = default_answer.clone();
             // The node's own directory (issue #67 item 4). An unresolvable
-            // `workdir` fails the node before anything is spawned.
-            let node_dir = match super::node_workdir::resolve(playbook, node_id, workdir, |t| {
-                render_node_prompt(
-                    playbook,
-                    run_dir,
-                    run_id,
-                    state,
-                    cfg,
-                    t,
-                    &playbook.context_budget(node_id),
-                )
-            })? {
+            // `workdir` fails the node before anything is spawned. An item of
+            // a skip visit runs in the directory its visit resolved once.
+            let resolved = match item.and_then(|i| i.exec.as_ref()) {
+                Some(visit) => Ok(visit.dir.clone()),
+                None => super::node_workdir::resolve(playbook, node_id, workdir, |t| {
+                    render_node_prompt(
+                        playbook,
+                        run_dir,
+                        run_id,
+                        state,
+                        cfg,
+                        t,
+                        &playbook.context_budget(node_id),
+                    )
+                })?,
+            };
+            let node_dir = match resolved {
                 Ok(dir) => dir,
                 Err(msg) => {
                     return Ok(AttemptOutcome::Finished {
@@ -1436,13 +1447,17 @@ fn execute_node_kind(
             // Connector env isolation (spec 4.3) for every attempt's agent spawn:
             // scrub inherited connector tokens and hand the agent the run-context
             // env that `apb connector call` reads.
-            let spawn_env = crate::adapter::SpawnEnv::for_node(
-                env_scrub.to_vec(),
-                run_dir,
-                node_id,
-                cfg.spawn_env(),
-            )
-            .with_item(key.item);
+            // An item of a skip visit gets the `PATH` its visit captured.
+            let mut overlay = cfg.spawn_env();
+            if let Some(path) = item
+                .and_then(|i| i.exec.as_ref())
+                .and_then(|x| x.path_env.clone())
+            {
+                overlay.push(("PATH".to_string(), path));
+            }
+            let spawn_env =
+                crate::adapter::SpawnEnv::for_node(env_scrub.to_vec(), run_dir, node_id, overlay)
+                    .with_item(key.item);
 
             // Agent sessions this execution's attempts left behind, by binding
             // (issue #136 item 2). A later attempt on the same (agent, model) -
@@ -1460,6 +1475,7 @@ fn execute_node_kind(
                     KnownSession::Id {
                         id: rc.session.clone(),
                         workdir: None,
+                        fork: false,
                     },
                 );
             }
@@ -1467,30 +1483,62 @@ fn execute_node_kind(
             // node with `continue_session` continues the session its source
             // node finished in, when the journal shows the same executor in
             // the same directory. An answer round already resumes its own
-            // session, so it is never a handoff.
+            // session, so it is never a handoff. A fork decides on every entry
+            // of the node, a deferred retry included: nothing about a fork is
+            // kept across entries, so each one forks the source again (which
+            // a fork never writes into), for the step the entry runs on.
+            let forks = continue_session.as_ref().is_some_and(|c| c.forks());
             let mut handoff_warm = false;
-            if let (Some(source), None, None) = (continue_session, &resume, &continuation) {
+            if let (Some(source), None) = (continue_session, &resume)
+                && (continuation.is_none() || forks)
+            {
+                let hstep = continuation
+                    .as_ref()
+                    .and_then(|c| steps.get(c.step as usize))
+                    .unwrap_or(&steps[0]);
                 // Host execution mode (0.23.0): a host subagent has no
                 // session apb can see or continue, so the step starts cold.
-                let decision = if host_mode {
+                let decision = if host_mode || hstep.host {
                     super::handoff::Handoff::Cold(super::host::HOST_MODE_REASON.to_string())
                 } else {
+                    // A fork reads the source's whole conversation: the node
+                    // must run under the source's resolved profile, and the
+                    // installed CLI's help must list the fork form's flags
+                    // (probed last; a scripted scenario agent spawns nothing).
+                    let mut help = || match &hstep.invocation {
+                        Some(ri) if !scripted => {
+                            super::handoff::fork_help(&hstep.agent, &ri.canonical_executable)
+                        }
+                        _ => Ok(()),
+                    };
+                    let checks = forks.then(|| super::handoff::ForkChecks {
+                        profile: super::handoff::same_profile(
+                            run_dir,
+                            journaled.as_deref().unwrap_or(&[]),
+                            source.from(),
+                            &entry,
+                        ),
+                        help: &mut help,
+                    });
                     super::handoff::decide(
                         journaled.as_deref().unwrap_or(&[]),
-                        source,
-                        &steps[0].agent,
-                        &steps[0].model,
+                        source.from(),
+                        &hstep.agent,
+                        &hstep.model,
                         &node_dir,
                         isolated,
+                        source.mode,
+                        checks,
                     )
                 };
                 let (warm, reason) = match decision {
-                    super::handoff::Handoff::Warm { id, workdir } => {
+                    super::handoff::Handoff::Warm { id, workdir, fork } => {
                         sessions.insert(
-                            (steps[0].agent.clone(), steps[0].model.clone()),
+                            (hstep.agent.clone(), hstep.model.clone()),
                             KnownSession::Id {
                                 id,
                                 workdir: Some(workdir),
+                                fork,
                             },
                         );
                         (true, None)
@@ -1500,19 +1548,23 @@ fn execute_node_kind(
                 handoff_warm = warm;
                 journal.append(EventPayload::SessionHandoff {
                     node: node_id.to_string(),
-                    from_node: source.clone(),
+                    from_node: source.from().to_string(),
                     warm,
                     reason,
+                    mode: forks.then(|| "fork".to_string()),
                 })?;
             }
             // A `--now` pause (issue #200) keeps the node's session in the
             // attempt it cut short (`journal_interrupted`): the first attempt
             // after the resume continues it on the binding it ran on, like a
             // retry would have. A host subagent has no session apb can see.
+            // A fork skips it: the interrupted attempt's session is the
+            // fork's, and the entry above forked the source again.
             let mut pause_session = false;
             if resume.is_none()
                 && continuation.is_none()
                 && !host_mode
+                && !forks
                 && let Some(paused) = journaled
                     .as_deref()
                     .and_then(|events| super::journal::paused_attempt_session(run_dir, events, key))
@@ -1525,6 +1577,7 @@ fn execute_node_kind(
                     KnownSession::Id {
                         id: paused.session,
                         workdir: paused.workdir,
+                        fork: false,
                     },
                 );
                 pause_session = true;
@@ -1830,7 +1883,9 @@ fn execute_node_kind(
                     let answer_round = resume.is_some() && attempt == 1;
                     let handoff_round = handoff_warm && attempt == 1;
                     let pause_round = pause_session && attempt == 1;
-                    let continued: Option<(String, Option<PathBuf>)> = match &base_spec {
+                    // The third element marks a source session this attempt
+                    // forks instead of continuing.
+                    let continued: Option<(String, Option<PathBuf>, bool)> = match &base_spec {
                         Some((_, program))
                             if !step.host
                                 && (attempt > 1
@@ -1857,7 +1912,7 @@ fn execute_node_kind(
                             key: &key,
                             attempt,
                             entry: &entry,
-                            continued: continued.as_ref().and_then(|(_, wd)| wd.as_deref()),
+                            continued: continued.as_ref().and_then(|(_, wd, _)| wd.as_deref()),
                             agent: &step.agent,
                             program: &base_spec.as_ref().map_or_else(
                                 || step.agent.clone(),
@@ -2064,7 +2119,11 @@ fn execute_node_kind(
                         let adapter: Box<dyn crate::adapter::AgentAdapter> = match &base_spec {
                             Some((base, program)) => {
                                 let spec = match &continued {
-                                    Some((sid, _)) => {
+                                    Some((sid, _, true)) => {
+                                        crate::invocation::fork_spec(base, &step.agent, sid)
+                                            .expect("a forked session implies a fork form")
+                                    }
+                                    Some((sid, _, false)) => {
                                         crate::invocation::resume_spec(base, &step.agent, sid)
                                             .expect("a continued session implies a resume form")
                                     }
@@ -2168,6 +2227,15 @@ fn execute_node_kind(
                         .map(|s| crate::evidence::session::CloseGuard::new(run_dir, s));
                     let attempt_prompt: std::borrow::Cow<'_, str> = match &continued {
                         Some(_) if answer_round => std::borrow::Cow::Borrowed(text.as_str()),
+                        // A fork starts from a copy of the source's session,
+                        // which holds the earlier step: it gets this node's
+                        // whole prompt, and on a re-entry what the earlier
+                        // attempts did.
+                        Some((_, _, true)) => std::borrow::Cow::Owned(format!(
+                            "{}\n\n{text}{}",
+                            super::handoff::HANDOFF_PREAMBLE,
+                            super::attempt_memory::retry_briefing_now(run_dir, key)
+                        )),
                         // A handed-off session holds the earlier step, not
                         // this one: it gets this node's whole prompt.
                         Some(_) if handoff_round => std::borrow::Cow::Owned(format!(
@@ -2757,29 +2825,6 @@ fn execute_node_kind(
                         });
                     }
                     let spawn_instant = spawn_at.get();
-                    // The agent's own session transcript, next to the raw
-                    // output (claude keeps it outside the run).
-                    if spawn_instant.is_some() {
-                        let sid = match &outcome {
-                            Ok(report) => report.session.clone(),
-                            Err(_) => None,
-                        }
-                        .or_else(|| continued.as_ref().map(|(sid, _)| sid.clone()))
-                        .or_else(|| match &fresh {
-                            Some(crate::invocation::FreshSession::Assigned { id, .. }) => {
-                                Some(id.clone())
-                            }
-                            _ => None,
-                        });
-                        if let Some(sid) = sid {
-                            capture.record(super::transcript::copy_agent_session(
-                                &step.agent,
-                                &sid,
-                                &transcript_dir,
-                                cfg.output_limits().session_copy_bytes,
-                            ));
-                        }
-                    }
                     // Remember the session this attempt ran in (issue #136 item
                     // 2), so a later attempt on this binding can continue it.
                     // The id the agent printed wins; an assigned id stands in
@@ -2791,6 +2836,19 @@ fn execute_node_kind(
                     // until a retry actually needs it.
                     let session_now: Option<String> = match &outcome {
                         Ok(report) => report.session.clone(),
+                        // A failed fork's own session is the one its output
+                        // reports, never the source's it was handed: a retry
+                        // continues it.
+                        Err(_)
+                            if spawn_instant.is_some()
+                                && continued.as_ref().is_some_and(|(_, _, fork)| *fork) =>
+                        {
+                            fork_reported_session(
+                                &step.agent,
+                                &transcript_dir,
+                                cfg.output_limits().log_file_bytes,
+                            )
+                        }
                         // An id apb handed the attempt (a continued or an
                         // assigned session) wins over one it printed.
                         Err(_)
@@ -2805,7 +2863,15 @@ fn execute_node_kind(
                         }
                         Err(_) => None,
                     }
-                    .or_else(|| continued.as_ref().map(|(sid, _)| sid.clone()))
+                    // A fork never falls back to the continued id, the
+                    // source's: an attempt that reported none leaves the
+                    // binding on the source, so a retry forks it again.
+                    .or_else(|| {
+                        continued
+                            .as_ref()
+                            .filter(|(_, _, fork)| !fork)
+                            .map(|(sid, _, _)| sid.clone())
+                    })
                     .or_else(|| match (&fresh, &outcome, &base_spec) {
                         (Some(crate::invocation::FreshSession::Assigned { id, .. }), _, _)
                             if spawn_instant.is_some() =>
@@ -2828,15 +2894,80 @@ fn execute_node_kind(
                         }
                         _ => None,
                     });
+                    // A fork that reports its source's own session id did not
+                    // fork: it is never continued. The binding is dropped, so
+                    // the next attempt starts a fresh agent, and the reason
+                    // is journaled.
+                    let forked_from = continued
+                        .as_ref()
+                        .filter(|(_, _, fork)| *fork)
+                        .map(|(sid, _, _)| sid.clone());
+                    let session_now = match (session_now, &forked_from) {
+                        (Some(id), Some(source_id)) if &id == source_id => {
+                            sessions.remove(&binding);
+                            if let Ok(report) = &mut outcome {
+                                report.session = None;
+                            }
+                            journal.append(EventPayload::SessionHandoff {
+                                node: node_id.to_string(),
+                                from_node: continue_session
+                                    .as_ref()
+                                    .map(|c| c.from().to_string())
+                                    .unwrap_or_default(),
+                                warm: false,
+                                reason: Some(super::handoff::FORK_REPORTED_SOURCE.to_string()),
+                                mode: Some("fork".to_string()),
+                            })?;
+                            None
+                        }
+                        (s, _) => s,
+                    };
+                    // The checked session of a fork, the one its success
+                    // recovered from the status file journals for a later
+                    // handoff: `None` when it reported none or the source's.
+                    let fork_session = forked_from.as_ref().and(session_now.clone());
                     // An attempt killed by the node's kill flag (a `--now`
                     // pause, issue #200) journals no finish of its own: its
-                    // session is recorded next to its output, where the
-                    // interrupted attempt the pause journals finds it.
+                    // session (checked above, never a fork's source) is
+                    // recorded next to its output, where the interrupted
+                    // attempt the pause journals finds it.
                     if cancel.load(Ordering::Relaxed)
                         && spawn_instant.is_some()
                         && let Some(id) = &session_now
                     {
                         super::transcript::record_session(run_dir, &transcript_dir, id);
+                    }
+                    // The agent's own session transcript, next to the raw
+                    // output (claude keeps it outside the run). It runs after
+                    // the fork check above, so a fork that reported its
+                    // source's id (cleared there) never copies the source.
+                    if spawn_instant.is_some() {
+                        let sid = match &outcome {
+                            Ok(report) => report.session.clone(),
+                            Err(_) => None,
+                        }
+                        // A fork's own session is only the one it reports:
+                        // the continued id is the source's.
+                        .or_else(|| {
+                            continued
+                                .as_ref()
+                                .filter(|(_, _, fork)| !fork)
+                                .map(|(sid, _, _)| sid.clone())
+                        })
+                        .or_else(|| match &fresh {
+                            Some(crate::invocation::FreshSession::Assigned { id, .. }) => {
+                                Some(id.clone())
+                            }
+                            _ => None,
+                        });
+                        if let Some(sid) = sid {
+                            capture.record(super::transcript::copy_agent_session(
+                                &step.agent,
+                                &sid,
+                                &transcript_dir,
+                                cfg.output_limits().session_copy_bytes,
+                            ));
+                        }
                     }
                     if let Some(id) = &session_now {
                         sessions.insert(
@@ -2844,6 +2975,7 @@ fn execute_node_kind(
                             KnownSession::Id {
                                 id: id.clone(),
                                 workdir: Some(attempt_workdir.clone()),
+                                fork: false,
                             },
                         );
                         if let Ok(report) = &mut outcome
@@ -3476,7 +3608,10 @@ fn execute_node_kind(
                                                     attempt,
                                                     status: NodeStatus::Succeeded.as_str().into(),
                                                     duration_ms,
-                                                    session: None,
+                                                    // A fork's own checked session, so a later
+                                                    // node can continue it (none otherwise, as
+                                                    // before).
+                                                    session: fork_session.clone(),
                                                     summary: None,
                                                     rejected_output: None,
                                                     partial_output: None,
@@ -3914,17 +4049,24 @@ fn execute_node_kind(
             ..
         } => {
             let timeout = timeout_seconds.map(Duration::from_secs);
-            let workdir = match super::node_workdir::resolve(playbook, node_id, workdir, |t| {
-                render_node_prompt(
-                    playbook,
-                    run_dir,
-                    run_id,
-                    state,
-                    cfg,
-                    t,
-                    &playbook.context_budget(node_id),
-                )
-            })? {
+            // An item of a skip visit runs in the directory and under the
+            // runtime its visit resolved once, the values its stamp names.
+            let visit = item.and_then(|i| i.exec.as_ref());
+            let resolved = match visit {
+                Some(visit) => Ok(visit.dir.clone()),
+                None => super::node_workdir::resolve(playbook, node_id, workdir, |t| {
+                    render_node_prompt(
+                        playbook,
+                        run_dir,
+                        run_id,
+                        state,
+                        cfg,
+                        t,
+                        &playbook.context_budget(node_id),
+                    )
+                })?,
+            };
+            let workdir = match resolved {
                 Ok(dir) => dir,
                 Err(msg) => {
                     return Ok(AttemptOutcome::Finished {
@@ -3953,6 +4095,10 @@ fn execute_node_kind(
             }
             let overlay = cfg.spawn_env();
             env.extend(overlay.iter().map(|(k, v)| (k.as_str(), v.clone())));
+            // An item of a skip visit gets the `PATH` its visit captured.
+            if let Some(path) = visit.and_then(|v| v.path_env.clone()) {
+                env.push(("PATH", path));
+            }
             // A script has no sandbox: a read-only script is always the
             // detected tier, checked around its one run.
             // A scenario run's script is its scripted result: nothing runs.
@@ -4035,15 +4181,27 @@ fn execute_node_kind(
             if let Some(before) = &read_only_before {
                 read_only::journal_check(journal, node_id, 1, Some(&before.record()))?;
             }
-            let r = crate::script::run_script_with_env(
-                run_dir,
-                workdir,
-                script,
-                runner,
-                timeout,
-                Some(cancel),
-                &env,
-            )?;
+            let r = match visit.and_then(|v| v.runtimes.get(runner)) {
+                Some(runtime) => crate::script::run_script_with_runtime(
+                    runtime,
+                    run_dir,
+                    workdir,
+                    script,
+                    timeout,
+                    Some(cancel),
+                    &env,
+                    &[],
+                )?,
+                None => crate::script::run_script_with_env(
+                    run_dir,
+                    workdir,
+                    script,
+                    runner,
+                    timeout,
+                    Some(cancel),
+                    &env,
+                )?,
+            };
             let write_violation = match (&scope_before, &script_scope) {
                 (Some(before), Some(scope)) => {
                     super::write_scope::finish(before, scope, 1, run_dir, ctx.workdir)?
@@ -5702,6 +5860,21 @@ pub(crate) fn advance_frontier(
     }
     crate::diagnostics::route::record_decision(log, playbook, node, state, &evaluation);
     Ok(())
+}
+
+/// The session id a failed fork's stdout reports, through the agent's
+/// own reader. The record that names it can be the last one and as large as
+/// the reply (claude's one result object), so the whole log is read, which
+/// `stdout.log`'s own cap (`cap`, the run's `log_file_bytes`) bounds.
+fn fork_reported_session(agent: &str, transcript_dir: &Path, cap: u64) -> Option<String> {
+    use std::io::Read as _;
+    let mut buf = Vec::new();
+    std::fs::File::open(transcript_dir.join("stdout.log"))
+        .ok()?
+        .take(cap)
+        .read_to_end(&mut buf)
+        .ok()?;
+    crate::adapter::reported_session(agent, &String::from_utf8_lossy(&buf))
 }
 
 /// The session id a failed attempt printed before any work, read from the

@@ -72,6 +72,7 @@ impl Agent for Hermes {
             // hermes re-enters a session via `--resume <id>`, the prompt
             // after `-z`, still in one-shot mode.
             resume: Some(&["--resume", "{session}", "-z", "{prompt}", "-m", "{model}"]),
+            fork: None,
             fresh: FreshForm::Printed,
             profile_mode: None,
         })

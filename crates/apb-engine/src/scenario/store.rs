@@ -372,6 +372,7 @@ fn remove_run(root: &Path, run_id: &str) -> io::Result<()> {
             _ => None,
         }));
         apb_core::process_mode::guard_write(&dir)?;
+        crate::run_scripts::writable_tree(&dir)?;
         std::fs::remove_dir_all(&dir)?;
     }
     Ok(())

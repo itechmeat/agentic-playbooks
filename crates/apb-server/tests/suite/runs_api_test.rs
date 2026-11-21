@@ -2122,6 +2122,9 @@ fn item_settled(item: &str, state: &str) -> apb_engine::event::EventPayload {
         carried: false,
         check: None,
         digest: None,
+        skipped_from: None,
+        skip_digest: None,
+        skip_latched: None,
         result: None,
     }
 }
@@ -2137,6 +2140,7 @@ async fn run_detail_carries_the_lists_and_the_listing_marks_items_that_need_a_lo
         batch_size: 2,
         parallel: 1,
         reopened: false,
+        skip_refused: None,
     };
     seed_gate_run_yaml(
         dir.path(),

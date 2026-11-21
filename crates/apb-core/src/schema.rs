@@ -1278,6 +1278,82 @@ impl<'de> Deserialize<'de> for QualifiedPlaybookRef {
     }
 }
 
+/// How a node with `continue_session` uses its source's session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    /// Continue the source's conversation: this node's prompt is the next
+    /// message of the same session (the behaviour before modes).
+    #[default]
+    Continue,
+    /// Start from a copy of the source's conversation; the source session
+    /// is never written to.
+    Fork,
+}
+
+/// `continue_session`: a bare node id (mode `continue`) or
+/// `{ from, mode }`. A bare id serializes back as a bare id, so the
+/// digest of every existing definition is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContinueSession {
+    pub from: String,
+    pub mode: SessionMode,
+}
+
+impl ContinueSession {
+    pub fn from(&self) -> &str {
+        &self.from
+    }
+
+    pub fn forks(&self) -> bool {
+        self.mode == SessionMode::Fork
+    }
+}
+
+/// Intermediate form for `ContinueSession`: a bare node id or the object.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ContinueSessionForm {
+    Id(String),
+    Full(ContinueSessionFull),
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ContinueSessionFull {
+    from: String,
+    #[serde(default)]
+    mode: SessionMode,
+}
+
+impl<'de> Deserialize<'de> for ContinueSession {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match ContinueSessionForm::deserialize(d)? {
+            ContinueSessionForm::Id(from) => ContinueSession {
+                from,
+                mode: SessionMode::Continue,
+            },
+            ContinueSessionForm::Full(f) => ContinueSession {
+                from: f.from,
+                mode: f.mode,
+            },
+        })
+    }
+}
+
+impl Serialize for ContinueSession {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self.mode {
+            SessionMode::Continue => s.serialize_str(&self.from),
+            SessionMode::Fork => ContinueSessionFull {
+                from: self.from.clone(),
+                mode: self.mode,
+            }
+            .serialize(s),
+        }
+    }
+}
+
 /// A node's grant for one connector's `functions:` (spec
 /// 2026-07-18-connectors-design section 5): `All` (default, absent field) -
 /// every function callable; `ReadOnly` (`functions: read_only`) - only
@@ -2109,7 +2185,7 @@ pub enum NodeKind {
         /// session and both nodes run in the same directory; otherwise the
         /// node starts cold, as without the field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        continue_session: Option<String>,
+        continue_session: Option<ContinueSession>,
         /// Protected paths (C6): globs, relative to the node's working
         /// directory, of files an attempt must not change. The engine
         /// snapshots the matching files before every attempt and compares
@@ -2733,6 +2809,66 @@ pub fn cache_key_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
 }
 #[cfg(test)]
 mod tests {
+    fn session_playbook(field: &str) -> Result<Playbook, String> {
+        Playbook::from_yaml(&format!(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: {{ profile: dev }}\nnodes:\n  - {{ id: start, type: start }}\n  - {{ id: a, type: agent_task, prompt: x }}\n  - {{ id: b, type: agent_task, prompt: y, continue_session: {field} }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: a }}\n  - {{ from: a, to: b }}\n  - {{ from: b, to: done }}\n"
+        ))
+        .map_err(|e| e.to_string())
+    }
+
+    fn continue_session_of(pb: &Playbook) -> Option<ContinueSession> {
+        pb.nodes.iter().find_map(|n| match &n.kind {
+            NodeKind::AgentTask {
+                continue_session, ..
+            } if n.id == "b" => continue_session.clone(),
+            _ => None,
+        })
+    }
+
+    /// A bare id reads as a continuation and writes back as the bare id, so
+    /// the digest of every existing definition is unchanged; an explicit
+    /// `mode: continue` writes as the bare id too.
+    #[test]
+    fn a_bare_continue_session_round_trips_as_a_string() {
+        for field in ["a", "{ from: a, mode: continue }", "{ from: a }"] {
+            let pb = session_playbook(field).unwrap();
+            let cs = continue_session_of(&pb).expect("the field must read");
+            assert_eq!(cs.from(), "a");
+            assert!(!cs.forks());
+            let yaml = yaml_serde::to_string(&pb).unwrap();
+            assert!(yaml.contains("continue_session: a\n"), "{field}: {yaml}");
+            assert!(!yaml.contains("mode:"), "{field}: {yaml}");
+        }
+    }
+
+    /// The object form reads `fork` and `continue`; a fork writes back as
+    /// the object and reads the same again.
+    #[test]
+    fn the_object_form_reads_fork_and_continue() {
+        let pb = session_playbook("{ from: a, mode: fork }").unwrap();
+        let cs = continue_session_of(&pb).unwrap();
+        assert_eq!(cs.from(), "a");
+        assert!(cs.forks());
+        assert_eq!(cs.mode, SessionMode::Fork);
+        let yaml = yaml_serde::to_string(&pb).unwrap();
+        let again = Playbook::from_yaml(&yaml).unwrap();
+        assert_eq!(continue_session_of(&again), Some(cs));
+        let cont = session_playbook("{ from: a, mode: continue }").unwrap();
+        assert_eq!(
+            continue_session_of(&cont).unwrap().mode,
+            SessionMode::Continue
+        );
+    }
+
+    /// An unknown mode or an unknown key of the object form is a parse
+    /// error.
+    #[test]
+    fn an_unknown_mode_is_a_parse_error() {
+        assert!(session_playbook("{ from: a, mode: branch }").is_err());
+        assert!(session_playbook("{ from: a, mode: fork, extra: 1 }").is_err());
+        assert!(session_playbook("{ mode: fork }").is_err());
+    }
+
     /// A playbook with a `concurrency:` block reads it; one without reads
     /// `None`.
     #[test]

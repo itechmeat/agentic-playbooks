@@ -122,6 +122,21 @@ impl Agent for Claude {
                 "--",
                 "{prompt}",
             ]),
+            // Verified against claude --help (2.1.327): `--fork-session`
+            // ("When resuming, create a new session ID ...") resumes from a
+            // copy and leaves the resumed session as it was.
+            fork: Some(&[
+                "--resume",
+                "{session}",
+                "--fork-session",
+                "-p",
+                "--output-format",
+                "json",
+                "--model",
+                "{model}",
+                "--",
+                "{prompt}",
+            ]),
             // Verified against `claude --help`: `--session-id <uuid>` uses a
             // specific session id; `--resume <id>` continues it.
             fresh: FreshForm::Assigned {

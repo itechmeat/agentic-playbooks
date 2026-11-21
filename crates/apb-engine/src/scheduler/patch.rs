@@ -118,6 +118,11 @@ pub(crate) fn apply_patch(
     {
         return append_patch_rejected(log, reason);
     }
+    // The list skip's sets were read at start, and items a skip settled
+    // were skipped under the definition a patch would change.
+    if let Some(reason) = crate::list::skip::patch_refusal(playbook, &loaded.playbook, &events) {
+        return append_patch_rejected(log, reason);
+    }
     // The deadline is the run's contract: only a person changes it, at a
     // resume.
     if let Some(reason) = crate::run_deadline::patch_refusal(playbook, &loaded.playbook) {

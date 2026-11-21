@@ -72,6 +72,7 @@ impl Agent for Grok {
             // grok resumes by id via `-r <id>` and takes the follow-up as a
             // fresh `-p` single-turn prompt.
             resume: Some(&["-r", "{session}", "-p", "{prompt}", "-m", "{model}"]),
+            fork: None,
             fresh: FreshForm::Printed,
             profile_mode: None,
         })

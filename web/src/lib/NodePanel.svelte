@@ -11,7 +11,7 @@
   } from './successcheck'
   import { parseBinding, serializeBinding, toggleListEntry, type ConnectorBinding } from './connectorbinding'
   import { trustBadge, type ConnectorCard, type ConnectorDetail } from './connectors'
-  import { NODE_FIELDS, type NodeFieldKey } from './nodefields'
+  import { NODE_FIELDS, readContinueSession, writeContinueSession, type NodeFieldKey } from './nodefields'
   import { fetchMemory, saveMemory, fetchPlaybooks, fetchConnectors, fetchConnector } from './api'
   import FieldInfo from '$lib/components/FieldInfo.svelte'
   import { Button } from '$lib/components/ui/button'
@@ -194,7 +194,7 @@
         playbook: playbookRefToField(n.playbook),
         instruction: str(n.instruction),
         workdir: str(n.workdir),
-        continue_session: str(n.continue_session),
+        continue_session: readContinueSession(n.continue_session).from,
         output_fields: fieldsToField(n.outputs),
         judge_state: toYamlField(n.state),
         judge_questions: toYamlField(n.questions),
@@ -205,6 +205,7 @@
         branch: str(n.branch),
       }
       iso = isolationForm(n.isolation)
+      forkSession = readContinueSession(n.continue_session).fork
       yamlErrors = {}
     })
   })
@@ -213,6 +214,9 @@
   // and the network and keeps the extra paths (shown read-only) and any
   // other key as they are.
   let iso = $state(isolationForm(undefined))
+  // Whether `continue_session` forks its source (the object form) instead
+  // of continuing it (the bare id).
+  let forkSession = $state(false)
   function setIsolation(change: { level?: IsolationLevel; network?: IsolationNetwork }) {
     const value = isolationValue(node.isolation, change)
     iso = isolationForm(value)
@@ -420,6 +424,13 @@
     f.success_check = raw
     onChange?.({ success_check: fieldsToSuccessCheck(mode, raw) })
   }
+  // A cleared source clears fork too: the next source typed continues
+  // unless fork is ticked again. One source replacing another keeps it.
+  function setContinueSession(from: string, fork: boolean) {
+    f.continue_session = from
+    forkSession = from !== '' && fork
+    onChange?.({ continue_session: writeContinueSession(from, fork) })
+  }
   function setStr(key: string, raw: string) {
     f[key] = raw
     onChange?.(raw === '' ? { [key]: undefined } : { [key]: raw })
@@ -621,8 +632,17 @@
           placeholder="(fresh agent)"
           {readonly}
           value={f.continue_session}
-          oninput={(e) => setStr('continue_session', e.currentTarget.value.trim())}
+          oninput={(e) => setContinueSession(e.currentTarget.value.trim(), forkSession)}
         />
+        <label class="np-fork">
+          <input
+            type="checkbox"
+            disabled={readonly || f.continue_session === ''}
+            checked={forkSession}
+            onchange={(e) => setContinueSession(f.continue_session, e.currentTarget.checked)}
+          />
+          fork instead of continue
+        </label>
       </Field.Field>
       <Field.Field>
         {@render fieldHead('workdir', 'np-workdir')}
@@ -1024,6 +1044,13 @@
   /* The trigger is a child component, so its width is set globally. */
   :global(.np-select) {
     width: 100%;
+  }
+  .np-fork {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted-foreground);
   }
   .iso-paths {
     margin: 0;

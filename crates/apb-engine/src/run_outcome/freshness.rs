@@ -222,14 +222,37 @@ pub fn success_check(
     })
 }
 
-/// The freshness of a list node's script item checks, read from the list's
-/// latest settlement: they bind nothing.
+/// The freshness of a list node's script item checks, read from the
+/// later of the list's latest `node_finished` of a visit that checked an
+/// item and its latest settlement of an item checked here, as on a list
+/// without `skip`: a skipped row was not checked in this run, so neither it
+/// nor the finish of a visit that only skipped makes a check fresh. They
+/// bind nothing. `None` when no item was checked in this run.
 pub fn item_check(playbook: Option<&Playbook>, events: &[Event], node: &str) -> Option<Freshness> {
-    let seq = events.iter().rev().find_map(|e| match &e.payload {
-        EventPayload::NodeFinished { node: n, .. } if n == node => Some(e.seq),
-        EventPayload::ListItemSettled { node: n, .. } if n == node => Some(e.seq),
-        _ => None,
-    })?;
+    let mut checked_in_visit = false;
+    let mut reference = None;
+    for e in events {
+        match &e.payload {
+            EventPayload::ListStarted {
+                node: n, reopened, ..
+            } if n == node && !reopened => {
+                checked_in_visit = false;
+            }
+            EventPayload::ListItemSettled {
+                node: n,
+                skipped_from: None,
+                ..
+            } if n == node => {
+                checked_in_visit = true;
+                reference = Some(e.seq);
+            }
+            EventPayload::NodeFinished { node: n, .. } if n == node && checked_in_visit => {
+                reference = Some(e.seq);
+            }
+            _ => {}
+        }
+    }
+    let seq = reference?;
     Some(by_later_nodes(
         playbook,
         events,
@@ -273,6 +296,66 @@ mod tests {
     fn state(events: &[Event]) -> Option<FreshnessState> {
         let pb = Playbook::from_yaml(PLAYBOOK).unwrap();
         success_check(Some(&pb), events, "w").map(|f| f.state)
+    }
+
+    /// A plain list in a parallel run: an acting node started between the
+    /// list's last item settlement and its `node_finished`. The reference
+    /// is the `node_finished`, as on main, so the freshness is the one main
+    /// gives; and a visit that only skipped moves no reference.
+    #[test]
+    fn a_plain_list_item_check_is_read_as_on_main() {
+        let pb = Playbook::from_yaml(PLAYBOOK).unwrap();
+        let rows = |s: &str| s.replace("@N@", "rows");
+        let events = journal(&[
+            &rows(r#"{"type":"list_started","node":"@N@","total":1}"#),
+            &rows(
+                r#"{"type":"list_item_settled","node":"@N@","item":"a","state":"passed","round":0}"#,
+            ),
+            r#"{"type":"node_started","node":"edit","attempt":1}"#,
+            &rows(
+                r#"{"type":"node_finished","node":"@N@","status":"succeeded","attempt":1,"output":""}"#,
+            ),
+        ]);
+        // Main's reference: the latest node_finished or settlement.
+        let main_seq = events
+            .iter()
+            .rev()
+            .find_map(|e| match &e.payload {
+                EventPayload::NodeFinished { node, .. }
+                | EventPayload::ListItemSettled { node, .. }
+                    if node == "rows" =>
+                {
+                    Some(e.seq)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let main = by_later_nodes(
+            Some(&pb),
+            &events,
+            main_seq,
+            "rows",
+            "item checks are not bound to a fingerprint",
+        );
+        assert_eq!(item_check(Some(&pb), &events, "rows"), Some(main));
+        // A later visit that only skipped: the reference stays where the
+        // checked visit put it.
+        let mut more = events.clone();
+        let next = more.len() as u64;
+        more.extend(journal(&[
+            &rows(r#"{"type":"list_started","node":"@N@","total":1}"#),
+            &rows(r#"{"type":"list_item_settled","node":"@N@","item":"a","state":"passed","round":0,"skipped_from":"r0"}"#),
+            &rows(r#"{"type":"node_finished","node":"@N@","status":"succeeded","attempt":1,"output":""}"#),
+        ])
+        .into_iter()
+        .map(|mut e| {
+            e.seq += next;
+            e
+        }));
+        assert_eq!(
+            item_check(Some(&pb), &more, "rows"),
+            item_check(Some(&pb), &events, "rows")
+        );
     }
 
     #[test]

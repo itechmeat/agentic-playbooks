@@ -422,26 +422,6 @@ pub const MAX_SUBPLAYBOOK_DEPTH: usize = apb_core::schema::MAX_SUBPLAYBOOK_DEPTH
 /// See [`apb_core::schema::DEFAULT_MAX_PARALLEL`].
 pub const DEFAULT_MAX_PARALLEL: usize = apb_core::schema::DEFAULT_MAX_PARALLEL;
 
-/// The concurrency cap in force for this run.
-///
-/// Precedence follows the `max_retries` chain (`node.rs`: the authored value
-/// first, then a default, then a constant): `Playbook.defaults.max_parallel`,
-/// then the run's own cap, then [`DEFAULT_MAX_PARALLEL`]. `RunOptions` and
-/// `RunConfig` are ONE slot here - `prepare` copies the invocation value into the
-/// persisted run config, which is what a detached driver reads back, so the cap
-/// survives a re-drive.
-///
-/// A declared `0` reads as `1` (serialize) rather than as "admit nothing", which
-/// would wedge the batch.
-fn resolved_max_parallel(playbook: &Playbook, cfg: &RunConfig) -> usize {
-    playbook
-        .defaults
-        .max_parallel
-        .or(cfg.max_parallel)
-        .map(|n| n.max(1))
-        .unwrap_or(DEFAULT_MAX_PARALLEL)
-}
-
 /// The shared execution loop: advances the run from `start_node` to a finish node,
 /// a pause, or exhausting the step limit. Used by both `run` and `resume`.
 ///
@@ -737,6 +717,23 @@ fn drive_inner(
     // dedicated driver of the child. The guard removes the claim on every
     // exit path.
     let mut driver_claim = crate::driver::DriveClaim::claim(run_dir, cfg.parent_run.as_deref());
+    // A run that declares a list skip and journaled no set when a drive
+    // begins (a queued run paused before its turn, a crash before the set
+    // write, a resume from a named node) records its sets now, before any
+    // node runs; a partial record refuses to drive.
+    crate::list::skip::ensure_recorded(root, run_dir, &playbook, cfg, log)?;
+    // A drive of a run that may skip holds the read-only scripts copy for
+    // as long as it drives: the guard gives the modes back on every exit of
+    // this function, so the copy is read-only exactly while items can run.
+    // A child, an eval or a scenario run skips nothing and never takes it.
+    // A drive that releases the run gives it back before its lock opens.
+    let mut scripts = if crate::list::skip::skipping_nodes(&playbook).is_empty()
+        || !crate::list::skip::may_skip(cfg, run_dir)
+    {
+        None
+    } else {
+        Some(crate::run_scripts::Protected::take(run_dir).map_err(EngineError::Io)?)
+    };
     // An eval run's wall clock (0.24.0): the driver aborts the run itself at
     // the deadline, so the limit holds even when the `apb eval` that
     // started it is gone.
@@ -1116,8 +1113,11 @@ fn drive_inner(
             // is applied at the next turn instead.
             if deferred::may_release(cfg, mode, due_at, now)
                 && deferred::try_release(run_dir, log, control_cursor, now, || {
-                    // The busy lock first, then `driver.pid`: the guard
+                    // The scripts copy first: a drive that takes the run
+                    // once the lock opens must find its original modes.
+                    // Then the busy lock, then `driver.pid`: the guard
                     // removes the lock only while it names this process.
+                    drop(scripts.take());
                     drop(lock.take());
                     driver_claim.let_go();
                 })?
@@ -1148,12 +1148,7 @@ fn drive_inner(
         // the run's working tree once it is resolved (issue #67 item 8), else
         // the execution root. Taken from the fold on every iteration, because
         // a node can resolve the tree mid-run.
-        let workdir = state
-            .worktree
-            .as_deref()
-            .map(PathBuf::from)
-            .or_else(|| crate::scenario::session::workdir(run_dir))
-            .unwrap_or_else(|| root.to_path_buf());
+        let workdir = cache::tree_dir(&state, run_dir, root);
         let current_node = playbook
             .node(&current)
             .ok_or_else(|| EngineError::NotFound(current.clone()))?;
@@ -1477,7 +1472,7 @@ fn drive_inner(
             }
             // Resolved per iteration, because a supervisor patch can replace the
             // playbook (and with it `defaults.max_parallel`) mid-run.
-            let max_parallel = resolved_max_parallel(&playbook, cfg);
+            let max_parallel = cache::resolved_max_parallel(&playbook, cfg);
             // A cap of 1 means "no concurrency at all", so the batch is not
             // formed: `current` runs through the sequential path below and the
             // frontier heads are picked up on the following iterations. That is
@@ -3565,7 +3560,7 @@ fn drive_inner(
                             override_prompt,
                             track_provenance: true,
                             stop: Some(&exec_stop),
-                            max_parallel: resolved_max_parallel(&playbook, cfg),
+                            max_parallel: cache::resolved_max_parallel(&playbook, cfg),
                             control_after: control_cursor,
                             budget: Some(&gate),
                             continuation,
@@ -3956,7 +3951,7 @@ mod max_parallel_tests {
     #[test]
     fn neither_playbook_nor_run_declares_a_cap() {
         assert_eq!(
-            resolved_max_parallel(&playbook(""), &cfg(None)),
+            cache::resolved_max_parallel(&playbook(""), &cfg(None)),
             DEFAULT_MAX_PARALLEL
         );
     }
@@ -3965,24 +3960,30 @@ mod max_parallel_tests {
     fn the_run_cap_applies_when_the_playbook_is_silent() {
         // The RunOptions value arrives here through the persisted RunConfig,
         // which is what a detached driver reads back.
-        assert_eq!(resolved_max_parallel(&playbook(""), &cfg(Some(2))), 2);
+        assert_eq!(
+            cache::resolved_max_parallel(&playbook(""), &cfg(Some(2))),
+            2
+        );
     }
 
     #[test]
     fn the_authored_cap_wins_over_the_run_cap() {
         let pb = playbook("defaults:\n  max_parallel: 3\n");
-        assert_eq!(resolved_max_parallel(&pb, &cfg(Some(8))), 3);
-        assert_eq!(resolved_max_parallel(&pb, &cfg(None)), 3);
+        assert_eq!(cache::resolved_max_parallel(&pb, &cfg(Some(8))), 3);
+        assert_eq!(cache::resolved_max_parallel(&pb, &cfg(None)), 3);
     }
 
     #[test]
     fn a_declared_zero_serializes_instead_of_admitting_nothing() {
         // 0 must never mean "no slots at all", which would wedge every batch.
         assert_eq!(
-            resolved_max_parallel(&playbook("defaults:\n  max_parallel: 0\n"), &cfg(None)),
+            cache::resolved_max_parallel(&playbook("defaults:\n  max_parallel: 0\n"), &cfg(None)),
             1
         );
-        assert_eq!(resolved_max_parallel(&playbook(""), &cfg(Some(0))), 1);
+        assert_eq!(
+            cache::resolved_max_parallel(&playbook(""), &cfg(Some(0))),
+            1
+        );
     }
 }
 

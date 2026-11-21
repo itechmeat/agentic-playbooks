@@ -80,6 +80,9 @@ fn item_lines(lists: &[RunList], filter: &ItemFilter<'_>) -> Vec<String> {
             l.passed,
             l.needs_look
         ));
+        if let Some(s) = &l.skip {
+            out.push(format!("  {}", skip_line(s)));
+        }
         out.extend(
             l.items
                 .iter()
@@ -104,13 +107,56 @@ fn item_lines(lists: &[RunList], filter: &ItemFilter<'_>) -> Vec<String> {
     out
 }
 
+/// What a list's skip read: the run's set, or why it skips nothing.
+fn skip_line(s: &apb_engine::list::skip::SkipView) -> String {
+    if let Some(why) = &s.refused {
+        return format!(
+            "skip refused: {}",
+            sanitize_for_terminal(why, QUESTION_TEXT_MAX)
+        );
+    }
+    let mut line = match &s.source {
+        Some(run) => format!(
+            "skip: {} items from run {}{}",
+            s.read_items,
+            sanitize_for_terminal(run, QUESTION_TEXT_MAX),
+            if s.truncated { ", more not kept" } else { "" }
+        ),
+        None => "skip: no earlier success".to_string(),
+    };
+    if s.not_inherited > 0 {
+        line.push_str(&format!(
+            ", {} not skipped (output could not be carried)",
+            s.not_inherited
+        ));
+    }
+    if s.reworked > 0 {
+        line.push_str(&format!(
+            ", {}",
+            apb_engine::list::skip_taken_back(s.reworked)
+        ));
+    }
+    if let Some(why) = &s.stopped_stamping {
+        line.push_str(&format!(
+            "; stamping stopped: {}",
+            sanitize_for_terminal(why, QUESTION_TEXT_MAX)
+        ));
+    }
+    line
+}
+
 /// `id<TAB>state<TAB>round n<TAB>what it says`: a passed item with an
 /// earlier send still unknown says so after its verdict.
 fn item_line(i: &RunListItem) -> String {
     let unresolved = i
         .unresolved_send
         .then_some(apb_engine::list::UNRESOLVED_SEND_TEXT);
+    let skipped = i
+        .skipped_from
+        .as_ref()
+        .map(|run| format!("skipped (passed in {run})"));
     let words: Vec<&str> = [
+        skipped.as_deref(),
         i.verdict.as_deref(),
         unresolved,
         i.reason.as_deref(),
@@ -148,7 +194,80 @@ mod tests {
             attempts: 2,
             unresolved_send: false,
             check_rejected: false,
+            skipped_from: None,
         }
+    }
+
+    #[test]
+    fn a_skipped_item_names_its_run() {
+        let mut skipped = item("a", "passed", None);
+        skipped.skipped_from = Some("lst-r0".into());
+        assert_eq!(
+            item_line(&skipped),
+            "a\tpassed\tround 1\tskipped (passed in lst-r0)"
+        );
+        let mut list = RunList {
+            node: "rows".into(),
+            title: None,
+            total: 1,
+            processed: 1,
+            passed: 1,
+            passed_with_note: 0,
+            needs_look: 0,
+            pending: 0,
+            running: 0,
+            batch: 0,
+            batches: 1,
+            items: vec![skipped],
+            pilot: None,
+            stopped: None,
+            skip: Some(apb_engine::list::skip::SkipView {
+                skipped: 1,
+                read_items: 3,
+                source: Some("lst-r0".into()),
+                truncated: true,
+                refused: None,
+                not_inherited: 0,
+                stopped_stamping: None,
+                reworked: 0,
+            }),
+        };
+        let all = ItemFilter {
+            node: None,
+            state: None,
+        };
+        let lines = item_lines(std::slice::from_ref(&list), &all);
+        assert_eq!(lines[1], "  skip: 3 items from run lst-r0, more not kept");
+        list.skip = Some(apb_engine::list::skip::SkipView {
+            skipped: 0,
+            read_items: 0,
+            source: None,
+            truncated: false,
+            refused: Some("skip_supervisor_note: a note".into()),
+            not_inherited: 0,
+            stopped_stamping: None,
+            reworked: 0,
+        });
+        let lines = item_lines(std::slice::from_ref(&list), &all);
+        assert_eq!(lines[1], "  skip refused: skip_supervisor_note: a note");
+        list.skip.as_mut().unwrap().refused = None;
+        let lines = item_lines(std::slice::from_ref(&list), &all);
+        assert_eq!(lines[1], "  skip: no earlier success");
+        list.skip = Some(apb_engine::list::skip::SkipView {
+            skipped: 1,
+            read_items: 3,
+            source: Some("lst-r0".into()),
+            truncated: false,
+            refused: None,
+            not_inherited: 2,
+            stopped_stamping: Some("skip_scripts_diverged: the copy changed".into()),
+            reworked: 0,
+        });
+        let lines = item_lines(std::slice::from_ref(&list), &all);
+        assert_eq!(
+            lines[1],
+            "  skip: 3 items from run lst-r0, 2 not skipped (output could not be carried); stamping stopped: skip_scripts_diverged: the copy changed"
+        );
     }
 
     #[test]
@@ -171,6 +290,7 @@ mod tests {
             ],
             pilot: None,
             stopped: None,
+            skip: None,
         };
         let filter = ItemFilter {
             node: Some("rows"),
@@ -206,6 +326,7 @@ mod tests {
             items: Vec::new(),
             pilot: None,
             stopped: None,
+            skip: None,
         };
         let filter = ItemFilter {
             node: None,
@@ -235,6 +356,7 @@ mod tests {
             items: vec![item("a", "passed", None), item("b", "pending", None)],
             pilot: None,
             stopped: None,
+            skip: None,
         };
         let pending = ItemFilter {
             node: None,

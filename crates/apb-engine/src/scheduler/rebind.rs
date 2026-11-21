@@ -130,7 +130,15 @@ pub(crate) fn apply_rebind(
     log: &mut EventLog,
     command: RebindCommand,
 ) -> Result<(), EngineError> {
-    match resolve_rebind(root, run_dir, &command)? {
+    let outcome = match resolve_rebind(root, run_dir, &command)? {
+        RebindOutcome::Bound(profile) => match skip_refusal(root, run_dir, &command.node, &profile)
+        {
+            Some(reason) => RebindOutcome::Rejected(reason),
+            None => RebindOutcome::Bound(profile),
+        },
+        rejected => rejected,
+    };
+    match outcome {
         RebindOutcome::Bound(profile) => {
             let mut overlay = read_overlay(run_dir)?;
             overlay
@@ -152,6 +160,92 @@ pub(crate) fn apply_rebind(
         }
     }
     Ok(())
+}
+
+/// Why a rebind of `node` to `candidate` is refused because the node
+/// settled items by its list skip in this run: the work the candidate gives
+/// the node differs from the work it is bound to now, or either cannot be
+/// computed. `None` for a node that skipped nothing.
+fn skip_refusal(
+    root: &Path,
+    run_dir: &Path,
+    node: &str,
+    candidate: &ManifestProfile,
+) -> Option<String> {
+    use crate::list::skip::{WORK_CHANGED, WORK_UNKNOWN};
+    // A journal that does not read cannot say whether the node skipped:
+    // refused, never let through.
+    let events = match read_all(run_dir) {
+        Ok(ev) => ev,
+        Err(e) => {
+            return Some(format!(
+                "{WORK_UNKNOWN}: node {node}: the run's journal does not read, so whether it settled items by its skip cannot be told: {e}"
+            ));
+        }
+    };
+    let skipped = events.iter().any(|e| {
+        matches!(&e.payload, EventPayload::ListItemSettled { node: n, skipped_from: Some(_), .. } if n == node)
+    });
+    if !skipped {
+        return None;
+    }
+    let unknown = |why: String| {
+        format!(
+            "{WORK_UNKNOWN}: node {node} settled items by its skip in this run, and its work cannot be compared: {why}"
+        )
+    };
+    let playbook = match std::fs::read_to_string(run_dir.join("playbook.yaml"))
+        .map_err(|e| e.to_string())
+        .and_then(|y| Playbook::from_yaml(&y).map_err(|e| e.to_string()))
+    {
+        Ok(p) => p,
+        Err(why) => return Some(unknown(why)),
+    };
+    let Some(node_def) = playbook.node(node) else {
+        return Some(unknown(format!("node {node} is not in the definition")));
+    };
+    let cfg = match crate::run_config::read_run_config(run_dir) {
+        Ok(c) => c,
+        Err(e) => return Some(unknown(e.to_string())),
+    };
+    let decisions = crate::decision::DecisionRunner::for_run(root, run_dir, &events, &[]);
+    let state = crate::state::RunState::fold(&events);
+    let run_id = run_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let workers = node_def.list().map_or(1, |l| {
+        l.workers(super::cache::resolved_max_parallel(&playbook, &cfg))
+    });
+    let exec = super::cache::visit_execution(
+        &playbook,
+        node_def,
+        &super::cache::tree_dir(&state, run_dir, root),
+        run_dir,
+        &run_id,
+        &state,
+        &cfg,
+        workers,
+    );
+    let src = super::cache::WorkSource {
+        run_dir,
+        events: &events,
+        playbook: &playbook,
+        node: node_def,
+        cfg: &cfg,
+        decisions: decisions.as_ref().map(|d| d.settings()),
+        exec: &exec,
+    };
+    let now = super::cache::work_inputs(&src).map(|w| super::cache::work_fingerprint(&w));
+    let then = super::cache::work_with_profile(&src, candidate)
+        .map(|w| super::cache::work_fingerprint(&w));
+    match (now, then) {
+        (Ok(a), Ok(b)) if a == b => None,
+        (Ok(_), Ok(_)) => Some(format!(
+            "{WORK_CHANGED}: node {node} settled items by its skip in this run; a rebind may not change its work"
+        )),
+        (Err(why), _) | (_, Err(why)) => Some(unknown(why)),
+    }
 }
 
 fn resolve_rebind(
@@ -269,4 +363,199 @@ pub(crate) fn set_routed(
     }
     write_overlay(run_dir, &overlay)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod skip_tests {
+    use super::*;
+
+    const PLAYBOOK: &str = "schema: 2\nid: lst\nname: List\nversion: 1.0.0\ndefaults: { profile: main }\nnodes:\n  - { id: start, type: start }\n  - id: work\n    type: agent_task\n    prompt: \"Handle one item.\"\n    list:\n      items: { inline: [ { id: a } ] }\n      skip: { passed_in: previous_success }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done }\n";
+
+    fn profile(model: &str, argv: &[&str], program: &str, fingerprint: &str) -> ManifestProfile {
+        serde_json::from_value(serde_json::json!({
+            "scope": "project",
+            "name": "main",
+            "profile_digest": "sha256:p",
+            "bundle_digest": "sha256:b",
+            "soul": "",
+            "soul_requirement": "any",
+            "skills": [],
+            "chain": [{
+                "agent_id": "claude",
+                "model": model,
+                "spec": { "argv": argv },
+                "soul_delivery": "native",
+                "canonical_executable": program,
+                "executable_fingerprint": fingerprint,
+            }],
+        }))
+        .unwrap()
+    }
+
+    fn bound() -> ManifestProfile {
+        profile(
+            "haiku",
+            &["-p", "--model", "{model}", "--", "{prompt}"],
+            "/opt/claude",
+            "10:1",
+        )
+    }
+
+    /// A run directory whose node `work` settled an item by its skip, bound
+    /// to [`bound`]; `pinned` writes the scripts pin.
+    fn run_dir(pinned: bool) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("playbook.yaml"), PLAYBOOK).unwrap();
+        let provenance = if pinned {
+            r#"{"seq":1,"ts":0,"type":"run_provenance","origin":"project","scripts_digest":"none"}"#
+        } else {
+            r#"{"seq":1,"ts":0,"type":"run_provenance","origin":"project"}"#
+        };
+        std::fs::write(
+            dir.path().join("events.jsonl"),
+            format!(
+                "{}\n{provenance}\n{}\n",
+                r#"{"seq":0,"ts":0,"type":"run_started","playbook":"lst","version":"1.0.0","definition":"sha256:def"}"#,
+                r#"{"seq":2,"ts":0,"type":"list_item_settled","node":"work","item":"a","state":"passed","round":0,"carried":true,"skipped_from":"r0","skip_digest":"d"}"#
+            ),
+        )
+        .unwrap();
+        crate::run_config::write_run_config(dir.path(), &crate::run_config::RunConfig::default())
+            .unwrap();
+        let p = bound();
+        let manifest = RunExecutionManifest {
+            node_bindings: [("work".to_string(), p.key())].into(),
+            profiles: vec![p],
+            ..RunExecutionManifest::default()
+        };
+        crate::manifest::write(dir.path(), &manifest).unwrap();
+        dir
+    }
+
+    fn refusal(dir: &Path, candidate: &ManifestProfile) -> Option<String> {
+        skip_refusal(dir, dir, "work", candidate)
+    }
+
+    /// The candidate differs from the bound profile only in its model: the
+    /// rebind would change the work of a node that skipped items.
+    #[test]
+    fn a_rebind_of_a_node_with_skipped_items_is_refused() {
+        let dir = run_dir(true);
+        assert_eq!(
+            refusal(dir.path(), &bound()),
+            None,
+            "the same work is allowed"
+        );
+        let why = refusal(
+            dir.path(),
+            &profile(
+                "opus",
+                &["-p", "--model", "{model}", "--", "{prompt}"],
+                "/opt/claude",
+                "10:1",
+            ),
+        )
+        .unwrap();
+        assert!(
+            why.starts_with("list_skip_work_changed: node work"),
+            "{why}"
+        );
+    }
+
+    /// Only the invocation specification differs.
+    #[test]
+    fn a_rebind_changing_only_the_executor_is_refused() {
+        let dir = run_dir(true);
+        let why = refusal(
+            dir.path(),
+            &profile(
+                "haiku",
+                &["-p", "--verbose", "--model", "{model}", "--", "{prompt}"],
+                "/opt/claude",
+                "10:1",
+            ),
+        )
+        .unwrap();
+        assert!(why.starts_with("list_skip_work_changed"), "{why}");
+    }
+
+    /// Only the canonical executable of the one invocation differs; the
+    /// executable's fingerprint alone (the same binary updated in place)
+    /// changes no work.
+    #[test]
+    fn a_rebind_changing_only_the_program_path_is_refused() {
+        let dir = run_dir(true);
+        let why = refusal(
+            dir.path(),
+            &profile(
+                "haiku",
+                &["-p", "--model", "{model}", "--", "{prompt}"],
+                "/usr/local/bin/claude",
+                "10:1",
+            ),
+        )
+        .unwrap();
+        assert!(why.starts_with("list_skip_work_changed"), "{why}");
+        assert_eq!(
+            refusal(
+                dir.path(),
+                &profile(
+                    "haiku",
+                    &["-p", "--model", "{model}", "--", "{prompt}"],
+                    "/opt/claude",
+                    "99:2"
+                )
+            ),
+            None
+        );
+    }
+
+    /// The work cannot be computed (the run pinned no scripts digest): the
+    /// rebind is refused `list_skip_work_unknown`, never let through.
+    #[test]
+    fn a_rebind_whose_work_cannot_be_compared_is_refused() {
+        let dir = run_dir(false);
+        let why = refusal(dir.path(), &bound()).unwrap();
+        assert!(
+            why.starts_with("list_skip_work_unknown: node work"),
+            "{why}"
+        );
+    }
+
+    /// A node that skipped nothing is rebound as before.
+    #[test]
+    fn a_node_that_skipped_nothing_is_not_refused() {
+        let dir = run_dir(true);
+        let other = profile("opus", &["x"], "/opt/other", "1:1");
+        assert_eq!(skip_refusal(dir.path(), dir.path(), "done", &other), None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A journal that does not read refuses the rebind: whether the node
+    /// settled items by its skip cannot be told, so it is never let through.
+    #[test]
+    fn a_journal_that_does_not_read_refuses_the_rebind() {
+        let run = tempfile::tempdir().unwrap();
+        std::fs::write(
+            run.path().join("events.jsonl"),
+            "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\nnot json\n{\"seq\":2,\"ts\":0,\"type\":\"run_finished\",\"outcome\":\"succeeded\"}\n",
+        )
+        .unwrap();
+        assert!(read_all(run.path()).is_err(), "the journal is unreadable");
+        let candidate: ManifestProfile = serde_json::from_value(serde_json::json!({
+            "scope": "project", "name": "main", "profile_digest": "sha256:p", "bundle_digest": "sha256:b",
+            "soul": "", "soul_requirement": "any", "skills": [], "chain": [],
+        }))
+        .unwrap();
+        let refusal = skip_refusal(run.path(), run.path(), "l", &candidate).expect("refused");
+        assert!(
+            refusal.starts_with(crate::list::skip::WORK_UNKNOWN)
+                && refusal.contains("does not read"),
+            "{refusal}"
+        );
+    }
 }

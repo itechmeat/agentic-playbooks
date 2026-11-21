@@ -116,6 +116,10 @@ fn runner_registry_resolution() {
     // 4. The ts runner through the default registry (bun) - only if bun is installed,
     //    otherwise skip so it doesn't flap in CI without the runtime.
     if in_path("bun") {
+        // A run resolves each runner key once (`script::resolved_runner`):
+        // the default registry is read by a run directory that has not
+        // resolved `ts` under the config above.
+        let ver = tempfile::tempdir().unwrap();
         write_script(ver.path(), "scripts/ok.ts", "console.log('ts-ok')");
         let r = run_script(
             ver.path(),

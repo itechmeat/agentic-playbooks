@@ -177,7 +177,7 @@ fn cache_path() -> Option<PathBuf> {
 
 /// File fingerprint for the cache key: "path:size:mtime_ms". Empty if the
 /// file does not exist.
-fn fingerprint(path: &Path) -> String {
+pub fn fingerprint(path: &Path) -> String {
     match std::fs::metadata(path) {
         Ok(m) => {
             let mtime = m

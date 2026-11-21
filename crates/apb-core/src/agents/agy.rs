@@ -60,6 +60,7 @@ impl Agent for Agy {
                 Interaction::Reprompt,
             ),
             resume: None,
+            fork: None,
             fresh: FreshForm::Printed,
             profile_mode: None,
         })

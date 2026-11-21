@@ -160,3 +160,38 @@ describe('NodePanel publish', () => {
     expect(text('np-publish-from')).toBe('each (not a source)')
   })
 })
+
+describe('NodePanel continue_session', () => {
+  function renderAgent(continue_session: unknown, onChange: (patch: Record<string, unknown>) => void) {
+    const node = { id: 'w', type: 'agent_task', prompt: 'go', continue_session }
+    app = mount(NodePanel, { target: document.body, props: { id: 'p', node, onChange } })
+    flushSync()
+  }
+  const source = () => document.getElementById('np-continue') as HTMLInputElement
+  const fork = () => document.querySelector('.np-fork input') as HTMLInputElement
+  const type = (v: string) => {
+    source().value = v
+    source().dispatchEvent(new Event('input', { bubbles: true }))
+    flushSync()
+  }
+
+  it('keeps fork while one source replaces another', () => {
+    const onChange = vi.fn()
+    renderAgent({ from: 'assess', mode: 'fork' }, onChange)
+    expect(fork().checked).toBe(true)
+    type('plan')
+    expect(onChange.mock.calls).toEqual([[{ continue_session: { from: 'plan', mode: 'fork' } }]])
+    expect(fork().checked).toBe(true)
+  })
+
+  it('clears fork with the source, so a new source continues it', () => {
+    const onChange = vi.fn()
+    renderAgent({ from: 'assess', mode: 'fork' }, onChange)
+    type('')
+    expect(fork().checked).toBe(false)
+    expect(fork().disabled).toBe(true)
+    type('plan')
+    expect(onChange.mock.calls).toEqual([[{ continue_session: undefined }], [{ continue_session: 'plan' }]])
+    expect(fork().checked).toBe(false)
+  })
+})

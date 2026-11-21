@@ -88,6 +88,9 @@ impl Agent for Codex {
                 "--",
                 "{prompt}",
             ]),
+            // `codex fork` is an interactive picker and `codex exec resume` has
+            // no fork flag: a fork on codex starts cold.
+            fork: None,
             fresh: FreshForm::Printed,
             profile_mode: None,
         })

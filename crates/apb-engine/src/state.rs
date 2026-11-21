@@ -836,7 +836,8 @@ impl RunState {
                 | EventPayload::ListBatchStarted { .. }
                 | EventPayload::ListItemSettled { .. }
                 | EventPayload::ListPilot { .. }
-                | EventPayload::ListStopped { .. } => {}
+                | EventPayload::ListStopped { .. }
+                | EventPayload::ListSkipRead { .. } => {}
                 // The budget and its gate; `crate::budget::BudgetFold` folds
                 // them.
                 EventPayload::BudgetSet { .. }

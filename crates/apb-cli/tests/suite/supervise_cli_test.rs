@@ -466,6 +466,127 @@ fn params_are_not_on_the_child_argv() {
     assert_eq!(cfg.params.get("message").map(String::as_str), Some(value));
 }
 
+/// A list that skips what passed before, with one plain and one secret
+/// param the step never renders (V340).
+#[cfg(target_os = "linux")]
+const SUPERVISED_SKIP: &str = r#"
+schema: 2
+id: svskip
+name: Supervised skip
+version: 1.0.0
+params:
+  - { name: city, type: text }
+  - { name: token, type: text, secret: true }
+defaults:
+  profile: main
+supervisor:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - id: work
+    type: script
+    script: scripts/item.sh
+    runner: sh
+    list:
+      items: { inline: [ { id: a }, { id: b } ] }
+      batch: { size: 2, parallel: 1, retries: 0 }
+      skip: { passed_in: previous_success }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: done }
+"#;
+
+/// The items of `run`'s list settled by its skip, by the run they passed in.
+#[cfg(target_os = "linux")]
+fn skipped_from(dir: &Path, run: &str) -> Vec<Option<String>> {
+    let rd = dir.join(".apb/runs").join(run);
+    let journal = poll_until("the run to finish", || {
+        let events = apb_engine::event::read_all(&rd).ok()?;
+        events
+            .iter()
+            .any(|e| {
+                matches!(
+                    e.payload,
+                    apb_engine::event::EventPayload::RunFinished { .. }
+                )
+            })
+            .then_some(events)
+    });
+    journal
+        .into_iter()
+        .filter_map(|e| match e.payload {
+            apb_engine::event::EventPayload::ListItemSettled { skipped_from, .. } => {
+                Some(skipped_from)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A run whose params crossed to its `__drive-supervised` child in the
+/// handoff, never on argv, gives its list's work the same inputs as a run
+/// that parsed them in the process that drives it: after a foreground run,
+/// a `--supervise` run with the same params skips every item, and one
+/// whose secret param differs works every item.
+#[cfg(target_os = "linux")]
+#[test]
+fn handed_params_give_the_skip_the_same_work() {
+    let dir = seeded();
+    let vdir = dir.path().join(".apb/playbooks/svskip/1.0.0");
+    fs::create_dir_all(vdir.join("scripts")).unwrap();
+    fs::write(vdir.join("playbook.yaml"), SUPERVISED_SKIP).unwrap();
+    fs::write(vdir.join("scripts/item.sh"), "echo done\n").unwrap();
+    fs::write(dir.path().join(".apb/playbooks/svskip/current"), "1.0.0").unwrap();
+    let marker = dir.path().join("agent_marker.txt");
+    let stub = agent_stub(dir.path(), &marker);
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let start = |extra: &[&str], token: &str| {
+        let out = playbook()
+            .args(["run", "svskip", "--param", "city=Lyon", "--param"])
+            .arg(format!("token={token}"))
+            .args(extra)
+            .current_dir(dir.path())
+            .env("APB_AGENT_CMD", &stub)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(
+            out.status.success(),
+            "{stdout} {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        stdout
+    };
+    let runs = dir.path().join(".apb/runs");
+    start(&[], "violet hedgehog");
+    let first = fs::read_dir(&runs)
+        .unwrap()
+        .flatten()
+        .next()
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        skipped_from(dir.path(), &first),
+        [None, None],
+        "the first run works both items"
+    );
+    let second = extract_run_id(&start(&["--supervise"], "violet hedgehog"), &runs);
+    assert_eq!(
+        skipped_from(dir.path(), &second),
+        [Some(first.clone()), Some(first.clone())],
+        "the handed params are the same work"
+    );
+    let third = extract_run_id(&start(&["--supervise"], "amber otter"), &runs);
+    assert_eq!(
+        skipped_from(dir.path(), &third),
+        [None, None],
+        "another secret is other work"
+    );
+}
+
 /// A keyed `--supervise` start hands its key to the `__drive-supervised`
 /// child in the handoff file, never on its argv (the supervisor stub
 /// records its parent's command line), and a repeat answers the run.
@@ -516,5 +637,132 @@ fn start_key_is_not_on_the_child_argv() {
     assert!(
         again.contains(&format!("run already started: {run_id} (start key)")),
         "{again}"
+    );
+}
+
+/// The Codex trigger across processes: run 1 passes item a under runtime
+/// A; run 2 loads a, b and c, skips a, and is paused while b runs; the
+/// machine's `runners.sh` moves to runtime B; the resume, a new process,
+/// resolves the visit's execution again. The work differs, so the skipped
+/// a goes back to pending and is worked under B, and the skip line counts
+/// it. A resume of the same run with nothing changed keeps its skips (the
+/// engine test `a_resume_with_nothing_changed_keeps_the_skips`).
+#[cfg(unix)]
+#[test]
+fn a_resumed_visit_works_a_skipped_item_whose_runtime_changed() {
+    use apb_engine::event::{EventPayload, read_all};
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = seeded();
+    let root = dir.path();
+    let cfg = root.join("cfg");
+    fs::create_dir_all(&cfg).unwrap();
+    for name in ["runtime-a", "runtime-b"] {
+        let p = root.join(name);
+        fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\necho \"{name}:$APB_ITEM_ID\" >> '{}'\nexec /bin/sh \"$@\"\n",
+                root.join("used").display()
+            ),
+        )
+        .unwrap();
+        set_executable(&p);
+    }
+    let config = |rt: &str| {
+        fs::write(
+            cfg.join("config.yaml"),
+            format!("runners:\n  sh: ['{}']\n", root.join(rt).display()),
+        )
+        .unwrap()
+    };
+    config("runtime-a");
+    let vdir = root.join(".apb/playbooks/svfeed/1.0.0");
+    fs::create_dir_all(vdir.join("scripts")).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        "schema: 2\nid: svfeed\nname: Feed\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: feed, type: script, script: scripts/feed.sh, runner: sh, outputs: { fields: [items] } }\n  - id: work\n    type: script\n    script: scripts/item.sh\n    runner: sh\n    list:\n      items: { from: { node: feed, field: items } }\n      batch: { size: 1, parallel: 1, retries: 0 }\n      skip: { passed_in: previous_success }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: feed }\n  - { from: feed, to: work }\n  - { from: work, to: done }\n",
+    )
+    .unwrap();
+    let r = root.display();
+    fs::write(
+        vdir.join("scripts/feed.sh"),
+        format!("cat '{r}/items.json'\n"),
+    )
+    .unwrap();
+    fs::write(
+        vdir.join("scripts/item.sh"),
+        format!("if [ \"$APB_ITEM_ID\" = b ]; then touch '{r}/started-b'; while [ -f '{r}/hold' ]; do sleep 0.05; done; fi\necho ok\n"),
+    )
+    .unwrap();
+    fs::write(root.join(".apb/playbooks/svfeed/current"), "1.0.0").unwrap();
+    let items = |ids: &[&str]| {
+        let list: Vec<String> = ids.iter().map(|i| format!("{{\"id\":\"{i}\"}}")).collect();
+        fs::write(
+            root.join("items.json"),
+            format!("{{\"items\": [{}]}}", list.join(",")),
+        )
+        .unwrap();
+    };
+    let apb = || {
+        let mut c = crate::common::apb_std();
+        c.current_dir(root).env("APB_CONFIG_DIR", &cfg);
+        c
+    };
+    items(&["a"]);
+    let first = apb().args(["run", "svfeed"]).output().unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let _ = fs::remove_file(root.join("used"));
+    items(&["a", "b", "c"]);
+    fs::write(root.join("hold"), "").unwrap();
+    let mut second = apb().args(["run", "svfeed"]).spawn().unwrap();
+    poll_until("item b to start", || {
+        root.join("started-b").exists().then_some(())
+    });
+    let runs = root.join(".apb/runs");
+    let run_id = poll_until("the second run", || {
+        fs::read_dir(&runs).ok()?.flatten().find_map(|e| {
+            let ev = read_all(&e.path()).ok()?;
+            ev.iter()
+                .any(|e| matches!(&e.payload, EventPayload::ListItemSettled { item, skipped_from: Some(_), .. } if item == "a"))
+                .then(|| e.file_name().to_string_lossy().into_owned())
+        })
+    });
+    let req = apb_engine::pause::PauseRequest {
+        by: Some(apb_engine::pause::PauseBy::Operator),
+        mode: apb_engine::pause::PauseMode::Drain,
+        ..Default::default()
+    };
+    apb_engine::pause::request_pause(root, &run_id, &req).unwrap();
+    fs::remove_file(root.join("hold")).unwrap();
+    // A paused run exits with its own code: only that it ended is needed.
+    let _ = second.wait().unwrap();
+    config("runtime-b");
+    let _ = fs::remove_file(root.join("used"));
+    let resumed = apb().args(["resume", &run_id]).output().unwrap();
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let used = fs::read_to_string(root.join("used")).unwrap_or_default();
+    assert!(
+        used.lines().any(|l| l == "runtime-b:a"),
+        "a is worked under B: {used}"
+    );
+    let ev = read_all(&runs.join(&run_id)).unwrap();
+    assert!(
+        ev.iter().any(|e| matches!(&e.payload,
+            EventPayload::ListItemSettled { item, reason: Some(r), .. } if item == "a" && r == "skip_config_changed")),
+        "the skipped row went back to pending with its reason"
+    );
+    let line = apb().args(["runs", &run_id, "--items"]).output().unwrap();
+    let text = String::from_utf8_lossy(&line.stdout);
+    assert!(
+        text.contains("1 skipped item taken back because its skip no longer held"),
+        "{text}"
     );
 }

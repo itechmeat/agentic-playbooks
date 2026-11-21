@@ -11,17 +11,22 @@
     pilotLine,
     processedLabel,
     processedPercent,
+    skipLabel,
+    SKIP_HELP,
+    skippedLabel,
     stateLabel,
     stoppedLine,
     unlistedPending,
     visibleItems,
     type ItemFilter,
   } from './listprogress'
+  import { runHref } from './startedruns'
 
   // One card per list node of the run: how far its visit got, each state
   // counted, and its items in a table a person can filter. The counts are
   // the engine's; this panel only shows them.
-  let { lists }: { lists?: RunList[] | null } = $props()
+  // `workspace` resolves the link of a skipped row to the run it passed in.
+  let { lists, workspace = '' }: { lists?: RunList[] | null; workspace?: string } = $props()
 
   const shown = $derived(lists ?? [])
   // Per list node: the state filter and whether the row cap is lifted.
@@ -34,11 +39,17 @@
   {@const view = visibleItems(l.items, filter, expanded[l.node] ?? false)}
   {@const batch = batchLabel(l)}
   {@const unlisted = unlistedPending(l)}
+  {@const skipped = skippedLabel(l)}
+  {@const skipLine = skipLabel(l)}
   <OutcomeSection title={`List ${l.title ?? l.node}`} testid="run-list">
     <div class="summary">
       <span data-testid="run-list-processed">{processedLabel(l)}</span>
+      {#if skipped}<span class="muted" data-testid="run-list-skipped">{skipped}</span>{/if}
       {#if batch}<span class="muted" data-testid="run-list-batch">{batch}</span>{/if}
     </div>
+    {#if skipLine}
+      <p class="pilot" data-testid="run-list-skip" title={SKIP_HELP}>{skipLine}</p>
+    {/if}
     <div
       class="bar"
       role="progressbar"
@@ -85,7 +96,18 @@
                 <td><code>{i.id}</code></td>
                 <td>{stateLabel(i.state)}</td>
                 <td>{i.round}</td>
-                <td class="note">{itemText(i)}</td>
+                <td class="note">
+                  {#if i.skipped_from}
+                    {@const rest = itemText({ ...i, skipped_from: undefined })}
+                    skipped (passed in <a
+                      class="skip-link"
+                      href={runHref(workspace, i.skipped_from)}
+                      data-testid="run-list-skipped-from">{i.skipped_from}</a
+                    >){rest ? `: ${rest}` : ''}
+                  {:else}
+                    {itemText(i)}
+                  {/if}
+                </td>
               </tr>
             {:else}
               <tr><td colspan="4" class="muted">No item in this state.</td></tr>
@@ -106,6 +128,10 @@
 {/each}
 
 <style>
+  .skip-link {
+    color: var(--primary);
+    text-decoration: underline;
+  }
   .pilot {
     margin: 0.25rem 0 0;
     color: var(--text-muted);

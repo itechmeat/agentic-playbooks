@@ -275,8 +275,9 @@ binaries on `PATH`.
 
 The run guard names cover `evidence`, a run's `deadline`, a `concurrency:`
 key, a gate's `fields`, `show` or `max_scope`, a list node's
-`pilot` or `stop_when` (`list_pilot`), a timer wait (`wait_park`) and a
-doubled eval run (`eval_doubles`), among the features each change added.
+`pilot` or `stop_when` (`list_pilot`), a timer wait (`wait_park`), a
+doubled eval run (`eval_doubles`) and a list node's `skip` (`list_skip`),
+among the features each change added.
 A guard lists its names in one fixed order, the order the features were
 added (`GuardedFeature::ALL`), so a definition with both a pilot list and
 a timer wait carries `["list_pilot", "wait_park"]`. `eval_doubles` is a
@@ -290,7 +291,19 @@ and still stops it. The guard narrows what an older apb does with the
 run; what keeps a doubled run from a service through a connector is its
 manifest, which records the accounts' names only, so every connector call
 an apb blind to doubles makes for the run fails before it loads the
-connector, resolves a secret or sends a request. A definition whose list block carries `pilot` or `stop_when` is
+connector, resolves a secret or sends a request. A definition whose list
+block carries `skip` is refused by apb 1.0.0-beta.1 and every later release
+without it; apb 0.25.0 predates list mode: it drops the whole list block
+and runs the step once, skipping nothing and repeating its outside
+actions, which is what the `list_skip` guard exists for. An
+older apb reads and stops such a run at any time and refuses to pause it at
+any time, since the guard follows every checkpoint and the unknown
+`list_skip_read` line comes before the first one. The skip picks its
+earlier run by the same origin stamp and checks `run.previous_success`
+uses; the journals of runs under the operator's own account are inside
+the trust boundary, as for every other apb guard (a same-user writer stays
+out of scope, below), so an edited journal of an earlier run is not
+defended against. A definition whose list block carries `pilot` or `stop_when` is
 refused outright by apb 1.0.0-beta.1 and every later release without this
 change: their list block rejects unknown fields, so such a binary neither
 starts such a playbook nor resumes such a run and appends nothing to its

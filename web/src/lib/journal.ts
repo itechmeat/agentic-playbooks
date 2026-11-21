@@ -135,10 +135,29 @@ export function eventNote(e: WfEvent): string | undefined {
     // The window a queued routine read once it got its concurrency key.
     case 'previous_success_set':
       return 'previous success read after the key came free'
-    case 'session_handoff':
-      return r.warm
-        ? `warm: continues the session of ${String(r.from_node ?? '')}`
-        : `cold${r.reason ? ` (${String(r.reason)})` : ''}`
+    case 'list_skip_read': {
+      // The skip set one list node read at start, from one earlier run.
+      const set = (r.set ?? {}) as { source?: string; items?: Record<string, string>; refused?: string }
+      const n = Object.keys(set.items ?? {}).length
+      const what = set.refused
+        ? `refused (${set.refused})`
+        : set.source
+          ? `${n} item${n === 1 ? '' : 's'} from run ${set.source}`
+          : 'no earlier success'
+      return `skip set of ${String(r.node ?? '')}: ${what}`
+    }
+    case 'session_handoff': {
+      // `mode: fork` marks a node that starts from a copy of its source's
+      // session; a continuation carries no mode.
+      const fork = r.mode === 'fork'
+      const from = String(r.from_node ?? '')
+      if (r.warm) {
+        return fork
+          ? `warm (fork): starts from a copy of the session of ${from}`
+          : `warm: continues the session of ${from}`
+      }
+      return `cold${fork ? ' (fork)' : ''}${r.reason ? ` (${String(r.reason)})` : ''}`
+    }
     // 0.23.0 outcome events (provenance, goal criteria, protected paths).
     case 'artifacts_committed':
     case 'goal_checked':

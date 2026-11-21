@@ -138,6 +138,13 @@ pub(crate) struct ItemExec {
     pub checked: bool,
     /// The item's JSON on disk, for a script step.
     pub file: std::path::PathBuf,
+    /// The visit's resolved execution, for an item of a list with `skip`:
+    /// the item runs in its directory, under its runtimes and with its
+    /// `PATH`, and its check with the captured check directory and policy,
+    /// never resolving them again. `None` for
+    /// a list without `skip` and when the execution did not resolve (the
+    /// visit then skips nothing and its items run as on main).
+    pub exec: Option<std::sync::Arc<super::cache::VisitExecution>>,
 }
 
 impl ItemExec {

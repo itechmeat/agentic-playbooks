@@ -205,7 +205,8 @@ fn entry_of(
         && mode.is_some()
         && !from_step
         && eligible_definition(events, definition.as_deref())
-        && unoverridden;
+        && unoverridden
+        && skip_lists_worked(events);
     Ok(ProbationEntry {
         run,
         version,
@@ -215,6 +216,60 @@ fn entry_of(
         outcome: outcome.to_string(),
         eligible,
         ended_ms: apb_core::clock::now_ms_u64(),
+    })
+}
+
+/// Whether every list node that skipped items in the run also worked one:
+/// some visit of it holds a fresh passed settlement, one with `carried:
+/// false` of an item admitted in a batch and not after a `node_cache_hit`
+/// of the node in that visit. A run in which a node that skipped items
+/// worked none succeeded without running the version's work. A skipping
+/// list never reached, or one that skipped nothing, costs no credit.
+fn skip_lists_worked(events: &[Event]) -> bool {
+    let mut skipping: Vec<&str> = Vec::new();
+    for e in events {
+        if let EventPayload::ListItemSettled {
+            node,
+            skipped_from: Some(_),
+            ..
+        } = &e.payload
+            && !skipping.contains(&node.as_str())
+        {
+            skipping.push(node);
+        }
+    }
+    skipping.into_iter().all(|node| {
+        let visits = crate::list::ListFold::visits(events, node);
+        visits.iter().enumerate().any(|(i, visit)| {
+            let until = visits.get(i + 1).map_or(u64::MAX, |v| v.started_seq);
+            let mut admitted: std::collections::BTreeSet<&str> = Default::default();
+            let mut cache_hit = false;
+            events
+                .iter()
+                .filter(|e| e.seq >= visit.started_seq && e.seq < until)
+                .any(|e| match &e.payload {
+                    EventPayload::NodeCacheHit { node: n, .. } if n == node => {
+                        cache_hit = true;
+                        false
+                    }
+                    EventPayload::ListBatchStarted { node: n, items, .. } if n == node => {
+                        admitted.extend(items.iter().map(String::as_str));
+                        false
+                    }
+                    EventPayload::ListItemSettled {
+                        node: n,
+                        item,
+                        state,
+                        carried: false,
+                        ..
+                    } if n == node => {
+                        !cache_hit
+                            && state == crate::list::ledger::settled::PASSED
+                            && admitted.contains(item.as_str())
+                    }
+                    _ => false,
+                })
+        })
     })
 }
 
@@ -287,6 +342,89 @@ mod tests {
         .into_iter()
         .map(|v| serde_json::from_value(v).unwrap())
         .collect()
+    }
+
+    /// The journal of an attended run with `extra` between its provenance
+    /// and its end.
+    fn with(extra: &[serde_json::Value]) -> Vec<Event> {
+        let mut j = journal();
+        let end = j.pop().unwrap();
+        for (i, v) in extra.iter().enumerate() {
+            let mut v = v.clone();
+            v["seq"] = (10 + i as u64).into();
+            v["ts"] = 0.into();
+            j.push(serde_json::from_value(v).unwrap());
+        }
+        j.push(end);
+        j
+    }
+
+    fn eligible(events: &[Event]) -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        crate::run_config::write_run_config(dir.path(), &crate::run_config::RunConfig::default())
+            .unwrap();
+        entry_of(dir.path(), events, "succeeded").unwrap().eligible
+    }
+
+    fn list_started() -> serde_json::Value {
+        serde_json::json!({"type": "list_started", "node": "l", "total": 2})
+    }
+
+    fn skipped(item: &str) -> serde_json::Value {
+        serde_json::json!({"type": "list_item_settled", "node": "l", "item": item,
+            "state": "passed", "carried": true, "skipped_from": "r0", "skip_digest": "d"})
+    }
+
+    fn batch(items: &[&str]) -> serde_json::Value {
+        serde_json::json!({"type": "list_batch_started", "node": "l", "batch": 1, "items": items})
+    }
+
+    fn worked(item: &str, state: &str) -> serde_json::Value {
+        serde_json::json!({"type": "list_item_settled", "node": "l", "item": item, "state": state})
+    }
+
+    /// A list node that skipped items earns the run credit only with a
+    /// fresh passed settlement admitted in a batch.
+    #[test]
+    fn a_list_that_worked_no_item_is_not_eligible() {
+        assert!(eligible(&journal()), "the base journal is eligible");
+        // Every item skipped.
+        assert!(!eligible(&with(&[
+            list_started(),
+            skipped("a"),
+            skipped("b")
+        ])));
+        // Every item skipped but an oversized one settled before any batch.
+        assert!(!eligible(&with(&[
+            list_started(),
+            skipped("a"),
+            worked("b", "needs_look"),
+        ])));
+        assert!(!eligible(&with(&[
+            list_started(),
+            skipped("a"),
+            worked("b", "passed"),
+        ])));
+        // The one passed item follows a cache hit of the node.
+        assert!(!eligible(&with(&[
+            list_started(),
+            skipped("a"),
+            serde_json::json!({"type": "node_cache_hit", "node": "l", "key": "k", "source_run": "r"}),
+            batch(&["b"]),
+            worked("b", "passed"),
+        ])));
+        // One passed item admitted in a batch, no cache hit.
+        assert!(eligible(&with(&[
+            list_started(),
+            skipped("a"),
+            batch(&["b"]),
+            worked("b", "passed"),
+        ])));
+        // A skipping list never reached, or that loaded zero items.
+        assert!(eligible(&with(&[])));
+        assert!(eligible(&with(&[
+            serde_json::json!({"type": "list_started", "node": "l", "total": 0})
+        ])));
     }
 
     /// An unattended run whose manifest is gone takes its mode from the

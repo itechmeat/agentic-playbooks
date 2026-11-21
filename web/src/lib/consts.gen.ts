@@ -48,6 +48,10 @@ export const MISSING_REASONS = ['not_run', 'not_succeeded', 'field_absent', 'not
 /** What a passed list item with an earlier send still unknown says beside its state. */
 export const UNRESOLVED_SEND_TEXT = "earlier send unresolved"
 
+/** What the skip line says after the count of skipped rows taken back, for one and for more. */
+export const SKIP_TAKEN_BACK_ONE = "skipped item taken back because its skip no longer held"
+export const SKIP_TAKEN_BACK_MANY = "skipped items taken back because their skip no longer held"
+
 /** The dashboard's default port (the dev server proxies to it). */
 export const DEFAULT_PORT = 7321
 

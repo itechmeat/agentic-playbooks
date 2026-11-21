@@ -26,7 +26,7 @@ engine, mcp, and core <- mcp-client <- engine. Do not introduce import cycles
   rule family: `graph`, `nodes`, `connectors`, `templates`, `node_io` for
   `continue_session`, declared output fields, node `workdir`, the run
   `worktree` and `cache.key`, `baseline` for V62-V67, `list` for the list
-  rules V85-V89 and V93-V95, `budget` for V96-V98, `params` for the secret
+  rules V85-V89 and V93-V95, V283, V288 and V289, `budget` for V96-V98, `params` for the secret
   param rules V99 and V100, V340 (no string of a definition references a
   secret param, over `secret_param_refs`, the one walk every check of a
   definition shares) and the search param rules V160-V162, `quality` for the `quality:` block and the
@@ -36,7 +36,7 @@ engine, mcp, and core <- mcp-client <- engine. Do not introduce import cycles
   the bindings of MCP connectors V300 to V302 (`validate/mcp.rs`: V300 a
   binding with no `functions` list, V301 a launcher `command`, V302 an
   engine site), `publish` for a `publish` node and `publish_only`
-  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `review_form` for the form of a `human_review` (a malformed `max_scope` V243, `fields` V244, `show` V245, a required field without a default on a gate the engine may decide V246, a default over untrusted text V247), `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`; `list_pilot` names a definition whose list uses `pilot` or `stop_when`, `wait_park` one with a timer wait, `eval_doubles` (never a definition
+  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `review_form` for the form of a `human_review` (a malformed `max_scope` V243, `fields` V244, `show` V245, a required field without a default on a gate the engine may decide V246, a default over untrusted text V247), `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`; `list_pilot` names a definition whose list uses `pilot` or `stop_when`, `wait_park` one with a timer wait, `list_skip` one whose list uses `skip`, `eval_doubles` (never a definition
   feature) a doubled eval run, named from `run_provenance.eval_doubles`,
   the names in this declaration order), `output_types` for the typed output field contract V167-V168, `write_scope` for a declared write scope V170-V172, `deadline` for a run's `deadline` V200, `concurrency` for the `concurrency:` block V210 and V211, `health` for the `health:` block V212, `previous_success` for the `run.previous_success` grammar, the `when_none` block and V176; `nodes` also holds V68, ids that start with `@`
   are the engine's, V101, `audience` on a finish without a prompt, and
@@ -82,7 +82,7 @@ engine, mcp, and core <- mcp-client <- engine. Do not introduce import cycles
   before its rename), the run
   budget's schema,
   the precedence of a run argument over the playbook's block and the amount
-  parsers (`budget.rs`), list mode (`list/`: the `list:` block, item
+  parsers (`budget.rs`), list mode (`list/`: the `list:` block with its `skip`, item
   loading with ids and the `where` filter in `items`, the per-item state
   machine in `verdict`), the loop visit fold behind `no_new_items`
   (`loop_items.rs`: the readable visits, the seen keys and the dry
@@ -234,8 +234,8 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   URLs, `refname` the ref and remote name rules, `porcelain` a push's
   outcome), the built-in agents, one module each (`agents/`: the
   registry `all` and `lookup`, `agent.rs` the `Agent` trait, its descriptor,
-  capabilities and verified CLI version, `forms.rs` the launch, resume and
-  fresh-session forms, `output.rs` the output readers with `promises` and
+  capabilities and verified CLI version, `forms.rs` the launch, resume, fork (claude and opencode)
+  and fresh-session forms, `output.rs` the output readers with `promises` and
   `conformance`, `setup.rs` what detection reads and the run-scoped
   environment, `policy.rs` the model rules, `check.rs` the doctor's free
   local check of an installed CLI (version against the verified one, the
@@ -430,7 +430,7 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   probation in `gate/unattended` (`ProbationView`, `probation`,
   `check_probation`, `PROBATION_REQUIRED`, `NOT_READY`) and the pilot arm
   of `next_action/unattended`, list mode's pure half
-  (`list/`: `ledger` the journal fold of a visit, `prompt` the `## item`
+  (`list/`: `ledger` the journal fold of a visit, `skip` the history read and the journaled set (`skip_record` its record types, a leaf the journal reads), `prompt` the `## item`
   prompt section, `stamp` the item stamp on item-scoped events, `view` the
   surface view), `loop_seen` the rendered seen keys of `no_new_items`
   fed to every prompt, judge state field and cache key, `previous_success.rs`
@@ -1640,7 +1640,11 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   not_passed`, progress and every surface. Everything keyed by node is
   keyed by `ExecKey` (node + item) so items of one node can run at once.
   The prompt is rendered once per visit; the item goes in a trailing
-  `## item` section, so templates may not read `item.*` (V86). Host
+  `## item` section, so templates may not read `item.*` (V86). A `skip` reads the one run
+  `run.previous_success` names once at start (one `list_skip_read` set per
+  list node, all in one write) and settles an item whose skip digest (its
+  id, the item and the whole configured work) still matches as passed
+  without running it. Host
   execution mode refuses list nodes at run start.
 - Fan-in is a **join**: an explicit `join: all|any` on an incoming edge, or an
   implicit wait-for-all when an acyclic fan-in carries no `join` at all (a fan-in

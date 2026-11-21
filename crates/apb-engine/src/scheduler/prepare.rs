@@ -1075,6 +1075,23 @@ pub(crate) fn prepare_placed(
     // once here where the params are final and nothing is written yet: a
     // refusal here (unreadable history, a bad `when_none` time) leaves no
     // run behind. Only a definition that reads the namespace looks at all.
+    // A continued run's predecessor journal, read once for both readers
+    // (the window and the list skip's sets).
+    let has_skip = crate::list::skip::declares_skip(&playbook);
+    let pred_events = match opts.continued_from.as_deref() {
+        Some(pred)
+            if scenario.is_none()
+                && opts.eval.is_none()
+                && (apb_core::previous_success::reads(&playbook) || has_skip) =>
+        {
+            Some(crate::event::read_all(&place.runs.join(pred)).map_err(|_| {
+                EngineError::Invalid(format!(
+                    "previous_success_unreadable: run `{pred}`: its journal does not read; repair or remove it, then start again"
+                ))
+            })?)
+        }
+        _ => None,
+    };
     let mut previous_success = if !apb_core::previous_success::reads(&playbook) {
         None
     } else if scenario.is_some() || opts.eval.is_some() {
@@ -1082,18 +1099,12 @@ pub(crate) fn prepare_placed(
         Some(crate::previous_success::snapshot(
             root, None, &playbook, &params,
         )?)
-    } else if let Some(pred) = opts.continued_from.as_deref() {
+    } else if opts.continued_from.is_some() {
         // A continued run keeps its predecessor's window: the predecessor's
         // own record, copied unchanged. When the predecessor recorded none
         // (its definition did not read the namespace), look up as a fresh
         // start does.
-        let pred_dir = place.runs.join(pred);
-        let pred_events = crate::event::read_all(&pred_dir).map_err(|_| {
-            EngineError::Invalid(format!(
-                "previous_success_unreadable: run `{pred}`: its journal does not read; repair or remove it, then start again"
-            ))
-        })?;
-        let recorded = crate::previous_success::recorded(&pred_events);
+        let recorded = crate::previous_success::recorded(pred_events.as_deref().unwrap_or(&[]));
         Some(match recorded {
             Some(ps) => ps,
             None => look_up_previous_success(root, id, t.origin_label, &playbook, &params)?,
@@ -1140,6 +1151,37 @@ pub(crate) fn prepare_placed(
             depth: opts.depth,
         },
     )?;
+    // The list skip's sets (incremental lists D2), read here like the
+    // window: a start that takes no concurrency slot never queues, so an
+    // unreadable history refuses it before the run directory exists; a
+    // start that takes one reads after an at-once admission (below), or
+    // after its turn when it queues.
+    let mut list_skip = if !has_skip {
+        None
+    } else if scenario.is_some() || opts.eval.is_some() || opts.parent_run.is_some() {
+        // Repeatable runs and children read no history: every item runs.
+        Some(crate::list::skip::empty_sets(&playbook))
+    } else if let Some(pred) = opts.continued_from.as_deref() {
+        // A continued run keeps its predecessor's sets; a node the
+        // predecessor recorded none for gets an empty set.
+        let pred_playbook = crate::list::skip::predecessor_definition(&place.runs.join(pred));
+        Some(crate::list::skip::continued_sets(
+            pred,
+            pred_events.as_deref().unwrap_or(&[]),
+            pred_playbook.as_ref(),
+            &playbook,
+        )?)
+    } else if key.is_some() {
+        None
+    } else {
+        Some(crate::list::skip::read_sets(
+            root,
+            &playbook,
+            id,
+            t.origin_label,
+            previous_success.as_ref(),
+        )?)
+    };
     // The health hold (routine health D2), authoritative: a hold that
     // appeared after the gate, or a direct engine start, is still refused
     // here, before anything is claimed or written. A trial runs held: it
@@ -1251,16 +1293,19 @@ pub(crate) fn prepare_placed(
             .unwrap_or_default();
         let scope = apb_core::scope::Scope::parse(t.origin_label)
             .unwrap_or(apb_core::scope::Scope::Project);
+        // A refused start leaves no run and frees its start key: the
+        // directory holds only the empty journal and `driver.pid`, so it
+        // goes away whole, and the `Claim` drop finds no `run_started` and
+        // frees its entry.
+        let leave_no_run = |run_dir: &Path| {
+            crate::driver::let_go_unclaimed(run_dir);
+            if std::fs::symlink_metadata(run_dir).is_ok_and(|m| m.is_dir()) {
+                let _ = std::fs::remove_dir_all(run_dir);
+            }
+        };
         match crate::concurrency::admit(root, scope, id, record, on_busy, &run_id, &lineage) {
             Err(e) => {
-                // A refused start leaves no run and frees its start key:
-                // the directory holds only the empty journal and
-                // `driver.pid`, so it goes away whole, and the `Claim`
-                // drop finds no `run_started` and frees its entry.
-                crate::driver::let_go_unclaimed(&run_dir);
-                if std::fs::symlink_metadata(&run_dir).is_ok_and(|m| m.is_dir()) {
-                    let _ = std::fs::remove_dir_all(&run_dir);
-                }
+                leave_no_run(&run_dir);
                 return Err(e);
             }
             Ok(admission) => {
@@ -1281,6 +1326,25 @@ pub(crate) fn prepare_placed(
                 if let Some(h) = holder {
                     queued_reason =
                         format!("concurrency: key `{}` is held by run `{h}`", record.display);
+                }
+            }
+        }
+        // Admitted at once: the skip's sets are read now, before anything
+        // is journaled; an unreadable history leaves no run, and the
+        // provisional slot claim goes with its owner.
+        if has_skip && list_skip.is_none() && !key_queued {
+            match crate::list::skip::read_sets(
+                root,
+                &playbook,
+                id,
+                t.origin_label,
+                previous_success.as_ref(),
+            ) {
+                Ok(sets) => list_skip = Some(sets),
+                Err(e) => {
+                    drop(slot_owner.take());
+                    leave_no_run(&run_dir);
+                    return Err(e);
                 }
             }
         }
@@ -1378,15 +1442,17 @@ pub(crate) fn prepare_placed(
             .and_then(|l| l.check.as_ref())
             .is_some_and(|c| c.script.is_some())
     });
-    let scripts_digest = if has_goal_scripts || has_baseline_scripts || has_item_check_scripts {
-        Some(prep_try_unstarted(
-            &mut log,
-            &unstarted,
-            crate::run_scripts::digest(&run_dir),
-        )?)
-    } else {
-        None
-    };
+    // A list skip compares the work under the scripts pinned here.
+    let scripts_digest =
+        if has_goal_scripts || has_baseline_scripts || has_item_check_scripts || has_skip {
+            Some(prep_try_unstarted(
+                &mut log,
+                &unstarted,
+                crate::run_scripts::digest(&run_dir),
+            )?)
+        } else {
+            None
+        };
     if copied != digest {
         return prep_try_unstarted(
             &mut log,
@@ -1650,6 +1716,12 @@ pub(crate) fn prepare_placed(
     // write with its provenance.
     let run_guard = run_guard_of(&playbook, deadline.is_some(), key.is_some(), eval_doubles);
     journal_provenance(&mut log, provenance, run_guard)?;
+    // The list skip's sets, every node's line in one write after the guard,
+    // decided under the journal's append lock.
+    if let Some(sets) = list_skip.take() {
+        let written = crate::list::skip::write_sets(&mut log, &playbook, sets);
+        prep_try(&mut log, written)?;
+    }
     // A doubled run's capture exists, empty and durable, before its first
     // node: a capture missing later was removed, never "no call yet".
     if eval_doubles {

@@ -75,6 +75,20 @@ impl Agent for Opencode {
                 "--",
                 "{prompt}",
             ]),
+            // Verified against opencode run --help (2.2.5): `--fork` ("Fork
+            // the session before continuing") next to `--session`.
+            fork: Some(&[
+                "run",
+                "--session",
+                "{session}",
+                "--fork",
+                "--format",
+                "json",
+                "-m",
+                "{model}",
+                "--",
+                "{prompt}",
+            ]),
             // Verified against `opencode run --help` (1.18): `--title` names
             // the session; `opencode session list --format json` lists `id`
             // and `title`, scoped to the project of the working directory.

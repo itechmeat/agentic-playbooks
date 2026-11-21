@@ -89,7 +89,34 @@ pub fn resume_spec(
     agent: &str,
     session: &str,
 ) -> Option<apb_core::config::InvocationDef> {
-    let argv = resume_argv(agent)?
+    Some(session_spec(base, resume_argv(agent)?, session))
+}
+
+/// The fork argv of `agent_id` (D3 of the session fork design): the resume
+/// form that starts from a copy of `{session}`. `None` for an agent with no
+/// fork form, whose fork starts cold.
+pub fn fork_argv(agent_id: &str) -> Option<Vec<String>> {
+    apb_core::agents::lookup(agent_id)?.forms()?.fork_argv()
+}
+
+/// `base` turned into its fork form for `session`: like [`resume_spec`],
+/// over the fork argv. `None` for an agent with no fork form.
+pub fn fork_spec(
+    base: &apb_core::config::InvocationDef,
+    agent: &str,
+    session: &str,
+) -> Option<apb_core::config::InvocationDef> {
+    Some(session_spec(base, fork_argv(agent)?, session))
+}
+
+/// `base` with `argv` (a resume or fork argv) and `session` substituted for
+/// `{session}`; the follow-up always travels as argv `{prompt}`.
+fn session_spec(
+    base: &apb_core::config::InvocationDef,
+    argv: Vec<String>,
+    session: &str,
+) -> apb_core::config::InvocationDef {
+    let argv = argv
         .into_iter()
         .map(|a| {
             if a == "{session}" {
@@ -99,11 +126,11 @@ pub fn resume_spec(
             }
         })
         .collect();
-    Some(apb_core::config::InvocationDef {
+    apb_core::config::InvocationDef {
         argv,
         prompt_via: apb_core::config::PromptVia::Argv,
         ..base.clone()
-    })
+    }
 }
 
 pub use apb_core::agents::FreshSession;
@@ -354,6 +381,34 @@ mod tests {
         ));
         assert!(!apb_core::detect::continues_sessions("grok"));
         assert!(apb_core::detect::continues_sessions("claude-code"));
+    }
+
+    /// The fork spec is the resume argv with the fork flag right after the
+    /// session id, the binary and the prompt slot as the resume spec has
+    /// them; an agent without a fork form has none.
+    #[test]
+    fn fork_spec_inserts_the_fork_flag_after_the_session() {
+        for (agent, flag) in [("claude", "--fork-session"), ("opencode", "--fork")] {
+            let base = builtin(agent).unwrap();
+            let resume = resume_spec(&base, agent, "sid-1").unwrap();
+            let fork = fork_spec(&base, agent, "sid-1").unwrap();
+            let at = fork.argv.iter().position(|a| a == "sid-1").unwrap();
+            assert_eq!(fork.argv[at + 1], flag, "{agent}: {:?}", fork.argv);
+            let mut without = fork.argv.clone();
+            without.remove(at + 1);
+            assert_eq!(without, resume.argv, "{agent}");
+            assert_eq!(fork.prompt_via, PromptVia::Argv);
+            let same_but_argv = apb_core::config::InvocationDef {
+                argv: fork.argv.clone(),
+                ..resume.clone()
+            };
+            assert_eq!(fork, same_but_argv, "{agent}");
+        }
+        for agent in ["codex", "zcode", "dsh", "grok"] {
+            let base = builtin(agent).unwrap();
+            assert!(fork_spec(&base, agent, "sid-1").is_none(), "{agent}");
+            assert!(fork_argv(agent).is_none(), "{agent}");
+        }
     }
 
     #[test]

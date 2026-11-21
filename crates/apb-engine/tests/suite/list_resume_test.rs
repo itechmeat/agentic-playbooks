@@ -403,6 +403,7 @@ fn a_crash_before_the_requeue_still_reruns_the_items_that_need_a_look() {
                 batch_size: *batch_size,
                 parallel: *parallel,
                 reopened: true,
+                skip_refused: None,
             }),
             _ => None,
         })

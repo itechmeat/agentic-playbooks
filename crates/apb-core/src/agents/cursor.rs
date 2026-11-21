@@ -84,6 +84,7 @@ impl Agent for Cursor {
                 "--",
                 "{prompt}",
             ]),
+            fork: None,
             fresh: FreshForm::Printed,
             profile_mode: None,
         })

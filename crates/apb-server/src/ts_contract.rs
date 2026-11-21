@@ -124,6 +124,7 @@ fn render_types() -> String {
         apb_engine::list::RunListItem::decl(&cfg),
         apb_engine::list::RunList::decl(&cfg),
         apb_engine::list::view::PilotView::decl(&cfg),
+        apb_engine::list::skip_record::SkipView::decl(&cfg),
         apb_engine::progress::ProgressSummary::decl(&cfg),
         apb_engine::run_view::ChildRun::decl(&cfg),
         apb_engine::run_view::RunUsage::decl(&cfg),
@@ -618,6 +619,11 @@ fn render_consts() -> String {
     out.push_str(&format!(
         "\n/** What a passed list item with an earlier send still unknown says beside its state. */\nexport const UNRESOLVED_SEND_TEXT = {}\n",
         serde_json::to_string(apb_engine::list::UNRESOLVED_SEND_TEXT).expect("a string serializes")
+    ));
+    out.push_str(&format!(
+        "\n/** What the skip line says after the count of skipped rows taken back, for one and for more. */\nexport const SKIP_TAKEN_BACK_ONE = {}\nexport const SKIP_TAKEN_BACK_MANY = {}\n",
+        serde_json::to_string(apb_engine::list::SKIP_TAKEN_BACK_ONE).expect("a string serializes"),
+        serde_json::to_string(apb_engine::list::SKIP_TAKEN_BACK_MANY).expect("a string serializes")
     ));
     out.push_str(&format!(
         "\n/** The dashboard's default port (the dev server proxies to it). */\nexport const DEFAULT_PORT = {}\n",

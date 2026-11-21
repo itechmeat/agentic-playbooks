@@ -868,6 +868,8 @@ fn remove_family(
     }
     drop(success_locks);
     drop(event_locks);
+    // A run that never ended may still hold a read-only scripts copy.
+    crate::run_scripts::writable_tree(&removed)?;
     std::fs::remove_dir_all(&removed)?;
     Ok(None)
 }

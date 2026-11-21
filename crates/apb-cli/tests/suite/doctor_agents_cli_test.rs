@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 /// Every flag claude's built-in forms pass.
-const FULL_HELP: &str = "Usage: claude [options]\n  -p, --print\n  --output-format <format>\n  --model <model>\n  --append-system-prompt <prompt>\n  --permission-mode <mode>\n  -r, --resume [id]\n  --session-id <uuid>\n";
+const FULL_HELP: &str = "Usage: claude [options]\n  -p, --print\n  --output-format <format>\n  --model <model>\n  --append-system-prompt <prompt>\n  --permission-mode <mode>\n  -r, --resume [id]\n  --fork-session\n  --session-id <uuid>\n";
 
 /// A `claude` stub in `dir` printing `version` and `help`.
 fn stub_claude(dir: &Path, version: &str, help: &str) {

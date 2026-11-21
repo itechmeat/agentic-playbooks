@@ -238,6 +238,7 @@ pub fn recover(root: &Path) -> Result<(), EngineError> {
             continue;
         }
         if name.starts_with(".removed-") {
+            crate::run_scripts::writable_tree(&path)?;
             std::fs::remove_dir_all(&path)?;
         } else if let Some(id) = name.strip_prefix(".removing-") {
             runs_ready(&runs)?;

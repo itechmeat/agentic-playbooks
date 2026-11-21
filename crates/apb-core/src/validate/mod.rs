@@ -436,7 +436,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_judge_edges(playbook, &mut r); // V59, V60 (issue #165 Part 7)
     check_decision_opt_ins(playbook, ctx, &mut r); // V70, V71, V72, V73, V74
     decisions::check_undeclared_shipping(playbook, &mut r); // V90
-    list::check_lists(playbook, ctx, &mut r); // V85-V89, V93-V95
+    list::check_lists(playbook, ctx, &mut r); // V85-V89, V93-V95, V283, V288, V289
     budget::check_budget(playbook, &mut r); // V96-V98
     params::check_params(playbook, &mut r); // V99, V100, V177, V178, V340
     quality::check_quality(playbook, &mut r); // V102-V107
