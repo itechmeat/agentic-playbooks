@@ -181,3 +181,76 @@ fn an_attempt_that_sees_what_it_was_handed_journals_nothing() {
             .any(|e| matches!(e.payload, EventPayload::ToolExposureMismatch { .. }))
     );
 }
+
+/// A run of a node granting the MCP connector of `connector_mcp.rs` (its
+/// tools pinned) under a stub agent that opens with `init`; answers the
+/// run's events.
+fn run_mcp_grant(init: &str) -> Vec<apb_engine::event::Event> {
+    use apb_engine::gate::launch::{LaunchContext, LaunchKind};
+    let fx = crate::connector_mcp::Fx::new();
+    fx.install_pinned();
+    init_project(&fx.root).unwrap();
+    let playbook = PLAYBOOK.replace(
+        "profile: p }",
+        "profile: p, connectors: [{ name: tracker-mcp, functions: [search_issues] }] }",
+    );
+    assert_ne!(playbook, PLAYBOOK, "the node was granted the connector");
+    let dir = fx.root.join(".apb/playbooks/exp/1.0.0");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("playbook.yaml"), playbook).unwrap();
+    fs::write(fx.root.join(".apb/playbooks/exp/current"), "1.0.0").unwrap();
+    common::seed_profile(&fx.root, "p", AGENT, "haiku", &[]);
+    let agent = write_agent(&fx.base(), init, 0);
+    fs::write(
+        fx.cfg.join("config.yaml"),
+        format!("agents:\n  {AGENT}: {{ program: {agent}, transport: acp }}\n"),
+    )
+    .unwrap();
+    let _cmd = common::EnvVar::remove("APB_AGENT_CMD");
+    let wref = apb_core::scope::PlaybookRef {
+        origin: apb_core::scope::Origin::Project { workspace_id: None },
+        id: "exp".into(),
+        version: None,
+    };
+    let permit = apb_engine::gate::check_run(
+        &fx.root,
+        &wref,
+        true,
+        false,
+        &LaunchContext::dashboard(LaunchKind::Start),
+    )
+    .expect("the gate admits the run");
+    let mut opts = RunOptions::default();
+    permit.apply(&mut opts);
+    let res = run(&fx.root, "exp", None, opts).expect("the run drives");
+    read_all(&fx.root.join(".apb/runs").join(&res.run_id)).unwrap()
+}
+
+/// An MCP grant is a connector grant: the attempt expects the shell tool
+/// and no MCP server, so an agent that reports none is not a mismatch, and
+/// one that reports a server named like the connector is.
+#[test]
+fn an_mcp_grant_adds_no_expected_server() {
+    let events =
+        run_mcp_grant(r#"{"type":"system","subtype":"init","tools":["Bash"],"mcp_servers":[]}"#);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::ToolExposureMismatch { .. })),
+        "{events:?}"
+    );
+    let events = run_mcp_grant(
+        r#"{"type":"system","subtype":"init","tools":["Bash"],"mcp_servers":[{"name":"tracker-mcp","status":"connected"}]}"#,
+    );
+    let unexpected: Vec<String> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::ToolExposureMismatch {
+                unexpected_servers, ..
+            } => Some(unexpected_servers.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(unexpected, vec!["tracker-mcp".to_string()]);
+}

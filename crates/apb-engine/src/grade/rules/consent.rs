@@ -25,13 +25,14 @@ use crate::event::EventPayload;
 use crate::grade::sources::RunSources;
 
 /// Connector call outcomes after which the call's effect may have happened.
-const MAY_HAVE_ACTED: [&str; 6] = [
+const MAY_HAVE_ACTED: [&str; 7] = [
     "ok",
     "timeout",
     "network",
     "service",
     "incomplete_response",
     "unknown_effect",
+    "tool_error",
 ];
 
 /// Review decisions that approve.

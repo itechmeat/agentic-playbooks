@@ -73,6 +73,7 @@ fn connector_call_smtp_fields_round_trip() {
         attempt_seq: Some(17),
         intent: Some("si-abc".into()),
         origin: None,
+        tool_digest: None,
     };
     let s = serde_json::to_string(&p).unwrap();
     assert!(!s.contains("password"));

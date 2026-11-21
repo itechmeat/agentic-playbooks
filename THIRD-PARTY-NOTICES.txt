@@ -14,7 +14,7 @@ PART 1. RUST CRATES
 
 The apb binary for the release targets (aarch64-apple-darwin,
 x86_64-apple-darwin, x86_64-unknown-linux-gnu, x86_64-unknown-linux-musl)
-includes 328 third-party crates. Where a crate offers a choice of
+includes 329 third-party crates. Where a crate offers a choice of
 licenses, the license listed is the one apb uses it under.
 
 --------------------------------------------------------------------------------
@@ -5696,6 +5696,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
+  tokio-stream 0.1.19 https://github.com/tokio-rs/tokio
   tokio-util 0.7.18 https://github.com/tokio-rs/tokio
   tokio 1.54.1 https://github.com/tokio-rs/tokio
 
@@ -6254,6 +6255,7 @@ SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License (MIT)
+
 Used by:
   same-file 1.0.6 https://github.com/BurntSushi/same-file
 

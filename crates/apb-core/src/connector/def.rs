@@ -416,6 +416,9 @@ pub struct FunctionSpec {
     pub imap: Option<ImapSpec>,
     #[serde(default)]
     pub inbox: Option<InboxSpec>,
+    /// The MCP tool this function calls (`super::mcp`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<super::mcp::McpFunctionSpec>,
     /// How a repeat of this send is kept from acting twice (see
     /// `super::idempotency`). Only on functions that change something.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -481,6 +484,19 @@ impl FunctionSpec {
         self.inbox.is_some()
     }
 
+    /// An mcp function calls a tool of the connector's MCP server.
+    pub fn is_mcp(&self) -> bool {
+        self.mcp.is_some()
+    }
+
+    /// Whether the function's results are text written outside the run:
+    /// the author's `untrusted_output`, or any mcp function (its server
+    /// writes every byte of the answer). Every reader goes through this,
+    /// never through the raw field.
+    pub fn is_untrusted_output(&self) -> bool {
+        self.untrusted_output || self.is_mcp()
+    }
+
     /// The send-once declaration the send ledger tracks: the declared
     /// `idempotency`, except `repeatable`, which behaves like no
     /// declaration (see `super::idempotency`). Every runtime reader goes
@@ -500,6 +516,11 @@ impl FunctionSpec {
     /// Whether the function can carry a run notification (see
     /// `super::people::notice_capable`).
     pub fn carries_notices(&self) -> bool {
+        // An MCP server would have to be started from the drive's
+        // notification sweep; this version does not do that.
+        if self.is_mcp() {
+            return false;
+        }
         super::people::notice_capable(
             self.people.as_ref(),
             self.send_once().is_some(),
@@ -517,6 +538,8 @@ impl FunctionSpec {
             FunctionKind::Smtp
         } else if self.is_imap() {
             FunctionKind::Imap
+        } else if self.is_mcp() {
+            FunctionKind::Mcp
         } else {
             FunctionKind::Other
         };
@@ -571,6 +594,10 @@ pub struct ConnectorDoc {
     /// Present exactly when the connector declares `inbox` functions.
     #[serde(default)]
     pub webhook: Option<WebhookSpec>,
+    /// The MCP server this connector maps (`mcp` functions). Present
+    /// exactly when the connector declares `mcp` functions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<super::mcp::McpServerSpec>,
     #[serde(default)]
     pub account_fields: Vec<AccountField>,
     #[serde(default)]
@@ -621,6 +648,13 @@ impl ConnectorDoc {
     /// 14. `decode_base64url` and `content_types` sit only on HTTP
     ///     functions; every `content_types` entry is a non-empty
     ///     lower-case media type without parameters.
+    /// 15. An `mcp` function names a tool by the naming rule, sets no
+    ///     HTTP field and declares `idempotency` unless `read_only`
+    ///     (`super::mcp::validate_function_shape`). A connector carries an
+    ///     `mcp:` block exactly when it declares mcp functions; with the
+    ///     block, every function is mcp or mock, `auth`, `webhook` and
+    ///     `error_when` are absent, only read-only functions share a tool,
+    ///     and the block passes `super::mcp::validate_server_shape`.
     pub fn from_yaml(yaml: &str, expected_name: &str) -> Result<Self, ConnectorError> {
         let doc: ConnectorDoc =
             yaml_serde::from_str(yaml).map_err(|e| ConnectorError::Yaml(e.to_string()))?;
@@ -655,14 +689,15 @@ impl ConnectorDoc {
             let is_smtp = f.smtp.is_some();
             let is_imap = f.imap.is_some();
             let is_inbox = f.inbox.is_some();
-            match [is_http, is_mock, is_smtp, is_imap, is_inbox]
+            let is_mcp = f.mcp.is_some();
+            match [is_http, is_mock, is_smtp, is_imap, is_inbox, is_mcp]
                 .iter()
                 .filter(|set| **set)
                 .count()
             {
                 0 => {
                     return Err(ConnectorError::Invalid(format!(
-                        "function `{}` is not an HTTP call (method + url), a mock, an smtp block, an imap block, or an inbox block",
+                        "function `{}` is not an HTTP call (method + url), a mock, an smtp block, an imap block, an inbox block, or an mcp block",
                         f.name
                     )));
                 }
@@ -686,13 +721,15 @@ impl ConnectorDoc {
                         validate_smtp_shape(f)?;
                     } else if is_imap {
                         validate_imap_shape(f)?;
+                    } else if is_mcp {
+                        mcp_function_shape(f)?;
                     } else {
                         validate_inbox_shape(f)?;
                     }
                 }
                 _ => {
                     return Err(ConnectorError::Invalid(format!(
-                        "function `{}` must be exactly one of: an HTTP call, a mock, an smtp block, an imap block, or an inbox block",
+                        "function `{}` must be exactly one of: an HTTP call, a mock, an smtp block, an imap block, an inbox block, or an mcp block",
                         f.name
                     )));
                 }
@@ -928,6 +965,8 @@ impl ConnectorDoc {
             }
             _ => {}
         }
+
+        validate_mcp_connector(&doc)?;
 
         let mut seen_fields = std::collections::HashSet::new();
         for field in &doc.account_fields {
@@ -1284,6 +1323,97 @@ impl<'a> FieldNames<'a> {
     }
 }
 
+/// Manifest rule 15.3: the connector-level rules of the mcp kind.
+fn validate_mcp_connector(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
+    let c = &doc.name;
+    let mcp_names: Vec<&str> = doc
+        .functions
+        .iter()
+        .filter(|f| f.is_mcp())
+        .map(|f| f.name.as_str())
+        .collect();
+    let Some(spec) = &doc.mcp else {
+        if !mcp_names.is_empty() {
+            return Err(ConnectorError::Invalid(format!(
+                "connector `{c}` declares mcp function(s) {} but no `mcp:` block",
+                mcp_names.join(", ")
+            )));
+        }
+        return Ok(());
+    };
+    if mcp_names.is_empty() {
+        return Err(ConnectorError::Invalid(format!(
+            "connector `{c}` declares an `mcp:` block but no mcp function"
+        )));
+    }
+    let fields = [
+        ("auth", doc.auth.is_some()),
+        ("webhook", doc.webhook.is_some()),
+        ("error_when", doc.error_when.is_some()),
+    ];
+    if let Some((field, _)) = fields.iter().find(|(_, set)| *set) {
+        return Err(ConnectorError::Invalid(format!(
+            "connector `{c}` has an `mcp:` block and must not set `{field}`"
+        )));
+    }
+    if let Some(f) = doc.functions.iter().find(|f| !f.is_mcp() && !f.is_mock()) {
+        return Err(ConnectorError::Invalid(format!(
+            "connector `{c}` has an `mcp:` block, so its functions are mcp or mock functions only; `{}` is not",
+            f.name
+        )));
+    }
+    let mapped: Vec<(&FunctionSpec, &str)> = doc
+        .functions
+        .iter()
+        .filter_map(|f| Some((f, f.mcp.as_ref()?.tool.as_str())))
+        .collect();
+    for (i, (a, tool)) in mapped.iter().enumerate() {
+        if let Some((b, _)) = mapped[i + 1..]
+            .iter()
+            .find(|(b, t)| t == tool && !(a.read_only && b.read_only))
+        {
+            return Err(ConnectorError::Invalid(format!(
+                "functions `{}` and `{}` map the same tool `{tool}`; only read-only functions may share a tool",
+                a.name, b.name
+            )));
+        }
+    }
+    let timeouts: Vec<(&str, u64)> = doc
+        .functions
+        .iter()
+        .filter(|f| f.is_mcp())
+        .map(|f| (f.name.as_str(), f.timeout_sec))
+        .collect();
+    super::mcp::validate_server_shape(c, spec, &timeouts)
+}
+
+/// The facts of an mcp function its shape rules read
+/// (`super::mcp::validate_function_shape`).
+fn mcp_function_shape(f: &FunctionSpec) -> Result<(), ConnectorError> {
+    let Some(spec) = &f.mcp else {
+        return Ok(());
+    };
+    let http_fields: [(&'static str, bool); 10] = [
+        ("query", !f.query.is_empty()),
+        ("headers", !f.headers.is_empty()),
+        ("body", f.body.is_some()),
+        ("body_form", !f.body_form.is_empty()),
+        ("text_args", !f.text_args.is_empty()),
+        ("scopes", !f.scopes.is_empty()),
+        ("paginate", f.paginate.is_some()),
+        ("mime", f.mime.is_some()),
+        ("decode_base64url", !f.decode_base64url.is_empty()),
+        ("content_types", !f.content_types.is_empty()),
+    ];
+    super::mcp::validate_function_shape(&super::mcp::FunctionFacts {
+        name: &f.name,
+        spec,
+        http_field: http_fields.iter().find(|(_, set)| *set).map(|(n, _)| *n),
+        read_only: f.read_only,
+        has_idempotency: f.idempotency.is_some(),
+    })
+}
+
 /// Validates every template placeholder in the connector against the
 /// secret-placement policy: `{{secret.*}}` is allowed only inside `auth`
 /// (any occurrence in a function's `url`, `query`, or `body` is rejected);
@@ -1368,6 +1498,10 @@ pub fn validate_templates(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
         validate_webhook_templates(hook, &doc.name, &fields)?;
     }
 
+    if let Some(mcp) = &doc.mcp {
+        validate_mcp_templates(mcp, &fields)?;
+    }
+
     if let Some(auth) = &doc.auth {
         if let AuthSpec::Oauth2Refresh {
             token_url,
@@ -1441,6 +1575,55 @@ pub fn validate_templates(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
         }
     }
 
+    Ok(())
+}
+
+/// Validates the placeholders of a connector's `mcp:` block: `command`
+/// takes none, each `args` entry takes `{{account.*}}` only (an argument
+/// shows in the process list, so never a secret), and an `env` value takes
+/// `{{account.*}}` and `{{secret.*}}`. `{{args.*}}` is refused in the whole
+/// block: the call's arguments go to the tool, not to the transport.
+fn validate_mcp_templates(
+    mcp: &super::mcp::McpServerSpec,
+    fields: &FieldNames,
+) -> Result<(), ConnectorError> {
+    use crate::connector::template::{Namespace, placeholders};
+
+    if let Some(command) = &mcp.command
+        && !placeholders(command)?.is_empty()
+    {
+        return Err(ConnectorError::Invalid(
+            "mcp `command` takes no placeholder; it is a literal program".to_string(),
+        ));
+    }
+    let args = mcp
+        .args
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (format!("mcp args[{i}]"), a, false));
+    let env = mcp
+        .env
+        .iter()
+        .map(|(name, v)| (format!("mcp env.{name}"), v, true));
+    for (where_, template, secret_ok) in args.chain(env) {
+        for (ns, name) in placeholders(template)? {
+            reject_auth(ns, &where_)?;
+            match ns {
+                Namespace::Args => {
+                    return Err(ConnectorError::Invalid(format!(
+                        "args placeholders are not allowed in the mcp block ({where_}); the call's arguments go to the tool"
+                    )));
+                }
+                Namespace::Secret if !secret_ok => {
+                    return Err(ConnectorError::Invalid(format!(
+                        "secret placeholders are allowed only in auth and in mcp env values ({where_})"
+                    )));
+                }
+                _ => {}
+            }
+            fields.check(ns, &name)?;
+        }
+    }
     Ok(())
 }
 

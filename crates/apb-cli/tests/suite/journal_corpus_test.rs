@@ -114,6 +114,17 @@
 //! provenance and guard) on which each old binary's `apb connector call`
 //! fails, sends nothing to a live service and runs no `{{cmd:...}}` helper.
 //!
+//! Row M1 covers MCP tool connectors: the new binary installs an MCP
+//! connector whose program is the scripted stub, approves its tree and
+//! account and records the account's pins in-process (no binary approves
+//! an MCP connector without a terminal), and starts a playbook whose review
+//! gate comes before a node granted one MCP function. Each old binary reads
+//! that run; approves and resumes it, where the node's stub agent calls the
+//! function through that old binary, which cannot load the snapshot, so the
+//! call fails closed: no server starts and no send intent is journaled;
+//! and refuses a new start with `connector_unresolved`. The whole row runs
+//! in a child test process, so the in-process config dir is its own.
+//!
 //! Row S1 covers scenario runs: a quick scenario run the new binary plays
 //! (`apb eval --level quick`) lives under `.apb/scenario-runs/` with
 //! `origin: scenario` in its manifest; neither old binary lists it, shows
@@ -4775,5 +4786,249 @@ fn rowv1_doubled_run_old_connector_call_sends_nothing() {
             label(&reader)
         );
         assert!(!marker.exists(), "row V1: {} ran no helper", label(&reader));
+    }
+}
+
+/// Row M1's connector: design D1's example with the stub as its program.
+fn m1_connector(command: &str) -> String {
+    format!(
+        r#"name: tracker-mcp
+version: 0.1.0
+mcp:
+  transport: stdio
+  command: {command}
+  args: ["--workspace", "{{{{account.workspace}}}}"]
+  env:
+    TRACKER_TOKEN: "{{{{secret.token}}}}"
+account_fields:
+  - {{ name: workspace, required: true }}
+  - {{ name: token, required: true, secret: true }}
+identity: {{ function: whoami, path: id }}
+functions:
+  - name: whoami
+    description: The account the server acts as
+    read_only: true
+    mcp: {{ tool: whoami }}
+  - name: list_comments
+    description: Recent comments of one issue
+    read_only: true
+    mcp: {{ tool: list_comments }}
+  - name: create_comment
+    description: Add a comment to an issue
+    mcp: {{ tool: create_comment }}
+    args_schema:
+      type: object
+      properties: {{ issue: {{ type: string }}, body: {{ type: string }} }}
+      required: [issue, body]
+    idempotency:
+      mode: marker
+      arg: body
+      format: html_comment
+      reconcile:
+        function: list_comments
+        items: comments
+        text: body
+        author: author.id
+        item_ref: url
+"#
+    )
+}
+
+/// Row M1's playbook: a review gate before a node granted one MCP function.
+const M1_MCP: &str = "schema: 2\nid: corpus-mcp\nname: Journal corpus MCP\nversion: 1.0.0\neffects: [network, external]\nnodes:\n  - { id: start, type: start }\n  - { id: gate, type: human_review, options: [approved, rejected] }\n  - { id: look, type: agent_task, prompt: LOOK, profile: corpus, connectors: [{ name: tracker-mcp, functions: [list_comments] }] }\n  - { id: ok, type: finish, outcome: success }\n  - { id: no, type: finish, outcome: failure }\nedges:\n  - { from: start, to: gate }\n  - { from: gate, to: look, condition: { type: review_status, equals: approved } }\n  - { from: gate, to: no, condition: { type: review_status, equals: rejected } }\n  - { from: look, to: ok }\n";
+
+#[test]
+fn rowm1_mcp_call_old_binaries_fail_closed() {
+    apb_core::process_mode::testing::in_plain_child(
+        "journal_corpus_test::rowm1_mcp_call_old_binaries_fail_closed",
+        rowm1_body,
+    );
+}
+
+fn rowm1_body() {
+    use apb_core::connector::mcp::digest::{pin_digest, tool_digest};
+    use apb_core::connector::mcp::pins::{PinStore, ServerPin, ToolPin};
+    use apb_core::trust::{Kind, OriginKind, TrustStore, account_trust_id};
+    use apb_mcp_client::testing::{StubEra, StubServer};
+
+    let new = new_binary();
+    let mut case = Case::new("row M1");
+    case.seed_inline(&new, "corpus-mcp", M1_MCP, &[]);
+    let cfg = case.dir.path().join("home/.config/apb");
+    let stub = StubServer::write(&case.dir.path().join("stub"), StubEra::Modern).unwrap();
+    let tools = serde_json::json!([
+        { "name": "whoami", "inputSchema": { "type": "object" } },
+        { "name": "list_comments", "inputSchema": { "type": "object" } },
+        { "name": "create_comment", "inputSchema": { "type": "object" } }
+    ]);
+    stub.set_tools(&tools).unwrap();
+    let program = fs::canonicalize(stub.program()).unwrap();
+    fs::create_dir_all(cfg.join("connectors/tracker-mcp")).unwrap();
+    fs::write(
+        cfg.join("connectors/tracker-mcp/connector.yaml"),
+        m1_connector(&program.to_string_lossy()),
+    )
+    .unwrap();
+    fs::create_dir_all(cfg.join("connector-config")).unwrap();
+    fs::write(
+        cfg.join("connector-config/tracker-mcp.yaml"),
+        "accounts:\n  - name: work\n    default: true\n    workspace: acme\n    token: \"{{env.CORPUS_MCP_TOKEN}}\"\n",
+    )
+    .unwrap();
+    case.env
+        .push(("CORPUS_MCP_TOKEN", "corpus-mcp-token-6612".to_string()));
+    // The approvals and the pins, written in this child process's own
+    // config dir, which is the case's.
+    // SAFETY: this child process runs this one test.
+    unsafe { std::env::set_var("APB_CONFIG_DIR", &cfg) };
+    let tree = apb_core::connector::store::load("tracker-mcp")
+        .unwrap()
+        .digest;
+    let accounts = apb_core::connector::config::load_merged(&case.root(), "tracker-mcp").unwrap();
+    let account = apb_core::connector::config::account_digest(&accounts[0]);
+    let mut trust = TrustStore::load();
+    trust
+        .approve_kind(
+            &tree,
+            "tracker-mcp",
+            Kind::Connector,
+            OriginKind::LocallyApproved,
+        )
+        .unwrap();
+    trust
+        .approve_kind(
+            &account,
+            &account_trust_id("tracker-mcp", "work"),
+            Kind::ConnectorAccount,
+            OriginKind::LocallyApproved,
+        )
+        .unwrap();
+    let program_s = program.to_string_lossy().to_string();
+    let program_digest = apb_core::content::sha256_hex(&fs::read(&program).unwrap());
+    let pins: std::collections::BTreeMap<String, ToolPin> = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| {
+            (
+                t["name"].as_str().unwrap().to_string(),
+                ToolPin {
+                    digest: tool_digest(t),
+                    description: String::new(),
+                    members: Default::default(),
+                },
+            )
+        })
+        .collect();
+    let digests = pins
+        .iter()
+        .map(|(k, v)| (k.clone(), v.digest.clone()))
+        .collect();
+    PinStore::record(
+        "tracker-mcp",
+        "work",
+        ServerPin {
+            pin_digest: pin_digest(&tree, &account, &program_s, &program_digest, &digests),
+            connector_digest: tree,
+            account_digest: account,
+            command: program_s.clone(),
+            program: program_s,
+            program_digest,
+            tools: pins,
+            approved_at_ms: 1,
+        },
+    )
+    .unwrap();
+    // The node's agent calls the function through `CORPUS_APB` and keeps
+    // what it answered.
+    let d = case.dir.path().display().to_string();
+    let agent = case.dir.path().join("mcp-agent.sh");
+    fs::write(
+        &agent,
+        format!(
+            "#!/bin/sh\n\"$CORPUS_APB\" connector call tracker-mcp list_comments --args '{{}}' > '{d}/call.out' 2>&1\necho $? > '{d}/call.code'\necho ok\n"
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+    case.env.retain(|(k, _)| *k != "APB_AGENT_CMD");
+    case.env
+        .push(("APB_AGENT_CMD", agent.display().to_string()));
+
+    let run = case.start_inline(&new, "corpus-mcp", &[]);
+    case.wait_journal(&run, "the review gate", |j| {
+        j.iter().any(|e| e["type"] == "review_requested")
+    });
+    case.kill_driver(&run);
+    case.save();
+    assert!(
+        case.run_dir(&run)
+            .join("connectors/tracker-mcp.yaml")
+            .exists(),
+        "row M1: the run snapshotted the MCP connector"
+    );
+    assert!(
+        stub.starts().is_empty(),
+        "row M1: the writer started no server"
+    );
+
+    let Some((beta1, v025)) = old_readers(&case) else {
+        return;
+    };
+    for reader in [beta1, v025] {
+        case.restore();
+        let ran = case.run(&reader, &["runs", &run]);
+        assert!(ran.ok(), "row M1: {} runs: {ran:?}", label(&reader));
+
+        case.env.retain(|(k, _)| *k != "CORPUS_APB");
+        case.env.push(("CORPUS_APB", reader.display().to_string()));
+        let _ = fs::remove_file(case.dir.path().join("call.code"));
+        case.approve_and_resume(&reader, &run);
+        let code = fs::read_to_string(case.dir.path().join("call.code"))
+            .unwrap_or_else(|_| panic!("row M1: {} the node ran its call", label(&reader)));
+        let said = fs::read_to_string(case.dir.path().join("call.out")).unwrap_or_default();
+        assert_ne!(
+            code.trim(),
+            "0",
+            "row M1: {} the call fails: {said}",
+            label(&reader)
+        );
+        assert!(
+            said.contains("snapshot is invalid"),
+            "row M1: {} cannot load the snapshot: {said}",
+            label(&reader)
+        );
+        assert!(
+            stub.starts().is_empty(),
+            "row M1: {} started no server",
+            label(&reader)
+        );
+        assert!(
+            !case
+                .journal(&run)
+                .iter()
+                .any(|e| e["type"] == "send_intent_recorded"),
+            "row M1: {} journaled no send intent",
+            label(&reader)
+        );
+
+        case.restore();
+        let ran = case.run(&reader, &["run", "corpus-mcp", "--detach"]);
+        assert!(
+            !ran.ok(),
+            "row M1: {} refuses a new start: {ran:?}",
+            label(&reader)
+        );
+        assert!(
+            format!("{}{}", ran.stdout, ran.stderr).contains("connector_unresolved"),
+            "row M1: {} refuses with connector_unresolved: {ran:?}",
+            label(&reader)
+        );
+        assert!(
+            stub.starts().is_empty(),
+            "row M1: {} started no server",
+            label(&reader)
+        );
     }
 }

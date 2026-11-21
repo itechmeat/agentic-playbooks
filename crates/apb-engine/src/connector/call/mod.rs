@@ -28,7 +28,7 @@ mod request;
 pub(crate) mod response;
 mod send_once;
 pub(crate) mod shape;
-mod target;
+pub(crate) mod target;
 pub(crate) mod url_encode;
 pub(crate) mod wire;
 
@@ -58,7 +58,7 @@ use apb_core::secret::{Redaction, Secret};
 use apb_core::trust::{TrustStore, account_trust_id};
 use serde_json::{Value, json};
 
-use crate::connector::intent::stamp::Stamp;
+use crate::connector::intent::stamp::{Stamp, prepare_body_args};
 use crate::event::{EventLog, EventPayload};
 use crate::manifest::{self, ManifestAccount, ManifestConnector, ManifestConnectorGrant};
 
@@ -112,6 +112,12 @@ struct EventMeta {
     /// A doubled call's reservation, delivered as the last step of
     /// `execute` (eval-doubles D1 "Answering a call"); `None` otherwise.
     reservation: Option<crate::eval::doubles::Reservation>,
+    /// The digest of the MCP tool an mcp call verified against its pin;
+    /// `None` for every other call.
+    tool_digest: Option<String>,
+    /// The open session of an mcp call, closed only after the result is
+    /// journaled and its intent settled; `None` for every other call.
+    mcp_session: Option<crate::connector::mcp::SessionHandle>,
 }
 
 /// Runs the whole call pipeline for a node with no send label or attempt
@@ -155,7 +161,11 @@ fn execute_bounded(req: CallRequest, ctx: &CallContext, max_secs: Option<u64>) -
     }
     match run(&req, ctx, max_secs) {
         Outcome::DryRun(value) => (value, true),
-        Outcome::Answer(ok) => (ok.to_success_json(), true),
+        Outcome::Answer(ok, warnings) => {
+            let mut value = ok.to_success_json();
+            add_warnings(&mut value, &warnings);
+            (value, true)
+        }
         Outcome::Ok(ok, mut meta) => {
             if let Some(refused) = journal_call(&req, &mut meta) {
                 return refused;
@@ -171,15 +181,21 @@ fn execute_bounded(req: CallRequest, ctx: &CallContext, max_secs: Option<u64>) -
             }
             let mut value = ok.to_success_json();
             settle_send(&req, &meta, Ok(&ok), &mut value);
+            close_mcp(&mut meta);
             add_warnings(&mut value, &meta.warnings);
             deliver_double(&req, meta.reservation.take(), (value, true))
         }
-        Outcome::Executed(err, mut meta) => {
+        Outcome::Executed(mut err, mut meta) => {
+            // An mcp call that failed closes its server first, so what the
+            // close proved reaches the journaled settlement (design D4
+            // "The order of one call", step 7).
+            close_mcp_into(&mut err, &mut meta);
             if let Some(refused) = journal_call(&req, &mut meta) {
                 return refused;
             }
             let mut value = err.to_json();
             let now_ok = settle_send(&req, &meta, Err(&err), &mut value);
+            close_mcp(&mut meta);
             add_warnings(&mut value, &meta.warnings);
             deliver_double(&req, meta.reservation.take(), (value, now_ok))
         }
@@ -250,6 +266,29 @@ fn settle_send(
     result.is_ok()
 }
 
+/// Closes the session of an mcp call, after its result is journaled and
+/// its intent settled, and adds the end's warning to the printed ones.
+fn close_mcp(meta: &mut EventMeta) {
+    if let Some(session) = meta.mcp_session.take()
+        && let Some(w) = session.close_noted()
+    {
+        meta.warnings.push(w);
+    }
+}
+
+/// Closes the session of an mcp call that failed, before its result is
+/// journaled and its intent settled, and puts the end's warning in front
+/// of the error's message (the settlement's detail is cut from the end):
+/// a person resolving an unknown send, and the run journal, read that the
+/// server's process group could not be shown empty.
+fn close_mcp_into(err: &mut CallError, meta: &mut EventMeta) {
+    if let Some(session) = meta.mcp_session.take()
+        && let Some(w) = session.close_noted()
+    {
+        err.message = format!("{w}; {}", err.message);
+    }
+}
+
 /// Puts the call's warnings at the top level of the result JSON, ok or
 /// error, when there are any. Warnings are never journaled.
 fn add_warnings(value: &mut Value, warnings: &[String]) {
@@ -264,7 +303,7 @@ fn add_warnings(value: &mut Value, warnings: &[String]) {
 /// event).
 enum Outcome {
     DryRun(Value),
-    Answer(CallOk),
+    Answer(CallOk, Vec<String>),
     Ok(CallOk, EventMeta),
     Executed(CallError, EventMeta),
     Gate(CallError),
@@ -276,7 +315,7 @@ fn run(req: &CallRequest, ctx: &CallContext, max_secs: Option<u64>) -> Outcome {
     let (mut prepared, scope) = match prepare(req, ctx, max_secs) {
         Ok(Staged::Ready(Prepared::DryRun(v), _)) => return Outcome::DryRun(v),
         Ok(Staged::Ready(Prepared::Call(p), scope)) => (*p, scope),
-        Ok(Staged::Answer(ok)) => return Outcome::Answer(ok),
+        Ok(Staged::Answer(ok, warnings)) => return Outcome::Answer(ok, warnings),
         Err(e) => return Outcome::Gate(e),
     };
     if let Some(secs) = max_secs {
@@ -288,10 +327,12 @@ fn run(req: &CallRequest, ctx: &CallContext, max_secs: Option<u64>) -> Outcome {
     let account = prepared.account().to_string();
     let url = prepared.pre_auth_url();
     let (smtp_subject, smtp_recipients) = prepared.event_extra();
+    let tool_digest = prepared.tool_digest();
+    let mcp_session = prepared.mcp_session();
     // Whether the journal event can speak about response completeness is a
     // property of the call kind (only a real HTTP response read a body), so
     // it is read off the prepared call before dispatch consumes it.
-    let http_like = matches!(prepared, PreparedCall::Http(_));
+    let http_like = matches!(prepared, PreparedCall::Http(_) | PreparedCall::Mcp { .. });
     let started = Instant::now();
     // A doubled call's reservation outlives its dispatch: it is delivered
     // at the end of `execute`.
@@ -332,6 +373,8 @@ fn run(req: &CallRequest, ctx: &CallContext, max_secs: Option<u64>) -> Outcome {
         pages,
         scope,
         reservation,
+        tool_digest,
+        mcp_session,
     };
     match result {
         Ok(ok) => Outcome::Ok(ok, meta),
@@ -343,7 +386,9 @@ fn run(req: &CallRequest, ctx: &CallContext, max_secs: Option<u64>) -> Outcome {
 /// the scope its journal record carries, or an answer that needs no call.
 enum Staged {
     Ready(Prepared, CallScope),
-    Answer(CallOk),
+    /// An answer without a call, with the warnings of a session the call
+    /// had opened and closed.
+    Answer(CallOk, Vec<String>),
 }
 
 /// The result of the gate + render stage: a dry-run terminal, or a fully
@@ -391,6 +436,12 @@ enum PreparedCall {
         account: String,
         reservation: crate::eval::doubles::Reservation,
     },
+    /// A verified MCP tool call over its open session (design D4). Boxed
+    /// for the same reason as the others.
+    Mcp {
+        account: String,
+        call: Box<crate::connector::mcp::McpCall>,
+    },
 }
 
 impl PreparedCall {
@@ -402,6 +453,7 @@ impl PreparedCall {
             PreparedCall::Http(h) => h.deadline = h.deadline.min(lowered),
             PreparedCall::Smtp { call, .. } => call.cap_timeout(secs),
             PreparedCall::Imap { call, .. } => call.cap_deadline(lowered),
+            PreparedCall::Mcp { call, .. } => call.cap_deadline(lowered),
             PreparedCall::Mock { .. }
             | PreparedCall::Inbox { .. }
             | PreparedCall::Double { .. } => {}
@@ -416,6 +468,7 @@ impl PreparedCall {
             PreparedCall::Imap { account, .. } => account,
             PreparedCall::Inbox { account, .. } => account,
             PreparedCall::Double { account, .. } => account,
+            PreparedCall::Mcp { account, .. } => account,
         }
     }
 
@@ -430,6 +483,7 @@ impl PreparedCall {
             PreparedCall::Imap { call, .. } => call.endpoint(),
             PreparedCall::Inbox { call, .. } => call.endpoint(),
             PreparedCall::Double { .. } => "eval-double".to_string(),
+            PreparedCall::Mcp { call, .. } => call.endpoint(),
         }
     }
 
@@ -437,12 +491,30 @@ impl PreparedCall {
     /// every other kind, which record neither.
     fn event_extra(&self) -> (Option<String>, Option<u32>) {
         match self {
-            PreparedCall::Mock { .. } | PreparedCall::Http(_) | PreparedCall::Double { .. } => {
-                (None, None)
-            }
+            PreparedCall::Mock { .. }
+            | PreparedCall::Http(_)
+            | PreparedCall::Double { .. }
+            | PreparedCall::Mcp { .. } => (None, None),
             PreparedCall::Smtp { call, .. } => call.event_extra(),
             PreparedCall::Imap { call, .. } => call.event_extra(),
             PreparedCall::Inbox { call, .. } => call.event_extra(),
+        }
+    }
+
+    /// The digest of the MCP tool an mcp call verified; `None` for every
+    /// other kind.
+    fn tool_digest(&self) -> Option<String> {
+        match self {
+            PreparedCall::Mcp { call, .. } => Some(call.tool_digest()),
+            _ => None,
+        }
+    }
+
+    /// The open session of an mcp call; `None` for every other kind.
+    fn mcp_session(&self) -> Option<crate::connector::mcp::SessionHandle> {
+        match self {
+            PreparedCall::Mcp { call, .. } => Some(call.session()),
+            _ => None,
         }
     }
 
@@ -495,6 +567,7 @@ impl PreparedCall {
             PreparedCall::Double { reservation, .. } => {
                 return (Self::answer_double(&reservation), Some(reservation));
             }
+            PreparedCall::Mcp { call, .. } => call.send(),
         };
         (dispatched, None)
     }
@@ -611,17 +684,6 @@ fn prepare(
         read: &execute_with,
         budget: &budget,
     };
-    match send_once::gate(&gate_input)? {
-        send_once::SendGate::Untracked => budget(&events)?,
-        send_once::SendGate::Answer(ok) => return Ok(Staged::Answer(ok)),
-        send_once::SendGate::Send(tracked) => {
-            scope.attempt = tracked.attempt;
-            scope.attempt_seq = tracked.attempt_seq;
-            scope.send = Some(*tracked);
-        }
-    }
-
-    let stamp = scope.send.as_ref().map(send_once::Tracked::stamp);
     // An item check's args are rendered templates, so always text: read
     // them as the function's schema types them.
     let typed;
@@ -634,6 +696,102 @@ fn prepare(
     } else {
         &req.args
     };
+    // A live mcp call (design D4 "The order of one call"): the arguments'
+    // shape, the admission decision, the pin check and the start, all
+    // before the gate records an intent. A doubled call and a dry-run take
+    // the common path below.
+    let mcp = target.function.mcp.is_some() && doubles.is_none();
+    if mcp {
+        crate::connector::mcp::require_call_arguments(req.connector, req.function, args)?;
+    }
+    let live_mcp = mcp && !req.dry_run;
+    let mut connected = None;
+    if live_mcp && matches!(send_once::preview(&gate_input)?, send_once::Preview::GoOn) {
+        connected = Some(mcp_connect(req, &target, args, max_secs)?);
+    }
+    let abandon =
+        |connected: Option<crate::connector::mcp::Connected>, e: CallError| match connected {
+            Some(c) => crate::connector::mcp::with_warning(e, c.abandon()),
+            None => e,
+        };
+    // A live mcp call records an intent only with its server started and
+    // its pins checked. When the unlocked preview sent the call to the
+    // gate and the gate would now admit it (the ledger changed in
+    // between), the gate records nothing and answers `NeedsStart`: the
+    // server is started and checked, and the gate decides again.
+    let may_record = |connected: &Option<_>| !live_mcp || connected.is_some();
+    let mut gate = match send_once::gate(&gate_input, may_record(&connected)) {
+        Ok(gate) => gate,
+        Err(e) => return Err(abandon(connected, e)),
+    };
+    if matches!(gate, send_once::SendGate::NeedsStart) {
+        connected = Some(mcp_connect(req, &target, args, max_secs)?);
+        gate = match send_once::gate(&gate_input, may_record(&connected)) {
+            Ok(gate) => gate,
+            Err(e) => return Err(abandon(connected, e)),
+        };
+    }
+    match gate {
+        send_once::SendGate::Untracked if live_mcp => {
+            // The server start takes seconds: the attempt and the budget
+            // are decided again on the journal as it is once the server
+            // runs, so a call whose attempt ended, or whose allowance an
+            // earlier call spent meanwhile, never reaches `tools/call`.
+            let c = match connected.take() {
+                Some(c) => c,
+                None => mcp_connect(req, &target, args, max_secs)?,
+            };
+            let now = attempt::journal(req.run_dir);
+            if ctx.origin.charges_budget() && !attempt::bind(&now, req.node_id, &ctx.claim).open {
+                return Err(abandon(Some(c), send_once::attempt_closed(req)));
+            }
+            if let Err(e) = budget(&now) {
+                return Err(abandon(Some(c), e));
+            }
+            connected = Some(c);
+        }
+        send_once::SendGate::Untracked => {
+            if let Err(e) = budget(&events) {
+                return Err(abandon(connected, e));
+            }
+        }
+        send_once::SendGate::Answer(ok) => {
+            // The answer stands; the warning of a session that was opened
+            // goes with it.
+            let warnings = connected
+                .and_then(crate::connector::mcp::Connected::abandon)
+                .into_iter()
+                .collect();
+            return Ok(Staged::Answer(ok, warnings));
+        }
+        send_once::SendGate::Send(tracked) => {
+            scope.attempt = tracked.attempt;
+            scope.attempt_seq = tracked.attempt_seq;
+            scope.send = Some(*tracked);
+        }
+        // Only a gate that may not record answers it, and the second gate
+        // above may.
+        send_once::SendGate::NeedsStart => {
+            return Err(abandon(
+                connected,
+                CallError::new(
+                    CallErrorCode::Config,
+                    "mcp: the send-once gate asked for a start twice; nothing was recorded or sent",
+                ),
+            ));
+        }
+    }
+    if live_mcp {
+        // An untracked call (no intent) connects here when the preview did
+        // not; a tracked one was connected before its intent was recorded.
+        let connected = match connected {
+            Some(c) => c,
+            None => mcp_connect(req, &target, args, max_secs)?,
+        };
+        return Ok(mcp_ready(&target, args, connected, scope));
+    }
+
+    let stamp = scope.send.as_ref().map(send_once::Tracked::stamp);
     // D7: the attachments directory this call writes into, node and list
     // item included, each segment through the file name sanitizer; the op
     // appends the uid.
@@ -684,6 +842,71 @@ fn prepare(
             Err(e)
         }
     }
+}
+
+/// Steps 2 and 2a of a live mcp call: the arguments' schema, the pin check
+/// (no secret, nothing started), then the secrets and the start, the
+/// listing and the tool check. Nothing is recorded yet.
+fn mcp_connect(
+    req: &CallRequest,
+    target: &target::Target,
+    args: &Value,
+    max_secs: Option<u64>,
+) -> Result<crate::connector::mcp::Connected, CallError> {
+    if let Some(schema) = &target.function.args_schema {
+        validate_args(schema, args)?;
+    }
+    let deadline = Instant::now()
+        + Duration::from_secs(match max_secs {
+            Some(bound) => target.function.timeout_sec.min(bound),
+            None => target.function.timeout_sec,
+        });
+    // The tree the run snapshotted and the gate approved: the manifest's
+    // `ManifestConnector.digest`.
+    let connector_digest = manifest::read(req.run_dir)
+        .ok()
+        .flatten()
+        .and_then(|m| m.connector(req.connector).map(|c| c.digest.clone()))
+        .ok_or_else(|| {
+            CallError::new(
+                CallErrorCode::Config,
+                format!("connector `{}` is not in the run manifest", req.connector),
+            )
+        })?;
+    let fields = non_secret_fields(&target.maccount);
+    let checked = crate::connector::mcp::check_pin(&crate::connector::mcp::McpConnectInput {
+        doc: &target.doc,
+        connector_digest: &connector_digest,
+        account_digest: &target.maccount.digest,
+        function: &target.function,
+        connector: req.connector,
+        account_name: &target.account,
+        account_fields: &fields,
+        full: req.full,
+        deadline,
+    })?;
+    let (secrets, redactions) = resolve_secrets(req.root, &target.maccount, deadline)?;
+    crate::connector::mcp::connect(checked, &secrets, redactions)
+}
+
+/// Step 4 of a live mcp call, after the gate: the marker stamped into
+/// the arguments of the connected, verified session. Nothing here fails:
+/// the server was started and checked before any intent was recorded.
+fn mcp_ready(
+    target: &target::Target,
+    args: &Value,
+    connected: crate::connector::mcp::Connected,
+    scope: CallScope,
+) -> Staged {
+    let stamp = scope.send.as_ref().map(send_once::Tracked::stamp);
+    let arguments = prepare_body_args(&target.function, args, stamp.as_ref()).into_owned();
+    Staged::Ready(
+        Prepared::Call(Box::new(PreparedCall::Mcp {
+            account: target.account.clone(),
+            call: Box::new(connected.with_arguments(arguments)),
+        })),
+        scope,
+    )
 }
 
 /// Refuses a call once the grant's `max_calls` budget is spent in the
@@ -965,6 +1188,29 @@ fn build_prepared(
         };
     }
 
+    // 7a. MCP: a dry-run renders the start and the arguments; a live call
+    // reaching here comes from outside a run (the playground, a pinned
+    // notice) and is refused, before any secret is resolved. A live call
+    // in a run takes the mcp order of `prepare` and never reaches here.
+    if function.mcp.is_some() {
+        if !dry_run {
+            return Err(crate::connector::mcp::live_call_unsupported(
+                &doc.name,
+                &function.name,
+            ));
+        }
+        return crate::connector::mcp::dry_run(
+            doc,
+            function,
+            &doc.name,
+            &account_name,
+            &non_secret_fields(maccount),
+            args,
+            stamp,
+        )
+        .map(Prepared::DryRun);
+    }
+
     // 7. Secrets: resolve every env-ref field. Skipped entirely for a dry-run.
     let account_fields = non_secret_fields(maccount);
     let (secrets, mut redactions) = if dry_run {
@@ -1186,6 +1432,14 @@ fn build_prepared(
 /// the dashboard's probe button. Returns the same `{ "ok": bool, ... }` shape
 /// `execute` does; the bool mirrors `execute`'s ok hint.
 pub fn healthcheck(root: &Path, name: &str, account: &str) -> (Value, bool) {
+    if let Some(e) = guard_refusal() {
+        return (e.to_json(), false);
+    }
+    // An MCP connector's healthcheck checks the pins without a tool call
+    // (design D4 "Live calls outside a run").
+    if store::load(name).is_ok_and(|loaded| loaded.doc.mcp.is_some()) {
+        return crate::connector::mcp::pin::healthcheck(root, name, account);
+    }
     answer_live(|| prepare_healthcheck(root, name, account))
 }
 
@@ -1431,6 +1685,7 @@ fn append_event(req: &CallRequest, meta: &EventMeta) -> bool {
         attempt_seq: meta.scope.attempt_seq,
         intent: meta.scope.send.as_ref().map(|t| t.id.clone()),
         origin: meta.scope.origin.journal_tag(),
+        tool_digest: meta.tool_digest.clone(),
     })
     .is_ok()
 }

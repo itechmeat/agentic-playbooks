@@ -17,9 +17,10 @@ spec `docs/superpowers/specs/2026-07-12-agent-profiles-design.md`.
 
 ## Crates (big picture)
 
-Six crates under `crates/`; the dependency direction is core <- engine <- mcp,
-with cli and server on top, and `apb-decide` (no workspace dependency) <-
-engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below).
+Seven crates under `crates/`; the dependency direction is core <- engine <- mcp,
+with cli and server on top, `apb-decide` (no workspace dependency) <-
+engine, mcp, and core <- mcp-client <- engine. Do not introduce import cycles
+(enforced by code-ranker, see below).
 
 - `apb-core` - domain layer, no async. Playbook schema (`schema.rs`,
   `Playbook::from_yaml`; a node's `results:` entries are `ResultDecl`), validator (`validate/`, codes V01+, one module per
@@ -32,7 +33,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   definition shares) and the search param rules V160-V162, `quality` for the `quality:` block and the
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
-  `isolation` V112-V115, `publish` for a `publish` node and `publish_only`
+  `isolation` V112-V115 (V113's message names the MCP reason), `mcp` for
+  the bindings of MCP connectors V300 to V302 (`validate/mcp.rs`: V300 a
+  binding with no `functions` list, V301 a launcher `command`, V302 an
+  engine site), `publish` for a `publish` node and `publish_only`
   V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `review_form` for the form of a `human_review` (a malformed `max_scope` V243, `fields` V244, `show` V245, a required field without a default on a gate the engine may decide V246, a default over untrusted text V247), `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`; `list_pilot` names a definition whose list uses `pilot` or `stop_when`, `wait_park` one with a timer wait, `eval_doubles` (never a definition
   feature) a doubled eval run, named from `run_provenance.eval_doubles`,
   the names in this declaration order), `output_types` for the typed output field contract V167-V168, `write_scope` for a declared write scope V170-V172, `deadline` for a run's `deadline` V200, `concurrency` for the `concurrency:` block V210 and V211, `health` for the `health:` block V212, `previous_success` for the `run.previous_success` grammar, the `when_none` block and V176; `nodes` also holds V68, ids that start with `@`
@@ -102,8 +106,20 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   whose `explain` never carries body text (`connector/event_filter.rs`), the
   OAuth pure helpers (the token response,
   scopes, PKCE, the authorization URL, the callback;
-  `connector/oauth.rs`) and the paging block with its manifest rules
-  (`connector/paginate.rs`), profiles
+  `connector/oauth.rs`), the paging block with its manifest rules
+  (`connector/paginate.rs`), and the MCP connector kind (`connector/mcp/`:
+  `mod` the `mcp:` blocks of a connector and a function, their manifest
+  rules, `MCP_AUTO_MIN_TIMEOUT_SEC`, `MCP_LAUNCHERS` (the launchers and
+  interpreters behind V301 and the approval's warning) and `LOADER_ENV`
+  (the `env` names refused `mcp_env_loads_code`, with the `LD_` and
+  `DYLD_` prefixes); `digest` the tool
+  digest over the raw definition minus `UNPINNED_MEMBERS`, `canonical_json`
+  and the pin digest; `pins` the pin store `<config-dir>/mcp-tools.json`,
+  read beneath the canonical config dir, written under its lock with its
+  cap, `ServerPin::compare`, the one comparison of a pin binding,
+  `program_status` for display, and `forget`, called by
+  `install::uninstall` and `TrustStore::revoke`),
+  profiles
   (`profile.rs` types incl. `ProfileError` and `ProfileDoc::problems`, the one
   structural check of a run start, `apb validate` and every profile write,
   `profile_store.rs` scope resolution and bundle trust, `skills.rs`), a
@@ -327,6 +343,28 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   one shared HTTP exchange, limit checks and strict reply validation,
   retries, the provider chain, the per-run cache and the `ApiKey` wrapper; the `testing` feature adds a
   multi-response HTTP stub. Knows nothing about runs.
+- `apb-mcp-client` - a blocking stdio client of the Model Context Protocol
+  over rmcp `=3.9.0` (the version `apb-mcp` pins), depending on `apb-core`
+  only (core <- mcp-client <- engine): `Session` with its own runtime on its
+  own thread (`connect` in `auto`, `modern` or `legacy`, `list_tools` as
+  the raw JSON the server sent, `call_tool`, `close`), the program file
+  (`stdio.rs` `ProgramFile`: opened once, its digest read from that
+  descriptor, started from it through `/proc/self/fd/<n>` on Linux and its
+  path hashed again right before the spawn elsewhere, `StartFrom`), the
+  spawn with a cleared environment behind
+  `process_mode::guard_program_start`, in a fresh private working
+  directory, as the leader of its own process group (`PR_SET_PDEATHSIG` on
+  Linux), the line tap (`tap.rs`: a bounded line reader at
+  `MAX_LINE_BYTES` and `MAX_SESSION_BYTES` per session, the raw
+  `tools/list` capture, each request's id registered before its bytes are
+  forwarded, and the `tools/call` lines handed over, which tell
+  `CallFailure::NotSent` from `Lost`), and an end that closes stdin, kills
+  the server's group while the server is unreaped and reaps it
+  (`Ended::Reaped { killed, group }` the only proof, `GroupEnd` what was
+  seen of the group; a late reap waits in the worker); the `testing`
+  feature adds the `sh` stub server, refused in a build without debug
+  assertions. Knows nothing about runs, grants, pins
+  or the send ledger.
 - `apb-engine` - execution. The drive loop (`scheduler.rs`) with its phases in
   `scheduler/` (`entry` start, handoff and dead-attempt reaping, `control_apply`
   the control scan (a park applied only as the last entry of a pass at its
@@ -749,7 +787,22 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   `ManifestConnector.doubled_accounts`; `connector/run.rs` records no
   account for it), `paginate.rs` (the bounded
   page walk), `shape.rs` (one response shaped: status, error_when, decoded
-  text), and `send_once` the send-once flow; `intent/` the
+  text), and `send_once` the send-once flow, with `preview` the read-only
+  admission an mcp call asks before it starts a server and `gate`'s
+  `may_record`, whose `NeedsStart` keeps an intent from being recorded
+  before the server started; `mcp/` the MCP
+  kind: `mod` `program_file` the one open of a program file, `check_pin`
+  before any secret (keeping that file open), `connect` after it,
+  `McpCall`, the `SessionHandle` closed after a success's settlement and
+  before a failure's, `end_warning`, `server_text` (redact the whole
+  text, then cut to 500 characters) and `redact_tree` (strings, member
+  names and numbers), `server` the server's environment from a fixed
+  source (`server_path`, the program's directory last) and
+  `preview_start`, `map` answers and failures to results with
+  `tool_error`, `redact` the one redaction walk (`redact_tree`, strings,
+  member names and numbers) and the bound of server text (`server_text`,
+  redacted whole, then cut), `pin` the person's listing `list_live`,
+  `record` and the pin-check `healthcheck`; `intent/` the
   send ledger: `identity` what makes two sends the same, `ledger` the fold
   and the admission table, `stamp` the key and the marker, `reconcile` the
   lookup of a marker send; `effect` what a call says about its effect), background
@@ -901,6 +954,10 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   `connector_oauth.rs` is `apb connector oauth` (a person's terminal runs
   the loopback consent of one connector account and prints the refresh
   token once; refused inside a run step and without a terminal).
+  `connector_mcp.rs` is the approval of an MCP connector (`approve_mcp`
+  over a `Confirm`, the binary passing the terminal; `print_tree`,
+  `print_program` and `print_pins`, the approve output, every string
+  sanitized for the terminal).
   `passkey.rs` is `apb passkey enroll|list|remove` (person only, refused
   inside a run step, at an interactive terminal; the enrollment code is
   stored only after the person typed it back, and every removal needs a
@@ -1244,6 +1301,43 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   connectors reference only to scrub them (and withholds the args when
   one is unresolved); no value leaves the call process. A declared
   `irreversible` effect stays refused, doubles or not.
+- **MCP tool connectors** (`docs/CONNECTORS.md` "MCP servers", spec
+  `docs/superpowers/specs/2026-11-20-mcp-tool-connectors-design.md`): a
+  connector with an `mcp:` block maps the tools of an MCP server, stdio
+  only in this version (`transport: http` refused). Its functions are
+  called by apb through `apb connector call`, never handed to an agent
+  (nothing is added to any agent's MCP configuration), and count as
+  `untrusted_output`; `read_only`, `irreversible` and `idempotency` are
+  the author's, server annotations shown and never used. The program and
+  the tools are pinned by a person at an interactive terminal (`apb
+  connector approve <c> --account <a>`), in two typed confirmations: the
+  program first (path, file digest, rendered args and env, the account's
+  fields, before any secret is resolved), then the tools after the
+  listing; refused without a terminal, in a run step, over MCP and from the
+  dashboard (`mcp_approve_needs_a_person`, no digest printed). A pin record
+  in `<config-dir>/mcp-tools.json` is one binding of the tree digest, the
+  account digest, the program path and digest and the tool digests,
+  compared in one place (`ServerPin::compare`). The server's environment
+  comes from a fixed source, never the caller's; the server runs in a
+  fresh private working directory, as the person, unsandboxed (the
+  approval says so once), and an `env` name that changes what code it
+  loads is refused (`mcp_env_loads_code`). The program that runs is the
+  file that was hashed (its descriptor on Linux, its path hashed again
+  elsewhere). Every call checks the pins before it resolves a secret and
+  again after its listing, all before the send intent is recorded, on
+  every path (`NeedsStart`); one server per call, the leader of its own
+  process group, which the close kills while the server is unreaped,
+  closed after a success's settlement and before a failure's. Only
+  failures before the hand-over of `tools/call` (a call no byte of which
+  reached the server included, `CallFailure::NotSent`) settle `not_sent`; `tool_error` (`isError`,
+  `input_required`, a task, a JSON-RPC error of any code on a write) and
+  lost answers settle `unknown`. The run gate refuses unpinned granted
+  tools (`mcp_tools_unpinned`). Uninstalling a connector or revoking an
+  approval forgets its pins. No live MCP call outside a run
+  (`mcp_live_call_unsupported`); the healthcheck is a pin check without a
+  call. V113 refuses MCP connectors on isolated nodes, V302 at engine
+  sites. `connector_call.tool_digest` is additive; no run guard, since an
+  older apb cannot load the connector and fails every call closed.
 - **Edge addresses and route facts** (spec
   `docs/superpowers/specs/2026-11-01-edge-identity-design.md`): every edge
   has an address in its definition (`id:<id>` or `e:<from>><to>#<n>`,

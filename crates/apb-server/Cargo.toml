@@ -52,3 +52,6 @@ ts-rs = "12"
 http-body-util = "0.1.3"
 tempfile = "3.27.0"
 tower = "0.5.3"
+# The scripted stdio MCP server of the MCP connector tests; a test build
+# only (the feature refuses a build without debug assertions).
+apb-mcp-client = { path = "../apb-mcp-client", features = ["testing"] }

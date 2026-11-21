@@ -10,7 +10,8 @@
 //! functions; and [`contract_test`] is the offline runner for a connector's
 //! `tests.yaml` cases, reusing [`call`]'s render path with no network.
 //! [`intent`] is the send-intent ledger that keeps a send from acting twice,
-//! and [`effect`] says what one call means for the world.
+//! and [`effect`] says what one call means for the world. [`mcp`] is the
+//! MCP tool kind: the pin check, the server's start and one `tools/call`.
 //!
 //! The manifest parsing, grant resolution, secret chain, and account config
 //! that these modules consume live in `apb_core::connector`.
@@ -24,6 +25,7 @@ pub(crate) mod files;
 pub mod imap;
 pub mod inbox;
 pub mod intent;
+pub mod mcp;
 pub(crate) mod mime_read;
 pub mod oauth;
 pub mod prompt;

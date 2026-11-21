@@ -17,6 +17,7 @@ mod budget;
 mod cache;
 mod candidate;
 mod connector;
+mod connector_mcp;
 mod connector_oauth;
 mod consent;
 mod corrections;

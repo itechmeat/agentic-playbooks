@@ -229,6 +229,10 @@ doctor` reports the trust status of every connector and account (approved,
 changed since approval, or never approved) alongside manifest, config, and env
 checks.
 
+For a connector with an `mcp:` block both approvals are a person's act at an
+interactive terminal, and the account approval also pins the server's program
+and tools; see [MCP servers](#mcp-servers).
+
 ## Binding a connector to a node
 
 An `agent_task` node gets an optional `connectors` list, the same two-form
@@ -496,6 +500,565 @@ To run the listener, see docs/DEPLOYMENT.md. `apb connector doctor` prints
 the exact callback URL per account, the pending depth, and whether the local
 listener answers.
 
+## MCP servers
+
+A connector can map the tools of a server of the Model Context Protocol
+instead of HTTP endpoints. apb starts the server and calls its tools itself,
+through `apb connector call`, exactly as it makes an HTTP call: the grant,
+`max_calls`, the trust approvals, secret scrubbing, the `connector_call`
+journal entry and the send ledger all apply. The agent never gets the
+server (below). This version speaks stdio only: `transport: http` is
+refused when the manifest loads ("mcp transport `http` is not supported by
+this apb").
+
+### The manifest
+
+A connector-level `mcp:` block says how to start the server, and each
+function names the tool it calls with `mcp: { tool: <name> }`:
+
+```yaml
+name: code-search
+version: 0.1.0
+mcp:
+  transport: stdio
+  command: code-search-mcp            # an absolute path or a bare program name
+  args: ["--root", "{{account.repo_dir}}"]
+account_fields:
+  - { name: repo_dir, required: true }
+functions:
+  - { name: search, description: Search the code, read_only: true, mcp: { tool: search } }
+  - { name: read_file, description: Read one file, read_only: true, mcp: { tool: read_file } }
+```
+
+The `mcp:` block:
+
+- `transport`: `stdio`.
+- `command`: a literal program, an absolute path or a bare name, with no
+  placeholder. A bare name is looked up once, when a person approves an
+  account (below), never at call time.
+- `args`: argument templates; each may use `{{account.*}}` only. A
+  `{{secret.*}}` here would land in the process list and is refused.
+- `env`: variable name to template. Names are upper case letters, digits
+  and `_` and must not start with `APB_`. Values may use `{{account.*}}`
+  and `{{secret.*}}`; this is the only place a secret reaches the server.
+  A name that changes what code a process loads is refused when the
+  manifest loads (`mcp_env_loads_code`), since the approval of the
+  program does not cover the code such a variable pulls in: every name
+  starting `LD_` or `DYLD_`, and `NODE_OPTIONS`, `NODE_PATH`,
+  `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `PYTHONUSERBASE`,
+  `PYTHONINSPECT`, `RUBYOPT`, `RUBYLIB`, `GEM_HOME`, `GEM_PATH`,
+  `PERL5OPT`, `PERL5LIB`, `PERLLIB`, `PERL5DB`, `BASH_ENV`, `ENV`,
+  `ZDOTDIR`, `CLASSPATH`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`,
+  `JDK_JAVA_OPTIONS`, `GCONV_PATH` and `LUA_PATH`.
+- `protocol`: how the conversation opens. `auto` (the default) asks
+  `server/discover` first and falls back to `initialize` for a server of an
+  older revision; `modern` speaks 2026-07-28 only (an older server is an
+  error); `legacy` sends `initialize` only.
+
+`{{args.*}}` is refused anywhere in the block: the call's arguments go to
+the tool, not to the program. No control character may appear in
+`command`, an `args` entry or an `env` name or value.
+
+A connector with an `mcp:` block holds only `mcp` and `mock` functions, and
+an `mcp:` block exactly when it has an `mcp` function. It sets no `auth`,
+`webhook` or `error_when`. An mcp function takes the fields every function
+has (`name`, `description`, `args_schema`, `examples`, `read_only`,
+`irreversible`, `idempotency`, `response_pick`, `timeout_sec`,
+`untrusted_output`) and none of the HTTP fields (`query`, `headers`, `body`,
+`body_form`, `text_args`, `scopes`, `paginate`, `mime`,
+`decode_base64url`, `content_types`). The tool name is 1 to 128 of `A-Z`,
+`a-z`, `0-9`, `_`, `-` and `.`, exactly as the server lists it. Two
+functions may map the same tool (a narrower `args_schema` for one use) only
+when both are `read_only`. A function that is not `read_only` must declare
+`idempotency` (see "Sending once over MCP" below).
+
+What a function may do is the author's word, never the server's:
+`read_only`, `irreversible` and `idempotency` are declared per function as
+for HTTP, and the server's annotations (`readOnlyHint`, `destructiveHint`,
+`idempotentHint`) are shown to a person at approval and read by nothing
+else. An `irreversible` mcp function reaches V73 and the unattended rules
+like any other connector function.
+
+The timeout rule of `protocol: auto`: a server that ignores
+`server/discover` is asked `initialize` only after a fixed 10 s probe, and
+the call's `timeout_sec` bounds the probe too. So under `auto` every mcp
+function needs a `timeout_sec` of at least 15, else the manifest is refused
+with `mcp_timeout_too_small`. Set `protocol: modern` or `legacy` when the
+server's revision is known; both skip the probe and take any timeout.
+
+A second example, outside code: a local notes server that adds a note sent
+once by a marker and deletes a note only behind a person's review.
+
+```yaml
+name: notes-mcp
+version: 0.1.0
+mcp:
+  transport: stdio
+  command: /opt/notes-mcp/bin/notes-mcp
+  args: ["--folder", "{{account.folder}}"]
+account_fields:
+  - { name: folder, required: true }
+identity: { function: whoami, path: name }
+functions:
+  - { name: whoami, description: The user the server writes as, read_only: true, mcp: { tool: whoami } }
+  - name: list_notes
+    description: Notes changed since a time
+    read_only: true
+    mcp: { tool: list_notes }
+    args_schema: { type: object, properties: { since: { type: string } } }
+  - name: add_note
+    description: Add a note
+    mcp: { tool: add_note }
+    args_schema:
+      type: object
+      properties: { title: { type: string }, body: { type: string } }
+      required: [title, body]
+    idempotency:
+      mode: marker
+      arg: body
+      format: html_comment
+      reconcile: { function: list_notes, since_arg: since, items: notes, text: body, author: author, item_ref: id }
+  - name: delete_note
+    description: Delete one note
+    irreversible: true
+    mcp: { tool: delete_note }
+    args_schema: { type: object, properties: { id: { type: string } }, required: [id] }
+    idempotency: { mode: none }
+```
+
+A retry of `add_note` whose answer was lost finds the note by its marker
+instead of adding a second one. Grant `delete_note` only to a node that
+runs after a `human_review` gate; V73 refuses that gate's `auto_decide`.
+
+### One server per call
+
+Every call starts its own server process from the program the approval
+pinned, opens the conversation, lists the tools, checks the pins, sends
+one `tools/call` and closes the server again. Nothing is kept between
+calls, so a server that crashed costs one call, never the run. The
+working directory is a fresh, empty, private directory (mode 0700) that
+apb makes under the temporary directory for this one start and removes,
+with everything in it, once the server has ended; it is never the project
+root. The server's stderr is not read. One deadline, the function's
+`timeout_sec`, covers the start, the handshake, the listing and the call.
+
+The server runs as you, unsandboxed: it can read and change what you can,
+including apb's own files and the secrets of other connectors. The
+private working directory only keeps a relative path from landing in
+your project. Approve only a server you would run yourself. Running MCP
+servers under apb's isolation sandbox is future work.
+
+apb starts the server as the leader of its own process group. To end it,
+apb closes the server's stdin and waits up to 3 s for it to exit; then,
+while the server is still unreaped (so its group id cannot have been
+reused), it kills the server's whole process group, reaps the server
+within 2 s and looks up to 1 s for the group to be empty. So a worker the
+server forked in its group ends with it. A process that left the group
+(its own session or group) is not chased; when the group is not seen
+empty, the call carries the warning "the MCP server was reaped, but its
+process group could not be shown empty: a process it started may still
+run and act". apb signals no other process. When the calling process
+itself is killed, apb's close does not run. On Linux the server is then
+killed with it (it is started with a parent-death signal), though a
+worker it forked is not. On other platforms the server ends only when it
+exits on the end of its stdin, so a killed call whose server ignores the
+end of its input leaves that server running. A cleanup of such survivors
+is future work. Nothing in the journal or the send ledger depends on the
+server ending.
+
+A single message from the server is limited to a little over 7 MiB, one
+session to four such messages in all, and one listing to 20 pages, 500
+tools and 2 MiB; past a limit the call fails with
+`mcp_message_too_large`.
+
+### The server's environment
+
+The server does not inherit the environment of whoever calls it. apb
+clears it and builds a new one from a fixed source:
+
+| Variable | Value | Source |
+|---|---|---|
+| `HOME` | the user's home directory | the system account database of the user apb runs as |
+| `USER`, `LOGNAME` | the user's name | the same account entry |
+| `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` | `<home>/.config`, `<home>/.local/share`, `<home>/.local/state`, `<home>/.cache` | the home above and the XDG defaults, never the caller's values |
+| `PATH` | `/usr/local/bin:/usr/bin:/bin`, then `/opt/homebrew/bin` on macOS, then `<program dir>` | fixed: the system directories first, so a name the server looks up is never found first in the program's own directory; on macOS the Homebrew directory, so a `#!/usr/bin/env node` server finds its interpreter; the pinned program's own directory last |
+| each name of `mcp.env` | its rendered template | the approved definition and the approved account; a declared name overrides a row above |
+| everything else of the calling process (`PATH`, `HOME`, `XDG_*`, `LANG`, `TZ`, `TMPDIR`, the proxy variables in either case, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `APB_*`, an agent's token) | dropped | none |
+
+So a caller cannot point the pinned program at another configuration or
+route its traffic through a proxy of its choosing. A server that needs a
+proxy, a certificate bundle, a locale or a temp dir gets it only by name in
+`mcp.env`, with its value from the definition or an account field:
+
+```yaml
+mcp:
+  transport: stdio
+  command: /opt/tracker-mcp/bin/tracker-mcp
+  env:
+    HTTPS_PROXY: "{{account.proxy}}"
+    SSL_CERT_FILE: "{{account.ca_bundle}}"
+    TRACKER_TOKEN: "{{secret.token}}"
+```
+
+Where the account database gives no home (no entry for the user, or a
+system that is not unix), the call is refused before anything starts.
+
+### Approving the program and the tools
+
+The connector tree and each account are approved by digest as for every
+connector, and an MCP connector adds two more facts: the program that
+receives the account's secrets, and the tools it may be asked to run. For a
+connector with an `mcp:` block, every approval is a person's act at an
+interactive terminal:
+
+```sh
+apb connector approve code-search                  # the tree: one typed confirmation
+apb connector approve code-search --account work   # the program, then the tools: two typed confirmations
+```
+
+Without `--account`, apb prints the tree digest and the `mcp:` block as
+written (transport, command, each `args` template, every `env` name with its
+template, `protocol`; placeholders stay unrendered, so no secret or account
+value is read) and asks you to type the connector name. It starts nothing
+and touches no pin. A tree approval alone never makes an old pin usable:
+the output lists every account whose tools need a new approval.
+
+With `--account`, in this order:
+
+1. The first confirmation, the program. apb resolves `command` once, a
+   bare name through your own `PATH`, to an absolute canonical path, and
+   hashes the file. It prints the command, the path, the file's digest, a
+   warning when the command is an interpreter or a launcher (below), the
+   line "this program runs as you, unsandboxed: it can read and change
+   what you can, including apb's own files and the secrets of other
+   connectors", every argument rendered
+   with the account's fields, every `env` override rendered the same way
+   (a part that comes from a secret shows as `[secret <field> from env
+   <VAR>]` or `[secret <field> from cmd]`, never its value), every
+   non-secret field of the account, and for each secret read from a command
+   the command line that will run. Nothing has been resolved or started
+   yet, so an account field that sets a proxy, a `PATH` or a certificate
+   file is seen before it takes effect. You type the connector name to go
+   on; anything else ends the command with nothing resolved, started or
+   written.
+2. apb reloads the connector and the account and compares both digests
+   with the ones you confirmed, then opens the program file once and
+   compares its digest with the one you confirmed. A change refuses the
+   approval (`mcp_approve_definition_changed`,
+   `mcp_approve_account_changed`, `mcp_server_changed`) with nothing
+   resolved or started.
+3. Only then are the account's secrets resolved and the file opened in
+   step 2 started (below, "The program that runs"), under a fixed 30 s,
+   and every tool listed.
+4. The second confirmation, the tools. apb prints the era of the
+   conversation, the program again, and one line per function: the tool,
+   its status against the existing pin (`pinned`, `unpinned`, `changed` or
+   `missing`), the full digest of its definition and its description;
+   for a changed tool the pinned and the new description side by side and
+   the names of the members that changed; then each tool's title, input
+   schema and annotations (shown, not used). Server tools no function maps
+   are listed by name; they can never be called. Each field of server
+   text is cut to its own length, and all of it together to 20 000
+   characters, with one line saying how many lines were left out. Right
+   above the question apb prints again the program digest, the count of
+   tools in each status and the pin digest over the whole binding, so no
+   server text can scroll them away. When the server started for this
+   listing could not be shown ended, a warning above them says that a
+   process started for the listing may still be running with the
+   account's secrets. You type the connector name again.
+5. apb records the account approval and then one pin record for the
+   connector and account.
+
+Every text in both confirmations, from the definition, the account, the
+file system or the server, is sanitized for the terminal, and long values
+are cut with a marker. The protocol version a server reports is kept only
+when it is one apb supports; any other ends the conversation with
+`mcp_protocol_unsupported`, which does not repeat what the server sent. A
+tool the server does not list is reported as a
+warning and not pinned; its function is refused (`mcp_tool_missing`) until
+the server lists it and you approve again.
+
+There is no other way to approve an MCP connector. Without an interactive
+terminal, inside a run step, over MCP and from the dashboard the approval
+is refused `mcp_approve_needs_a_person`, and that refusal prints no digest,
+program or tool, so a caller cannot learn a value to replay. No flag names
+an expected digest. Approval without a terminal (for example in
+provisioning scripts) is future work. Connectors of other kinds keep their
+approval as described in "Approving trust".
+
+A tool's digest covers its whole definition as the server sent it, read
+off the wire (name, title, description, input and output schema,
+annotations and any member a later protocol revision adds), except `icons`
+and `_meta`, which a server may change per request. A pin record binds,
+as one unit, the approved tree digest, the approved account digest, the
+program's path and file digest, and the digest of every mapped tool. So a
+changed definition (its `command`, `args`, `env` or any other field), a
+project account that replaces a global one of the same name, a program
+file that changed, or a tool whose definition changed each refuse every
+call until a person approves the account again. Each approval of an
+account replaces its record whole, and the last approval of an
+account name on this machine is the one that counts.
+
+A server could echo one of the account's secrets back into a tool's
+definition. A listing whose raw tool definitions hold any secret of the
+account, in a name, a description, an annotation or any member, is refused
+`mcp_tools_reflect_a_secret` before anything is hashed, shown or stored;
+the refusal names no tool. On top of that, every server text the listing
+shows or stores passes the account's redactions.
+
+### Every call checks the pins
+
+Before a call starts anything or resolves any secret, apb checks the pin
+store, the record for the connector and account, the run's tree and
+account digests against it, the program file at the pinned path and its
+digest, and that the function's tool is pinned. Only then does it resolve
+the secrets (a `{{cmd:...}}` helper runs only for a call whose pins
+passed), start exactly the program file it checked (never a name looked
+up in the caller's `PATH`; see "The program that runs" above), list the tools and compare the live digest of the tool
+with its pin. This happens on every call, not once per run: a server that
+changes a description between two calls of one attempt is refused on the
+second. All of it comes before the send intent is recorded and before
+anything is sent.
+
+The run gate also refuses a start whose granted mcp functions have no pin
+for their connector, account and tree (`mcp_tools_unpinned`, with a manual
+next action); it starts no server and hashes no file. `acknowledge_untrusted`
+does not bypass it. A doubled eval run is no exception (below).
+
+The pins live in `<config-dir>/mcp-tools.json`, machine-wide like
+`trust.json`, one record per connector account. The file is read without
+following a link below the config dir, written atomically under a lock
+(mode 0600), and refused rather than read as empty when it does not parse,
+so an edit never silently resets it. A record that would push the file
+past its 4 MiB read cap is refused (`mcp_pin_store_too_large`). A call made
+from a run step reads pins only from the default config dir: with the
+config dir redirected it is refused `mcp_config_dir_redirected`.
+
+What the pin store guards against: a server or a program file that
+changes after a person approved it; a caller that picks the program or its
+environment; and an agent or a mistake reaching pins through apb's own
+surfaces (no MCP tool and no HTTP route writes a pin, and the approval
+takes a person at a terminal). "Approved at a terminal" has two limits.
+The pin store is an unsigned file that any process of the same user can
+write, exactly as `trust.json`, so an approval is no protection against a
+run step of the same user that has a shell; for an agent with a shell,
+isolation (`docs/ISOLATION.md`) is the answer. And the terminal check is
+`isatty` plus `/dev/tty`: an agent with a pseudo-terminal that clears
+`APB_RUN_ID` passes it, as it passes every typed confirmation of apb.
+
+Pins go with the connector and its approval. Uninstalling a connector
+(the dashboard's uninstall of an installed connector) removes its pin
+records (a reinstall asks a person to approve
+its tools again at a terminal; the trust record stays, as before), and
+revoking the approval of a connector or of a connector account (`apb
+trust revoke`, MCP `trust_revoke`, the dashboard) removes the pin records
+of that connector or that account. Both are best effort: a pin store that
+does not read keeps them, and a kept pin still binds the tree digest. An
+account has no removal command; the pin of an account you deleted binds
+an account digest nothing matches, and the next approval of an account of
+that name replaces it.
+
+The program that runs is the file that was hashed. apb opens the program
+file once, without following a link and without waiting on a FIFO,
+accepts only a regular file, reads its digest from that open file and
+keeps it open until the start:
+
+- On Linux the server is started from that open file
+  (`/proc/self/fd/<n>`), so a file renamed over the path, a new file or a
+  swapped link after the check changes nothing: the file that was hashed
+  runs. For a script with an interpreter line, the interpreter reads the
+  hashed file the same way, and the script's own name (`$0`,
+  `sys.argv[0]`, `__file__`) is `/proc/self/fd/<n>`, a link that resolves
+  to the approved file (or to `<path> (deleted)` when it was replaced). A
+  script that finds its files next to its own name resolves that link
+  first: node does it itself, and a shell script can use `readlink
+  /proc/$$/fd/<n>`.
+- On other platforms (macOS) apb opens the path again without following
+  a link and hashes it again right before the start; a different digest
+  refuses the start (`mcp_server_changed`) and nothing starts. The short
+  window between that second hash and the start remains there.
+- On no platform is a file rewritten in place (the same file, changed
+  between the check and the start) covered; only a replacement is.
+
+The program pin covers the program file only, not the libraries it
+loads.
+
+Interpreters and launchers. When `command` is a launcher (`npx`, `pnpx`,
+`bunx`, `uvx`, `pipx`, `uv`, `npm`, `pnpm`, `yarn`, `docker`, `podman`,
+`env`) or an interpreter (`node`, `nodejs`, `deno`, `bun`, `python`,
+`python3`, `sh`, `bash`, `zsh`, `dash`, `ksh`, `fish`, `ruby`, `perl`,
+`php`, `java`, `lua`, `pwsh`, and a versioned name such as `python3.12`),
+the approval covers that program file only, not the script or package it
+runs. The script, the package or image it fetches or picks at each start,
+and the modules it loads are not covered and can change with nothing
+pinned changing; the tool pins still refuse a changed tool list, but a
+server that changes what it does and not its tools is not caught. Each
+confirmation prints "warning: <name> is an interpreter or a launcher;
+this approval covers the <name> file only, not the script or package it
+runs", and every binding of such a connector draws validator warning
+V301. Install the server and name its program in `command` instead.
+
+Refusals name what differs and never a digest or a command to run; the
+message starts with the code, while `error.code` stays the coarse class:
+
+| Code | Class | When |
+|---|---|---|
+| `mcp_server_unpinned` | `permission` | no pin record for the connector and account |
+| `mcp_server_changed` | `permission` | the definition, the account, or the program file changed, or the file is gone, a link or not a regular file |
+| `mcp_tool_unpinned` | `permission` | the record has no pin for the function's tool |
+| `mcp_tool_changed` | `permission` | the tool's definition differs from its pin |
+| `mcp_tool_missing` | `config` | the server no longer lists the mapped tool |
+| `mcp_tools_reflect_a_secret` | `permission` | a tool definition holds a secret of the account |
+| `mcp_config_dir_redirected` | `permission` | a run step's config dir is redirected |
+| `mcp_message_too_large` | `service` | a message or a listing over its limit (before the call is sent) |
+| `mcp_live_call_unsupported` | `config` | a live call outside a run (below) |
+| `mcp_tools_unpinned` | run gate | a run start whose granted mcp functions are not pinned; when the pin store does not read, the refusal carries `store_unreadable` with its path and the next action is to move it aside and approve the tools again at a terminal |
+| `mcp_approve_needs_a_person` | approve, exit 2 (dashboard 403) | an approval anywhere but an interactive terminal |
+| `mcp_approve_definition_changed`, `mcp_approve_account_changed` | approve, exit 2 | the connector or the account changed after the program confirmation |
+| `mcp_env_loads_code` | install and load | an `mcp.env` name that changes what code a process loads |
+
+### What an MCP call returns
+
+An MCP call answers `{ "ok": true, "body": ... }` with no HTTP `status`.
+The body is the tool's structured content when it sent one (any JSON value,
+`null` included); otherwise its text blocks joined with a newline, parsed
+as JSON when they parse and `{ "text": "<joined text>" }` when not (an
+answer with no text block is `{ "text": "" }`). Image, audio and resource
+blocks are left out and counted in `dropped_content`. The account's
+secrets are redacted from the body (in every string, every member name
+and every number), then a `response_pick` projection applies (`picked:
+true`). Every text the server provides in an error (a tool's error text,
+a JSON-RPC error message, a failure message) is redacted whole and then
+cut to 500 characters with a marker; a tool's error text is kept as
+text, never parsed. A body over the 1 MiB cap fails a `read_only`
+function `incomplete_response`; a write succeeds with a `null` body and
+`response_complete: false`, as an HTTP write with a cut body does. The
+call's arguments must be a JSON object; a scalar, an array or `null` is
+refused `invalid_args` before anything starts.
+
+The journaled `connector_call` carries the url `mcp+stdio://<connector>/<tool>`
+and `tool_digest`, the digest of the tool definition the call was checked
+against.
+
+How each answer counts (what decides the send ledger is whether the
+`tools/call` request was handed to the server):
+
+- A failure before the request is handed over (the start, the handshake,
+  the listing, a pin refusal) records no send intent, journals no call and
+  spends no `max_calls` unit. The send intent is recorded only after the
+  server started and its pins were checked. A failure after the intent was
+  recorded and before the hand-over settles the send `not_sent`, and so
+  does a call no byte of which reached the server (the server already
+  gone): "the call never reached the MCP server; nothing was sent". apb
+  says so only after it stopped every further write to the server, so a
+  call that waited in a queue when its deadline passed can never go out
+  later; a call apb cannot prove unwritten settles `unknown`. apb
+  reads every message before it writes it to the server and refuses one
+  it cannot read rather than send it unread; the arguments of an MCP
+  call may be nested at most 64 levels and be at most 1 MiB as JSON,
+  else the call is refused `invalid_args` before the server starts.
+  Every line the server sends that starts with `{` must be exactly one
+  JSON-RPC 2.0 message (no member named twice, nothing around it but one
+  carriage return); apb ends the session on any other such line, and on a
+  line that starts with a byte order mark (`mcp_message_invalid`), and
+  passes nothing of it on. A line that does not start with `{` (log text,
+  a blank line) is dropped unread; the call's warnings say how many, never
+  what they said, and more than 1000 of them end the session.
+- A complete answer that is not an error is a success; a write settles
+  `confirmed`.
+- An answer with `isError: true`, a task handle, an `input_required` answer
+  (the server wants input apb cannot give), and a JSON-RPC error of any code
+  to a write are the outcome `tool_error`: the tool may have acted before it
+  failed or asked, so a write settles `unknown`. A server error code is the
+  server's own word, received after the request went out, so no code counts
+  as "nothing happened".
+- A JSON-RPC error to a `read_only` function is a failed read: `service`
+  for -32700 and -32600, `config` for -32601, `invalid_args` for -32602,
+  and `tool_error` for any other code.
+- No answer: a timeout is `timeout`, a broken pipe, a server that exited or
+  an answer over the message limit is `network`; a write settles `unknown`.
+
+A call that failed closes its server before its result is journaled and
+its send settled, so a warning from the close (a process group not shown
+empty) is at the front of the settlement's detail, where `apb intent list`
+and `apb intent resolve` show it.
+
+### Sending once over MCP
+
+The protocol has no idempotency key, so a write declares `marker`, `none`
+or `repeatable`, and `key` is refused. A `marker` send needs the
+connector's `identity` and a `reconcile` function that is a read-only mcp
+function of the same connector; the marker rides in the tool's arguments,
+and a repeat of an unknown send lists recent items through the reconcile
+function, whose `items`, `text`, `author` and `item_ref` paths read the
+body shape above. A `none` send that ends unknown waits for a person (or
+the binding's `on_unknown: resend`). See [Sending once](#sending-once).
+
+### Where an MCP connector cannot be used
+
+- An isolated node: V113 refuses any connector on a node with `isolation`,
+  and its message names MCP connectors, whose server would need the
+  credentials the sandbox withholds. A broker is future work.
+- An engine site: V302 (error) refuses an MCP connector at the baseline
+  check, the follow-up check and a list item check (`<node>#check`). Those
+  reads run from the drive or a detached waker, for which this version
+  defines no server environment, working directory or stop path.
+- A notification target: an mcp function never carries notifications, so
+  `apb notify` refuses it.
+- Outside a run. A live call of an mcp function outside a run (the
+  dashboard's playground, a pinned notice) is refused
+  `mcp_live_call_unsupported` before any secret is resolved; a `--dry-run`
+  still answers, with the pinned program (or the `command` when nothing is
+  pinned), the rendered arguments, the `env` names, the tool and the
+  prepared arguments, starting nothing. The dashboard's healthcheck of an
+  MCP connector checks the pins without a tool call: it starts the pinned
+  server, lists its tools, compares every mcp function's tool with its pin
+  and closes the server, journaling and writing nothing (`{ "ok": true,
+  "mcp": { "era": ..., "tools_checked": n } }`). Like any connector, it
+  needs a `healthcheck` function, whose `timeout_sec` is its deadline.
+
+A binding that grants an MCP connector without a `functions` list grants
+every tool the manifest maps, destructive ones included, and draws V300.
+Every mcp function counts as `untrusted_output`: its server writes every
+byte of the answer, so bind the connector with `untrusted: true` (V187).
+
+### The agent never gets the server
+
+The agent sees the functions as the manifest describes them: description,
+`args_schema` and examples are the author's, never the server's. It calls
+them through `apb connector call` like any other function, and apb adds no
+server to any agent's MCP configuration. In a profile's default `minimal`
+environment claude runs with `--strict-mcp-config`, so no MCP server but
+apb's own reaches it. Under `environment: full` claude loads the person's
+own MCP configuration, as before; apb adds nothing there either, but cannot
+say which servers the person configured.
+
+### Eval doubles
+
+An eval case doubles an mcp function exactly as an HTTP one, by connector
+and function name (see `docs/EVALS.md`); the double answers before any
+secret is resolved and no server starts. Four points differ:
+
+1. The double's `answer` is `{ status, body }` as for any function, but the
+   agent reads `body` where a live call returns the body shape above, so
+   write `body` in that shape (the structured content, or
+   `{ "text": ... }`). `status` means nothing to the server.
+2. The journaled call of a doubled function has the url `eval-double` and
+   no `tool_digest`: no tool was checked.
+3. The run gate's pin check applies to an eval run as to any run: a
+   doubled eval needs its tools approved once, against the real server, as
+   it needs its connector and account approved.
+4. An eval case that runs under the config dir it was handed calls no MCP
+   server live: a live mcp call from a run step whose config dir is
+   redirected is refused `mcp_config_dir_redirected`, even with the pins
+   in that dir. Give such a case's MCP calls a double (`connectors:`).
+
+### Older apb
+
+An apb older than this change cannot load a connector manifest with an
+`mcp:` block: it refuses to start such a run, and in a run it resumes,
+every call of an mcp function fails before anything starts.
+
 ## What a call returns
 
 A call answers with one JSON document. On success it carries `ok: true`, the
@@ -520,7 +1083,8 @@ human-readable `message`, and, when they apply, `http_status` and
 `invalid_args`, `auth` (the service rejected the credentials), `not_found`,
 `rate_limited` (with `retry_after_sec` when the service gave one), `service`
 (any other non-2xx, a redirect, or an `error_when` reclassification inside a
-2xx), `network`, `timeout`, and `incomplete_response`. A function that is sent
+2xx), `network`, `timeout`, and `incomplete_response`. An MCP call adds
+`tool_error` (see [MCP servers](#mcp-servers)). A function that is sent
 once (see [Sending once](#sending-once)) adds two refusals: `unknown_effect`
 and `in_flight`. Any call refuses with `attempt_closed` when it does not
 belong to the node's current attempt: that attempt has ended, or the call
@@ -704,9 +1268,10 @@ and the repeat is answered `already_sent` with the key as its `ref`.
 Without `conflict`, a 409 stays unknown, like any other outcome nobody
 can tell.
 
-`idempotency` is allowed only on HTTP, mock, smtp and imap functions that
-are not `read_only` (an smtp or imap function may declare only `mode:
-none`, since neither protocol has a key or a marker to reconcile with), and
+`idempotency` is allowed only on HTTP, mock, smtp, imap and mcp functions
+that are not `read_only` (an smtp or imap function may declare only `mode:
+none`, since neither protocol has a key or a marker to reconcile with; an
+mcp function, below, anything but `key`), and
 the
 manifest is refused at load time when a `key` field is empty, is also an
 argument, or sits in a body that does not always render as a JSON object
@@ -724,6 +1289,17 @@ that unlikely but is not a guarantee.
 `--dry-run` never carries a real key or marker: the preview shows
 `(set at send)` for a key and `[apb adds a hidden send marker here]` for a
 marker.
+
+An mcp function (see [MCP servers](#mcp-servers)) that is not `read_only`
+must declare `marker`, `none` or `repeatable`; `key` is refused, since the
+protocol has no idempotency key. A `marker` send's `reconcile` function is
+a `read_only` mcp function of the same connector, and the marker rides in
+the tool's arguments, neutralized and appended as for HTTP. What counts as
+unknown is wider than for HTTP: once the `tools/call` request was handed to
+the server, an answer with `isError: true`, an `input_required` answer, a
+task handle and a JSON-RPC error of any code are the outcome `tool_error`
+and settle the send `unknown`, as do a timeout and a broken connection.
+Only a failure apb knows came before the hand-over settles `not_sent`.
 
 ### `on_unknown`: a binding's choice for unknown sends
 
@@ -878,7 +1454,7 @@ scripted response too, so a case and a live call refuse the same headers.
 apb connector list              installed connectors, trust and config status
 apb connector show <name>       manifest summary and per-account status
 apb connector call <name> <fn>  the agent-facing call channel (--account, --args, --dry-run, --intent)
-apb connector approve <name>    approve a connector or (--account) an account digest
+apb connector approve <name>    approve a connector or (--account) an account digest; an MCP connector only by a person at a terminal, --account also pins its program and tools
 apb connector oauth <name>      one-time OAuth consent for an account; a person at a terminal; prints the refresh token once
 apb connector doctor            check every connector: manifest, config, env, trust, healthcheck
 apb connector env [<name>]      unresolved env var names as ready-to-paste KEY= lines
@@ -889,7 +1465,17 @@ apb connector init <name>       scaffold a new connector folder from a template
 the engine when a node executes a call). Outside a run, `--dry-run` renders a
 call without executing it, against the live connector and account config (no
 secret is resolved, so no approval is needed); probe an account with the
-dashboard healthcheck.
+dashboard healthcheck. For an MCP connector the healthcheck checks the pins
+without a tool call (it starts the pinned server, lists and compares its
+tools, and closes it), and the dashboard's playground refuses a live call of
+an mcp function (`mcp_live_call_unsupported`).
+
+Approving an MCP connector, with or without `--account`, is a person's act
+at an interactive terminal only: there is no flag and no form without a
+terminal (provisioning scripts are future work), it is refused inside a run
+step, and the dashboard does not approve MCP connectors. `approve
+--account` also pins the connector's program and tools (see
+[MCP servers](#mcp-servers)).
 `--args -` reads the JSON arguments from stdin.
 
 ## Agent-written text (`text_args`)

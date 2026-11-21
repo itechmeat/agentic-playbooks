@@ -27,6 +27,7 @@ mod judge;
 mod known_problems;
 mod list;
 mod loop_items;
+mod mcp;
 mod node_io;
 pub(crate) mod nodes;
 mod output_types;
@@ -420,6 +421,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_playbook_ref(playbook, &mut r); // V22
     check_connectors(playbook, ctx, &mut r); // V23-V26, V42, V43, V69, V84
     connectors::check_untrusted_output(playbook, ctx, &mut r); // V187
+    mcp::check_mcp_bindings(playbook, ctx, &mut r); // V300 to V302
     baseline::check_baseline(playbook, ctx, &mut r); // V62-V67
     follow_up::check_follow_up(playbook, ctx, &mut r); // V183-V186
     check_cache(playbook, &mut r); // V27, V28, V29
@@ -479,7 +481,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
         previous_success::check_previous_success(playbook, &mut r); // V176
         check_refs(playbook, ctx, &mut r); // V14, V15
         // V16 is retired (isolation is enforced now); its number stays reserved.
-        isolation::check_isolation(playbook, &mut r); // V112-V115
+        isolation::check_isolation(playbook, ctx, &mut r); // V112-V115
         untrusted::check_untrusted(playbook, &mut r); // V179-V182
         check_trigger(playbook, &mut r); // V17
         check_goal(playbook, &mut r); // V41

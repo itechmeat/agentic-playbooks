@@ -261,6 +261,13 @@ send that declares `idempotency`. A playbook that declares an
 above), so the worked case below uses `examples/playbooks/crm-cleanup.yaml`
 (`effects: [network, external]`).
 
+A function of an MCP connector (CONNECTORS.md "MCP servers") is doubled
+the same way, and the double answers before any server starts. A case
+never calls an MCP server live: its run keeps the config dir `apb eval`
+handed it, and a live MCP call from a run step whose config dir is
+redirected is refused `mcp_config_dir_redirected`, even with the pins in
+that dir. Give every MCP call of a case a double.
+
 ### The format
 
 ```yaml

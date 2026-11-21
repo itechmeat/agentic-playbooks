@@ -274,6 +274,44 @@ fn policy_actions(of: StartOf<'_>, refusal: &Value) -> Vec<StartAction> {
                 )
             })
             .collect(),
+        "mcp_tools_unpinned" if refusal.get("store_unreadable").is_some() => {
+            let store = refusal["store_unreadable"].as_str().unwrap_or("mcp-tools.json");
+            vec![of.fix(
+                Remedy::Manual {
+                    detail: format!(
+                        "move the MCP pin store `{store}` aside, then a person approves the MCP tools again at a terminal"
+                    ),
+                },
+                format!("the MCP pin store `{store}` does not read, so no MCP tool counts as approved"),
+            )]
+        }
+        "mcp_tools_unpinned" => {
+            let mut seen: Vec<(String, String)> = Vec::new();
+            for entry in strings(refusal, "tools") {
+                let mut parts = entry.splitn(3, '/');
+                let (Some(c), Some(a)) = (parts.next(), parts.next()) else {
+                    continue;
+                };
+                let pair = (c.to_string(), a.to_string());
+                if !seen.contains(&pair) {
+                    seen.push(pair);
+                }
+            }
+            seen.into_iter()
+                .map(|(c, a)| {
+                    of.fix(
+                        Remedy::Manual {
+                            detail: format!(
+                                "a person approves the MCP tools of connector `{c}` for account `{a}` at a terminal"
+                            ),
+                        },
+                        format!(
+                            "nobody approved the MCP tools of `{c}` for account `{a}`; an acknowledge does not cover it"
+                        ),
+                    )
+                })
+                .collect()
+        }
         "connector_env_missing" => strings(refusal, "missing")
             .into_iter()
             .map(|name| {

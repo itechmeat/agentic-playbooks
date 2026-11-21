@@ -7,8 +7,9 @@
 //! and configured accounts and expands them into per-node grants;
 //! `text_mode` prepares agent-written string args (`text_args`) before they
 //! reach a request body; `people` names the args of a function that people
-//! read; `idempotency` declares how a send is kept from acting twice, and
-//! `marker` renders and matches the hidden send marker.
+//! read; `idempotency` declares how a send is kept from acting twice,
+//! `marker` renders and matches the hidden send marker, and `mcp` is the
+//! mcp connector kind: the `mcp:` blocks, tool digests and the pin store.
 
 pub mod common;
 pub mod config;
@@ -23,6 +24,8 @@ pub mod idempotency;
 pub mod inbox;
 pub mod install;
 pub mod marker;
+// Not glob re-exported: callers name `mcp::` types by their module.
+pub mod mcp;
 // No glob re-export: `official::{list,get}` would collide with `store::{list,...}`
 // under the `pub use store::*` glob below. Callers use `official::list()` etc.
 pub mod oauth;

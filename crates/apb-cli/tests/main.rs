@@ -66,6 +66,8 @@ mod cli_test;
 mod cloud_models_cli_test;
 #[path = "suite/connector_cli.rs"]
 mod connector_cli;
+#[path = "suite/connector_mcp_cli_test.rs"]
+mod connector_mcp_cli_test;
 #[path = "suite/connector_oauth_test.rs"]
 mod connector_oauth_test;
 #[path = "suite/demo_playbooks_test.rs"]
@@ -125,6 +127,8 @@ mod mcp_cli_test;
 #[cfg(unix)]
 #[path = "suite/mcp_read_only_cli_test.rs"]
 mod mcp_read_only_cli_test;
+#[path = "suite/mcp_revision_test.rs"]
+mod mcp_revision_test;
 #[path = "suite/mcp_supervise_test.rs"]
 mod mcp_supervise_test;
 #[path = "suite/next_actions_cli_test.rs"]

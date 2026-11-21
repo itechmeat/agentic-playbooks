@@ -31,9 +31,28 @@ The validator checks it:
 | Code | Severity | Rule |
 |---|---|---|
 | V112 | warning | `full` with the network left implicit: say `network: open` or `network: none` |
-| V113 | error | isolation together with `connectors`: the sandbox withholds both the connector credentials and the journal the send ledger writes |
+| V113 | error | isolation together with `connectors`: the sandbox withholds both the connector credentials and the journal the send ledger writes; an MCP connector also starts a server program with those credentials, which the sandbox cannot broker in this version |
 | V114 | error | an extra path that is relative, contains `..`, is `/` or `~`, or reaches a credential location (`~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gh`, `~/.config/apb`, `~/.docker`, `~/.kube`, `~/.netrc`, `~/.git-credentials`, `~/.claude`, `~/.codex`, `~/.local/share/opencode`, `/run`, `/tmp`, `/var/tmp`, `/proc` and others); a `writable` path equal to, inside or above a place the operator runs programs or settings from (`~/.bashrc`, `~/.profile`, `~/.zshrc`, `~/.config/systemd`, `~/.config/autostart`, `~/.local/bin`, `~/.cargo/bin`, `~/.gitconfig`, `~/.config/git` and others; so `~/.config`, `~/.local` and `~/.cargo` are refused as writable, `~/.cargo/registry` is fine) |
 | V115 | error | `network`, `read_only` or `writable` with level `none` |
+
+An MCP connector (`docs/CONNECTORS.md`, "MCP servers") runs outside any
+sandbox: apb, not the agent, starts its server per call from the program
+file a person approved at an interactive terminal (two typed
+confirmations, never from a run step, MCP or the dashboard), the file
+whose digest was checked, in a fresh private working directory, with an
+environment built from a fixed source (the account database's home and
+name, the XDG defaults under it, a fixed `PATH` of the system directories
+with the program's directory last, and the variables the definition
+declares) and nothing of the calling process. The server runs as the
+person, unsandboxed, and can read and change what the person can;
+running MCP servers under this sandbox is future work. That is why V113
+keeps it off isolated nodes. Two more rules bound where it runs: V301
+warns when its command is an interpreter or a launcher (`node`,
+`python3`, `npx`, `uvx`, `docker` and the like), whose approval covers
+that program file only, not the script or package it runs, and V302
+refuses it at an engine site (the
+baseline check, the follow-up check, a list item check), where no server
+environment or stop path is defined yet.
 
 The validator reads the paths as written. Before every sandboxed attempt apb
 checks them again on the host, resolved (symlinks followed) against the real
@@ -560,7 +579,9 @@ time a credential-shaped variable the allowlist would pass to an agent
 - Isolation for script nodes, goal scripts and project checks (a
   `read_only` script gets the detected tier only).
 - Restoring a tree a `read_only` node changed.
-- Connectors in an isolated node (V113 refuses them).
+- Connectors in an isolated node, MCP connectors included (V113 refuses
+  them); a broker that would let an isolated node reach a connector is a
+  design of its own.
 - A separate copy of the tree per node for concurrent isolated nodes.
 - seccomp filters and setuid `bwrap`.
 - A separate host uid: it needs root.

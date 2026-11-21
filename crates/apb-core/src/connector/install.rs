@@ -257,7 +257,10 @@ pub fn reconcile_official() -> Vec<Reconciled> {
 /// cannot lose the accounts the user configured, and reinstalling later picks
 /// them straight back up.
 ///
-/// The trust record is deliberately left in place too. Reinstalling the same
+/// Its MCP tool pins are removed, best effort (`PinStore::forget`, also when
+/// the directory is already gone, so a pin an earlier uninstall kept goes on
+/// a repeat); the trust record is
+/// deliberately left in place. Reinstalling the same
 /// embedded version reproduces the same tree digest, so the existing approval
 /// still matches and the user is not asked to re-approve bytes they already
 /// approved. A digest that is no longer installed grants nothing on its own:
@@ -277,6 +280,9 @@ pub fn uninstall(name: &str) -> Result<UninstallReport, UninstallError> {
     let base = store::connectors_dir().ok_or(UninstallError::NoConfigDir)?;
     let target: PathBuf = base.join(name);
     if !target.exists() {
+        // Pins an earlier uninstall could not forget (a pin store that did
+        // not read then) go now; writes nothing when none is left.
+        let _ = crate::connector::mcp::pins::PinStore::forget(name, None);
         return Ok(UninstallReport {
             name: name.to_string(),
             no_op: true,
@@ -284,6 +290,12 @@ pub fn uninstall(name: &str) -> Result<UninstallReport, UninstallError> {
     }
     std::fs::remove_dir_all(&target)
         .map_err(|e| UninstallError::Io(format!("cannot remove {}: {e}", target.display())))?;
+    // The MCP pins of the connector go with it: they hold its program path
+    // and its tool definitions, which serve nothing once it is gone. A
+    // reinstall asks a person to approve its tools again at a terminal.
+    // Best effort: a pin store that does not read keeps them, and a kept
+    // pin still binds the tree digest, so it admits nothing by itself.
+    let _ = crate::connector::mcp::pins::PinStore::forget(name, None);
     Ok(UninstallReport {
         name: name.to_string(),
         no_op: false,
@@ -462,6 +474,53 @@ mod tests {
             second.no_op,
             "removing an absent connector is a clean no-op"
         );
+        drop(cfg);
+    }
+
+    #[test]
+    fn uninstall_forgets_the_connectors_mcp_pins() {
+        use crate::connector::mcp::pins::{PinStore, ServerPin};
+        let _lock = crate::env_test_lock();
+        let (cfg, _guard) = set_config_dir();
+        install_official(EMBEDDED, false).unwrap();
+        let pin = ServerPin {
+            connector_digest: "sha256:tree".into(),
+            account_digest: "sha256:acct".into(),
+            command: "server".into(),
+            program: "/usr/bin/server".into(),
+            program_digest: "sha256:prog".into(),
+            tools: Default::default(),
+            pin_digest: "sha256:pin".into(),
+            approved_at_ms: 0,
+        };
+        PinStore::record(EMBEDDED, "work", pin.clone()).unwrap();
+        PinStore::record("another", "work", pin).unwrap();
+        uninstall(EMBEDDED).unwrap();
+        let store = PinStore::load().unwrap();
+        assert!(store.server(EMBEDDED, "work").is_none());
+        assert!(store.server("another", "work").is_some());
+        drop(cfg);
+    }
+
+    #[test]
+    fn uninstall_of_an_absent_connector_still_forgets_its_pins() {
+        use crate::connector::mcp::pins::{PinStore, ServerPin};
+        let _lock = crate::env_test_lock();
+        let (cfg, _guard) = set_config_dir();
+        let pin = ServerPin {
+            connector_digest: "sha256:tree".into(),
+            account_digest: "sha256:acct".into(),
+            command: "server".into(),
+            program: "/usr/bin/server".into(),
+            program_digest: "sha256:prog".into(),
+            tools: Default::default(),
+            pin_digest: "sha256:pin".into(),
+            approved_at_ms: 0,
+        };
+        PinStore::record(EMBEDDED, "work", pin).unwrap();
+        let report = uninstall(EMBEDDED).unwrap();
+        assert!(report.no_op, "nothing was installed");
+        assert!(PinStore::load().unwrap().server(EMBEDDED, "work").is_none());
         drop(cfg);
     }
 

@@ -379,6 +379,7 @@ impl TrustStore {
             });
         })?;
         removed.sort_by_key(|e| e.approved_at_ms);
+        forget_mcp_pins(&removed);
         Ok(removed)
     }
 
@@ -406,6 +407,29 @@ impl TrustStore {
         };
         let bytes = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
         atomic_write_private(&path, &bytes)
+    }
+}
+
+/// The MCP tool pins bound to every connector or connector account
+/// approval that was revoked (the record's tree digest, or its account
+/// digest, equal to the revoked one): a pin is part of a person's approval,
+/// so it goes with it, and a new approval at a terminal records it again.
+/// A pin bound to another approval of the same name stays. Best effort: a
+/// pin store that does not read keeps them, and a call still needs the
+/// trust the revoke removed.
+fn forget_mcp_pins(removed: &[TrustEntry]) {
+    use crate::connector::mcp::pins::PinStore;
+    for e in removed {
+        let _ = match e.kind {
+            Kind::Connector => PinStore::forget_bound(&e.id, None, &e.digest),
+            Kind::ConnectorAccount => match e.id.split_once('/') {
+                Some((connector, account)) => {
+                    PinStore::forget_bound(connector, Some(account), &e.digest)
+                }
+                None => Ok(()),
+            },
+            _ => Ok(()),
+        };
     }
 }
 

@@ -1171,6 +1171,10 @@ pub enum EventPayload {
         /// (`list:`). Absent everywhere else. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         item: Option<String>,
+        /// The digest of the MCP tool definition this call verified against
+        /// its pin (`sha256:<hex>`); absent for every other kind. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_digest: Option<String>,
     },
     /// A send through a connector function that declares `idempotency` is
     /// about to leave: what it is, who sends it, and the nonce that makes it
@@ -4299,6 +4303,7 @@ mod tests {
             attempt_seq: None,
             intent: None,
             origin: None,
+            tool_digest: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(!s.contains("pages"), "{s}");
@@ -4321,6 +4326,7 @@ mod tests {
             attempt_seq: None,
             intent: None,
             origin: None,
+            tool_digest: None,
         };
         let s = serde_json::to_string(&mk(None)).unwrap();
         assert!(!s.contains("pages"), "{s}");

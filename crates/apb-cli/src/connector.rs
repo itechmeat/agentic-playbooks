@@ -350,6 +350,24 @@ fn approve_cmd(root: &Path, name: &str, account: Option<&str>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // An MCP connector, its tree and every account, is a person's approval
+    // at an interactive terminal, refused before anything is read or
+    // started; every other kind is approved as before.
+    if loaded.doc.mcp.is_some() {
+        if let Some(why) = crate::connector_mcp::refusal() {
+            eprintln!("{why}");
+            return ExitCode::from(2);
+        }
+        let code = crate::connector_mcp::approve_mcp(
+            &mut crate::connector_mcp::Terminal,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+            root,
+            name,
+            account,
+        );
+        return ExitCode::from(code);
+    }
     match account {
         None => {
             let mut trust = TrustStore::load();

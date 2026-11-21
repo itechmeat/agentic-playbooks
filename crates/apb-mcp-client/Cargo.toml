@@ -1,0 +1,34 @@
+[package]
+name = "apb-mcp-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `apb_core::secret::Secret` and the program-start guard.
+apb-core = { path = "../apb-core" }
+# The version `apb-mcp` pins. No `transport-child-process`: apb spawns the
+# server itself and hands rmcp the two pipes.
+rmcp = { version = "=3.9.0", default-features = false, features = ["client", "transport-async-rw"] }
+tokio.workspace = true
+serde_json.workspace = true
+# The frame reader that refuses a member named twice.
+serde.workspace = true
+thiserror.workspace = true
+# The digest of a program file, read from the descriptor that starts it.
+sha2.workspace = true
+# Unix only, like every target apb ships: the descriptor a program starts
+# from, its process group (`killpg`) and the unreaped exit check (`waitid`).
+libc = "0.2"
+
+[features]
+# The scripted stdio server (`testing::StubServer`) the client, engine and
+# CLI tests start.
+testing = []
+
+[dev-dependencies]
+apb-mcp-client = { path = ".", features = ["testing"] }
+# `apb_core::process_mode::testing`: guard tests in a read-only child process.
+apb-core = { path = "../apb-core", features = ["testing"] }
+tempfile = "3.27.0"
