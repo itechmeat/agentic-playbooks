@@ -7,6 +7,8 @@ import {
   listChips,
   pilotLine,
   processedPercent,
+  skipLabel,
+  skippedLabel,
   stoppedLine,
   visibleItems,
 } from './listprogress'
@@ -56,6 +58,34 @@ describe('listprogress', () => {
     expect(visibleItems(items, 'with_note', false).rows.map((i) => i.id)).toEqual(['b'])
     expect(visibleItems(items, 'passed', false).rows.map((i) => i.id)).toEqual(['a'])
     expect(itemText(items[2])).toBe('check unknown: no body')
+  })
+
+  it('the label names skipped items', () => {
+    const skip = { skipped: 3, read_items: 4, source: 'lst-r0', truncated: false, not_inherited: 0, reworked: 0 }
+    expect(skippedLabel(list([], { skip }))).toBe('3 skipped')
+    expect(skipLabel(list([], { skip }))).toBe('skip: 4 items from run lst-r0')
+    expect(skipLabel(list([], { skip: { ...skip, read_items: 1, truncated: true } }))).toBe(
+      'skip: 1 item from run lst-r0, more not kept',
+    )
+    expect(skipLabel(list([], { skip: { ...skip, source: undefined } }))).toBe('skip: no earlier success')
+    expect(skipLabel(list([], { skip: { ...skip, refused: 'skip_supervisor_note: a note' } }))).toBe(
+      'skip refused: skip_supervisor_note: a note',
+    )
+    expect(skippedLabel(list([], { skip: { ...skip, skipped: 0 } }))).toBeNull()
+    expect(
+      skipLabel(list([], { skip: { ...skip, not_inherited: 2, stopped_stamping: 'skip_scripts_diverged: changed' } })),
+    ).toBe('skip: 4 items from run lst-r0, 2 not skipped (output could not be carried); stamping stopped: skip_scripts_diverged: changed')
+    expect(
+      skipLabel(list([], { skip: { ...skip, source: undefined, stopped_stamping: 'skip_scripts_diverged: changed' } })),
+    ).toBe('skip: no earlier success; stamping stopped: skip_scripts_diverged: changed')
+    expect(skipLabel(list([], { skip: { ...skip, reworked: 1 } }))).toBe(
+      'skip: 4 items from run lst-r0, 1 skipped item taken back because its skip no longer held',
+    )
+    expect(skipLabel(list([], { skip: { ...skip, reworked: 2 } }))).toBe(
+      'skip: 4 items from run lst-r0, 2 skipped items taken back because their skip no longer held',
+    )
+    expect(skipLabel(list([]))).toBeNull()
+    expect(itemText(item('a', 'passed', { skipped_from: 'lst-r0' }))).toBe('skipped (passed in lst-r0)')
   })
 
   it('badges a list node with its progress, and only a list node', () => {

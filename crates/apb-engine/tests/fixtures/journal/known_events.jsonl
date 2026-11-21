@@ -27,3 +27,7 @@
 {"seq":26,"ts":1790000000026,"type":"node_finished","node":"items","status":"failed","attempt":1,"output":"stopped","artifacts":[]}
 {"seq":27,"ts":1790000000027,"type":"run_error","reason":"none"}
 {"seq":28,"ts":1790000000028,"type":"run_finished","outcome":"succeeded"}
+{"seq":29,"ts":1790000000029,"type":"list_skip_read","node":"items","set":{"source":"r0","items":{"a":"sha256:skip"},"truncated":true}}
+{"seq":30,"ts":1790000000030,"type":"list_item_settled","node":"items","item":"a","state":"passed","round":0,"carried":true,"skipped_from":"r0","skip_digest":"sha256:skip"}
+{"seq":31,"ts":1790000000031,"type":"session_handoff","node":"implement","from_node":"assess","warm":true,"mode":"fork"}
+{"seq":32,"ts":1790000000032,"type":"list_started","node":"items","total":1,"filtered_out":0,"items_digest":"","batch_size":1,"parallel":1,"skip_refused":"skip_supervisor_note: a supervisor note is in force, so every item works"}

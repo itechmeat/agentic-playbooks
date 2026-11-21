@@ -32,6 +32,9 @@ pub(crate) struct Checked {
     pub note: Option<String>,
     /// The check source that decided, `None` without a check.
     pub kind: Option<&'static str>,
+    /// The verdict is a fallback (`on_unavailable`), not the check's own:
+    /// such a settlement mints no skip digest.
+    pub fallback: bool,
 }
 
 impl Checked {
@@ -40,6 +43,7 @@ impl Checked {
             verdict,
             note: Some(note.into()),
             kind: Some(kind),
+            fallback: false,
         }
     }
 }
@@ -67,6 +71,7 @@ pub(super) fn run(
                 missing.join(", ")
             )),
             kind: None,
+            fallback: false,
         };
     }
     let Some(source) = spec.check.as_ref().and_then(|c| c.source()) else {
@@ -74,6 +79,7 @@ pub(super) fn run(
             verdict: Some(ItemVerdict::Accept),
             note: None,
             kind: None,
+            fallback: false,
         };
     };
     let kind = source.kind();
@@ -88,6 +94,7 @@ pub(super) fn run(
                 verdict: Some(ItemVerdict::Accept),
                 note: None,
                 kind: Some(kind),
+                fallback: false,
             },
             Some(note) => Checked::of(kind, Some(ItemVerdict::Reject), note),
         },
@@ -140,25 +147,39 @@ fn output_mismatch(check: &OutputCheck, output: &str) -> Option<String> {
     )))
 }
 
+/// The resolved execution of a skip visit, for its item checks; `None`
+/// for a list without `skip` or an execution that did not resolve.
+fn visit<'b>(run: &'b ListRun<'_, '_, '_>) -> Option<&'b super::super::cache::VisitExecution> {
+    run.spec.skip.as_ref()?;
+    let _ = run.execution();
+    run.execution.get()?.as_ref().ok().map(|v| v.as_ref())
+}
+
 /// Everything a check's process or call needs from the run.
 fn read_ctx<'b>(run: &'b ListRun<'_, '_, '_>, events: &'b [crate::event::Event]) -> ReadCtx<'b> {
     let ctx = run.ctx;
     ReadCtx {
         run_dir: ctx.run_dir,
         root: &run.root,
-        workdir: ctx.workdir,
+        // An item of a skip visit is checked in the directory its visit
+        // resolved, the one its stamp's work names.
+        workdir: visit(run).map_or(ctx.workdir, |v| v.check_dir.as_path()),
         params: &ctx.cfg.params,
         spawn_env: &run.spawn_env,
         scrub: ctx.env_scrub,
         cancel: ctx.cancel,
         phase: "item",
         events,
-        // Sibling items change the tree while this one is checked.
-        guard_tree: run.workers == 1,
+        // Sibling items change the tree while this one is checked. An item
+        // of a skip visit is checked under the policy its visit captured.
+        guard_tree: visit(run).map_or(run.workers == 1, |v| v.check_policy.guard_tree),
         // The tree lock predicate over the list run's playbook and config,
         // and one worker (siblings write the tree, as `guard_tree` says):
         // only then may a JUnit report scan trust the reports.
-        holds_tree: crate::scheduler::entry::holds_tree(ctx.playbook, ctx.cfg) && run.workers == 1,
+        holds_tree: visit(run).map_or(
+            crate::scheduler::entry::holds_tree(ctx.playbook, ctx.cfg) && run.workers == 1,
+            |v| v.check_policy.holds_tree,
+        ),
         scripts_label: "item check scripts",
         site: apb_core::baseline::BASELINE_SITE,
         cap_secs: crate::run_deadline::latch(ctx.run_dir).map(|l| l.left_secs()),
@@ -191,6 +212,10 @@ fn script(run: &ListRun<'_, '_, '_>, item: &Item, output: &str, path: &str) -> C
         };
         env.push(("APB_ITEM_OUTPUT_FILE", out.to_string()));
     }
+    // An item of a skip visit is checked with the `PATH` its visit captured.
+    if let Some(path) = visit(run).and_then(|v| v.path_env.clone()) {
+        env.push(("PATH", path));
+    }
     match run_script_json(path, CHECK_TIMEOUT_SECONDS, &env, &read_ctx(run, &events)) {
         ScriptJson::Doc(doc) => {
             let note = doc.get("note").and_then(Value::as_str).map(clip_note);
@@ -203,6 +228,7 @@ fn script(run: &ListRun<'_, '_, '_>, item: &Item, output: &str, path: &str) -> C
                     verdict: Some(v),
                     note,
                     kind: Some("script"),
+                    fallback: false,
                 },
                 None => Checked::of(
                     "script",
@@ -360,11 +386,15 @@ fn judge(
         Asked::Unavailable(reason) => format!("the judge gave no usable answer ({reason})"),
     };
     match j.on_unavailable() {
-        Some(OnUnavailable::Reject) => Checked::of("judge", Some(ItemVerdict::Reject), why),
+        Some(OnUnavailable::Reject) => Checked {
+            fallback: true,
+            ..Checked::of("judge", Some(ItemVerdict::Reject), why)
+        },
         Some(OnUnavailable::NeedsLook) | None => Checked::of("judge", None, why),
-        Some(OnUnavailable::AcceptWithNote) => {
-            Checked::of("judge", Some(ItemVerdict::AcceptWithNote), why)
-        }
+        Some(OnUnavailable::AcceptWithNote) => Checked {
+            fallback: true,
+            ..Checked::of("judge", Some(ItemVerdict::AcceptWithNote), why)
+        },
     }
 }
 

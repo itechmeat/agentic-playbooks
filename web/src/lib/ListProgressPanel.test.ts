@@ -94,4 +94,20 @@ describe('ListProgressPanel', () => {
     expect(b.querySelector('.note')?.textContent).toBe('earlier send unresolved')
     expect(a.querySelector('.note')?.textContent).toBe('')
   })
+
+  it('a skipped row links its earlier run', () => {
+    const all: RunListItem[] = [
+      { id: 'a', state: 'passed', round: 0, attempts: 0, skipped_from: 'lst-r0' },
+      { id: 'b', state: 'passed', round: 0, attempts: 1 },
+    ]
+    const list = { ...triage(all), skip: { skipped: 1, read_items: 1, source: 'lst-r0', truncated: false, not_inherited: 0, reworked: 0 } }
+    app = mount(ListProgressPanel, { target: document.body, props: { lists: [list], workspace: 'ws1' } })
+    flushSync()
+    expect(document.querySelector('[data-testid="run-list-skipped"]')?.textContent).toBe('1 skipped')
+    expect(document.querySelector('[data-testid="run-list-skip"]')?.textContent).toBe('skip: 1 item from run lst-r0')
+    const link = document.querySelector('[data-testid="run-list-skipped-from"]') as HTMLAnchorElement
+    expect(link.textContent).toBe('lst-r0')
+    expect(link.getAttribute('href')).toBe('#/run/ws1/lst-r0')
+    expect(rows()[1].querySelector('[data-testid="run-list-skipped-from"]')).toBeNull()
+  })
 })

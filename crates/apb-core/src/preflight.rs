@@ -148,14 +148,15 @@ pub fn unmatched_protect_globs(root: &Path, playbook: &Playbook) -> Vec<String> 
 }
 
 /// One line per `continue_session` node whose bound agent cannot continue a
-/// session at all (issue #67 item 1): such a node always starts a fresh agent.
+/// session at all (issue #67 item 1), or, for a fork, has no fork form: such
+/// a node always starts a fresh agent.
 /// A profile that does not resolve here is left to the run-time resolver.
 pub fn cold_handoffs(root: &Path, playbook: &Playbook) -> Vec<String> {
     use crate::schema::NodeKind;
     let mut out = Vec::new();
     for node in &playbook.nodes {
         let NodeKind::AgentTask {
-            continue_session: Some(source),
+            continue_session: Some(cs),
             profile,
             ..
         } = &node.kind
@@ -173,7 +174,18 @@ pub fn cold_handoffs(root: &Path, playbook: &Playbook) -> Vec<String> {
             continue;
         };
         let agent = &loaded.doc.executor.agent;
-        if !crate::detect::continues_sessions(agent) {
+        let source = cs.from();
+        if cs.forks() {
+            let forks = crate::agents::lookup(agent)
+                .and_then(|a| a.forms())
+                .is_some_and(|f| f.fork.is_some());
+            if !forks {
+                out.push(format!(
+                    "node `{}` forks the session of `{source}`, but its agent `{agent}` cannot fork a session, so it starts a fresh agent",
+                    node.id
+                ));
+            }
+        } else if !crate::detect::continues_sessions(agent) {
             out.push(format!(
                 "node `{}` continues the session of `{source}`, but its agent `{agent}` cannot continue a session, so it starts a fresh agent",
                 node.id

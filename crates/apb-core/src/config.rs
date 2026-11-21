@@ -451,35 +451,65 @@ pub fn program_in_path(program: &str) -> bool {
     std::env::split_paths(&path).any(|dir| is_executable(&dir.join(program)))
 }
 
-/// Whether the path is a runnable program (see `program_in_path`).
-#[cfg(unix)]
-fn is_executable(p: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+/// Where `program` is found as [`program_in_path`] looks for it: the path
+/// that matched, the path as given when it names one and is runnable as
+/// is, else the first runnable `PATH` entry (on Windows the candidate with
+/// the `PATHEXT` extension that matched, never the bare name that does not
+/// exist).
+pub fn program_location(program: &str) -> Option<std::path::PathBuf> {
+    if program.contains('/') || program.contains('\\') {
+        return executable_match(std::path::Path::new(program));
+    }
+    let path = std::env::var("PATH").ok()?;
+    std::env::split_paths(&path).find_map(|dir| executable_match(&dir.join(program)))
 }
 
-#[cfg(windows)]
+/// Whether the path is a runnable program (see `program_in_path`).
 fn is_executable(p: &std::path::Path) -> bool {
-    if p.is_file() {
-        return true;
-    }
-    // Without an extension, try variants from PATHEXT (.EXE/.CMD/.BAT/...).
-    if p.extension().is_some() {
-        return false;
-    }
+    executable_match(p).is_some()
+}
+
+/// The runnable program `p` names: `p` itself on Unix when it is a regular
+/// file with the exec bit set.
+#[cfg(unix)]
+fn executable_match(p: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p)
+        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .then(|| p.to_path_buf())
+}
+
+/// The runnable program `p` names on Windows: `p` itself when it is a
+/// file, else the first `PATHEXT` variant that is one.
+#[cfg(windows)]
+fn executable_match(p: &std::path::Path) -> Option<std::path::PathBuf> {
     let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-    exts.split(';').filter(|e| !e.is_empty()).any(|ext| {
-        let mut cand = p.as_os_str().to_os_string();
-        cand.push(ext);
-        std::path::Path::new(&cand).is_file()
-    })
+    with_pathext(p, &exts)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn is_executable(p: &std::path::Path) -> bool {
-    p.is_file()
+fn executable_match(p: &std::path::Path) -> Option<std::path::PathBuf> {
+    p.is_file().then(|| p.to_path_buf())
+}
+
+/// `p` when it is a file, else (only when `p` has no extension) the first
+/// variant of `p` with an extension from the `;`-separated `exts` that is
+/// one: the path that matched, in the order `exts` lists them.
+#[cfg(any(windows, test))]
+fn with_pathext(p: &std::path::Path, exts: &str) -> Option<std::path::PathBuf> {
+    if p.is_file() {
+        return Some(p.to_path_buf());
+    }
+    // Without an extension, try variants from PATHEXT (.EXE/.CMD/.BAT/...).
+    if p.extension().is_some() {
+        return None;
+    }
+    exts.split(';').filter(|e| !e.is_empty()).find_map(|ext| {
+        let mut cand = p.as_os_str().to_os_string();
+        cand.push(ext);
+        let cand = std::path::PathBuf::from(cand);
+        cand.is_file().then_some(cand)
+    })
 }
 
 /// Global config directory: `APB_CONFIG_DIR` (override for tests/local),
@@ -1469,5 +1499,33 @@ mod account_tests {
         // (the isolation exists only with debug assertions).
         #[cfg(debug_assertions)]
         assert!(super::test_isolation::forbidden_paths().contains(&entry.home.join(".config/apb")));
+    }
+}
+
+#[cfg(test)]
+mod program_location_tests {
+    /// A name with no file of its own matches the `PATHEXT` variant that
+    /// exists, and that variant is the path returned; a file that exists as
+    /// named wins over every variant, and a name with an extension tries
+    /// none.
+    #[test]
+    fn the_pathext_variant_that_matched_is_returned() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("sh.exe"), "").unwrap();
+        std::fs::write(dir.path().join("sh.cmd"), "").unwrap();
+        assert_eq!(
+            super::with_pathext(&dir.path().join("sh"), ".com;.exe;.cmd"),
+            Some(dir.path().join("sh.exe"))
+        );
+        assert_eq!(
+            super::with_pathext(&dir.path().join("sh"), ".cmd;.exe"),
+            Some(dir.path().join("sh.cmd"))
+        );
+        std::fs::write(dir.path().join("sh"), "").unwrap();
+        assert_eq!(
+            super::with_pathext(&dir.path().join("sh"), ".exe"),
+            Some(dir.path().join("sh"))
+        );
+        assert_eq!(super::with_pathext(&dir.path().join("x.bat"), ".exe"), None);
     }
 }

@@ -640,6 +640,16 @@ pub fn capture_failed_session(agent_id: &str, stdout: &str) -> Option<String> {
         .filter(|id| is_plausible_session_id(id))
 }
 
+/// The session id an attempt's stdout reports through the agent's own
+/// reader, whether or not the attempt succeeded: a fork's new session, which
+/// a retry of a failed fork continues.
+pub fn reported_session(agent_id: &str, stdout: &str) -> Option<String> {
+    apb_core::agents::lookup(agent_id)?
+        .output()
+        .session_id(stdout)
+        .filter(|id| is_plausible_session_id(id))
+}
+
 /// The tools and MCP servers an agent reported at start in its streaming
 /// output (`apb_core::agents::OutputFormat::exposed_tools`); `None` for an
 /// agent or an output that names none.

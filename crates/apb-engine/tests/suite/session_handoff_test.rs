@@ -72,6 +72,7 @@ fn handoffs(root: &Path) -> Vec<(String, bool, Option<String>)> {
                 from_node,
                 warm,
                 reason,
+                ..
             } => {
                 assert_eq!(from_node, "assess");
                 Some((node, warm, reason))

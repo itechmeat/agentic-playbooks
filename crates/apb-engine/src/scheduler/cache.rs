@@ -1039,10 +1039,1067 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+// --- the work a list skip compares (incremental lists, D2) ---
+
+/// The label of the work fingerprint's canonical form.
+const WORK_LABEL: &str = "list-skip/1";
+/// The keyed-tag domain of a sensitive run input inside the work.
+const WORK_PARAM_DOMAIN: &str = "apb-list-skip-param-v1";
+
+/// What one list node's work is computed from, read when its visit starts.
+pub(crate) struct WorkSource<'a> {
+    pub run_dir: &'a Path,
+    pub events: &'a [crate::event::Event],
+    pub playbook: &'a Playbook,
+    pub node: &'a Node,
+    pub cfg: &'a RunConfig,
+    /// The effective non-secret settings of the run's decision runner;
+    /// `None` when the run has no decisions block.
+    pub decisions: Option<&'a apb_core::decisions::EffectiveDecisions>,
+    /// The directory the node's step executes in, as [`execution_dir`]
+    /// gives it (the run's tree or the project root it falls back to, under
+    /// the node's own `workdir`), or why it does not resolve.
+    pub exec: &'a Result<VisitExecution, String>,
+}
+
+/// Everything a list visit's item execution reads from outside the
+/// definition, resolved once as the visit starts ([`visit_execution`]): the
+/// canonical directory its steps run in, every script runtime its steps and
+/// checks run as the canonical program that is exec'd, the directory and
+/// `PATH` its checks run with, the checks' policy flags and the MCP pins of
+/// its granted accounts. The work fingerprint is computed from this value,
+/// and every item of a skip visit executes with this value (`ItemExec.exec`):
+/// no execution site of such an item resolves any of it again. A node with
+/// `isolation` cannot declare `skip` (V288), so no sandbox is part of it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct VisitExecution {
+    /// The canonical directory the steps execute in.
+    pub dir: PathBuf,
+    /// The canonical directory the item checks execute in: the drive's tree
+    /// (the run's worktree, else the project root), never the node's own
+    /// `workdir`.
+    pub check_dir: PathBuf,
+    /// The `PATH` the steps and checks receive, as apb's process held it
+    /// when the visit started; `None` when it had none. The children get
+    /// this value, whatever apb's `PATH` is later. No other inherited
+    /// variable is captured (a stated limit: the profile's `process_env`
+    /// bounds what an agent inherits).
+    pub path_env: Option<String>,
+    /// The item checks' policy as the visit derives it from the run's
+    /// options and the definition: whether a script or connector check
+    /// must leave the tree as it found it (`guard_tree`, one worker only),
+    /// and whether a report scan may trust the tree (`holds_tree`). The
+    /// checks run from these captured flags.
+    pub check_policy: CheckPolicy,
+    /// The runner keys the steps and checks use, resolved.
+    pub runtimes: std::collections::BTreeMap<String, crate::script::ResolvedRunner>,
+    /// `<connector>/<account>` of every account granted at the node or its
+    /// item check -> the `pin_digest` of the MCP tool approval the machine's
+    /// pin store holds for it (`None`: no pin, an HTTP connector or an MCP
+    /// account never approved). Every call checks the live server against
+    /// the pin store; a settlement that finds the store's pins differ from
+    /// these stamps nothing (`ListRun::pins_held`).
+    pub mcp_pins: std::collections::BTreeMap<String, Option<String>>,
+}
+
+/// The MCP pins of the accounts granted at `node` and its item check, as
+/// the machine's pin store holds them now.
+pub(crate) fn mcp_pins(
+    run_dir: &Path,
+    node: &Node,
+) -> Result<std::collections::BTreeMap<String, Option<String>>, String> {
+    let Some(manifest) =
+        crate::manifest::read(run_dir).map_err(|e| format!("skip_needs_manifest: {e}"))?
+    else {
+        return Ok(Default::default());
+    };
+    let mut keys = Vec::new();
+    for site in [node.id.clone(), apb_core::list::check_site(&node.id)] {
+        for g in manifest.grants_for(&site) {
+            for a in &g.accounts {
+                keys.push((g.connector.clone(), a.clone()));
+            }
+        }
+    }
+    if keys.is_empty() {
+        return Ok(Default::default());
+    }
+    let store = apb_core::connector::mcp::pins::PinStore::load()
+        .map_err(|e| format!("skip_mcp_pins_unreadable: {e}"))?;
+    Ok(keys
+        .into_iter()
+        .map(|(c, a)| {
+            let pin = store.server(&c, &a).map(|p| p.pin_digest.clone());
+            (apb_core::connector::mcp::pins::server_key(&c, &a), pin)
+        })
+        .collect())
+}
+
+/// The concurrency cap in force for this run.
+///
+/// Precedence follows the `max_retries` chain (`node.rs`: the authored value
+/// first, then a default, then a constant): `Playbook.defaults.max_parallel`,
+/// then the run's own cap, then [`apb_core::schema::DEFAULT_MAX_PARALLEL`]. `RunOptions` and
+/// `RunConfig` are ONE slot here - `prepare` copies the invocation value into the
+/// persisted run config, which is what a detached driver reads back, so the cap
+/// survives a re-drive.
+///
+/// A declared `0` reads as `1` (serialize) rather than as "admit nothing", which
+/// would wedge the batch.
+pub(crate) fn resolved_max_parallel(playbook: &Playbook, cfg: &RunConfig) -> usize {
+    playbook
+        .defaults
+        .max_parallel
+        .or(cfg.max_parallel)
+        .map(|n| n.max(1))
+        .unwrap_or(apb_core::schema::DEFAULT_MAX_PARALLEL)
+}
+
+/// Whether a run holds its working tree: one of its nodes takes the tree
+/// lock and it does not share the workdir. The one predicate the drive takes
+/// the tree lock by, and the baseline and list item checks trust a JUnit
+/// report by (`entry::holds_tree` re-exports it).
+pub(crate) fn holds_tree(playbook: &Playbook, cfg: &RunConfig) -> bool {
+    !cfg.shared_workdir && playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock())
+}
+
+/// The item checks' policy flags a visit captures ([`VisitExecution`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct CheckPolicy {
+    pub guard_tree: bool,
+    pub holds_tree: bool,
+}
+
+/// Resolves the [`VisitExecution`] of `node` once: `Err` with the skip
+/// refusal's reason when a part does not resolve.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn visit_execution(
+    playbook: &Playbook,
+    node: &Node,
+    tree: &Path,
+    run_dir: &Path,
+    run_id: &str,
+    state: &RunState,
+    cfg: &RunConfig,
+    workers: usize,
+) -> Result<VisitExecution, String> {
+    let dir = execution_dir(playbook, &node.id, tree, run_dir, run_id, state, cfg)?;
+    let check_dir = tree
+        .canonicalize()
+        .map_err(|e| format!("skip_workdir_unresolved: {}: {e}", tree.display()))?;
+    Ok(VisitExecution {
+        dir,
+        check_dir,
+        path_env: captured_path(std::env::var("PATH"))?,
+        // Sibling items change the tree while one is checked: the tree
+        // guard holds only with one worker.
+        check_policy: CheckPolicy {
+            guard_tree: workers == 1,
+            holds_tree: holds_tree(playbook, cfg) && workers == 1,
+        },
+        runtimes: runtimes(run_dir, node)?,
+        mcp_pins: mcp_pins(run_dir, node)?,
+    })
+}
+
+/// The `PATH` a visit captures from apb's own: `None` when it has none,
+/// `Err` with the skip refusal's reason when it holds bytes a `String`
+/// cannot carry. Such a value is never captured as absent: the children
+/// would inherit it while the work fingerprint named no `PATH`.
+fn captured_path(path: Result<String, std::env::VarError>) -> Result<Option<String>, String> {
+    match path {
+        Ok(p) => Ok(Some(p)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(
+            "skip_path_unrepresentable: apb's PATH is not valid Unicode, so the work fingerprint cannot name it"
+                .to_string(),
+        ),
+    }
+}
+
+/// Where agent_task and script nodes without their own `workdir` run: the
+/// run's working tree once it is resolved (issue #67 item 8), else a
+/// scenario run's directory, else the execution root.
+pub(crate) fn tree_dir(state: &RunState, run_dir: &Path, root: &Path) -> PathBuf {
+    state
+        .worktree
+        .as_deref()
+        .map(PathBuf::from)
+        .or_else(|| crate::scenario::session::workdir(run_dir))
+        .unwrap_or_else(|| root.to_path_buf())
+}
+
+/// The directory `node` executes in, canonical: the node's own `workdir`
+/// rendered over `tree` (the run's working tree, else the execution root
+/// the drive falls back to) through the same resolution and renderer the
+/// node's execution uses ([`super::node_workdir::resolve`] over the
+/// template render of `render_node_prompt`). `Err` with the
+/// skip refusal's reason when it does not resolve.
+pub(crate) fn execution_dir(
+    playbook: &Playbook,
+    node_id: &str,
+    tree: &Path,
+    run_dir: &Path,
+    run_id: &str,
+    state: &RunState,
+    cfg: &RunConfig,
+) -> Result<PathBuf, String> {
+    let unresolved = |why: String| format!("skip_workdir_unresolved: {why}");
+    // The one template render every prompt goes through, as
+    // `render_node_prompt` gives it to the node's own execution.
+    let dir = super::node_workdir::resolve(playbook, node_id, tree, |t| {
+        let budget = playbook.context_budget(node_id);
+        let inputs = crate::judge_eval::JudgeInputs::from_state(
+            playbook, run_dir, run_id, state, cfg, &budget,
+        )?;
+        Ok(inputs.render(t, run_dir, budget.output_max_bytes))
+    })
+    .map_err(|e| unresolved(e.to_string()))?
+    .map_err(unresolved)?;
+    dir.canonicalize()
+        .map_err(|e| unresolved(format!("{}: {e}", dir.display())))
+}
+
+/// Everything a run was configured with that decides how one list node's
+/// items are worked and checked: parts 1 to 12 (8 retired), each taken whole, with only the
+/// contents of the world outside. The one comparison of work: the skip
+/// digest, the patch refusal and the rebind refusal read it, and it shares
+/// no code with the node cache key.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct WorkInputs {
+    label: &'static str,
+    /// Part 1: the digest of the whole definition in force.
+    definition: String,
+    /// Part 2: the digest of the run's `scripts/` copy as pinned at start.
+    scripts: String,
+    /// Part 3: the canonical start request filled from the run config.
+    request: serde_json::Value,
+    /// Part 4: what the manifest resolved for the run and the node.
+    resolved: serde_json::Value,
+    /// Part 5: the effective decision configuration, or `none`.
+    decisions: serde_json::Value,
+    /// Part 6: the canonical directory the node's step executes in, the
+    /// project-root fallback and the node's own `workdir` included.
+    target: String,
+    /// Part 7: every script runtime the node's step and checks run, as the
+    /// run resolved it once ([`crate::script::resolved_runner`]): the same
+    /// value runs.
+    runtimes: std::collections::BTreeMap<String, crate::script::ResolvedRunner>,
+    /// Part 10: the canonical directory the item checks run in.
+    check_target: String,
+    /// Part 11: the `PATH` the steps and checks receive.
+    path_env: Option<String>,
+    /// Part 12: the item checks' policy flags.
+    check_policy: CheckPolicy,
+    /// Part 9: the MCP pins of the granted accounts
+    /// ([`VisitExecution::mcp_pins`]); empty without a grant.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    mcp_pins: std::collections::BTreeMap<String, Option<String>>,
+}
+
+/// The runner keys `node`'s step and its checks run scripts under: a
+/// script node's `runner`, and `sh` for a script `success_check` or a
+/// script item check.
+fn runner_keys(node: &Node) -> std::collections::BTreeSet<String> {
+    let mut keys = std::collections::BTreeSet::new();
+    if let apb_core::schema::NodeKind::Script { runner, .. } = &node.kind {
+        keys.insert(runner.clone());
+    }
+    if node
+        .success_check
+        .as_ref()
+        .is_some_and(|c| c.script_path().is_some())
+    {
+        keys.insert("sh".to_string());
+    }
+    if node
+        .list()
+        .and_then(|l| l.check.as_ref())
+        .and_then(|c| c.source())
+        .is_some_and(|s| matches!(s, apb_core::list::CheckSource::Script(_)))
+    {
+        keys.insert("sh".to_string());
+    }
+    keys
+}
+
+/// Part 7 (see [`WorkInputs::runtimes`]).
+fn runtimes(
+    run_dir: &Path,
+    node: &Node,
+) -> Result<std::collections::BTreeMap<String, crate::script::ResolvedRunner>, String> {
+    runner_keys(node)
+        .into_iter()
+        .map(|k| {
+            crate::script::resolved_runner(run_dir, &k)
+                .map(|r| (k, r))
+                .map_err(|e| format!("skip_runtime_unresolved: {e}"))
+        })
+        .collect()
+}
+
+/// Why a runtime of `runtimes` is no longer the file the run resolved: its
+/// identity read now differs from the one resolved (a program replaced at
+/// the same path while the run held its resolution). `None` while every
+/// one holds. Read as a visit's work is computed and at every settlement,
+/// so neither a skip nor a stamp rests on a runtime that changed.
+pub(crate) fn runtime_changed(
+    runtimes: &std::collections::BTreeMap<String, crate::script::ResolvedRunner>,
+) -> Option<String> {
+    runtimes
+        .iter()
+        .find(|(_, r)| apb_core::detect::fingerprint(Path::new(&r.path)) != r.identity)
+        .map(|(k, r)| {
+            format!(
+                "{}: the runtime of runner `{k}` at {} changed after the run resolved it",
+                crate::list::skip::RUNTIME_CHANGED,
+                r.path
+            )
+        })
+}
+
+/// The six parts of one list node's work (see [`WorkInputs`]). `Err` with
+/// the skip refusal's reason when a part does not read.
+pub(crate) fn work_inputs(src: &WorkSource<'_>) -> Result<WorkInputs, String> {
+    let exec = src.exec.as_ref().map_err(Clone::clone)?;
+    if let Some(why) = runtime_changed(&exec.runtimes) {
+        return Err(why);
+    }
+    Ok(WorkInputs {
+        label: WORK_LABEL,
+        definition: definition_in_force(src.run_dir, src.events)?,
+        scripts: pinned_scripts(src.events)?,
+        request: run_request(src.run_dir, src.playbook, src.cfg)?,
+        resolved: resolved_work(src.run_dir, src.node)?,
+        decisions: src
+            .decisions
+            .map(|d| serde_json::to_value(d).unwrap_or(serde_json::Value::Null))
+            .unwrap_or_else(|| serde_json::Value::String("none".into())),
+        target: exec.dir.to_string_lossy().into_owned(),
+        runtimes: exec.runtimes.clone(),
+        mcp_pins: exec.mcp_pins.clone(),
+        check_target: exec.check_dir.to_string_lossy().into_owned(),
+        path_env: exec.path_env.clone(),
+        check_policy: exec.check_policy,
+    })
+}
+
+/// SHA-256 hex over the canonical JSON of the work.
+pub(crate) fn work_fingerprint(inputs: &WorkInputs) -> String {
+    let json = serde_json::to_value(inputs).unwrap_or(serde_json::Value::Null);
+    // `serde_json` keeps object keys sorted (no `preserve_order`), so the
+    // compact form is canonical.
+    sha256_hex(json.to_string().as_bytes())
+}
+
+/// Part 1: the latest journaled digest of the definition in force, else the
+/// digest of the run's snapshot bytes.
+fn definition_in_force(run_dir: &Path, events: &[crate::event::Event]) -> Result<String, String> {
+    if let Some(d) = crate::run_definitions::boundaries(events)
+        .into_iter()
+        .rev()
+        .find_map(|b| b.definition)
+    {
+        return Ok(d);
+    }
+    std::fs::read(run_dir.join("playbook.yaml"))
+        .map(|b| crate::run_definitions::digest(&b))
+        .map_err(|e| format!("skip_definition_unreadable: {e}"))
+}
+
+/// Part 2: the scripts digest `run_provenance` pinned.
+pub(crate) fn pinned_scripts(events: &[crate::event::Event]) -> Result<String, String> {
+    events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::RunProvenance { scripts_digest, .. } => scripts_digest.clone(),
+            _ => None,
+        })
+        .ok_or_else(|| "skip_scripts_unreadable: the run pinned no scripts digest".to_string())
+}
+
+/// Part 3: [`start_request_of`] with the removed fields taken out, the
+/// output limits added and every sensitive value as its keyed tag only. A
+/// param is declared secret when the run's secret set holds it (the
+/// manifest's `secret_params` and the snapshot's declarations, read
+/// strictly: a set that does not read refuses) or the definition in force
+/// declares it, the classification every redaction of the run uses.
+fn run_request(
+    run_dir: &Path,
+    playbook: &Playbook,
+    cfg: &RunConfig,
+) -> Result<serde_json::Value, String> {
+    let mut declared = crate::run_redact::secret_names_strict(run_dir)
+        .map_err(|e| format!("skip_secret_set_unreadable: {}", e.sentence("the run")))?;
+    declared.extend(crate::run_redact::declared_secret(playbook));
+    let tag = |name: &str, value: &str| -> Result<serde_json::Value, String> {
+        let bytes = serde_json::to_vec(&(name, value)).unwrap_or_default();
+        apb_core::run_origin::tag_if_keyed(WORK_PARAM_DOMAIN, &bytes)
+            .map(|t| serde_json::json!({ "keyed": t }))
+            .ok_or_else(|| {
+                "skip_no_key: this installation has no key, so a sensitive input cannot be compared"
+                    .to_string()
+            })
+    };
+    let fields = start_request_of(cfg);
+    let mut v = serde_json::to_value(&fields).map_err(|e| e.to_string())?;
+    let map = v.as_object_mut().expect("a struct serializes as an object");
+    for removed in [
+        "v",
+        "version",
+        "worktree",
+        "supervision",
+        "cache",
+        "max_parallel",
+        "max_patches_per_run",
+        "deadline_ms",
+        "budget",
+        "unattended",
+        "allow_shared_workdir",
+        "continued_from",
+        "external_data",
+        "execution",
+    ] {
+        map.remove(removed);
+    }
+    let mut params = serde_json::Map::new();
+    for (name, value) in &fields.params {
+        let sensitive =
+            apb_core::run_params::sensitive(declared.contains(name.as_str()), name, value);
+        let entry = match sensitive {
+            Some(_) => tag(name, value)?,
+            None => serde_json::Value::String(value.clone()),
+        };
+        params.insert(name.clone(), entry);
+    }
+    map.insert("params".into(), serde_json::Value::Object(params));
+    if let Some(instruction) = &fields.instruction
+        && apb_core::run_params::sensitive(false, "instruction", instruction).is_some()
+    {
+        map.insert("instruction".into(), tag("instruction", instruction)?);
+    }
+    map.insert(
+        "output_limits".into(),
+        serde_json::to_value(cfg.output_limits).unwrap_or(serde_json::Value::Null),
+    );
+    Ok(v)
+}
+
+/// The canonical start request of a run, filled from its persisted config:
+/// the struct literal, so a field the struct gains is filled here before it
+/// compiles.
+fn start_request_of(cfg: &RunConfig) -> apb_core::start_key::StartRequestFields {
+    apb_core::start_key::StartRequestFields {
+        v: apb_core::start_key::REQUEST_V,
+        version: None,
+        params: cfg.params.clone(),
+        instruction: cfg.instruction.clone(),
+        worktree: None,
+        overrides: cfg
+            .overrides
+            .as_ref()
+            .and_then(|o| serde_json::to_vec(o).ok())
+            .map(|b| sha256_hex(&b)),
+        execution: None,
+        supervision: apb_core::start_key::label(&cfg.mode),
+        cache: apb_core::start_key::label(&cfg.cache),
+        max_parallel: cfg.max_parallel,
+        max_patches_per_run: cfg.max_patches_per_run,
+        context_max_bytes: cfg.context_max_bytes,
+        context_compact_model: cfg.context_compact_model.clone(),
+        deadline_ms: None,
+        budget: None,
+        unattended: cfg.unattended,
+        allow_shared_workdir: cfg.shared_workdir,
+        continued_from: cfg.continued_from.clone(),
+        external_data: false,
+    }
+}
+
+/// An invocation as part 4 holds it: whole, without the executable's
+/// fingerprint (an agent CLI updated in place is the world changing).
+fn invocation_work(inv: &crate::invocation::ResolvedInvocation) -> serde_json::Value {
+    let mut v = serde_json::to_value(inv).unwrap_or(serde_json::Value::Null);
+    if let Some(m) = v.as_object_mut() {
+        m.remove("executable_fingerprint");
+    }
+    v
+}
+
+/// The fields of a resolved profile that are not work: the tier the engine
+/// routed an attempt to and the cascade counter (routing follows the
+/// configured chain and tiers, which stay inside).
+const PROFILE_NOT_WORK: [&str; 2] = ["routed_tier", "cascade"];
+
+/// The executor part of the work of one resolved profile: the manifest's
+/// resolved profile whole, minus [`PROFILE_NOT_WORK`], each invocation of
+/// its chain and tiers without its executable fingerprint. A field the
+/// profile gains later is inside by construction.
+pub(crate) fn profile_work(p: &crate::manifest::ManifestProfile) -> serde_json::Value {
+    let mut v = serde_json::to_value(p).unwrap_or(serde_json::Value::Null);
+    if let Some(m) = v.as_object_mut() {
+        for name in PROFILE_NOT_WORK {
+            m.remove(name);
+        }
+        m.insert(
+            "chain".into(),
+            serde_json::Value::Array(p.chain.iter().map(invocation_work).collect()),
+        );
+        if let Some(serde_json::Value::Array(tiers)) = m.get_mut("tiers") {
+            for (t, tier) in tiers.iter_mut().zip(&p.tiers) {
+                if let Some(o) = t.as_object_mut() {
+                    o.insert(
+                        "invocation".into(),
+                        tier.invocation
+                            .as_ref()
+                            .map(invocation_work)
+                            .unwrap_or(serde_json::Value::Null),
+                    );
+                }
+            }
+        }
+    }
+    v
+}
+
+/// The connector part of the work at one binding site: each grant with its
+/// connector's definition digest and every granted account's identity and
+/// snapshotted digest.
+fn grants_work(manifest: &crate::manifest::RunExecutionManifest, site: &str) -> serde_json::Value {
+    let grants: Vec<serde_json::Value> = manifest
+        .grants_for(site)
+        .iter()
+        .map(|g| {
+            let connector = manifest.connector(&g.connector);
+            let accounts: Vec<serde_json::Value> = g
+                .accounts
+                .iter()
+                .map(|a| {
+                    let digest = connector
+                        .and_then(|c| c.accounts.iter().find(|x| &x.name == a))
+                        .map(|x| x.digest.clone());
+                    serde_json::json!({ "name": a, "digest": digest })
+                })
+                .collect();
+            serde_json::json!({
+                "grant": g,
+                "connector_digest": connector.map(|c| c.digest.clone()),
+                "accounts": accounts,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(grants)
+}
+
+/// Whether `node` reads anything the manifest resolved: an executor or a
+/// connector at the node or at its item check.
+fn needs_manifest(node: &Node) -> bool {
+    matches!(node.kind, NodeKind::AgentTask { .. })
+        || !node.kind.connector_bindings().is_empty()
+        || node
+            .list()
+            .and_then(|l| l.check.as_ref())
+            .is_some_and(|c| c.connector.is_some())
+}
+
+/// Part 4 as the run is bound now.
+fn resolved_work(run_dir: &Path, node: &Node) -> Result<serde_json::Value, String> {
+    let manifest =
+        crate::manifest::read(run_dir).map_err(|e| format!("skip_needs_manifest: {e}"))?;
+    let Some(manifest) = manifest else {
+        if needs_manifest(node) {
+            return Err(format!(
+                "skip_needs_manifest: node {} needs the run's manifest and the run has none",
+                node.id
+            ));
+        }
+        return Ok(serde_json::Value::String("none".into()));
+    };
+    let profile = rebind::effective_for_node(run_dir, &manifest, &node.id)
+        .map_err(|e| format!("skip_needs_manifest: {e}"))?;
+    if profile.is_none() && matches!(node.kind, NodeKind::AgentTask { .. }) {
+        return Err(format!(
+            "skip_needs_manifest: the manifest resolved no profile for node {}",
+            node.id
+        ));
+    }
+    Ok(resolved_with(&manifest, node, profile.as_ref()))
+}
+
+/// Part 4 over `manifest` with `profile` as the node's executor (the bound
+/// one, or a rebind's candidate).
+pub(crate) fn resolved_with(
+    manifest: &crate::manifest::RunExecutionManifest,
+    node: &Node,
+    profile: Option<&crate::manifest::ManifestProfile>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "execution": manifest
+            .execution
+            .as_ref()
+            .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
+            .unwrap_or_else(|| serde_json::Value::String("none".into())),
+        "profile": profile.map(profile_work),
+        "node": grants_work(manifest, &node.id),
+        "check": grants_work(manifest, &apb_core::list::check_site(&node.id)),
+    })
+}
+
+/// [`work_inputs`] with part 4 replaced: the fingerprint a rebind to
+/// `candidate` would give the node.
+pub(crate) fn work_with_profile(
+    src: &WorkSource<'_>,
+    candidate: &crate::manifest::ManifestProfile,
+) -> Result<WorkInputs, String> {
+    let mut inputs = work_inputs(src)?;
+    let manifest = crate::manifest::read(src.run_dir)
+        .map_err(|e| format!("skip_needs_manifest: {e}"))?
+        .ok_or_else(|| "skip_needs_manifest: the run has no manifest".to_string())?;
+    inputs.resolved = resolved_with(&manifest, src.node, Some(candidate));
+    Ok(inputs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use apb_core::cache::CACHE_FORMAT;
+
+    /// A resolved execution in `dir` with no runtimes.
+    fn exec_at(dir: &str) -> Result<VisitExecution, String> {
+        Ok(VisitExecution {
+            dir: PathBuf::from(dir),
+            check_dir: PathBuf::from(dir),
+            path_env: None,
+            check_policy: CheckPolicy {
+                guard_tree: true,
+                holds_tree: false,
+            },
+            runtimes: Default::default(),
+            mcp_pins: Default::default(),
+        })
+    }
+
+    /// An absent `PATH` is captured as absent, a value as it is, and one
+    /// that is not Unicode refuses the visit's execution instead of
+    /// passing for an absent one.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_unicode_refuses_the_capture() {
+        use std::os::unix::ffi::OsStringExt;
+        assert_eq!(captured_path(Ok("/bin".into())), Ok(Some("/bin".into())));
+        assert_eq!(captured_path(Err(std::env::VarError::NotPresent)), Ok(None));
+        let raw = std::ffi::OsString::from_vec(b"/opt/\xff/bin".to_vec());
+        let why = captured_path(Err(std::env::VarError::NotUnicode(raw))).unwrap_err();
+        assert!(why.starts_with("skip_path_unrepresentable"), "{why}");
+    }
+
+    fn ev(seq: u64, v: serde_json::Value) -> crate::event::Event {
+        let mut v = v;
+        v["seq"] = seq.into();
+        v["ts"] = 0.into();
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// The definition of the work tests: an agent list `l` and three params,
+    /// one declared secret.
+    const WORK_PLAYBOOK: &str = "schema: 2\nid: p\nname: P\nversion: 1.0.0\nparams:\n  - { name: token, type: text, secret: true }\n  - { name: api_token, type: text }\n  - { name: note, type: text }\n  - { name: city, type: text }\nnodes:\n  - { id: start, type: start }\n  - { id: l, type: agent_task, prompt: p, profile: main, list: { items: { inline: [a] } } }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: l }\n  - { from: l, to: done }\n";
+
+    /// A credential-shaped value (a prefixed access token).
+    const CREDENTIAL: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+
+    /// A resolved profile with one chain invocation and one tier.
+    fn profile() -> crate::manifest::ManifestProfile {
+        let inv = serde_json::json!({
+            "agent_id": "claude", "model": "haiku", "spec": { "argv": ["-p", "--", "{prompt}"] },
+            "soul_delivery": "native", "canonical_executable": "/opt/claude", "executable_fingerprint": "10:1",
+        });
+        serde_json::from_value(serde_json::json!({
+            "scope": "project", "name": "main", "profile_digest": "sha256:p", "bundle_digest": "sha256:bundle",
+            "soul": "", "soul_requirement": "any", "skills": [], "chain": [inv.clone()],
+            "tiers": [{ "name": "cheap", "for": "routine", "invocation": inv }],
+            "routed_tier": "cheap", "cascade": 2,
+        }))
+        .unwrap()
+    }
+
+    /// A manifest for node `l`: execution mode `mode`, the profile, and one
+    /// granted connector account whose snapshotted digest is `account`.
+    fn manifest_of(mode: &str, account: &str) -> crate::manifest::RunExecutionManifest {
+        let p = profile();
+        let mut m = crate::manifest::RunExecutionManifest {
+            execution: Some(serde_json::from_value(serde_json::json!({ "mode": mode })).unwrap()),
+            node_bindings: [("l".to_string(), p.key())].into(),
+            profiles: vec![p],
+            ..Default::default()
+        };
+        m.connectors.push(crate::manifest::ManifestConnector {
+            doubled_accounts: Vec::new(),
+            name: "slack".into(),
+            digest: "sha256:connector".into(),
+            accounts: vec![crate::manifest::ManifestAccount {
+                name: "acme".into(),
+                default: true,
+                fields: [("workspace".to_string(), "acme".to_string())].into(),
+                env: BTreeMap::new(),
+                cmd: BTreeMap::new(),
+                digest: account.into(),
+            }],
+        });
+        m.connector_grants.insert(
+            "l".into(),
+            vec![crate::manifest::ManifestConnectorGrant {
+                connector: "slack".into(),
+                accounts: vec!["acme".into()],
+                functions: vec!["post".into()],
+                max_calls: None,
+                on_unknown: None,
+            }],
+        );
+        m
+    }
+
+    fn decisions() -> apb_core::decisions::EffectiveDecisions {
+        serde_json::from_value(serde_json::json!({
+            "mode": "enforce", "timeout_ms": 1000, "providers": [],
+            "budget": {}, "privacy": {}, "uses": {},
+        }))
+        .unwrap()
+    }
+
+    /// A run directory with the definition, the journal's definition and
+    /// scripts pin, and `manifest` written.
+    fn run_with(
+        manifest: &crate::manifest::RunExecutionManifest,
+    ) -> (tempfile::TempDir, Vec<crate::event::Event>) {
+        let run = tempfile::tempdir().unwrap();
+        std::fs::write(run.path().join("playbook.yaml"), WORK_PLAYBOOK).unwrap();
+        crate::manifest::write(run.path(), manifest).unwrap();
+        let events = vec![
+            ev(
+                0,
+                serde_json::json!({ "type": "run_started", "playbook": "p", "version": "1.0.0", "definition": "sha256:def" }),
+            ),
+            ev(
+                1,
+                serde_json::json!({ "type": "run_provenance", "scripts_digest": "sha256:scripts" }),
+            ),
+        ];
+        (run, events)
+    }
+
+    /// The work fingerprint of the run under `manifest` and `cfg`.
+    fn fingerprint_of(manifest: &crate::manifest::RunExecutionManifest, cfg: &RunConfig) -> String {
+        let (run, events) = run_with(manifest);
+        let playbook = Playbook::from_yaml(WORK_PLAYBOOK).unwrap();
+        let src = WorkSource {
+            run_dir: run.path(),
+            events: &events,
+            playbook: &playbook,
+            node: playbook.node("l").unwrap(),
+            cfg,
+            decisions: None,
+            exec: &exec_at("/tree"),
+        };
+        work_fingerprint(&work_inputs(&src).unwrap())
+    }
+
+    /// The previous success ran in `cli` mode, the next run in `host` mode
+    /// with every other input equal: the work fingerprint differs, so every
+    /// item would run again. At the fingerprint: host mode refuses list
+    /// nodes at start (`scheduler/prepare.rs`, "list nodes need execution:
+    /// cli"), so no run can show it end to end.
+    #[test]
+    fn a_cli_to_host_change_changes_the_work_fingerprint() {
+        let cfg = RunConfig::default();
+        let cli = fingerprint_of(&manifest_of("cli", "sha256:a1"), &cfg);
+        assert_eq!(cli, fingerprint_of(&manifest_of("cli", "sha256:a1"), &cfg));
+        assert_ne!(cli, fingerprint_of(&manifest_of("host", "sha256:a1"), &cfg));
+        assert_ne!(
+            cli,
+            fingerprint_of(&manifest_of("cli+guard", "sha256:a1"), &cfg)
+        );
+    }
+
+    /// A granted account's field changes its snapshotted digest, and the
+    /// work fingerprint with it (the table's account row: the agent stub
+    /// calls no connector).
+    #[test]
+    fn a_granted_account_field_changes_the_work_fingerprint() {
+        let cfg = RunConfig::default();
+        assert_ne!(
+            fingerprint_of(&manifest_of("cli", "sha256:a1"), &cfg),
+            fingerprint_of(&manifest_of("cli", "sha256:a2"), &cfg)
+        );
+    }
+
+    /// Every part of the work over its serialized form, each with a value:
+    /// the definition, the pin, the request with its removals, the manifest's
+    /// execution block, the profile whole without its executable fingerprint
+    /// and its routing fields, the grants with the account digest, the
+    /// decision settings, and the tree.
+    #[test]
+    fn work_inputs_takes_each_part() {
+        let (run, events) = run_with(&manifest_of("cli", "sha256:a1"));
+        let playbook = Playbook::from_yaml(WORK_PLAYBOOK).unwrap();
+        let cfg = RunConfig {
+            params: [("city".to_string(), "Lyon".to_string())].into(),
+            instruction: Some("produce summaries".into()),
+            context_max_bytes: Some(4096),
+            max_parallel: Some(3),
+            continued_from: Some("older".into()),
+            ..RunConfig::default()
+        };
+        let d = decisions();
+        let src = WorkSource {
+            run_dir: run.path(),
+            events: &events,
+            playbook: &playbook,
+            node: playbook.node("l").unwrap(),
+            cfg: &cfg,
+            decisions: Some(&d),
+            exec: &exec_at("/src/tree"),
+        };
+        let v = serde_json::to_value(work_inputs(&src).unwrap()).unwrap();
+        assert_eq!(v["definition"], "sha256:def");
+        assert_eq!(v["scripts"], "sha256:scripts");
+        let req = &v["request"];
+        assert_eq!(req["params"]["city"], "Lyon");
+        assert_eq!(req["instruction"], "produce summaries");
+        assert_eq!(req["context_max_bytes"], 4096);
+        assert!(req.get("output_limits").is_some());
+        for removed in [
+            "v",
+            "version",
+            "worktree",
+            "supervision",
+            "cache",
+            "max_parallel",
+            "max_patches_per_run",
+            "deadline_ms",
+            "budget",
+            "unattended",
+            "allow_shared_workdir",
+            "continued_from",
+            "external_data",
+            "execution",
+        ] {
+            assert!(req.get(removed).is_none(), "{removed} is removed: {req}");
+        }
+        let resolved = &v["resolved"];
+        assert_eq!(resolved["execution"]["mode"], "cli");
+        let profile = &resolved["profile"];
+        assert_eq!(profile["bundle_digest"], "sha256:bundle");
+        assert_eq!(profile["chain"][0]["canonical_executable"], "/opt/claude");
+        assert!(profile["chain"][0].get("executable_fingerprint").is_none());
+        assert!(
+            profile["tiers"][0]["invocation"]
+                .get("executable_fingerprint")
+                .is_none()
+        );
+        assert!(profile.get("routed_tier").is_none() && profile.get("cascade").is_none());
+        assert_eq!(resolved["node"][0]["accounts"][0]["digest"], "sha256:a1");
+        assert_eq!(resolved["node"][0]["connector_digest"], "sha256:connector");
+        assert_eq!(v["decisions"]["mode"], "enforce");
+        assert_eq!(v["target"], "/src/tree");
+    }
+
+    /// Each case `run_params::sensitive` names (a declared secret, a
+    /// secret-shaped name, a credential-shaped value) and an instruction
+    /// that looks like a credential enter the work only as the
+    /// installation-keyed tag: never the value, never its bare hash. Without
+    /// a key the work does not compute (`skip_no_key`) and no key is made.
+    #[test]
+    fn sensitive_inputs_enter_only_as_keyed_tags() {
+        apb_core::process_mode::testing::in_plain_child(
+            "scheduler::cache::tests::sensitive_inputs_enter_only_as_keyed_tags",
+            || {
+                let cfg_dir = tempfile::tempdir().unwrap();
+                // SAFETY: a child process runs this one test on one thread.
+                unsafe { std::env::set_var("APB_CONFIG_DIR", cfg_dir.path()) };
+                let values = [
+                    ("token", "declared-secret-value"),
+                    ("api_token", "named-secret-value"),
+                    ("note", CREDENTIAL),
+                ];
+                assert!(apb_core::run_params::sensitive(true, "token", values[0].1).is_some());
+                assert!(apb_core::run_params::sensitive(false, "api_token", values[1].1).is_some());
+                assert!(apb_core::run_params::sensitive(false, "note", CREDENTIAL).is_some());
+                let cfg = RunConfig {
+                    params: values
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
+                    instruction: Some(CREDENTIAL.into()),
+                    ..RunConfig::default()
+                };
+                let (run, events) = run_with(&manifest_of("cli", "sha256:a1"));
+                let playbook = Playbook::from_yaml(WORK_PLAYBOOK).unwrap();
+                let src = WorkSource {
+                    run_dir: run.path(),
+                    events: &events,
+                    playbook: &playbook,
+                    node: playbook.node("l").unwrap(),
+                    cfg: &cfg,
+                    decisions: None,
+                    exec: &exec_at("/tree"),
+                };
+                // No installation key: refused, and none created.
+                let no_key = work_inputs(&src).unwrap_err();
+                assert!(no_key.starts_with("skip_no_key"), "{no_key}");
+                assert!(
+                    std::fs::read_dir(cfg_dir.path()).map_or(0, |d| d.count()) == 0,
+                    "no key is created"
+                );
+                apb_core::run_origin::ensure_key().unwrap();
+                let v = serde_json::to_value(work_inputs(&src).unwrap()).unwrap();
+                let req = &v["request"];
+                for (name, _) in values {
+                    assert!(req["params"][name]["keyed"].is_string(), "{name}: {req}");
+                }
+                assert!(req["instruction"]["keyed"].is_string(), "{req}");
+                let text = v.to_string();
+                assert!(!text.contains(CREDENTIAL), "the instruction never appears");
+                for (_, value) in values {
+                    assert!(!text.contains(value), "the value never appears");
+                    let bare = sha256_hex(value.as_bytes());
+                    assert!(
+                        !text.contains(bare.trim_start_matches("sha256:")),
+                        "never its bare hash"
+                    );
+                }
+            },
+        );
+    }
+
+    /// The directory a node executes in, as its work holds it: the tree the
+    /// run falls back to when it has no worktree (the project root),
+    /// canonical, and a node's own `workdir` rendered over it; a template
+    /// that renders to no directory refuses the work.
+    #[test]
+    fn the_execution_dir_is_the_tree_or_the_nodes_own_workdir() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("sub-a")).unwrap();
+        std::fs::create_dir_all(root.path().join("sub-b")).unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let yaml = "schema: 2\nid: p\nname: P\nversion: 1.0.0\nparams:\n  - { name: dir, type: text }\nnodes:\n  - { id: start, type: start }\n  - { id: plain, type: script, script: s.sh, runner: sh, list: { items: { inline: [a] } } }\n  - { id: own, type: script, script: s.sh, runner: sh, workdir: \"{{params.dir}}\", list: { items: { inline: [a] } } }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: plain }\n  - { from: plain, to: own }\n  - { from: own, to: done }\n";
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        let state = RunState::default();
+        let at = |node: &str, dir: &str| {
+            let cfg = RunConfig {
+                params: [("dir".to_string(), dir.to_string())].into(),
+                ..RunConfig::default()
+            };
+            execution_dir(&pb, node, root.path(), run.path(), "r", &state, &cfg)
+        };
+        let canon = |p: &Path| p.canonicalize().unwrap();
+        assert_eq!(at("plain", "sub-a").unwrap(), canon(root.path()));
+        assert_eq!(
+            at("own", "sub-a").unwrap(),
+            canon(&root.path().join("sub-a"))
+        );
+        assert_ne!(at("own", "sub-a").unwrap(), at("own", "sub-b").unwrap());
+        assert!(
+            at("own", "missing")
+                .unwrap_err()
+                .starts_with("skip_workdir_unresolved")
+        );
+    }
+
+    /// The MCP approval of a granted account is part of the work: the
+    /// visit's resolved execution reads its `pin_digest` from the machine's pin
+    /// store, and another approval of the same account gives another work.
+    #[test]
+    fn a_granted_accounts_mcp_pin_is_part_of_the_work() {
+        apb_core::process_mode::testing::in_plain_child(
+            "scheduler::cache::tests::a_granted_accounts_mcp_pin_is_part_of_the_work",
+            || {
+                let cfg_dir = tempfile::tempdir().unwrap();
+                // SAFETY: a child process runs this one test on one thread.
+                unsafe { std::env::set_var("APB_CONFIG_DIR", cfg_dir.path()) };
+                let pin = |digest: &str| {
+                    let store = serde_json::json!({ "schema_version": 1, "servers": { "slack/acme": {
+                        "connector_digest": "sha256:c", "account_digest": "sha256:a", "command": "srv",
+                        "program": "/opt/srv", "program_digest": "sha256:p", "tools": {},
+                        "pin_digest": digest, "approved_at_ms": 1 } } });
+                    std::fs::write(
+                        cfg_dir
+                            .path()
+                            .join(apb_core::connector::mcp::pins::PIN_STORE_FILE),
+                        store.to_string(),
+                    )
+                    .unwrap();
+                };
+                let (run, events) = run_with(&manifest_of("cli", "sha256:a1"));
+                let playbook = Playbook::from_yaml(WORK_PLAYBOOK).unwrap();
+                let node = playbook.node("l").unwrap();
+                let cfg = RunConfig::default();
+                let work = || {
+                    let mut exec = exec_at("/tree").unwrap();
+                    exec.mcp_pins = mcp_pins(run.path(), node).unwrap();
+                    let exec = Ok(exec);
+                    let src = WorkSource {
+                        run_dir: run.path(),
+                        events: &events,
+                        playbook: &playbook,
+                        node,
+                        cfg: &cfg,
+                        decisions: None,
+                        exec: &exec,
+                    };
+                    work_fingerprint(&work_inputs(&src).unwrap())
+                };
+                pin("sha256:pin-1");
+                assert_eq!(
+                    mcp_pins(run.path(), node).unwrap().get("slack/acme"),
+                    Some(&Some("sha256:pin-1".to_string()))
+                );
+                let first = work();
+                assert_eq!(first, work());
+                pin("sha256:pin-2");
+                assert_ne!(first, work(), "another approval is other work");
+            },
+        );
+    }
+
+    /// A param the run's secret set holds (the manifest's `secret_params`,
+    /// kept from an earlier declaration the definition in force no longer
+    /// makes) enters the work as a keyed tag, as every redaction of the run
+    /// treats it; a secret set that does not read refuses the work.
+    #[test]
+    fn the_runs_secret_set_classifies_the_params() {
+        apb_core::process_mode::testing::in_plain_child(
+            "scheduler::cache::tests::the_runs_secret_set_classifies_the_params",
+            || {
+                let cfg_dir = tempfile::tempdir().unwrap();
+                // SAFETY: a child process runs this one test on one thread.
+                unsafe { std::env::set_var("APB_CONFIG_DIR", cfg_dir.path()) };
+                apb_core::run_origin::ensure_key().unwrap();
+                let mut manifest = manifest_of("cli", "sha256:a1");
+                manifest.secret_params = vec!["city".into()];
+                let (run, events) = run_with(&manifest);
+                let playbook = Playbook::from_yaml(WORK_PLAYBOOK).unwrap();
+                let cfg = RunConfig {
+                    params: [("city".to_string(), "Lyon".to_string())].into(),
+                    ..RunConfig::default()
+                };
+                let src = WorkSource {
+                    run_dir: run.path(),
+                    events: &events,
+                    playbook: &playbook,
+                    node: playbook.node("l").unwrap(),
+                    cfg: &cfg,
+                    decisions: None,
+                    exec: &exec_at("/tree"),
+                };
+                let v = serde_json::to_value(work_inputs(&src).unwrap()).unwrap();
+                assert!(v["request"]["params"]["city"]["keyed"].is_string(), "{v}");
+                assert!(!v.to_string().contains("Lyon"));
+                std::fs::write(run.path().join("playbook.yaml"), "params: [ not a list").unwrap();
+                let err = work_inputs(&src).unwrap_err();
+                assert!(err.starts_with("skip_secret_set_unreadable"), "{err}");
+            },
+        );
+    }
 
     /// Builds a minimal cache entry whose single artifact carries `path`, so a
     /// restore exercises the path-safety guard before touching the store.

@@ -393,6 +393,7 @@ mod tests {
                 batch_size: 2,
                 parallel: 1,
                 reopened: false,
+                skip_refused: None,
             },
         )
     }
@@ -457,6 +458,9 @@ mod tests {
                 carried: false,
                 check: None,
                 digest: None,
+                skipped_from: None,
+                skip_digest: None,
+                skip_latched: None,
                 result: None,
             },
         );

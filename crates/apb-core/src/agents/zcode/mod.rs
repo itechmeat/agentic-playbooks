@@ -140,6 +140,7 @@ impl Agent for Zcode {
                 "--mode",
                 "build",
             ]),
+            fork: None,
             fresh: FreshForm::Printed,
             profile_mode: Some(mode_args),
         })

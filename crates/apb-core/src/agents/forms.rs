@@ -15,6 +15,11 @@ pub struct Forms {
     /// elements, filled like the launch argv. `None` for an agent with no
     /// resume form, which forces the runtime downgrade to `reprompt`.
     pub resume: Option<&'static [&'static str]>,
+    /// The fork argv: the resume form that starts from a copy of
+    /// `{session}` and writes nothing back to it. Same placeholders as
+    /// `resume`. `None` for an agent with no such form: a fork starts
+    /// cold.
+    pub fork: Option<&'static [&'static str]>,
     /// How a fresh attempt makes its session findable.
     pub fresh: FreshForm,
     /// The autonomy flags a profile's `zcode_mode` asks for, for an agent
@@ -27,6 +32,12 @@ impl Forms {
     /// The resume argv as owned strings.
     pub fn resume_argv(&self) -> Option<Vec<String>> {
         self.resume
+            .map(|argv| argv.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// The fork argv as owned strings.
+    pub fn fork_argv(&self) -> Option<Vec<String>> {
+        self.fork
             .map(|argv| argv.iter().map(|s| s.to_string()).collect())
     }
 

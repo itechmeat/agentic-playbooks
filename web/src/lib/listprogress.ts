@@ -1,5 +1,5 @@
 import type { PilotView, RunList, RunListItem } from './api.gen'
-import { UNRESOLVED_SEND_TEXT } from './consts.gen'
+import { SKIP_TAKEN_BACK_MANY, SKIP_TAKEN_BACK_ONE, UNRESOLVED_SEND_TEXT } from './consts.gen'
 import type { PlaybookNode } from './types'
 
 // The run page's list panel and the graph's list badge: pure shaping of a
@@ -90,6 +90,37 @@ export function processedLabel(l: RunList): string {
   return `${l.processed} of ${l.total} processed`
 }
 
+// `3 skipped`: the items a skip settled in this visit, null for none.
+export function skippedLabel(l: RunList): string | null {
+  const n = l.skip?.skipped ?? 0
+  return n > 0 ? `${n} skipped` : null
+}
+
+// The help text of the skip line: what a skip covers and what it does not.
+export const SKIP_HELP =
+  'An item is skipped when what apb configures for it is unchanged: the definition, the scripts, the item, params, profiles, connectors as written, grants, runtimes, directories and PATH. Skip is not available on isolated nodes. Other environment variables, secret values, files outside the scripts copy and outside services are not covered: publish a new version to make the next run skip nothing.'
+
+// What a list's skip read: the items of the run's set and the run they
+// passed in, or why the list skips nothing. Null for a list without
+// `skip`.
+export function skipLabel(l: RunList): string | null {
+  const s = l.skip
+  if (!s) return null
+  const kept =
+    (s.not_inherited ? `, ${s.not_inherited} not skipped (output could not be carried)` : '') +
+    (s.reworked
+      ? `, ${s.reworked} ${s.reworked === 1 ? SKIP_TAKEN_BACK_ONE : SKIP_TAKEN_BACK_MANY}`
+      : '')
+  const base = s.refused
+    ? `skip refused: ${s.refused}`
+    : !s.source
+      ? 'skip: no earlier success'
+      : `skip: ${items(s.read_items)} from run ${s.source}${s.truncated ? ', more not kept' : ''}${kept}`
+  // The stamping explanation follows every branch: a first run has no
+  // source and can still stop stamping.
+  return s.stopped_stamping ? `${base}; stamping stopped: ${s.stopped_stamping}` : base
+}
+
 function withNote(i: RunListItem): boolean {
   return i.state === 'passed' && i.verdict === 'accept_with_note'
 }
@@ -125,13 +156,14 @@ export function visibleItems(
   return { rows: matching.slice(0, ITEM_ROW_CAP), hidden: matching.length - ITEM_ROW_CAP }
 }
 
-// What an item row says beside its state: that an earlier send of a
-// passed item is still unknown, the reason it needs a look, the check's
+// What an item row says beside its state: that a skip settled it from an
+// earlier run, that an earlier send of a passed item is still unknown, the reason it needs a look, the check's
 // note, or nothing.
 export function itemText(i: RunListItem): string {
+  const skipped = i.skipped_from ? `skipped (passed in ${i.skipped_from})` : null
   const unresolved = i.unresolved_send ? UNRESOLVED_SEND_TEXT : null
   const reason = i.reason ? i.reason.replace(/_/g, ' ') : null
-  return [unresolved, reason, i.note].filter((s): s is string => !!s).join(': ')
+  return [skipped, unresolved, reason, i.note].filter((s): s is string => !!s).join(': ')
 }
 
 // The graph badge of a list node: `12/43` once its visit started, `list`

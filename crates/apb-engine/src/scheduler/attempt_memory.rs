@@ -654,6 +654,9 @@ mod tests {
                 carried: false,
                 check: Some("output".into()),
                 digest: None,
+                skipped_from: None,
+                skip_digest: None,
+                skip_latched: None,
                 result: None,
             },
         )

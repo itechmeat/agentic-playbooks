@@ -4,6 +4,7 @@
   import { accentVar, nodeKindColor } from './profilecolor'
   import { shortModel } from './format'
   import { questionSummary, toYamlField } from './judgefields'
+  import { readContinueSession } from './nodefields'
   import { Button } from '$lib/components/ui/button'
   import FileText from '@lucide/svelte/icons/file-text'
   import X from '@lucide/svelte/icons/x'
@@ -31,6 +32,8 @@
 
   const k = $derived(nodeKindColor(node.type, data?.profile))
   const str = (v: unknown) => (typeof v === 'string' ? v : v == null ? '' : String(v))
+  // `continue_session` is a bare node id or `{ from, mode }`.
+  const continued = $derived(readContinueSession(node.continue_session))
   // `isolation` is the bare level, or the long form `{ level, network, ... }`
   // when more is declared.
   const isolationText = (v: unknown) => {
@@ -113,7 +116,7 @@
     {/if}
     {#if node.continue_session}
       <dt>continues</dt>
-      <dd>{str(node.continue_session)}</dd>
+      <dd>{continued.from}{continued.fork ? ' (fork)' : ''}</dd>
     {/if}
   </dl>
 

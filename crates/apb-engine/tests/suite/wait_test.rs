@@ -1681,3 +1681,57 @@ fn a_pending_park_is_applied_by_the_next_drive() {
         "no second park was posted"
     );
 }
+
+// A list that may skip, then a long timer wait.
+const WP_SKIP: &str = r#"
+schema: 2
+id: w
+name: WP
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: work
+    type: script
+    script: "scripts/go.sh"
+    runner: sh
+    list:
+      items: { inline: [ { id: i1 } ] }
+      skip: { passed_in: previous_success }
+  - { id: pause, type: wait, wait_for: { type: timer, seconds: 3 }, timeout_seconds: 3600 }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: pause }
+  - { from: pause, to: done }
+"#;
+
+/// A parked run's drive has left: its scripts copy is writable again, so a
+/// plain removal of the run directory works; nothing under the project is
+/// left read-only.
+#[test]
+fn a_parked_run_leaves_its_scripts_writable() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // The key is created under the env lock, held through the drive and
+    // the cleanup: a test that redirects `APB_CONFIG_DIR` holds that lock.
+    let _env = common::env_lock();
+    apb_core::run_origin::ensure_key().unwrap();
+    seed_scripts(root, WP_SKIP, &[("go.sh", GO_SH)]);
+    let _release = EnvVar::set("APB_RELEASE_AFTER_MS", "300");
+    let _poll = EnvVar::set("APB_WAKER_POLL_MS", "50");
+    let rx = spawn_wp(root, RunOptions::default());
+    assert_eq!(wait_result(&rx).outcome, RunStatus::Paused, "parked");
+    let run_dir = latest_run(root);
+    assert_eq!(wait_parks(&read_all(&run_dir).unwrap()).len(), 1);
+    let scripts = run_dir.join("scripts");
+    for p in [scripts.clone(), scripts.join("go.sh")] {
+        assert_ne!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o200,
+            0,
+            "{}",
+            p.display()
+        );
+    }
+    apb_engine::stop::stop_run(root, &run_id_of(&run_dir)).ok();
+}

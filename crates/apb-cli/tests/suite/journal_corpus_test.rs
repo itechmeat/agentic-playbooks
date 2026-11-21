@@ -565,6 +565,7 @@ impl Case {
     /// Puts the saved runs back, so the next operation starts from the
     /// writer's state and nothing an earlier operation wrote.
     fn restore(&self) {
+        writable_dirs(&self.runs());
         fs::remove_dir_all(self.runs()).unwrap();
         copy_tree(&self.saved(), &self.runs());
     }
@@ -933,6 +934,22 @@ fn journal_at(run_dir: &Path) -> Vec<Value> {
 
 fn last_of<'a>(journal: &'a [Value], kind: &str) -> Option<&'a Value> {
     journal.iter().rev().find(|e| e["type"] == kind)
+}
+
+/// Gives every directory under `path` its owner write bit: a run that may
+/// skip list items holds a read-only scripts copy while it can execute.
+fn writable_dirs(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if meta.is_dir() {
+        let mode = meta.permissions().mode();
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200));
+        for e in fs::read_dir(path).unwrap().flatten() {
+            writable_dirs(&e.path());
+        }
+    }
 }
 
 fn copy_tree(from: &Path, to: &Path) {
@@ -5030,5 +5047,341 @@ fn rowm1_body() {
             "row M1: {} started no server",
             label(&reader)
         );
+    }
+}
+
+// ---------------------------------------------- list skip and session fork
+
+/// Row L1's playbook: a script list whose items a later run skips, then a
+/// gate the run waits at, so a checkpoint and its run guard follow the
+/// skip sets.
+const L1_SKIP: &str = r#"schema: 2
+id: corpus-skip
+name: Journal corpus list skip
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: work
+    type: script
+    script: "scripts/item.sh"
+    runner: sh
+    list:
+      items: { inline: [ { id: i1 }, { id: i2 } ] }
+      batch: { size: 2, parallel: 1, retries: 0 }
+      skip: { passed_in: previous_success }
+  - { id: gate, type: human_review, options: [approved, rejected] }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: gate }
+  - { from: gate, to: ok, condition: { type: review_status, equals: approved } }
+  - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
+"#;
+
+/// The item script of row L1: it answers each item and changes nothing.
+const L1_ITEM_SH: &str = "echo 'item done'\n";
+
+/// The new binary's run of row L1 waiting at its gate after the list.
+fn l1_waiting_at_gate(case: &mut Case, new: &Path) -> String {
+    case.seed_inline(new, "corpus-skip", L1_SKIP, &[("item.sh", L1_ITEM_SH)]);
+    let run = case.start_inline(new, "corpus-skip", &[]);
+    let journal = case.wait_journal(&run, "the gate", |j| {
+        j.iter()
+            .any(|e| e["type"] == "review_requested" && e["node"] == "gate")
+    });
+    assert!(
+        journal.iter().any(|e| e["type"] == "list_skip_read"),
+        "{}: the run journals its skip set: {}",
+        case.name,
+        summary(&journal)
+    );
+    assert_run_guard_follows_last_checkpoint(&journal, case.name, &["list_skip"]);
+    case.kill_driver(&run);
+    run
+}
+
+/// Row L1: a definition with `list.skip` is one beta.1 cannot parse
+/// (its list block denies unknown fields): it refuses to start it and
+/// creates no run directory. 0.25.0 accepts unknown fields: it drops the
+/// skip (it predates list mode, so the whole list block) and runs the step,
+/// skipping nothing. Neither resumes a run of the new binary,
+/// whose guard names `list_skip`, and neither appends to its journal.
+#[test]
+fn l1_list_skip_old_binaries_refuse_start_and_resume() {
+    let new = new_binary();
+    let mut case = Case::new("row L1 (new)");
+    case.seed_inline(&new, "corpus-skip", L1_SKIP, &[("item.sh", L1_ITEM_SH)]);
+    let ran = case.run(&new, &["validate", "corpus-skip"]);
+    assert!(ran.ok(), "row L1: the new binary validates: {ran:?}");
+
+    for (tag, name) in [(BETA1, "row L1 (beta.1)"), (V025, "row L1 (0.25.0)")] {
+        let mut case = Case::new(name);
+        let Some(old) = old_binary(tag, &case) else {
+            continue;
+        };
+        case.seed_inline(&old, "corpus-skip", L1_SKIP, &[("item.sh", L1_ITEM_SH)]);
+        let ran = case.run(&old, &["run", "corpus-skip", "--detach"]);
+        if tag == BETA1 {
+            assert!(!ran.ok(), "{name}: beta.1 refuses to start: {ran:?}");
+            let created = fs::read_dir(case.runs())
+                .map(|d| d.flatten().count())
+                .unwrap_or(0);
+            assert_eq!(created, 0, "{name}: no run directory exists");
+        } else {
+            assert!(
+                ran.ok(),
+                "{name}: 0.25.0 parses and starts the playbook: {ran:?}"
+            );
+            let run = ran
+                .stdout
+                .lines()
+                .find_map(|l| l.strip_prefix("run started: "))
+                .map(|r| r.trim().to_string())
+                .unwrap_or_else(|| panic!("{name}: no run id in {ran:?}"));
+            case.guards.push(RunGuard::new(&case.root(), &run));
+            let journal = case.wait_journal(&run, "the gate", |j| {
+                j.iter()
+                    .any(|e| e["type"] == "review_requested" && e["node"] == "gate")
+            });
+            assert!(
+                !journal.iter().any(|e| e["type"] == "list_skip_read"),
+                "{name}: 0.25.0 drops the skip: {}",
+                summary(&journal)
+            );
+            // 0.25.0 predates list mode: it drops the whole list block and
+            // runs the step once, skipping nothing.
+            assert!(
+                journal.iter().any(|e| e["type"] == "node_finished"
+                    && e["node"] == "work"
+                    && e["status"] == "succeeded"),
+                "{name}: 0.25.0 runs the step: {}",
+                summary(&journal)
+            );
+            case.kill_driver(&run);
+        }
+
+        let run = l1_waiting_at_gate(&mut case, &new);
+        case.save();
+        case.restore();
+        let run_dir = case.runs().join(&run);
+        let before = fs::read(run_dir.join("events.jsonl")).unwrap();
+        let ran = case.run(&old, &["resume", &run]);
+        assert!(
+            !ran.ok(),
+            "{name}: the old binary refuses to resume: {ran:?}"
+        );
+        let after = fs::read(run_dir.join("events.jsonl")).unwrap();
+        assert_eq!(before, after, "{name}: the old binary appended nothing");
+    }
+}
+
+/// Row L1's window snapshots, made as the design fixes by a preparation
+/// in process, run in a child process of this test binary with an explicit
+/// environment ([`l1_window_child`]): nothing in this process changes its
+/// own environment. The child prepares the run through
+/// `prepare_supervised_background` under the case's project and home,
+/// copies the journal while the `PreparedRun` is held (it ends with the skip
+/// sets, no checkpoint after them), drives it on a thread until the gate
+/// after the list waits, copies it again (a `node_finished` and its run
+/// guard follow the sets) and stops it with the new binary. Returns the run
+/// id and the two snapshots of the runs directory, before the checkpoint
+/// and at the gate.
+fn l1_prepared_windows(case: &mut Case, new: &Path) -> (String, PathBuf, PathBuf) {
+    case.seed_inline(new, "corpus-skip", L1_SKIP, &[("item.sh", L1_ITEM_SH)]);
+    let home = case.dir.path().join("home");
+    let pre = case.dir.path().join("saved-pre");
+    let gate = case.saved();
+    let out = case.dir.path().join("l1-run-id");
+    let mut cmd = Command::new(std::env::current_exe().unwrap());
+    cmd.args([
+        "--exact",
+        "journal_corpus_test::l1_window_child",
+        "--ignored",
+        "--nocapture",
+    ])
+    .env_clear()
+    .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+    .env("HOME", &home)
+    .env("XDG_CONFIG_HOME", home.join(".config"))
+    .env("APB_DECISIONS_ALLOW_FAKE", "1")
+    .env("APB_L1_ROOT", case.root())
+    .env("APB_L1_PRE", &pre)
+    .env("APB_L1_GATE", &gate)
+    .env("APB_L1_OUT", &out)
+    .env("APB_L1_NEW", new)
+    .stdin(Stdio::null());
+    if let Some(tmp) = std::env::var_os("TMPDIR") {
+        cmd.env("TMPDIR", tmp);
+    }
+    for (k, v) in &case.env {
+        cmd.env(k, v);
+    }
+    let done = cmd.output().unwrap();
+    assert!(
+        done.status.success(),
+        "{}: the window child failed: {}{}",
+        case.name,
+        String::from_utf8_lossy(&done.stdout),
+        String::from_utf8_lossy(&done.stderr)
+    );
+    let run = fs::read_to_string(&out)
+        .unwrap_or_else(|e| panic!("{}: the window child wrote no run id: {e}", case.name));
+    let run = run.trim().to_string();
+    case.guards.push(RunGuard::new(&case.root(), &run));
+    let pre_journal = journal_at(&pre.join(&run));
+    assert_eq!(
+        pre_journal.last().map(|e| e["type"].clone()),
+        Some(Value::from("list_skip_read")),
+        "{}: the prepared journal ends with the skip sets: {}",
+        case.name,
+        summary(&pre_journal)
+    );
+    let journal = journal_at(&gate.join(&run));
+    assert_run_guard_follows_last_checkpoint(&journal, case.name, &["list_skip"]);
+    (run, pre, gate)
+}
+
+/// The child half of [`l1_prepared_windows`], run only by it: its whole
+/// environment is the one the parent set, and the paths come from it. Run
+/// any other way it does nothing.
+#[test]
+#[ignore = "run by l1_prepared_windows in a child process"]
+fn l1_window_child() {
+    use apb_engine::scheduler::{RunOptions, drive_prepared, prepare_supervised_background};
+    let var = |k: &str| std::env::var_os(k).map(PathBuf::from);
+    let (Some(root), Some(pre), Some(gate), Some(out), Some(new)) = (
+        var("APB_L1_ROOT"),
+        var("APB_L1_PRE"),
+        var("APB_L1_GATE"),
+        var("APB_L1_OUT"),
+        var("APB_L1_NEW"),
+    ) else {
+        return;
+    };
+    let prepared = prepare_supervised_background(&root, "corpus-skip", None, RunOptions::default())
+        .unwrap_or_else(|e| panic!("prepare: {e}"));
+    let run = prepared.run_id().to_string();
+    let runs = root.join(".apb/runs");
+    copy_tree(&runs, &pre);
+    let _ = fs::remove_file(pre.join(&run).join("driver.pid"));
+    let r = root.clone();
+    let driver = std::thread::spawn(move || drive_prepared(&r, prepared));
+    let start = Instant::now();
+    while !journal_at(&runs.join(&run))
+        .iter()
+        .any(|e| e["type"] == "review_requested" && e["node"] == "gate")
+    {
+        assert!(start.elapsed() < DEADLINE, "the gate was not reached");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    copy_tree(&runs, &gate);
+    let _ = fs::remove_file(gate.join(&run).join("driver.pid"));
+    let stopped = Command::new(&new)
+        .args(["stop", &run])
+        .current_dir(&root)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(stopped.status.success(), "stop: {stopped:?}");
+    driver
+        .join()
+        .unwrap()
+        .unwrap_or_else(|e| panic!("drive: {e}"));
+    fs::write(&out, &run).unwrap();
+}
+
+/// Row L1, the pause window: on the snapshot right after the skip sets are
+/// written (the journal ends with the sets, no checkpoint after them) and
+/// on the snapshot at the gate after the list (a checkpoint and its run
+/// guard naming `list_skip` follow them), both made in process, both
+/// released readers read the run, refuse to pause it and append nothing,
+/// and stop it with `run_aborted`.
+#[test]
+fn l1_list_skip_old_binaries_stop_but_never_pause() {
+    let new = new_binary();
+    for (tag, name) in [
+        (BETA1, "row L1 window (beta.1)"),
+        (V025, "row L1 window (0.25.0)"),
+    ] {
+        let mut case = Case::new(name);
+        let Some(old) = old_binary(tag, &case) else {
+            continue;
+        };
+        let (run, pre, gate) = l1_prepared_windows(&mut case, &new);
+        let put_back = |snapshot: &Path| {
+            writable_dirs(&case.runs());
+            fs::remove_dir_all(case.runs()).unwrap();
+            copy_tree(snapshot, &case.runs());
+        };
+        for (window, snapshot) in [
+            ("after the set write", pre.clone()),
+            ("at the gate", gate.clone()),
+        ] {
+            let run_dir = case.runs().join(&run);
+            put_back(&snapshot);
+            let ran = case.run(&old, &["runs", &run]);
+            assert!(ran.ok(), "{name} ({window}): reads the run: {ran:?}");
+            put_back(&snapshot);
+            let before = fs::read(run_dir.join("events.jsonl")).unwrap();
+            let ran = case.run(&old, &["pause", &run]);
+            assert!(!ran.ok(), "{name} ({window}): refuses to pause: {ran:?}");
+            let after = fs::read(run_dir.join("events.jsonl")).unwrap();
+            assert_eq!(before, after, "{name} ({window}): appended nothing");
+            put_back(&snapshot);
+            let ran = case.run(&old, &["stop", &run]);
+            assert!(ran.ok(), "{name} ({window}): stops the run: {ran:?}");
+            let journal = case.journal(&run);
+            assert_eq!(
+                journal.last().map(|e| e["type"].clone()),
+                Some(Value::from("run_aborted")),
+                "{name} ({window}): stop appends run_aborted last"
+            );
+        }
+    }
+}
+
+/// Row F1 (fork)'s playbook: a node that forks its source's session (the object
+/// form of `continue_session`).
+const F1_FORK: &str = r#"schema: 2
+id: corpus-fork
+name: Journal corpus session fork
+version: 1.0.0
+defaults: { profile: corpus }
+nodes:
+  - { id: start, type: start }
+  - { id: assess, type: agent_task, prompt: "Assess." }
+  - { id: try_a, type: agent_task, prompt: "Try.", continue_session: { from: assess, mode: fork } }
+  - { id: ok, type: finish, outcome: success }
+edges:
+  - { from: start, to: assess }
+  - { from: assess, to: try_a }
+  - { from: try_a, to: ok }
+"#;
+
+/// Row F1 (fork): both released readers refuse to validate and to start a
+/// playbook with the object form of `continue_session`, and create no
+/// run directory; the new binary validates it.
+#[test]
+fn f1_fork_old_binaries_refuse_the_definition() {
+    let new = new_binary();
+    let mut case = Case::new("row F1 (new)");
+    case.seed_inline(&new, "corpus-fork", F1_FORK, &[]);
+    let ran = case.run(&new, &["validate", "corpus-fork"]);
+    assert!(ran.ok(), "row F1: the new binary validates: {ran:?}");
+    for (tag, name) in [(BETA1, "row F1 (beta.1)"), (V025, "row F1 (0.25.0)")] {
+        let mut case = Case::new(name);
+        let Some(old) = old_binary(tag, &case) else {
+            continue;
+        };
+        case.seed_inline(&old, "corpus-fork", F1_FORK, &[]);
+        let ran = case.run(&old, &["validate", "corpus-fork"]);
+        assert!(!ran.ok(), "{name}: refuses to validate: {ran:?}");
+        let ran = case.run(&old, &["run", "corpus-fork", "--detach"]);
+        assert!(!ran.ok(), "{name}: refuses to start: {ran:?}");
+        let created = fs::read_dir(case.runs())
+            .map(|d| d.flatten().count())
+            .unwrap_or(0);
+        assert_eq!(created, 0, "{name}: no run directory exists");
     }
 }

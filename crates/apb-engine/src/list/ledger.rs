@@ -49,6 +49,11 @@ pub struct ItemRecord {
     pub digest: Option<String>,
     /// Its check rejected it in some round of this visit.
     pub check_rejected: bool,
+    /// The earlier run it passed in, when a `list.skip` settled it without
+    /// running it in this visit.
+    pub skipped_from: Option<String>,
+    /// The skip digest its settlement carries.
+    pub skip_digest: Option<String>,
 }
 
 impl ItemRecord {
@@ -71,6 +76,9 @@ pub struct ListCounts {
     pub needs_look: u32,
     pub pending: u32,
     pub running: u32,
+    /// Passed items a `list.skip` settled (they count in `passed` and
+    /// `processed` too).
+    pub skipped: u32,
 }
 
 /// The pilot of a visit, from its `list_pilot` events and the list node's
@@ -94,6 +102,19 @@ pub struct PilotState {
     /// or who decided it when no channel did (`unattended`, `model`);
     /// `unknown` for an old log.
     pub guidance_via: Option<String>,
+}
+
+/// The reason a skipped row of a continued or reopened visit goes back to
+/// pending: its skip digest no longer matches the work.
+pub const SKIP_CONFIG_CHANGED: &str = "skip_config_changed";
+/// A visit's refusal while a supervisor note is in force, and the reason a
+/// skipped row of a continued or reopened visit goes back to pending then.
+pub const SUPERVISOR_NOTE: &str = "skip_supervisor_note";
+
+/// Whether a settlement with `reason` takes a skipped row back: it is
+/// pending again, counted as reworked, with no inherited output.
+pub fn invalidates_skip(reason: Option<&str>) -> bool {
+    matches!(reason, Some(SKIP_CONFIG_CHANGED | SUPERVISOR_NOTE))
 }
 
 /// One visit of a list node.
@@ -121,6 +142,16 @@ pub struct ListFold {
     /// The visit ended early: the `reason` and `detail` of its
     /// `list_stopped`; a reopen clears it.
     pub stopped: Option<(String, String)>,
+    /// Why the visit skips nothing (`list_started.skip_refused`), as its
+    /// start decided it.
+    pub skip_refused: Option<String>,
+    /// Why the visit stopped stamping (`list_item_settled.skip_latched`),
+    /// the latest one of the visit.
+    pub skip_latched: Option<String>,
+    /// Skipped rows the visit sent back to pending because their skip no
+    /// longer held ([`invalidates_skip`]: the work changed, or a
+    /// supervisor note is in force).
+    pub skip_reworked: u32,
 }
 
 fn list_started<'a>(e: &'a Event, node: &str) -> Option<&'a EventPayload> {
@@ -159,6 +190,19 @@ impl ListFold {
         (n >= 2).then(|| Self::fold(events, node, starts[n - 2], starts[n - 1]))
     }
 
+    /// Every visit of `node`, in order.
+    pub fn visits(events: &[Event], node: &str) -> Vec<ListFold> {
+        let starts = visit_starts(events, node);
+        starts
+            .iter()
+            .enumerate()
+            .map(|(i, &from)| {
+                let until = starts.get(i + 1).copied().unwrap_or(events.len());
+                Self::fold(events, node, from, until)
+            })
+            .collect()
+    }
+
     fn fold(events: &[Event], node: &str, from: usize, until: usize) -> ListFold {
         let mut f = ListFold {
             node: node.to_string(),
@@ -174,8 +218,14 @@ impl ListFold {
                     items_digest,
                     batch_size,
                     parallel,
-                    ..
+                    reopened,
+                    skip_refused,
                 } if n == node => {
+                    if !reopened {
+                        f.skip_refused = skip_refused.clone();
+                        f.skip_latched = None;
+                        f.skip_reworked = 0;
+                    }
                     f.total = *total;
                     f.filtered_out = *filtered_out;
                     f.items_digest = items_digest.clone();
@@ -279,10 +329,22 @@ impl ListFold {
                     round,
                     carried,
                     digest,
+                    skipped_from,
+                    skip_digest,
+                    skip_latched,
                     ..
                 } if n == node => {
+                    if skip_latched.is_some() {
+                        f.skip_latched = skip_latched.clone();
+                    }
+                    let invalidated = invalidates_skip(reason.as_deref());
+                    if invalidated {
+                        f.skip_reworked += 1;
+                    }
                     let r = f.items.entry(item.clone()).or_default();
                     r.digest = digest.clone();
+                    r.skipped_from = skipped_from.clone();
+                    r.skip_digest = skip_digest.clone();
                     r.round = *round;
                     r.carried = *carried;
                     if verdict.is_some() {
@@ -295,7 +357,9 @@ impl ListFold {
                     }
                     r.reason = reason.clone();
                     r.check_rejected |= state == settled::REJECTED;
-                    if output.is_some() {
+                    if output.is_some() || invalidated {
+                        // A row taken back keeps no inherited output: a
+                        // later settlement with none leaves it with none.
                         r.output = output.clone();
                     }
                     r.state = Some(match state.as_str() {
@@ -375,6 +439,15 @@ impl ListFold {
         })
     }
 
+    /// Every item a `list.skip` settled in this visit.
+    pub fn skipped_ids(&self) -> Vec<String> {
+        self.items
+            .iter()
+            .filter(|(_, r)| r.skipped_from.is_some())
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// The visit's counts. `total` is the visit's item count; an item never
     /// admitted is pending.
     pub fn counts(&self) -> ListCounts {
@@ -397,6 +470,9 @@ impl ListFold {
             match r.state {
                 Some(ItemState::Passed) => {
                     c.passed += 1;
+                    if r.skipped_from.is_some() {
+                        c.skipped += 1;
+                    }
                     if r.passed_with_note() {
                         c.passed_with_note += 1;
                     }
@@ -457,10 +533,24 @@ pub fn progress_label(c: &ListCounts) -> String {
         1 => "1 needs a look".to_string(),
         n => format!("{n} need a look"),
     };
+    let skipped = if c.skipped > 0 {
+        format!(", {} skipped", c.skipped)
+    } else {
+        String::new()
+    };
     format!(
-        "{} of {} processed, {} passed, {look}",
+        "{} of {} processed, {} passed, {look}{skipped}",
         c.processed, c.total, c.passed
     )
+}
+
+/// The skip set this run journaled for `node` (its `list_skip_read` naming
+/// it); `None` when it journaled none.
+pub fn recorded_skip_set(events: &[Event], node: &str) -> Option<super::skip_record::SkipSet> {
+    events.iter().find_map(|e| match &e.payload {
+        EventPayload::ListSkipRead { node: n, set } if n == node => Some(set.clone()),
+        _ => None,
+    })
 }
 
 /// A `list` goal criterion read from the journal: whether `node`'s latest
@@ -501,6 +591,7 @@ mod tests {
                 batch_size: 2,
                 parallel: 1,
                 reopened,
+                skip_refused: None,
             },
         )
     }
@@ -520,6 +611,9 @@ mod tests {
                 carried: false,
                 check: None,
                 digest: None,
+                skipped_from: None,
+                skip_digest: None,
+                skip_latched: None,
                 result: None,
             },
         )
@@ -534,6 +628,62 @@ mod tests {
                 items: items.iter().map(|s| s.to_string()).collect(),
             },
         )
+    }
+
+    fn skipped_row(seq: u64, item: &str) -> Event {
+        let mut e = settled(seq, item, settled::PASSED, None, 0);
+        if let EventPayload::ListItemSettled {
+            carried,
+            skipped_from,
+            skip_digest,
+            ..
+        } = &mut e.payload
+        {
+            *carried = true;
+            *skipped_from = Some("r0".into());
+            *skip_digest = Some("d".into());
+        }
+        e
+    }
+
+    #[test]
+    fn skipped_items_count_as_passed_and_skipped() {
+        let events = vec![
+            started(1, 3, false),
+            skipped_row(2, "a"),
+            skipped_row(3, "b"),
+            batch(4, 1, &["c"]),
+            settled(5, "c", settled::PASSED, None, 0),
+        ];
+        let f = ListFold::of(&events, "l").unwrap();
+        let c = f.counts();
+        assert_eq!((c.passed, c.processed, c.skipped, c.pending), (3, 3, 2, 0));
+        assert_eq!(f.skipped_ids(), ["a", "b"]);
+        assert_eq!(f.item("a").unwrap().skipped_from.as_deref(), Some("r0"));
+        assert_eq!(
+            progress_label(&c),
+            "3 of 3 processed, 3 passed, 0 need a look, 2 skipped"
+        );
+        assert!(list_criterion(&events, "l").0, "a skipped item is done");
+    }
+
+    #[test]
+    fn visits_lists_every_visit_in_order() {
+        let events = vec![
+            started(1, 2, false),
+            settled(2, "a", settled::PASSED, None, 0),
+            started(3, 2, true),
+            settled(4, "b", settled::PASSED, None, 0),
+            started(5, 1, false),
+            skipped_row(6, "a"),
+        ];
+        let visits = ListFold::visits(&events, "l");
+        assert_eq!(visits.len(), 2, "a reopen continues its visit");
+        assert_eq!(visits[0].started_seq, 1);
+        assert_eq!(visits[0].items.len(), 2);
+        assert_eq!(visits[1].started_seq, 5);
+        assert_eq!(visits[1].skipped_ids(), ["a"]);
+        assert_eq!(visits.last(), ListFold::of(&events, "l").as_ref());
     }
 
     #[test]
@@ -741,6 +891,7 @@ mod tests {
                     batch_size: 2,
                     parallel: 1,
                     reopened: true,
+                    skip_refused: None,
                 },
             )],
         ]

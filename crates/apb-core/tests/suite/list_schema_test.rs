@@ -725,3 +725,175 @@ fn v242_then_continue_without_check() {
     );
     assert!(pilot_issues(&review).iter().all(|(c, ..)| *c != "V242"));
 }
+
+fn skip_issues(yaml: &str) -> Vec<(String, Severity, String)> {
+    let p = Playbook::from_yaml(yaml).unwrap();
+    validate(&p, &ValidationContext::default())
+        .issues
+        .into_iter()
+        .filter(|i| i.code == "V283")
+        .map(|i| (i.code.to_string(), i.severity, i.message.clone()))
+        .collect()
+}
+
+fn v283_message(line: &str) -> Vec<String> {
+    skip_issues(&with_list_tail(line))
+        .into_iter()
+        .map(|(_, s, m)| {
+            assert_eq!(s, Severity::Error, "{m}");
+            m
+        })
+        .collect()
+}
+
+#[test]
+fn v283_refuses_an_empty_field_list() {
+    assert_eq!(
+        v283_message("      skip: { passed_in: previous_success, unless_changed: [] }\n"),
+        vec![
+            "list.skip of node triage: unless_changed lists no field; leave it out to compare the whole item"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn v283_refuses_a_dotted_field() {
+    for field in ["a.b", "\"a b\"", "\"\""] {
+        assert_eq!(
+            v283_message(&format!(
+                "      skip: {{ passed_in: previous_success, unless_changed: [{field}] }}\n"
+            )),
+            vec!["list.skip of node triage: skip compares top-level item fields only".to_string()],
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn v283_refuses_a_repeated_field() {
+    assert_eq!(
+        v283_message(
+            "      skip: { passed_in: previous_success, unless_changed: [amount, amount] }\n"
+        ),
+        vec!["list.skip of node triage: names `amount` twice".to_string()]
+    );
+}
+
+#[test]
+fn a_valid_skip_is_clean() {
+    for line in [
+        "      skip: { passed_in: previous_success }\n",
+        "      skip: { passed_in: previous_success, unless_changed: [amount, status] }\n",
+    ] {
+        let yaml = with_list_tail(line);
+        assert_eq!(skip_issues(&yaml), [], "{line}");
+        let p = Playbook::from_yaml(&yaml).unwrap();
+        let back = Playbook::from_yaml(&yaml_serde::to_string(&p).unwrap()).unwrap();
+        assert_eq!(
+            back.node("triage").and_then(|n| n.list()),
+            p.node("triage").and_then(|n| n.list())
+        );
+        assert!(
+            p.node("triage")
+                .and_then(|n| n.list())
+                .unwrap()
+                .skip
+                .is_some()
+        );
+    }
+}
+
+/// A later node reading a skipping list's `skipped` count reads a field
+/// the list's output declares: no V46.
+#[test]
+fn a_node_reading_the_skipped_count_gets_no_v46() {
+    let yaml = with_list_tail("      skip: { passed_in: previous_success }\n").replace(
+        "  - { id: done, type: finish, outcome: success }",
+        "  - { id: report, type: agent_task, profile: x, prompt: \"Skipped {{nodes.triage.output.skipped}}\" }\n  - { id: done, type: finish, outcome: success }",
+    ).replace("  - { from: triage, to: done }", "  - { from: triage, to: report }\n  - { from: report, to: done }");
+    let p = Playbook::from_yaml(&yaml).unwrap();
+    let issues = validate(&p, &ValidationContext::default()).issues;
+    assert!(
+        !issues.iter().any(|i| i.code == "V46"),
+        "{:?}",
+        issues
+            .iter()
+            .map(|i| (i.code, i.message.clone()))
+            .collect::<Vec<_>>()
+    );
+    // The control: an undeclared field still warns.
+    let bad = Playbook::from_yaml(&yaml.replace("output.skipped", "output.skippd")).unwrap();
+    assert!(
+        validate(&bad, &ValidationContext::default())
+            .issues
+            .iter()
+            .any(|i| i.code == "V46")
+    );
+}
+
+/// V288: skip on a node with an isolation other than `none` is refused; the
+/// same list with `isolation: none` or none at all is accepted.
+#[test]
+fn skip_on_an_isolated_node_is_refused() {
+    let yaml = |iso: &str| {
+        format!(
+            "schema: 2\nid: p\nname: P\nversion: 1.0.0\ndefaults: {{ profile: x }}\nnodes:\n  - {{ id: start, type: start }}\n  - id: l\n    type: agent_task\n    prompt: p\n{iso}    list:\n      items: {{ inline: [ {{ id: a }} ] }}\n      skip: {{ passed_in: previous_success }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: l }}\n  - {{ from: l, to: done }}\n"
+        )
+    };
+    let codes = |y: String| {
+        let pb = apb_core::schema::Playbook::from_yaml(&y).unwrap();
+        validate(&pb, &ValidationContext::default())
+            .issues
+            .into_iter()
+            .filter(|i| i.code == "V288")
+            .map(|i| i.message)
+            .collect::<Vec<_>>()
+    };
+    let refused = codes(yaml("    isolation: { level: full, network: none }\n"));
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(
+        refused[0].contains("skip on isolated nodes is not supported yet"),
+        "{refused:?}"
+    );
+    assert!(codes(yaml("    isolation: { level: best_effort }\n")).len() == 1);
+    assert!(codes(yaml("    isolation: { level: none }\n")).is_empty());
+    assert!(codes(yaml("")).is_empty());
+}
+
+/// V289: a skipping agent list whose prompt reads a value of the run (an
+/// earlier node's output, the run's id) is refused; a prompt that reads
+/// only params and the instruction, or no template at all, is accepted,
+/// and a list without skip may read anything.
+#[test]
+fn skip_with_a_prompt_that_reads_run_values_is_refused() {
+    let yaml = |prompt: &str, skip: bool| {
+        let skip = if skip {
+            "      skip: { passed_in: previous_success }\n"
+        } else {
+            ""
+        };
+        format!(
+            "schema: 2\nid: p\nname: P\nversion: 1.0.0\nparams:\n  - {{ name: city, type: text }}\ndefaults: {{ profile: x }}\nnodes:\n  - {{ id: start, type: start }}\n  - {{ id: fetch, type: agent_task, prompt: fetch }}\n  - id: l\n    type: agent_task\n    prompt: \"{prompt}\"\n    list:\n      items: {{ inline: [ {{ id: a }} ] }}\n{skip}  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: fetch }}\n  - {{ from: fetch, to: l }}\n  - {{ from: l, to: done }}\n"
+        )
+    };
+    let codes = |y: String| {
+        let pb = apb_core::schema::Playbook::from_yaml(&y).unwrap();
+        validate(&pb, &ValidationContext::default())
+            .issues
+            .into_iter()
+            .filter(|i| i.code == "V289")
+            .map(|i| i.message)
+            .collect::<Vec<_>>()
+    };
+    let refused = codes(yaml("use {{nodes.fetch.output.policy}}", true));
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(
+        refused[0].contains("nodes.fetch.output.policy"),
+        "{refused:?}"
+    );
+    assert_eq!(codes(yaml("run {{run.id}}", true)).len(), 1);
+    assert!(codes(yaml("in {{params.city}}: {{run.instruction}}", true)).is_empty());
+    assert!(codes(yaml("plain", true)).is_empty());
+    assert!(codes(yaml("use {{nodes.fetch.output.policy}}", false)).is_empty());
+}

@@ -1,0 +1,15 @@
+{"definition":"f8a38bc5e4132ebc7b848662f1fa6f99863f53f57906a8c948e5d0586c6bc5ed","playbook":"lst","seq":0,"type":"run_started","version":"1.0.0"}
+{"digest":"sha256:3e3724d138277c2ddd27e3717c95c28af5b8c99faf7c62485225034d3ed3083e","origin":"project","seq":1,"type":"run_provenance"}
+{"attempt":1,"node":"start","seq":2,"type":"node_started"}
+{"artifacts":[],"attempt":1,"node":"start","output":"","seq":3,"status":"succeeded","type":"node_finished"}
+{"edges":["e:start>work#1"],"from":"start","seq":4,"to":"work","type":"edge_traversed","uncounted":true}
+{"attempt":1,"node":"work","seq":5,"type":"node_started"}
+{"batch_size":2,"filtered_out":0,"items_digest":"sha256:fd9cd37b7549483934661a3dbeb8ceb34fd6d26975169989d9b1c2bb3c3cd8ce","node":"work","parallel":1,"seq":6,"total":2,"type":"list_started"}
+{"batch":1,"items":["a","b"],"node":"work","seq":7,"type":"list_batch_started"}
+{"check":"output","digest":"sha256:ebddcace15c56ac9ac7a5499fffba4dece33724d7e2ad7ff5bdd262a10e643ef","item":"a","node":"work","output":"{\"blocking\":\"0\",\"id\":\"a\"}","round":0,"seq":8,"state":"passed","type":"list_item_settled","verdict":"accept"}
+{"check":"output","digest":"sha256:b62e0fa2051238982f5df0b30c51e0a72e7363bd6dca713c0dd7a45a32782310","item":"b","node":"work","output":"{\"blocking\":\"0\",\"id\":\"b\"}","round":0,"seq":9,"state":"passed","type":"list_item_settled","verdict":"accept"}
+{"done":2,"label":"2 of 2 processed, 2 passed, 0 need a look","node_id":"work","seq":10,"total":2,"type":"run_progress"}
+{"artifacts":[],"attempt":1,"node":"work","output":"{\"filtered_out\":0,\"items\":[{\"id\":\"a\",\"item\":{\"id\":\"a\",\"n\":1},\"note\":null,\"output\":{\"blocking\":\"0\",\"id\":\"a\"},\"state\":\"passed\"},{\"id\":\"b\",\"item\":{\"id\":\"b\",\"n\":2},\"note\":null,\"output\":{\"blocking\":\"0\",\"id\":\"b\"},\"state\":\"passed\"}],\"needs_look\":0,\"passed\":2,\"passed_with_note\":0,\"processed\":2,\"total\":2}","seq":11,"status":"succeeded","type":"node_finished"}
+{"edges":["e:work>done#1"],"from":"work","seq":12,"to":"done","type":"edge_traversed","uncounted":true}
+{"artifacts":[],"attempt":1,"node":"done","output":"","seq":13,"status":"succeeded","type":"node_finished"}
+{"outcome":"succeeded","seq":14,"type":"run_finished"}

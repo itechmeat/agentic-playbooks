@@ -91,6 +91,51 @@ fn the_flags_come_from_the_built_in_forms() {
     assert_eq!(zcode.iter().filter(|f| *f == "--mode").count(), 1);
 }
 
+/// The fork form's flags follow the resume form's: claude's
+/// `--fork-session`, opencode's `--fork`; an agent without a fork form adds
+/// none.
+#[test]
+fn form_flags_include_the_fork_flags() {
+    let claude = form_flags(&agent("claude").forms().unwrap());
+    assert_eq!(
+        claude.iter().filter(|f| *f == "--fork-session").count(),
+        1,
+        "{claude:?}"
+    );
+    let opencode = form_flags(&agent("opencode").forms().unwrap());
+    assert_eq!(
+        opencode.iter().filter(|f| *f == "--fork").count(),
+        1,
+        "{opencode:?}"
+    );
+    let codex = form_flags(&agent("codex").forms().unwrap());
+    assert!(!codex.iter().any(|f| f.starts_with("--fork")), "{codex:?}");
+}
+
+/// A claude help that lists every flag but `--fork-session` warns, naming
+/// that flag alone.
+#[test]
+fn a_help_without_the_fork_flag_warns() {
+    let help: String = form_flags(&agent("claude").forms().unwrap())
+        .into_iter()
+        .filter(|f| f != "--fork-session")
+        .map(|f| format!("  {f} <value>\n"))
+        .collect();
+    let lines = check(
+        agent("claude"),
+        &CheckInput {
+            version: Some("2.1.327"),
+            help: Some(Ok(&help)),
+            custom_form: false,
+        },
+    );
+    assert_eq!(lines[1].level, Level::Warn, "{}", lines[1].detail);
+    assert_eq!(
+        lines[1].detail,
+        "help does not list --fork-session: the built-in form may have changed"
+    );
+}
+
 #[test]
 fn a_flag_counts_only_as_a_whole_word() {
     let flags = vec!["-p".to_string(), "--model".to_string()];

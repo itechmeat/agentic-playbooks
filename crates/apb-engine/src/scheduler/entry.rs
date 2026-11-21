@@ -330,7 +330,8 @@ impl Prepared {
 /// now, once, and journaled as `previous_success_set`. A lookup error
 /// ends the run the way a start-time lookup error does. Skipped when the
 /// definition does not read the namespace, when the journal already holds
-/// the event, or when the run continues another one.
+/// the event, or when the run continues another one. The list skip's sets
+/// are recorded the same way after it.
 fn after_the_turn(
     root: &Path,
     run_dir: &Path,
@@ -339,36 +340,36 @@ fn after_the_turn(
     cfg: &RunConfig,
     log: &mut EventLog,
 ) -> Result<(), EngineError> {
-    if !apb_core::previous_success::reads(playbook) || cfg.continued_from.is_some() {
-        return Ok(());
-    }
-    let events = crate::event::read_all(run_dir)?;
-    if events
-        .iter()
-        .any(|e| matches!(&e.payload, EventPayload::PreviousSuccessSet { .. }))
+    let reads_window = apb_core::previous_success::reads(playbook);
+    if (!reads_window && !crate::list::skip::declares_skip(playbook))
+        || cfg.continued_from.is_some()
     {
         return Ok(());
     }
-    let scope = events
-        .iter()
-        .find_map(|e| match &e.payload {
-            EventPayload::RunProvenance { origin, .. } => origin.clone(),
-            _ => None,
-        })
-        .unwrap_or_else(|| "project".to_string());
-    let window = crate::scheduler::prepare::look_up_previous_success(
-        root,
-        crate::run_history::started(run_dir)
-            .map(|h| h.playbook)
-            .as_deref()
-            .unwrap_or_default(),
-        &scope,
-        playbook,
-        &cfg.params,
-    )?;
-    log.append(EventPayload::PreviousSuccessSet {
-        previous_success: Some(window),
-    })?;
+    let events = crate::event::read_all(run_dir)?;
+    if reads_window
+        && !events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::PreviousSuccessSet { .. }))
+    {
+        let scope = crate::list::skip::run_identity(&events).1;
+        let window = crate::scheduler::prepare::look_up_previous_success(
+            root,
+            crate::run_history::started(run_dir)
+                .map(|h| h.playbook)
+                .as_deref()
+                .unwrap_or_default(),
+            &scope,
+            playbook,
+            &cfg.params,
+        )?;
+        log.append(EventPayload::PreviousSuccessSet {
+            previous_success: Some(window),
+        })?;
+    }
+    // The list skip's sets, once, with the window this run recorded: a
+    // read that fails ends the run failed with its reason, like the window.
+    crate::list::skip::record_after_turn(root, run_dir, playbook, cfg, log)?;
     let _ = run_id;
     Ok(())
 }
@@ -1027,10 +1028,4 @@ pub fn post_supervisor_command(
     crate::control::post_control(&run_dir, cmd)
 }
 
-/// Whether a run holds its working tree: one of its nodes takes the tree
-/// lock and it does not share the workdir. The one predicate the drive takes
-/// the tree lock by, and the baseline and list item checks trust a JUnit
-/// report by.
-pub(crate) fn holds_tree(playbook: &Playbook, cfg: &RunConfig) -> bool {
-    !cfg.shared_workdir && playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock())
-}
+pub(crate) use super::cache::holds_tree;

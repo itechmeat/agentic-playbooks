@@ -387,7 +387,11 @@ pilot?: PilotView,
 /**
  * The visit ended early: the sentence its `list_stopped` carries.
  */
-stopped?: string, };
+stopped?: string, 
+/**
+ * The list's skip, when it declares one.
+ */
+skip?: SkipView, };
 
 export type OutcomeSummary = { headline: string, needs_look?: NeedsLook, 
 /**
@@ -798,6 +802,10 @@ instruction: string, options: Array<string>, how_to_decide: string, };
 
 export type ListProgress = { node: string, total: number, processed: number, passed: number, needs_look: number, running: number, 
 /**
+ * Items a `list.skip` settled (they count in `passed` too).
+ */
+skipped?: number, 
+/**
  * The visit's pilot, when the list runs one.
  */
 pilot?: PilotView, 
@@ -821,7 +829,12 @@ reason?: string, attempts: number,
  * send stays open until a person resolves it. Only a passed item says
  * so; an item held by an unknown send needs a look instead.
  */
-unresolved_send?: boolean, };
+unresolved_send?: boolean, 
+/**
+ * The earlier run it passed in, for an item a `list.skip` settled
+ * without running it.
+ */
+skipped_from?: string, };
 
 export type RunList = { node: string, title?: string, total: number, processed: number, passed: number, passed_with_note: number, needs_look: number, pending: number, running: number, 
 /**
@@ -839,7 +852,12 @@ pilot?: PilotView,
 /**
  * The visit ended early: the sentence its `list_stopped` carries.
  */
-stopped?: string, };
+stopped?: string, 
+/**
+ * The list's skip (`list.skip`): what the run's set holds and how
+ * many items of the visit it settled.
+ */
+skip?: SkipView, };
 
 export type PilotView = { round: number, items: Array<string>, passed: number, needs_look: number, 
 /**
@@ -850,6 +868,43 @@ rest: number,
  * `running`, `waiting`, `continued`, `revised` or `stopped`.
  */
 state: string, };
+
+export type SkipView = { 
+/**
+ * Items of the visit a skip settled.
+ */
+skipped: number, 
+/**
+ * Entries the run's set holds.
+ */
+read_items: number, 
+/**
+ * The run the set was read from.
+ */
+source?: string, 
+/**
+ * The set kept fewer entries than passed.
+ */
+truncated: boolean, 
+/**
+ * Why the node skips nothing: the set's refusal, else the visit's.
+ */
+refused?: string, 
+/**
+ * Passes of the source the set left out because their output cannot
+ * be carried; they are worked.
+ */
+not_inherited: number, 
+/**
+ * Skipped items worked again because their skip stopped holding while
+ * the visit was open (the work changed, or a supervisor note came into
+ * force).
+ */
+reworked: number, 
+/**
+ * Why the visit stopped stamping part way.
+ */
+stopped_stamping?: string, };
 
 export type ProgressSummary = { percent: number, label: string | null, waiting_on: string | null, 
 /**

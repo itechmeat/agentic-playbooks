@@ -61,7 +61,7 @@ export const NODE_FIELDS = {
   },
   continue_session: {
     label: 'Continue session of',
-    hint: 'An earlier agent node whose agent session this node continues: its first attempt resumes that session and sends this prompt as the next message, so the agent keeps what it already learned. Works for claude, codex, opencode, zcode and dsh when both nodes run on the same agent and model in the same directory; otherwise the node starts a fresh agent as usual.',
+    hint: 'An earlier agent node whose agent session this node continues: its first attempt resumes that session and sends this prompt as the next message, so the agent keeps what it already learned. Works for claude, codex, opencode, zcode and dsh when both nodes run on the same agent and model in the same directory; otherwise the node starts a fresh agent as usual. Ticking fork writes the object form { from, mode: fork }: the node starts from a copy of that session and never writes into it, so several forks of one node may run at once. A fork also needs this node to run under the same profile binding the source ran on, compared whole (agent, model, role prompt and skills, as bound when the source ran), because it hands over the whole conversation. Only claude and opencode fork; another agent or profile, or a CLI whose help lacks the fork flag, starts a fresh agent and says why.',
   },
   output_fields: {
     label: 'Output fields',
@@ -158,3 +158,24 @@ export const NODE_FIELDS = {
 } as const satisfies Record<string, NodeFieldInfo>
 
 export type NodeFieldKey = keyof typeof NODE_FIELDS
+
+/** `continue_session` as a playbook writes it: a bare node id (continue)
+ * or the object form with a mode. */
+export type ContinueSession = string | { from: string; mode?: 'continue' | 'fork' }
+
+/** The source node and whether the node forks it, from either shape. */
+export function readContinueSession(v: unknown): { from: string; fork: boolean } {
+  if (typeof v === 'string') return { from: v, fork: false }
+  if (v && typeof v === 'object') {
+    const o = v as { from?: unknown; mode?: unknown }
+    return { from: typeof o.from === 'string' ? o.from : '', fork: o.mode === 'fork' }
+  }
+  return { from: '', fork: false }
+}
+
+/** The value to write: the bare id unless the node forks, nothing without
+ * a source. */
+export function writeContinueSession(from: string, fork: boolean): ContinueSession | undefined {
+  if (from === '') return undefined
+  return fork ? { from, mode: 'fork' } : from
+}

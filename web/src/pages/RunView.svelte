@@ -866,7 +866,7 @@
       {/if}
       <RunOutputsPanel outputs={detail.run_outputs} onCite={showCite} />
       {#key `${workspace}/${id}`}
-        <ListProgressPanel lists={detail.lists} />
+        <ListProgressPanel lists={detail.lists} {workspace} />
       {/key}
       <DecisionsPanel decisions={detail.decisions} events={detail.events} runId={id} {workspace} />
       <AttemptModelsPanel models={detail.attempt_models} hintFollow={detail.hint_follow} {current} />

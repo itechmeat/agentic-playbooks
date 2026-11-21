@@ -1392,6 +1392,7 @@ fn a_made_up_item_id_may_neither_send_nor_reset_the_budget() {
                 batch_size: 1,
                 parallel: 1,
                 reopened: false,
+                skip_refused: None,
             });
             run.journal(EventPayload::ListBatchStarted {
                 node: NODE.into(),

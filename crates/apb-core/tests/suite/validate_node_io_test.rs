@@ -194,6 +194,41 @@ fn preflight_warns_when_the_bound_agent_cannot_continue_a_session() {
     }
 }
 
+/// The preflight reports a fork on an agent without a fork form (codex can
+/// continue a session but not fork one) as a cold handoff, naming the fork.
+#[test]
+fn a_fork_on_an_agent_without_a_fork_form_is_cold() {
+    let _cfg = crate::common::config_sandbox();
+    for (agent, cold) in [("claude", false), ("opencode", false), ("codex", true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let prof = dir.path().join(".apb/profiles/dev");
+        std::fs::create_dir_all(&prof).unwrap();
+        std::fs::write(
+            prof.join("profile.yaml"),
+            format!("name: dev\ndescription: t\nexecutor:\n  agent: {agent}\n  model: m\n"),
+        )
+        .unwrap();
+        std::fs::write(prof.join("SOUL.md"), "").unwrap();
+        let playbook = Playbook::from_yaml(
+            "schema: 2\nid: p\nname: P\nversion: 1.0.0\ndefaults: { profile: dev }\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: agent_task, prompt: x }\n  - { id: b, type: agent_task, prompt: y, continue_session: { from: a, mode: fork } }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: b, to: done }\n",
+        )
+        .unwrap();
+        let found = apb_core::preflight::findings(dir.path(), &playbook);
+        let lines: Vec<&String> = found
+            .iter()
+            .filter(|(code, _)| *code == "session_handoff_cold")
+            .map(|(_, line)| line)
+            .collect();
+        assert_eq!(!lines.is_empty(), cold, "{agent}: {found:?}");
+        if cold {
+            assert_eq!(
+                lines[0],
+                "node `b` forks the session of `a`, but its agent `codex` cannot fork a session, so it starts a fresh agent"
+            );
+        }
+    }
+}
+
 /// Two nodes continuing one session on parallel branches would write into
 /// it at the same time.
 #[test]
@@ -211,6 +246,38 @@ fn parallel_continuations_of_one_session_are_a_warning() {
         chain,
     );
     assert!(!has(&got, "V45", Severity::Warning), "{got:?}");
+}
+
+/// Two forks of one source on parallel branches never race: neither writes
+/// into the source session.
+#[test]
+fn two_forks_of_one_source_do_not_race() {
+    let edges = "  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: a, to: c }\n  - { from: b, to: done }\n  - { from: c, to: done }\n";
+    let got = issues(
+        "  - { id: a, type: agent_task, prompt: x }\n  - { id: b, type: agent_task, prompt: y, continue_session: { from: a, mode: fork } }\n  - { id: c, type: agent_task, prompt: z, continue_session: { from: a, mode: fork } }\n",
+        edges,
+    );
+    assert!(!has(&got, "V45", Severity::Warning), "{got:?}");
+}
+
+/// A fork racing a continuation still warns: the continuation writes into
+/// the session the fork copies.
+#[test]
+fn v45_still_warns_when_a_fork_races_a_continuation() {
+    let edges = "  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: a, to: c }\n  - { from: b, to: done }\n  - { from: c, to: done }\n";
+    let yaml = format!(
+        "schema: 2\nid: p\nname: P\nversion: 1.0.0\ndefaults: {{ profile: dev }}\nnodes:\n  - {{ id: start, type: start }}\n  - {{ id: a, type: agent_task, prompt: x }}\n  - {{ id: b, type: agent_task, prompt: y, continue_session: {{ from: a, mode: fork }} }}\n  - {{ id: c, type: agent_task, prompt: z, continue_session: a }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n{edges}"
+    );
+    let playbook = Playbook::from_yaml(&yaml).unwrap();
+    let report = validate(&playbook, &ctx());
+    let v45: Vec<&str> = report
+        .issues
+        .iter()
+        .filter(|i| i.code == "V45" && i.severity == Severity::Warning)
+        .filter_map(|i| i.node.as_deref())
+        .collect();
+    assert!(v45.contains(&"b"), "the fork warns: {v45:?}");
+    assert!(v45.contains(&"c"), "the continuation warns: {v45:?}");
 }
 
 /// `(code, severity)` of every issue for a playbook with `top` added at the

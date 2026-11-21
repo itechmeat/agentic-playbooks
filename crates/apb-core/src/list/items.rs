@@ -215,6 +215,25 @@ pub fn items_digest(items: &[Item]) -> String {
     sha256_hex(text.as_bytes())
 }
 
+/// The digest of an item's `unless_changed` fields: SHA-256 hex over the
+/// canonical JSON of `{"fields":[..],"values":[..]}`, the field names in the
+/// order written and each value encoding its presence: `{"present":false}`
+/// when the item has no such field, `{"present":true,"value":<v>}`
+/// otherwise, so an absent field and an explicit `null` differ, as the
+/// list's own field comparison tells them apart. The names are part of the
+/// digest, so a run with another field list never matches.
+pub fn fields_digest(value: &Value, fields: &[String]) -> String {
+    let values: Vec<Value> = fields
+        .iter()
+        .map(|f| match value.get(f) {
+            None => serde_json::json!({ "present": false }),
+            Some(v) => serde_json::json!({ "present": true, "value": v }),
+        })
+        .collect();
+    let doc = serde_json::json!({ "fields": fields, "values": values });
+    sha256_hex(canonical(&doc).as_bytes())
+}
+
 /// The bytes an item's JSON takes.
 pub fn item_bytes(item: &Item) -> usize {
     serde_json::to_string(&item.value).map_or(0, |s| s.len())
@@ -333,6 +352,28 @@ fn canonical(v: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn fields_digest_names_the_fields() {
+        let v = json!({ "a": 1, "b": 2 });
+        let a = fields_digest(&v, &["a".to_string()]);
+        let ab = fields_digest(&v, &["a".to_string(), "b".to_string()]);
+        assert_ne!(a, ab, "another field list never matches");
+        assert_eq!(
+            a,
+            fields_digest(&json!({ "a": 1, "c": 9 }), &["a".to_string()])
+        );
+        assert_ne!(a, fields_digest(&json!({ "a": 2 }), &["a".to_string()]));
+    }
+
+    #[test]
+    fn fields_digest_tells_absent_from_null() {
+        let f = ["amount".to_string()];
+        assert_ne!(
+            fields_digest(&json!({ "id": 1 }), &f),
+            fields_digest(&json!({ "id": 1, "amount": null }), &f)
+        );
+    }
 
     fn ids(items: &[Item]) -> Vec<&str> {
         items.iter().map(|i| i.id.as_str()).collect()

@@ -172,12 +172,13 @@ pub fn analyze(playbook: &Playbook) -> Analysis {
             {
                 sources.extend(src.iter().cloned());
             }
-            // Rule 5: a continued session holds the source node's text.
+            // Rule 5: a continued session holds the source node's text; a
+            // fork reads the same conversation, so it carries it too.
             if let NodeKind::AgentTask {
                 continue_session: Some(source),
                 ..
             } = &node.kind
-                && let Some(src) = output.get(source)
+                && let Some(src) = output.get(source.from())
             {
                 sources.extend(src.iter().cloned());
             }

@@ -93,6 +93,37 @@ describe('runEventJournal notes', () => {
     expect(entries[0].note ?? '').not.toContain('rejected:')
   })
 
+  it('a skip read line names the node, the items and the run', () => {
+    const entries = runEventJournal([
+      { seq: 1, ts: 1, type: 'list_skip_read', node: 'work', set: { source: 'lst-r0', items: { a: 'd1', b: 'd2' } } },
+      { seq: 2, ts: 2, type: 'list_skip_read', node: 'again', set: {} },
+    ] as never)
+    expect(entries.map((e) => e.note)).toEqual([
+      'skip set of work: 2 items from run lst-r0',
+      'skip set of again: no earlier success',
+    ])
+  })
+
+  it('a forked handoff says fork', () => {
+    const entries = runEventJournal([
+      { seq: 1, ts: 1, type: 'session_handoff', node: 'b', from_node: 'a', warm: true, mode: 'fork' },
+      {
+        seq: 2,
+        ts: 2,
+        type: 'session_handoff',
+        node: 'c',
+        from_node: 'a',
+        warm: false,
+        mode: 'fork',
+        reason: 'agent `codex` cannot fork a session',
+      },
+    ] as never)
+    expect(entries.map((e) => e.note)).toEqual([
+      'warm (fork): starts from a copy of the session of a',
+      'cold (fork) (agent `codex` cannot fork a session)',
+    ])
+  })
+
   it('says how a session handoff started and which declared fields were missing', () => {
     const loss = [{ stream: 'stdout', kept_bytes: 8, dropped_bytes_at_least: 4 }]
     const entries = runEventJournal([

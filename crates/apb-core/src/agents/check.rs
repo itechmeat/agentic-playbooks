@@ -161,6 +161,7 @@ pub fn form_flags(forms: &Forms) -> Vec<String> {
             .iter()
             .map(|s| s.to_string()),
     );
+    all.extend(forms.fork.unwrap_or_default().iter().map(|s| s.to_string()));
     match forms.fresh {
         FreshForm::Assigned { flag } | FreshForm::Titled { flag, .. } => all.push(flag.to_string()),
         FreshForm::Printed => {}
@@ -169,9 +170,14 @@ pub fn form_flags(forms: &Forms) -> Vec<String> {
         all.extend(mode(ZcodeMode::Yolo));
         all.extend(mode(ZcodeMode::Edit));
     }
+    argv_flags(all)
+}
+
+/// The flags of an argv form, once each in order: `--` ends the options and
+/// a lone `-` names stdin, so neither is a flag.
+pub fn argv_flags(argv: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for a in all {
-        // `--` ends the options and a lone `-` names stdin: neither is a flag.
+    for a in argv {
         if a.starts_with('-') && a != "--" && a != "-" && !out.contains(&a) {
             out.push(a);
         }

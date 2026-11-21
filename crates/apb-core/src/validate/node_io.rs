@@ -26,12 +26,13 @@ pub(crate) fn check_session_handoff(playbook: &Playbook, r: &mut ValidationRepor
     };
     for node in &playbook.nodes {
         let NodeKind::AgentTask {
-            continue_session: Some(source_id),
+            continue_session: Some(cs),
             ..
         } = &node.kind
         else {
             continue;
         };
+        let source_id = cs.from();
         let source = match playbook.node(source_id) {
             Some(s) if s.id != node.id && matches!(s.kind, NodeKind::AgentTask { .. }) => s,
             _ => {
@@ -48,7 +49,7 @@ pub(crate) fn check_session_handoff(playbook: &Playbook, r: &mut ValidationRepor
         let mut cold: Vec<&str> = Vec::new();
         if !must
             .get(node.id.as_str())
-            .is_some_and(|s| s.contains(source_id.as_str()))
+            .is_some_and(|s| s.contains(source_id))
         {
             cold.push("nothing orders the source before this node");
         }
@@ -62,12 +63,19 @@ pub(crate) fn check_session_handoff(playbook: &Playbook, r: &mut ValidationRepor
             cold.push("the two nodes run in different workdirs");
         }
         // Two continuations of one session that may run at the same time
-        // would both write into it.
+        // would both write into it. Two forks never race (neither writes
+        // into the source); a fork racing a continuation does, since the
+        // continuation writes into the session the fork copies.
         let racing = playbook.nodes.iter().any(|other| {
             other.id != node.id
-                && matches!(&other.kind, NodeKind::AgentTask { continue_session: Some(s), .. } if s == source_id)
-                && !must.get(node.id.as_str()).is_some_and(|s| s.contains(other.id.as_str()))
-                && !must.get(other.id.as_str()).is_some_and(|s| s.contains(node.id.as_str()))
+                && matches!(&other.kind, NodeKind::AgentTask { continue_session: Some(s), .. }
+                    if s.from() == source_id && !(s.forks() && cs.forks()))
+                && !must
+                    .get(node.id.as_str())
+                    .is_some_and(|s| s.contains(other.id.as_str()))
+                && !must
+                    .get(other.id.as_str())
+                    .is_some_and(|s| s.contains(node.id.as_str()))
         });
         if racing {
             cold.push("another node continues the same session and may run at the same time");

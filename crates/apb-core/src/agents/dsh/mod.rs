@@ -136,6 +136,7 @@ impl Agent for Dsh {
                 "--",
                 "{prompt}",
             ]),
+            fork: None,
             fresh: FreshForm::Printed,
             profile_mode: None,
         })

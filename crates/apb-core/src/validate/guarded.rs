@@ -11,7 +11,9 @@
 //! run without its limit; one that does not know a gate's `fields`,
 //! `show` or `max_scope` would decide the gate as a plain one; one that
 //! does not know `list.pilot` or `stop_when` would run every item of a
-//! list without its pilot gate or its early stop; one that does not know
+//! list without its pilot gate or its early stop; one that drops
+//! `list.skip` would work again every item that passed before, repeating
+//! its outside actions; one that does not know
 //! the wait park would count a parked timer wait as paused time and wait
 //! the whole timer again. A run whose definition uses any of them carries
 //! a `run_guard` naming them after every checkpoint, so such an apb refuses to continue
@@ -74,11 +76,16 @@ pub enum GuardedFeature {
     /// doubles; an older apb drops the doubles and would drive it as an
     /// ordinary run. A run feature: [`guarded_features`] never names it.
     EvalDoubles,
+    /// A list node skips items that passed in earlier runs (`list.skip`);
+    /// apb 0.25.0, which predates list mode, drops the whole list block and
+    /// runs the step once, skipping nothing and repeating its outside
+    /// actions.
+    ListSkip,
 }
 
 impl GuardedFeature {
     /// Every feature this binary knows, in declaration order.
-    pub const ALL: [GuardedFeature; 14] = [
+    pub const ALL: [GuardedFeature; 15] = [
         GuardedFeature::ApprovalBinding,
         GuardedFeature::PersonOnly,
         GuardedFeature::RequiredApproval,
@@ -93,6 +100,7 @@ impl GuardedFeature {
         GuardedFeature::ListPilot,
         GuardedFeature::WaitPark,
         GuardedFeature::EvalDoubles,
+        GuardedFeature::ListSkip,
     ];
 
     /// The name a `run_guard` carries.
@@ -112,6 +120,7 @@ impl GuardedFeature {
             GuardedFeature::ListPilot => "list_pilot",
             GuardedFeature::WaitPark => "wait_park",
             GuardedFeature::EvalDoubles => "eval_doubles",
+            GuardedFeature::ListSkip => "list_skip",
         }
     }
 
@@ -162,6 +171,9 @@ pub fn guarded_features(playbook: &Playbook) -> Vec<GuardedFeature> {
         {
             used.insert(GuardedFeature::ListPilot);
         }
+        if node.list().is_some_and(|l| l.skip.is_some()) {
+            used.insert(GuardedFeature::ListSkip);
+        }
         if let crate::schema::NodeKind::Wait {
             wait_for: crate::schema::WaitFor::Timer { .. },
             ..
@@ -202,7 +214,7 @@ mod tests {
     /// Each declaration names its own feature, a definition using several
     /// names each once in declaration order, and a definition using none
     /// needs no guard.
-    /// `deadline:` names `deadline`, and this binary knows fourteen features.
+    /// `deadline:` names `deadline`, and this binary knows fifteen features.
     #[test]
     fn a_deadline_is_a_guarded_feature() {
         let pb = Playbook::from_yaml(
@@ -210,7 +222,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(guarded_features(&pb), vec![GuardedFeature::Deadline]);
-        assert_eq!(GuardedFeature::ALL.len(), 14);
+        assert_eq!(GuardedFeature::ALL.len(), 15);
         assert_eq!(
             GuardedFeature::parse("deadline"),
             Some(GuardedFeature::Deadline)
@@ -376,15 +388,16 @@ mod tests {
         assert!(guarded_features(&plain).is_empty());
     }
 
-    /// `ALL` knows fourteen features, `list_pilot` twelfth, `wait_park`
-    /// thirteenth and `eval_doubles` the last one; a guard lists its names
-    /// in this declaration order.
+    /// `ALL` knows fifteen features, `list_pilot` twelfth, `wait_park`
+    /// thirteenth, `eval_doubles` fourteenth and `list_skip` the last one;
+    /// a guard lists its names in this declaration order.
     #[test]
-    fn all_has_fourteen_entries_in_order() {
-        assert_eq!(GuardedFeature::ALL.len(), 14);
+    fn all_has_fifteen_entries_in_order() {
+        assert_eq!(GuardedFeature::ALL.len(), 15);
         assert_eq!(GuardedFeature::ALL[11], GuardedFeature::ListPilot);
         assert_eq!(GuardedFeature::ALL[12], GuardedFeature::WaitPark);
         assert_eq!(GuardedFeature::ALL[13], GuardedFeature::EvalDoubles);
+        assert_eq!(GuardedFeature::ALL[14], GuardedFeature::ListSkip);
         assert_eq!(GuardedFeature::EvalDoubles.as_str(), "eval_doubles");
         assert_eq!(
             GuardedFeature::parse("eval_doubles"),
@@ -393,6 +406,26 @@ mod tests {
         let mut sorted = GuardedFeature::ALL;
         sorted.sort();
         assert_eq!(sorted, GuardedFeature::ALL, "ALL is the declaration order");
+    }
+
+    /// A list node with `skip` names `list_skip`, a list without it does
+    /// not, and `list_skip` is the last name.
+    #[test]
+    fn list_skip_is_a_guarded_feature() {
+        let skip = playbook(
+            "  - { id: l, type: script, script: s.sh, runner: sh, list: { items: { inline: [a, b] }, skip: { passed_in: previous_success } } }\n",
+        );
+        assert_eq!(guarded_features(&skip), vec![GuardedFeature::ListSkip]);
+        let plain = playbook(
+            "  - { id: l, type: script, script: s.sh, runner: sh, list: { items: { inline: [a, b] } } }\n",
+        );
+        assert!(guarded_features(&plain).is_empty());
+        assert_eq!(GuardedFeature::ListSkip.as_str(), "list_skip");
+        assert_eq!(
+            GuardedFeature::parse("list_skip"),
+            Some(GuardedFeature::ListSkip)
+        );
+        assert_eq!(GuardedFeature::ALL.last(), Some(&GuardedFeature::ListSkip));
     }
 
     /// A definition with a pilot list and a timer wait names both, the

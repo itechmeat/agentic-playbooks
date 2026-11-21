@@ -1,6 +1,7 @@
-//! List mode rules (V85-V89, V93-V95): where a `list:` block may sit, where
-//! its items come from, its item check, send-once on its steps, a judge
-//! check's answers, and the goal criterion that counts a list.
+//! List mode rules (V85-V89, V93-V95, V283, V288, V289): where a `list:` block may sit,
+//! where its items come from, its item check, send-once on its steps, a
+//! judge check's answers, the goal criterion that counts a list, and its
+//! `skip` block.
 
 use std::collections::BTreeSet;
 
@@ -45,6 +46,9 @@ pub(crate) fn check_lists(playbook: &Playbook, ctx: &ValidationContext, r: &mut 
             );
         }
         check_sends(node, ctx, r);
+        check_skip(node, spec, r);
+        check_skip_isolation(node, spec, r);
+        check_skip_reads(node, spec, r);
         if spec.rerun == crate::list::RerunPolicy::NotPassed && !cyclic.contains(node.id.as_str()) {
             r.warn(
                 "V93",
@@ -69,6 +73,80 @@ pub(crate) fn check_lists(playbook: &Playbook, ctx: &ValidationContext, r: &mut 
         }
     }
     check_goal_lists(playbook, r);
+}
+
+/// V288: `list.skip` on a node that declares an isolation other than
+/// `none`: an isolated item may run in a sandbox's or a scratch directory
+/// the skip's work does not represent, so skip on isolated nodes is not
+/// supported yet.
+fn check_skip_isolation(node: &Node, spec: &ListSpec, r: &mut ValidationReport) {
+    if spec.skip.is_some() && node.kind.is_isolated() {
+        r.error(
+            "V288",
+            Some(&node.id),
+            format!(
+                "list.skip of node {}: skip on isolated nodes is not supported yet; remove skip or set isolation to none",
+                node.id
+            ),
+        );
+    }
+}
+
+/// V289: `list.skip` on an agent task whose prompt reads a value of the
+/// run other than a param or the run's instruction (an earlier node's
+/// output, the run's context or id, ...). The skip digest covers what apb
+/// configures, not values a run produces, so a changed value would leave
+/// an item skipped that its prompt now asks something else of.
+fn check_skip_reads(node: &Node, spec: &ListSpec, r: &mut ValidationReport) {
+    if spec.skip.is_none() {
+        return;
+    }
+    let crate::schema::NodeKind::AgentTask { prompt, .. } = &node.kind else {
+        return;
+    };
+    let Some(read) = template_refs(prompt).into_iter().find(|cap| {
+        !(cap.starts_with("params.") || cap == "run.instruction" || crate::list::is_item_ref(cap))
+    }) else {
+        return;
+    };
+    r.error(
+        "V289",
+        Some(&node.id),
+        format!(
+            "list.skip of node {}: the prompt reads `{{{{{read}}}}}`, a value of the run the skip does not compare, so a skipped item would not run again when it changes; pass it as an item field or a param, or remove skip",
+            node.id
+        ),
+    );
+}
+
+/// V283: a malformed `list.skip` block.
+fn check_skip(node: &Node, spec: &ListSpec, r: &mut ValidationReport) {
+    let Some(fields) = spec.skip.as_ref().and_then(|s| s.unless_changed.as_ref()) else {
+        return;
+    };
+    let mut bad = |why: String| {
+        r.error(
+            "V283",
+            Some(&node.id),
+            format!("list.skip of node {}: {why}", node.id),
+        )
+    };
+    if fields.is_empty() {
+        bad("unless_changed lists no field; leave it out to compare the whole item".to_string());
+        return;
+    }
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut shape_reported = false;
+    for f in fields {
+        if f.is_empty() || f.contains('.') || f.chars().any(char::is_whitespace) {
+            if !shape_reported {
+                bad("skip compares top-level item fields only".to_string());
+                shape_reported = true;
+            }
+        } else if !seen.insert(f.as_str()) {
+            bad(format!("names `{f}` twice"));
+        }
+    }
 }
 
 /// V85: where `list` may sit and its numbers.
@@ -104,7 +182,7 @@ fn check_placement(playbook: &Playbook, node: &Node, spec: &ListSpec, r: &mut Va
         bad.push("it declares success_check (use list.check)".into());
     }
     if playbook.nodes.iter().any(|n| {
-        matches!(&n.kind, NodeKind::AgentTask { continue_session: Some(s), .. } if *s == node.id)
+        matches!(&n.kind, NodeKind::AgentTask { continue_session: Some(s), .. } if s.from() == node.id)
     }) {
         bad.push("another node continues its session".into());
     }
@@ -139,9 +217,10 @@ fn check_placement(playbook: &Playbook, node: &Node, spec: &ListSpec, r: &mut Va
 /// V85 on the other side: a node continuing a list node's session.
 fn check_continuation_of_list(playbook: &Playbook, node: &Node, r: &mut ValidationReport) {
     if let NodeKind::AgentTask {
-        continue_session: Some(source),
+        continue_session: Some(cs),
         ..
     } = &node.kind
+        && let source = cs.from()
         && playbook.node(source).is_some_and(|s| s.list().is_some())
     {
         r.error(

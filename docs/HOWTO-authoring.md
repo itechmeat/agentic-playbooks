@@ -1717,9 +1717,127 @@ visit journals `list_stopped` with the reason `stop_when` and a detail
 sentence, the node fails with `stopped` in its output, and the items it
 never ran stay pending.
 
+#### Skipping items that passed before (skip)
+
+`skip` lets a routine work only what is new or changed since its last
+success:
+
+```yaml
+list:
+  items: { from: { node: fetch_advisories, field: advisories } }
+  check: { script: scripts/check_fix.sh }
+  skip:
+    passed_in: previous_success
+    unless_changed: [severity, fixed_in]
+```
+
+`passed_in: previous_success` names the one earlier run the skip reads: the
+run `run.previous_success` names (the latest earlier top-level production
+run of this playbook in this scope that ended succeeded, created on this
+machine). An item that passed there is settled `passed` without running,
+shown as skipped, with the run it passed in. A skipped item carries its
+stamp into this run's record, so the next success skips it again: an item
+worked once is skipped by every later success while nothing the skip covers about it
+changed.
+
+What counts as unchanged is the item's skip digest: the item's id, the
+item itself (its whole content, or with `unless_changed` only the named
+top-level fields, an absent field told apart from `null`) and what apb
+configures for the item, taken whole. That covers the definition, the
+scripts copy, the params, the profiles and their bundles, the connector
+definitions and account entries as written, the grants and MCP tool
+approvals, the runtimes, the directories the step and its check run in,
+and `PATH`. Skip is not available on isolated nodes: a node whose
+`isolation` is `full` or `best_effort` cannot declare it (V288). Values a
+run produces are not covered either, so the prompt of a skipping agent list
+may read only params and `run.instruction`, never an earlier node's output,
+`run.context` or `run.id` (V289): pass such a value as an item field, which
+the skip compares per item. It does not cover the machine around
+apb: other inherited environment variables, the values secrets resolve
+to, files outside the scripts copy, and the state of outside services.
+Turn `skip` on only for a list whose items depend on what it covers;
+after changing something outside it (new credentials for another tenant,
+a tool on the machine), make the next run skip nothing by publishing a
+new version of the playbook. Any new playbook version, any changed
+param or instruction, any changed profile, connector account or decision
+setting, any changed script, script runtime (the `runners` entry of the
+machine config, or the program it finds on `PATH`), or the directory the
+step runs in (the run's tree, the project root it falls back to, a node's
+own `workdir`, so a project copied elsewhere works every item there)
+makes every item run again once; you narrow what counts as an item change with
+`unless_changed`, and nothing else. So the skip is for lists whose items
+come from an earlier node or a source; an inline list edited between
+versions is a new version and reruns every item. A playbook whose working
+tree comes from a node output, or is created fresh for each run, never
+skips. An agent CLI updated in place at the same path keeps the skips; a
+changed program path reruns them. A visit that carries a supervisor note
+works every item. An item that passes is stamped for later skips only when
+its work ran exactly under the configuration the skip digest covers and its
+check ran to a verdict and passed: an item worked while a supervisor note
+was in force (a reopened or resumed visit and a supervisor retry included,
+whatever the visit decided at its start), after a pilot revised with
+guidance, accepted with a note because its judge was unavailable, or with
+scripts that differ from the run's pin carries no stamp, so the next run
+works it again. The run's scripts copy is checked as each item starts and
+as it settles; once any item saw it differ from the copy the run started
+with, the visit stamps nothing more, and the skip line says so
+("stamping stopped"). While such a run can execute, its scripts copy is
+read-only: a script must not write under its own directory (a cache file
+next to a module, a scratch file), since that write now fails and the
+item needs a look. With `batch.parallel` above 1 the items of one visit
+can affect each other through the shared scripts copy, and apb detects
+only changes still present when an item starts or settles. The copy is
+read-only only while a drive runs it. A visit resumed or retried after
+something the skip covers changed works its skipped items again, and the
+skip line counts them. A run
+whose apb was killed before the run ended keeps its scripts copy
+read-only and still counts as live, so `apb runs prune` keeps it: stop
+it (`apb stop <id>`), which ends it and gives the copy its write bits
+back, and a prune removes it once the retention rules allow; to remove
+its directory by hand instead, run `chmod -R u+w` on it first. A skipped item passed in an earlier
+run and was not checked again: the item check evidence leaves it out,
+and the list line names the run it passed in. It carries the output it
+passed with there (each item's declared outputs, up to 2 KiB, as the
+earlier run stored them), so a later list or template reads the same
+values (an item that printed no JSON carries none, as before); an item
+whose stored output was clipped or holds a redaction marker is worked
+instead, and the skip line counts it ("N not
+skipped"). A field `unless_changed` names that no item of the visit
+has (a misspelling, say) makes the visit skip nothing and stamp nothing
+(`skip_unless_changed_absent`). The `## known problems` section of a prompt does not
+count. In the example, `dependency-security-fix` works only the
+advisories that are new or whose severity or fixed version changed.
+
+The set is read once, at start (after its turn for a run that waited for
+its concurrency key), and journaled as one `list_skip_read` line per
+skipping list; every visit and every resume reads that record, never the
+history again. A start whose earlier run does not read is refused
+(`list_skip_unreadable`); an earlier run whose journal, on the read the
+set comes from, no longer shows an eligible earlier success (resumed
+since, say) gives no skip, and every skipping list records
+`skip_source_ineligible`. A supervisor patch that adds a `skip` the start
+never read is refused, and once a run settled items by a skip every in-run
+patch is refused (a patch changes the definition, so the work those items
+were skipped under) and so is a rebind that changes the node's work; a run
+without such settlements is patched as before and its later skips simply
+do not match. Child runs, scenario runs and evals skip nothing. Skipped
+items are never in a pilot slice, and `stop_when` leaves them out of its
+share (items carried by `rerun: not_passed` count as before). Probation
+counts a run only when every list node that settled at least one item by
+a skip also passed at least one item it worked fresh in that run (not
+carried, not restored from the node cache); a skipping list that skipped
+nothing, or that loaded no items, costs no credit. A run using `skip`
+carries the run guard `list_skip`.
+
+| Code | Severity | What it means |
+|------|----------|---------------|
+| V283 | error | a malformed `list.skip`: `unless_changed` lists no field, names a field twice, or names one that is empty or holds a `.` or whitespace |
+| V288 | error | `list.skip` on a node whose `isolation` is `full` or `best_effort`: skip on isolated nodes is not supported yet |
+| V289 | error | `list.skip` on an agent list whose prompt reads a value of the run other than a param or `run.instruction` (an earlier node's output, `run.context`, `run.id`): the skip would not compare it |
+
 **Compatibility.** The `list:` block is additive to schema 2. A recent apb
 without this change reads the playbook and refuses it: the list block
-rejects unknown fields, and `pilot` and `stop_when` are new ones. An apb
+rejects unknown fields, and `pilot`, `stop_when` and `skip` are new ones. An apb
 old enough to accept unknown fields in a list block drops them and would
 run every item without a pilot gate, so start and resume list runs with
 this apb or a newer one.
@@ -3836,6 +3954,51 @@ bound agent cannot resume a session at all.
 The continuing node's prompt should say what to do next, not repeat the
 context: the session already holds the source's work. Reading
 `{{nodes.<source>.output}}` still works, but sends that output a second time.
+
+#### Forking the session (mode: fork)
+
+The object form forks the source's session instead of continuing it:
+
+```yaml
+- { id: try_a, type: agent_task, profile: dev, prompt: "try the first way", continue_session: { from: assess, mode: fork } }
+- { id: try_b, type: agent_task, profile: dev, prompt: "try the second way", continue_session: { from: assess, mode: fork } }
+```
+
+A fork starts from a copy of the source's conversation and never writes
+into the source session, so several forks of one source may run at the same
+time (V45 does not warn about two forks; it still warns when a fork may run
+beside a node that continues the same session, which writes into what the
+fork copies). `mode: continue` is the bare id written out and reads the same.
+The handoff rules above apply as they are, and the run journals
+`session_handoff` with `mode: fork`, warm or cold.
+
+Only `claude` (`--fork-session`) and `opencode` (`--fork`) can fork. A fork on
+another agent starts a fresh agent with the reason "cannot fork a session",
+never a plain continuation. A fork also needs the same resolved profile as
+its source, the one the source's attempt ran under (a rebind of the
+source after it ran does not count), compared whole (agent, model, role prompt, skills, fallbacks and
+tiers; the routing fields excepted): a node under another profile starts
+cold and says which profile each ran under. The cheap checks come first;
+only a node that would fork reads the installed CLI's help, once per
+process (again only when the binary changed): a help that does not list the
+fork flag starts the node fresh with that reason, and a help that does not
+read starts it fresh too and is read again after 60 seconds at the
+earliest, so a passing failure does not stick for the process.
+`apb doctor --agents` warns about the same help.
+
+A fork that reports the source's own session id did not fork: the node
+never continues that session and journals `session_handoff`, cold, with
+the reason that the fork reported the source session. The attempt keeps
+its verdict (a success stands, and a later node that continues this one
+starts cold); only when the node retries does the next attempt start a
+fresh agent instead of resuming the source. A retry inside the
+node's attempt loop continues the session the fork reported, also when the
+attempt that forked failed but printed its new session id. When the fork
+reported none, the retry forks the source again.
+Nothing about a fork is kept across entries of the node: a deferred retry
+(`retry_delay`), a pause and its resume, a driver that died and the resume
+that follows, and any `apb resume` fork the source again, and the attempt is
+told what the earlier attempts did through the retry briefing.
 
 ### Attempt transcripts
 

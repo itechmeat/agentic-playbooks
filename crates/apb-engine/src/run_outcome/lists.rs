@@ -47,15 +47,43 @@ pub struct ListOutcome {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub stopped: Option<String>,
+    /// The list's skip, when it declares one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub skip: Option<crate::list::skip_record::SkipView>,
+    /// The items a skip settled in this run: inherited passes, never
+    /// checked here, so the check evidence leaves them out.
+    #[serde(skip)]
+    #[cfg_attr(feature = "ts", ts(skip))]
+    pub skipped: u32,
 }
 
 impl ListOutcome {
     /// `List triage: 43 processed, 41 passed (2 with a note), 2 need a look`.
     pub fn line(&self) -> String {
-        let mut line = format!(
-            "List {}: {} processed, {} passed",
-            self.node, self.processed, self.passed
-        );
+        let mut line = format!("List {}: {} processed", self.node, self.processed);
+        if let Some(s) = self.skip.as_ref().filter(|s| s.skipped > 0) {
+            line.push_str(&match s.source.as_deref() {
+                Some(run) => format!(
+                    ", {} skipped (passed in run {run}, not checked again)",
+                    s.skipped
+                ),
+                None => format!(
+                    ", {} skipped (passed in earlier runs, not checked again)",
+                    s.skipped
+                ),
+            });
+        }
+        if let Some(s) = self.skip.as_ref().filter(|s| s.not_inherited > 0) {
+            line.push_str(&format!(
+                ", {} not skipped (the output they passed with could not be carried)",
+                s.not_inherited
+            ));
+        }
+        if let Some(s) = self.skip.as_ref().filter(|s| s.reworked > 0) {
+            line.push_str(&format!(", {}", crate::list::skip_taken_back(s.reworked)));
+        }
+        line.push_str(&format!(", {} passed", self.passed));
         if self.passed_with_note > 0 {
             line.push_str(&format!(" ({} with a note)", self.passed_with_note));
         }
@@ -75,15 +103,27 @@ impl ListOutcome {
         if let Some(detail) = &self.stopped {
             line.push_str(&format!("; stopped early: {detail}"));
         }
+        if let Some(why) = self
+            .skip
+            .as_ref()
+            .and_then(|s| s.stopped_stamping.as_deref())
+        {
+            line.push_str(&format!("; stamping stopped: {why}"));
+        }
         line
     }
 
     /// The engine's item check as evidence, once every item was
-    /// processed (a list under way is told by its line); `None` for a list
-    /// without a check.
+    /// processed (a list under way is told by its line), over the items
+    /// checked in this run only: a skipped item's pass is inherited, told
+    /// apart by the line with its source run, never executed evidence here.
+    /// `None` for a list without a check and for one whose every item was
+    /// skipped.
     fn evidence(&self) -> Option<Evidence> {
         let check = self.check.as_deref()?;
-        (self.processed > 0 && self.processed == self.total).then(|| Evidence {
+        let checked = self.processed.saturating_sub(self.skipped);
+        let passed = self.passed.saturating_sub(self.skipped);
+        (checked > 0 && self.processed == self.total).then(|| Evidence {
             source: EvidenceSource::ItemCheck,
             subject: self.node.clone(),
             result: if self.check_failed == 0 {
@@ -92,10 +132,11 @@ impl ListOutcome {
                 "failed"
             }
             .into(),
-            detail: Some(format!(
-                "{} of {} items passed, {check}",
-                self.passed, self.processed
-            )),
+            detail: Some(if self.skipped == 0 {
+                format!("{passed} of {checked} items passed, {check}")
+            } else {
+                format!("{passed} of {checked} items checked in this run passed, {check}")
+            }),
             basis: match self.check_kind {
                 Some("script") => EvidenceBasis::Executed,
                 Some("connector") => EvidenceBasis::Read,
@@ -151,6 +192,8 @@ pub fn list_outcomes(playbook: Option<&Playbook>, lists: &[RunList]) -> Vec<List
                 .map(|c| c.kind()),
             pilot: l.pilot.clone(),
             stopped: l.stopped.clone(),
+            skip: l.skip.clone(),
+            skipped: l.items.iter().filter(|i| i.skipped_from.is_some()).count() as u32,
         })
         .collect()
 }
@@ -233,7 +276,74 @@ mod tests {
             attempts: 2,
             unresolved_send: false,
             check_rejected,
+            skipped_from: None,
         }
+    }
+
+    #[test]
+    fn the_line_names_skipped_items() {
+        let mut o = ListOutcome {
+            node: "work".into(),
+            total: 5,
+            processed: 5,
+            passed: 5,
+            passed_with_note: 0,
+            needs_look: 0,
+            check_failed: 0,
+            check: None,
+            check_kind: None,
+            pilot: None,
+            stopped: None,
+            skip: Some(crate::list::skip_record::SkipView {
+                skipped: 3,
+                read_items: 4,
+                source: Some("r0".into()),
+                truncated: false,
+                refused: None,
+                not_inherited: 0,
+                stopped_stamping: None,
+                reworked: 0,
+            }),
+            skipped: 3,
+        };
+        assert_eq!(
+            o.line(),
+            "List work: 5 processed, 3 skipped (passed in run r0, not checked again), 5 passed, 0 need a look"
+        );
+        o.skip.as_mut().unwrap().skipped = 0;
+        assert!(!o.line().contains("skipped"), "{}", o.line());
+    }
+
+    /// A skipped item's pass is inherited: the check evidence counts only
+    /// the items checked in this run, and a list whose every item was
+    /// skipped gives no check evidence at all.
+    #[test]
+    fn skipped_items_are_never_executed_check_evidence() {
+        let mut o = ListOutcome {
+            node: "work".into(),
+            total: 3,
+            processed: 3,
+            passed: 3,
+            passed_with_note: 0,
+            needs_look: 0,
+            check_failed: 0,
+            check: Some("script scripts/c.sh".into()),
+            check_kind: Some("script"),
+            pilot: None,
+            stopped: None,
+            skip: None,
+            skipped: 1,
+        };
+        let e = o.evidence().expect("two items were checked here");
+        assert_eq!(
+            e.detail.as_deref(),
+            Some("2 of 2 items checked in this run passed, script scripts/c.sh")
+        );
+        o.skipped = 3;
+        assert!(
+            o.evidence().is_none(),
+            "an all-skipped list checked nothing here"
+        );
     }
 
     #[test]
@@ -258,6 +368,8 @@ mod tests {
                 state: "waiting".into(),
             }),
             stopped: None,
+            skip: None,
+            skipped: 0,
         };
         assert!(
             o.line().contains("; pilot round 1 waits for a decision"),

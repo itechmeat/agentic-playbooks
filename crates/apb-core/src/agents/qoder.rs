@@ -88,6 +88,7 @@ impl Agent for Qoder {
                 "--",
                 "{prompt}",
             ]),
+            fork: None,
             fresh: FreshForm::Printed,
             profile_mode: None,
         })

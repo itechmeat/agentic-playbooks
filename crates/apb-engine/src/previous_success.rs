@@ -139,7 +139,7 @@ pub(crate) fn find(
 /// says succeeded and nothing after it reopened the run (a revival, a
 /// resume, a node or attempt start or finish, a pause or an abort). A run
 /// revived after a finish and not finished again is not succeeded.
-fn settled_succeeded(events: &[Event]) -> bool {
+pub(crate) fn settled_succeeded(events: &[Event]) -> bool {
     let mut last: Option<&str> = None;
     let mut reopened = false;
     for e in events {
