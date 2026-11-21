@@ -191,12 +191,36 @@ export function findDuplicatePair(groups: ExecutorGroup[]): ExecutorGroup | null
   return null
 }
 
+/** A profile's `process_env` policy: `inherit` (everything, the default; the
+ * stored form drops the key) or `allowlist` (a base set, the agent's own
+ * variables and `allow`). */
+export type ProcessEnvPolicy = 'inherit' | 'allowlist'
+
+/** The editor's view of a profile's `process_env`. */
+export interface ProcessEnv {
+  policy: ProcessEnvPolicy
+  allow: string[]
+}
+
+/** A stored `process_env` block as the editor holds it. The stored form drops
+ * `inherit` (`apb_core::process_env::ProcessEnvPolicy::stored`), so absence,
+ * or a policy other than `allowlist`, reads as inherit with no extra names. */
+function readProcessEnv(env: { policy?: string; allow?: unknown } | undefined): ProcessEnv {
+  if (env?.policy !== 'allowlist') return { policy: 'inherit', allow: [] }
+  const allow = Array.isArray(env.allow)
+    ? env.allow.filter((s): s is string => typeof s === 'string')
+    : []
+  return { policy: 'allowlist', allow }
+}
+
 export interface ParsedProfileDoc {
   agent: string
   model: string
   fallbacks: ExecutorGroup[]
   description: string
   skills: string[]
+  /** The profile's `process_env` as the editor holds it. */
+  processEnv: ProcessEnv
   /** Executor tiers for tier routing (issue #165 Part 12), lightest first.
    * Read-only here: no write surface edits them, and a save keeps them. */
   tiers: ProfileTier[]
@@ -226,6 +250,7 @@ export function parseProfileDoc(yamlText: string): ParsedProfileDoc {
     executor?: { agent?: string; model?: string; fallbacks?: { agent?: string; model?: string }[] }
     skills?: (string | { name: string })[]
     tiers?: Record<string, { agent?: string; model?: string; use?: string; for?: string } | null>
+    process_env?: { policy?: string; allow?: unknown }
   }
   return {
     agent: doc.executor?.agent ?? 'claude',
@@ -236,6 +261,7 @@ export function parseProfileDoc(yamlText: string): ParsedProfileDoc {
     })),
     description: doc.description ?? '',
     skills: (doc.skills ?? []).map((s) => (typeof s === 'string' ? s : s.name)),
+    processEnv: readProcessEnv(doc.process_env),
     tiers: Object.entries(doc.tiers ?? {}).map(([name, t]) => ({
       name,
       executor:
@@ -244,6 +270,46 @@ export function parseProfileDoc(yamlText: string): ParsedProfileDoc {
       ...(t?.use !== 'executor' && t?.agent && t?.model ? { agent: t.agent, model: t.model } : {}),
     })),
   }
+}
+
+/** The editor's text area: one name or pattern per line, blank lines and
+ * surrounding spaces dropped, a repeat kept once in first order. */
+export function parseAllow(text: string): string[] {
+  const out: string[] = []
+  for (const line of text.split('\n')) {
+    const name = line.trim()
+    if (!name || out.includes(name)) continue
+    out.push(name)
+  }
+  return out
+}
+
+/** The text area's content for a stored list. */
+export function allowText(allow: string[]): string {
+  return allow.join('\n')
+}
+
+function sameAllow(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((x, i) => x === b[i])
+}
+
+/**
+ * The save body's `process_env`: `undefined` when the editor's state is the
+ * stored one (the save then keeps the stored value), else the policy with
+ * `allow` (dropped for `inherit`). The one comparison of the editor's state
+ * with the stored value lives here; the page never compares on its own.
+ */
+export function processEnvChange(
+  stored: ProcessEnv,
+  policy: ProcessEnvPolicy,
+  text: string,
+): { policy: ProcessEnvPolicy; allow?: string[] } | undefined {
+  // `allow` exists only under `allowlist`: under `inherit` the text area is
+  // hidden and whatever it still holds is ignored, both here and in the body.
+  const next: ProcessEnv =
+    policy === 'allowlist' ? { policy, allow: parseAllow(text) } : { policy, allow: [] }
+  if (next.policy === stored.policy && sameAllow(next.allow, stored.allow)) return undefined
+  return policy === 'allowlist' ? { policy, allow: next.allow } : { policy }
 }
 
 /** The privacy classes, most private first (the server's order). */

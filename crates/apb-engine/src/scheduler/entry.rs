@@ -791,9 +791,8 @@ pub fn drive_run_from_dir(root: &Path, run_id: &str) -> Result<RunResult, Engine
     //
     // A start that shares the workdir (`--allow-shared-workdir`) took no lock
     // and handed none over, so its driver takes none either.
-    let is_write = playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
     let tree = state.worktree.as_deref().map(Path::new);
-    let mut guard = if is_write && !cfg.shared_workdir {
+    let mut guard = if holds_tree(&playbook, &cfg) {
         let wait = cfg
             .workdir_queue_wait_ms
             .map(Duration::from_millis)
@@ -1026,4 +1025,12 @@ pub fn post_supervisor_command(
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
     crate::control::post_control(&run_dir, cmd)
+}
+
+/// Whether a run holds its working tree: one of its nodes takes the tree
+/// lock and it does not share the workdir. The one predicate the drive takes
+/// the tree lock by, and the baseline and list item checks trust a JUnit
+/// report by.
+pub(crate) fn holds_tree(playbook: &Playbook, cfg: &RunConfig) -> bool {
+    !cfg.shared_workdir && playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock())
 }

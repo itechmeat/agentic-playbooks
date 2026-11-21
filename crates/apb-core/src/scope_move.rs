@@ -23,11 +23,14 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use crate::fsutil::{copy_tree, ensure_no_symlink_below, lock_dir};
+use crate::candidate_pointer::CANDIDATE_LOCK_FILE;
+use crate::fsutil::{copy_tree, ensure_no_symlink_below, lock_dir, lock_held};
 use crate::launch::floor::{self, FloorKey, SaveAuthority};
 use crate::registry::is_safe_segment;
 use crate::versioning::current::{self, MoveCurrent, MovedBy};
+use crate::versioning::is_draft_debris;
 
 /// Why a playbook could not be copied.
 #[derive(Debug, thiserror::Error)]
@@ -127,6 +130,144 @@ pub fn copy_playbook_to(
         return Err(e);
     }
     Ok(dst)
+}
+
+/// How old a claim must be before it is named (a creation in progress is
+/// younger).
+pub const STALE_CLAIM_SECS: u64 = 600;
+
+/// What a stale playbook directory holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimLeft {
+    /// No entry at all: `rmdir` removes it safely.
+    Empty,
+    /// Only names the draft creation itself writes (`is_draft_debris`).
+    DraftDebris,
+    /// A staged copy of this id is still in the store's staging area: a
+    /// copy into it may still be running (one killed there leaves the same),
+    /// so nothing is offered for removal.
+    Staging,
+    /// Anything else beside or instead of those names.
+    Other,
+}
+
+/// One playbook directory a stopped copy or draft creation may have left.
+#[derive(Debug)]
+pub struct StaleClaim {
+    pub path: PathBuf,
+    pub left: ClaimLeft,
+}
+
+/// The playbook directories of `playbooks` (a store's `playbooks/`) that
+/// hold no `current`, whose modification time is more than
+/// [`STALE_CLAIM_SECS`] before `now`, and whose locks are not held. Never
+/// removes anything; sorted by path. A store that does not exist is an
+/// empty list.
+///
+/// A directory counts when `symlink_metadata` says it is a directory (not a
+/// link), it has no entry named `current` (every playbook has one; a
+/// directory without it is what an interrupted claim or creation leaves),
+/// its age is more than [`STALE_CLAIM_SECS`], its id lock
+/// (`<id>.lock`, the claim a copy holds, [`lock_dir`]'s own 60 s staleness
+/// rule through [`lock_held`]) is not held and, when `.candidate.lock` is
+/// there, that lock is not held either. Files beside the claims are
+/// skipped. A directory that cannot be listed is skipped too: an entry the
+/// doctor cannot see may be a person's data.
+pub fn stale_claims(playbooks: &Path, now: std::time::SystemTime) -> Vec<StaleClaim> {
+    let Ok(entries) = std::fs::read_dir(playbooks) else {
+        return Vec::new();
+    };
+    let mut claims = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        // A claim is a directory, never a link: nothing is followed.
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        let mut names: Vec<std::ffi::OsString> = Vec::new();
+        let mut has_current = false;
+        let mut readable = true;
+        for item in contents {
+            match item {
+                Ok(item) => {
+                    if item.file_name() == "current" {
+                        has_current = true;
+                    }
+                    names.push(item.file_name());
+                }
+                Err(_) => {
+                    readable = false;
+                    break;
+                }
+            }
+        }
+        if !readable || has_current {
+            continue;
+        }
+        // A creation in progress is younger than the threshold; a directory
+        // dated after `now` (clock skew) may be too.
+        let Ok(mtime) = meta.modified() else {
+            continue;
+        };
+        match now.duration_since(mtime) {
+            Ok(age) if age > Duration::from_secs(STALE_CLAIM_SECS) => {}
+            _ => continue,
+        }
+        // A copy holds `<id>.lock` for as long as its claim exists; a lock
+        // held under its own staleness rule is a live claim, never named.
+        let id = entry.file_name();
+        let id_lock = format!("{}.lock", id.to_string_lossy());
+        if lock_held(playbooks, &id_lock, now) {
+            continue;
+        }
+        // The pointer lock the draft's move of `current` takes.
+        if names
+            .iter()
+            .any(|n| n.to_str() == Some(CANDIDATE_LOCK_FILE))
+            && lock_held(&path, CANDIDATE_LOCK_FILE, now)
+        {
+            continue;
+        }
+        let left = if staging_of(playbooks, &id) {
+            ClaimLeft::Staging
+        } else if names.is_empty() {
+            ClaimLeft::Empty
+        } else if names.iter().all(|n| is_draft_debris(n.as_os_str())) {
+            ClaimLeft::DraftDebris
+        } else {
+            ClaimLeft::Other
+        };
+        claims.push(StaleClaim { path, left });
+    }
+    claims.sort_by(|a, b| a.path.cmp(&b.path));
+    claims
+}
+
+/// Whether the staging area beside `playbooks` holds a staged copy of
+/// `id` (`<id>-<nanos>`, the name [`copy_playbook_to`] stages under). A
+/// copy holds its id lock only by the lock's own staleness rule, so a copy
+/// that stages for longer than that is told apart by this, never by the
+/// lock alone.
+fn staging_of(playbooks: &Path, id: &std::ffi::OsStr) -> bool {
+    let (Some(parent), Some(id)) = (playbooks.parent(), id.to_str()) else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(parent.join(STAGING_DIR)) else {
+        return false;
+    };
+    let prefix = format!("{id}-");
+    entries.filter_map(Result::ok).any(|e| {
+        e.file_name()
+            .to_str()
+            .and_then(|n| n.strip_prefix(&prefix))
+            .is_some_and(|nanos| !nanos.is_empty() && nanos.bytes().all(|b| b.is_ascii_digit()))
+    })
 }
 
 /// The launch floor keys of a copy: the source's, read, and the

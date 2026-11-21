@@ -269,6 +269,155 @@ fn v67_a_tree_source_with_a_node_resolved_worktree_warns() {
     assert!(!has(&issues(&params_tree), "V67", Severity::Warning));
 }
 
+fn v320_message(yaml: &str) -> Option<String> {
+    let p = Playbook::from_yaml(yaml).unwrap();
+    validate(&p, &ValidationContext::default())
+        .issues
+        .into_iter()
+        .find(|i| i.code == "V320")
+        .map(|i| i.message)
+}
+
+fn v320_on(glob: &str) -> Option<String> {
+    v320_message(&GOOD.replace(
+        "      project_checks: { only: [test] }",
+        &format!("      project_checks: {{ only: [test], junit: \"{glob}\" }}"),
+    ))
+}
+
+/// Doubles every backslash, for the double-quoted YAML `v320_on` writes.
+fn quoted(glob: &str) -> String {
+    glob.replace('\\', "\\\\")
+}
+
+#[test]
+fn v320_empty_glob() {
+    for g in ["", "   "] {
+        let m = v320_on(g);
+        assert!(
+            m.as_deref() == Some("baseline check `tests`: project_checks.junit is empty"),
+            "{g}: {m:?}"
+        );
+    }
+}
+
+#[test]
+fn v320_absolute_glob() {
+    for g in ["/reports/*.xml", "\\reports\\*.xml", "~/reports/*.xml"] {
+        let m = v320_on(&quoted(g));
+        assert!(
+            m.as_deref()
+                == Some(
+                    "baseline check `tests`: project_checks.junit must be relative to the run's tree"
+                ),
+            "{g}: {m:?}"
+        );
+    }
+}
+
+#[test]
+fn v320_parent_component() {
+    for g in ["../reports/*.xml", "reports/../junit.xml"] {
+        let m = v320_on(&quoted(g));
+        assert!(
+            m.as_deref()
+                == Some(
+                    "baseline check `tests`: project_checks.junit must not leave the run's tree (..)"
+                ),
+            "{g}: {m:?}"
+        );
+    }
+}
+
+/// A backslash is refused wherever it stands: the engine splits on `/`
+/// only and the matcher reads `\` as an escape, so `reports\\*.xml` would
+/// pass the first-component rule here and then walk from the tree's root.
+#[test]
+fn v320_backslash() {
+    for g in ["reports\\*.xml", "reports\\..\\x.xml", "reports/a\\b.xml"] {
+        let m = v320_on(&quoted(g));
+        assert!(
+            m.as_deref()
+                == Some(
+                    "baseline check `tests`: project_checks.junit must separate directories with /, never \\"
+                ),
+            "{g}: {m:?}"
+        );
+    }
+}
+
+#[test]
+fn v320_invalid_glob() {
+    assert!(
+        v320_on("reports/[.xml").as_deref()
+            == Some("baseline check `tests`: project_checks.junit is not a valid glob")
+    );
+}
+
+#[test]
+fn v320_only_without_test() {
+    let m = v320_message(&GOOD.replace(
+        "      project_checks: { only: [test] }",
+        "      project_checks: { only: [lint], junit: \"reports/*.xml\" }",
+    ));
+    assert!(
+        m.as_deref()
+            == Some(
+                "baseline check `tests`: project_checks.junit is read only after test commands, but only names no test"
+            ),
+        "{m:?}"
+    );
+}
+
+#[test]
+fn v320_wildcard_in_the_first_component() {
+    for g in ["*.xml", "**/junit.xml"] {
+        let m = v320_on(g);
+        assert!(
+            m.as_deref()
+                == Some(
+                    "baseline check `tests`: project_checks.junit must start with a literal directory, such as reports/"
+                ),
+            "{g}: {m:?}"
+        );
+    }
+}
+
+#[test]
+fn v320_empty_or_dot_component() {
+    for g in ["./reports/*.xml", "reports//x.xml"] {
+        let m = v320_on(g);
+        assert!(
+            m.as_deref()
+                == Some("baseline check `tests`: project_checks.junit has an empty or . component"),
+            "{g}: {m:?}"
+        );
+    }
+}
+
+#[test]
+fn a_relative_glob_with_test_is_valid() {
+    let got = issues(&GOOD.replace(
+        "      project_checks: { only: [test] }",
+        "      project_checks: { only: [test], junit: \"reports/*.xml\" }",
+    ));
+    assert!(none_of(&got, &["V320"]), "{got:?}");
+    // A single literal component names one file and is not walked.
+    let got = issues(&GOOD.replace(
+        "      project_checks: { only: [test] }",
+        "      project_checks: { only: [test], junit: \"junit.xml\" }",
+    ));
+    assert!(none_of(&got, &["V320"]), "{got:?}");
+    // Longer than 256 characters.
+    let long = format!("reports/{}.xml", "a".repeat(250));
+    let m = v320_on(&long);
+    assert!(
+        m.as_deref()
+            == Some("baseline check `tests`: project_checks.junit is longer than 256 characters"),
+        "{m:?}"
+    );
+}
+
 #[test]
 fn v68_the_baseline_site_is_reserved() {
     let yaml = GOOD

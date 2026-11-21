@@ -1,4 +1,4 @@
-use apb_engine::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, adapter_for};
+use apb_engine::adapter::{AgentAdapter, AgentTask, CliAdapter, adapter_for};
 use apb_engine::invocation::builtin;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -33,7 +33,7 @@ fn adapter_for_maps_known_and_rejects_unknown() {
     assert!(unknown_rejected);
 }
 
-// Tests that spawn a process construct ClaudeAdapter directly with an explicit program,
+// Tests that spawn a process construct CliAdapter directly with an explicit program,
 // to avoid mutating the global APB_AGENT_CMD (a race under parallel tests).
 //
 // Each captured argv element is wrapped in delimiters and separated by an
@@ -43,7 +43,7 @@ fn adapter_for_maps_known_and_rejects_unknown() {
 #[test]
 fn hermes_adapter_sends_z_flag_prefixed_soul_and_model_flag() {
     let dir = tempfile::tempdir().unwrap();
-    let ad = ClaudeAdapter {
+    let ad = CliAdapter {
         program: stub_agent(dir.path(), "printf '<<<%s>>>\\001' \"$@\""),
         spec: builtin("hermes").unwrap(),
     };
@@ -110,7 +110,7 @@ fn a_dash_led_prompt_never_reaches_an_agent_as_an_option() {
             forms.push(("resume", resume));
         }
         for (form, spec) in forms {
-            let ad = ClaudeAdapter {
+            let ad = CliAdapter {
                 program: program.clone(),
                 spec,
             };
@@ -159,5 +159,34 @@ fn a_dash_led_prompt_never_reaches_an_agent_as_an_option() {
                 );
             }
         }
+    }
+}
+
+/// hermes now resumes (`--resume {session}`) with an id read from its
+/// plain-text reply, so the id goes through the one shape check every
+/// agent's captured session goes through before it is ever an argument
+/// (`adapter::is_plausible_session_id`: ASCII letters, digits, `-`, `_`,
+/// `.` and `:`, not starting with `-`, at most 128 characters). Anything
+/// else is no session: the next `continue_session` step or answer round
+/// starts cold, and the drive journals `interaction_downgraded` with the
+/// missing session as its reason (`scheduler::resume_decision`).
+#[test]
+fn a_hermes_session_id_of_another_shape_is_no_session() {
+    use apb_engine::adapter::capture_session;
+    let reply = |id: &str| format!("done\n{{\"session_id\":\"{id}\"}}\n");
+    assert_eq!(
+        capture_session("hermes", &reply("20261120_101500_ab12")).as_deref(),
+        Some("20261120_101500_ab12")
+    );
+    for bad in [
+        "--yolo".to_string(),
+        "-z".to_string(),
+        "a b".to_string(),
+        "a/b".to_string(),
+        "a;b".to_string(),
+        "x".repeat(129),
+        String::new(),
+    ] {
+        assert_eq!(capture_session("hermes", &reply(&bad)), None, "{bad:?}");
     }
 }

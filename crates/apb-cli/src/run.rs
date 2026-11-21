@@ -1523,7 +1523,7 @@ pub(crate) fn spawn_detached_supervised(
     // We do not wait for the child (`wait`) - this is exactly what makes the
     // run non-blocking for the caller; dropping `Child` orphans the process,
     // which is intentional (the same trick as in
-    // ClaudeAdapter::spawn_supervisor).
+    // CliAdapter::spawn_supervisor).
     drop(child);
 
     let deadline = Instant::now() + Duration::from_secs(10);

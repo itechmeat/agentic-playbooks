@@ -13,7 +13,7 @@ use std::path::Path;
 use apb_core::connector::config::account_digest;
 use apb_core::connector::resolve::resolve_playbook;
 use apb_core::schema::Playbook;
-use apb_engine::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, SpawnEnv};
+use apb_engine::adapter::{AgentAdapter, AgentTask, CliAdapter, SpawnEnv};
 use apb_engine::connector::run::snapshot_connectors;
 use apb_engine::invocation::builtin;
 
@@ -163,7 +163,7 @@ fn adapter_scrubs_connector_env_and_injects_run_context() {
     // scrubbing the spawned agent would inherit it.
     let _token = set_str("MOCK_SCRUB_TOKEN", "super-secret");
 
-    let ad = ClaudeAdapter {
+    let ad = CliAdapter {
         program: env_dump_agent(dir.path()),
         spec: builtin("claude").unwrap(),
     };

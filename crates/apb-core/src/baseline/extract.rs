@@ -84,8 +84,11 @@ fn finite(v: &Value) -> Option<f64> {
 }
 
 /// `s` as observed text: at most [`MAX_ITEM_CHARS`] characters, no
-/// control or invisible format character. `what` names it in the reason.
-fn checked_text(s: &str, what: &str) -> Result<String, String> {
+/// control or invisible format character. `what` names it in the reason,
+/// which never repeats the text. The one rule every observed text item is
+/// held to, the JUnit reader's failing tests included
+/// (`project_checks::junit_items`).
+pub fn checked_text(s: &str, what: &str) -> Result<String, String> {
     if s.chars().count() > MAX_ITEM_CHARS {
         return Err(format!("{what} is longer than {MAX_ITEM_CHARS} characters"));
     }

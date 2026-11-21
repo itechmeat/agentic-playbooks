@@ -902,6 +902,26 @@ pub fn lock_dir(dir: &Path, lock_name: &str) -> io::Result<DirLock> {
     lock_dir_stale_after(dir, lock_name, LOCK_STALE_MS).map(|(lock, _)| lock)
 }
 
+/// Whether the lock `<dir>/<lock_name>` is held, by the same staleness rule
+/// [`lock_dir`] applies when it would steal a dead owner's lock: the file is
+/// a regular file (`symlink_metadata`, no link followed) whose modification
+/// time is less than `LOCK_STALE_MS` before `now`, or lies after `now`
+/// (clock skew counts as held, as [`lock_is_stale`] does). Read only: it
+/// never takes, breaks or removes a lock. The caller's `now` keeps the rule
+/// testable (a test can age files against it).
+pub fn lock_held(dir: &Path, lock_name: &str, now: std::time::SystemTime) -> bool {
+    let Ok(meta) = fs::symlink_metadata(dir.join(lock_name)) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    let Ok(mtime) = meta.modified() else {
+        return false;
+    };
+    !stale_at(mtime, now, LOCK_STALE_MS)
+}
+
 /// [`lock_dir`] for a critical section that can legitimately run longer than
 /// a state-file update (a network request under the lock): a held lock counts
 /// as stale only once it is older than `stale_after`, which the caller derives
@@ -1022,9 +1042,16 @@ fn lock_is_stale(path: &Path, stale_ms: u128) -> bool {
     let Ok(mtime) = meta.modified() else {
         return false;
     };
-    match mtime.elapsed() {
+    stale_at(mtime, std::time::SystemTime::now(), stale_ms)
+}
+
+/// The one staleness rule of a lock file modified at `mtime`, seen at
+/// `now`: stale once it is at least `stale_ms` old; a time after `now`
+/// (clock skew) is never stale. [`lock_dir`] steals by it and
+/// [`lock_held`] reads by it.
+fn stale_at(mtime: std::time::SystemTime, now: std::time::SystemTime, stale_ms: u128) -> bool {
+    match now.duration_since(mtime) {
         Ok(age) => age.as_millis() >= stale_ms,
-        // mtime in the future (clock skew) - not stale.
         Err(_) => false,
     }
 }
@@ -1201,6 +1228,59 @@ mod unix_tests {
         std::os::unix::fs::symlink(&outside, &dir).unwrap();
         assert!(open_append_private_in(&dir, "notify").is_err());
         assert!(!outside.join("notify").exists());
+    }
+
+    /// The doctor's read-only hold check follows the same staleness rule
+    /// [`lock_dir`] applies when it would steal a dead owner's lock: a fresh
+    /// lock file is held, one older than [`LOCK_STALE_MS`] is not, one dated
+    /// after `now` is (clock skew counts as held), a missing one is not, and
+    /// a link is not (nothing is followed).
+    #[test]
+    fn lock_held_follows_the_staleness_of_lock_dir() {
+        use std::time::{Duration, SystemTime};
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path();
+        let now = SystemTime::now();
+
+        // A fresh lock file is held.
+        fs::write(dir.join("fresh.lock"), "token").unwrap();
+        assert!(lock_held(dir, "fresh.lock", now));
+
+        // One older than LOCK_STALE_MS is its dead owner's: not held.
+        fs::write(dir.join("dead.lock"), "token").unwrap();
+        File::options()
+            .write(true)
+            .open(dir.join("dead.lock"))
+            .unwrap()
+            .set_modified(now - Duration::from_millis(LOCK_STALE_MS as u64 + 1))
+            .unwrap();
+        assert!(!lock_held(dir, "dead.lock", now));
+
+        // A lock dated after `now` (clock skew) counts as held.
+        fs::write(dir.join("future.lock"), "token").unwrap();
+        File::options()
+            .write(true)
+            .open(dir.join("future.lock"))
+            .unwrap()
+            .set_modified(now + Duration::from_secs(60))
+            .unwrap();
+        assert!(lock_held(dir, "future.lock", now));
+
+        // A missing lock file is not held.
+        assert!(!lock_held(dir, "absent.lock", now));
+
+        // A link is not held: nothing is followed.
+        std::os::unix::fs::symlink(dir.join("fresh.lock"), dir.join("linked.lock")).unwrap();
+        assert!(!lock_held(dir, "linked.lock", now));
+
+        // Held exactly when the stealing rule would not steal it.
+        for name in ["fresh.lock", "dead.lock", "future.lock"] {
+            assert_eq!(
+                lock_held(dir, name, SystemTime::now()),
+                !lock_is_stale(&dir.join(name), LOCK_STALE_MS),
+                "{name}"
+            );
+        }
     }
 
     /// The leaf is one plain regular file: a path, a fifo (refused at once,

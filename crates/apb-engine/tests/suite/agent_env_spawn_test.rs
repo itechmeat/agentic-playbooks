@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use apb_core::process_env::ProcessEnvPolicy;
-use apb_engine::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, SpawnEnv};
+use apb_engine::adapter::{AgentAdapter, AgentTask, CliAdapter, SpawnEnv};
 use apb_engine::invocation::{builtin, resume_spec};
 
 use crate::common::{self, EnvVar};
@@ -126,7 +126,7 @@ fn spawn(
     dump: &Path,
 ) -> Spawned {
     let _ = fs::remove_file(dump);
-    let adapter = ClaudeAdapter {
+    let adapter = CliAdapter {
         program: program.to_string(),
         spec,
     };
@@ -277,7 +277,7 @@ fn the_supervisor_spawn_gets_the_allowlist_and_its_own_variables() {
         Vec::new(),
     )
     .with_process(Some(Arc::new(plan)));
-    let adapter = ClaudeAdapter {
+    let adapter = CliAdapter {
         program,
         spec: builtin("codex").unwrap(),
     };
@@ -410,7 +410,7 @@ fn the_supervisor_spawn_gets_the_run_scoped_leading_arguments() {
     perm.set_mode(0o755);
     fs::set_permissions(&program, perm).unwrap();
     let env = SpawnEnv::for_node(Vec::new(), run_dir.path(), "supervisor", Vec::new());
-    let adapter = ClaudeAdapter {
+    let adapter = CliAdapter {
         program: program.to_string_lossy().into_owned(),
         spec: builtin("dsh").unwrap(),
     };
@@ -493,7 +493,7 @@ fn the_supervisor_on_a_near_model_names_the_route_in_its_patch() {
     );
     let env =
         SpawnEnv::for_node(Vec::new(), run_dir.path(), "supervisor", Vec::new()).with_cloud(cloud);
-    let adapter = ClaudeAdapter {
+    let adapter = CliAdapter {
         program: program.to_string_lossy().into_owned(),
         spec: builtin("dsh").unwrap(),
     };

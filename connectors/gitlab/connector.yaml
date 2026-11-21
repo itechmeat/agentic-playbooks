@@ -1,6 +1,13 @@
 name: gitlab
-version: 0.2.0
+version: 0.3.0
 healthcheck: get_user
+# How the connector reads its own verified account, so a repeat of a
+# marker send can find the release the earlier attempt created. The token
+# is a personal access token (docs/CONNECTORS.md "gitlab"): /user is its
+# own user, the author of the releases it creates.
+identity:
+  function: get_user
+  path: username
 auth:
   kind: header
   header: PRIVATE-TOKEN
@@ -267,6 +274,19 @@ functions:
         name: { type: string }
         description: { type: string }
       required: [project, tag_name]
+    idempotency:
+      mode: marker
+      arg: description
+      format: html_comment
+      result_ref: _links.self
+      reconcile:
+        function: list_releases
+        args_from_send: [project]
+        fixed_args: { per_page: 20, order_by: created_at, sort: desc }
+        items: ""
+        text: description
+        author: author.username
+        item_ref: _links.self
     examples:
       - args: { project: "42", tag_name: v1.4.0, name: "v1.4.0", description: "Ship it" }
         note: "name and description are optional; the tag must already exist on the project unless create-from-ref is used outside this connector."
@@ -288,6 +308,29 @@ functions:
       - args: { project: "42", tag_name: v1.2.0 }
         note: "dots in the tag stay unencoded in the path (v1.2.0)."
     response_pick: [tag_name, name, description, released_at, _links.self]
+
+  - name: list_releases
+    description: List a project's releases, newest first
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/projects/{{args.project}}/releases"
+    query:
+      order_by: "{{args.order_by}}"
+      sort: "{{args.sort}}"
+      page: "{{args.page}}"
+      per_page: "{{args.per_page}}"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        order_by: { type: string, enum: [released_at, created_at] }
+        sort: { type: string, enum: [asc, desc] }
+        page: { type: integer, minimum: 1 }
+        per_page: { type: integer, minimum: 1, maximum: 100 }
+      required: [project]
+    response_pick: [tag_name, name, description, created_at, author.username, _links.self]
 
   - name: list_pipelines
     description: List pipelines in a project, filtered by ref, status, and page

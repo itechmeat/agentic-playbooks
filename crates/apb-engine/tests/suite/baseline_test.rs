@@ -1297,3 +1297,186 @@ fn an_interrupted_after_read_of_a_finish_with_a_prompt_never_reruns_the_answer_a
         assert_eq!(compared(&ev)[0].1, "met", "{how:?}");
     }
 }
+
+// --- JUnit reports for project checks --------------------------------------
+
+/// The `project_checks` head for the make tests, with or without the JUnit
+/// report glob.
+fn junit_checks(junit: Option<&str>) -> String {
+    let junit = junit
+        .map(|g| format!(", junit: \"{g}\""))
+        .unwrap_or_default();
+    format!(
+        "baseline_check:\n  checks:\n    - id: tests\n      project_checks: {{ only: [test]{junit} }}"
+    )
+}
+
+/// The Makefile whose `test` recipe writes a JUnit report with one failing
+/// case (a second once `second` exists) and exits 1.
+const JUNIT_MAKEFILE: &str = concat!(
+    "test:\n",
+    "\tmkdir -p reports\n",
+    "\tif [ -f second ]; then printf '%s' '<testsuite><testcase classname=\"suite\" name=\"it_fails\"><failure/></testcase><testcase classname=\"suite\" name=\"it_fails_2\"><failure/></testcase></testsuite>' > reports/junit.xml; else printf '%s' '<testsuite><testcase classname=\"suite\" name=\"it_fails\"><failure/></testcase></testsuite>' > reports/junit.xml; fi\n",
+    "\texit 1\n"
+);
+
+/// Seeds a git tree whose `make test` fails while writing its JUnit report;
+/// with `ignored`, `reports/` is git-ignored so the check leaves the tree
+/// as it found it.
+fn junit_project(root: &Path, id: &str, junit: Option<&str>, ignored: bool) {
+    seed(
+        root,
+        id,
+        &linear(id, &junit_checks(junit)),
+        &[("work.sh", "touch second\n")],
+    );
+    if ignored {
+        fs::write(root.join(".gitignore"), "reports/\n").unwrap();
+    }
+    fs::write(root.join("Makefile"), JUNIT_MAKEFILE).unwrap();
+}
+
+/// A `make test` whose JUnit report the command wrote: the failing tests
+/// are listed, each named by its report (design D4.2, spec "A literal
+/// report path").
+#[test]
+fn junit_reports_list_the_failing_tests_of_a_make_test() {
+    use apb_core::baseline::{Observation, ObservedValue};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    junit_project(root, "jr", Some("reports/*.xml"), true);
+    let (_, ev) = run_ok(root, "jr");
+    let obs = before_value(&ev, "tests", "make_test.failed_tests");
+    assert_eq!(
+        obs,
+        Observation::value(ObservedValue::List(vec![
+            apb_core::project_checks::encode_item(
+                "reports/junit.xml",
+                &apb_core::project_checks::FailingTest {
+                    classname: Some("suite".into()),
+                    name: "it_fails".into(),
+                },
+                1,
+            )
+        ])),
+        "{obs:?}"
+    );
+}
+
+/// A `make test` that fails while the report it wrote names no failing
+/// test (a coverage gate, a crash outside any case): the failing tests read
+/// unknown before and after, and the comparison is unknown, never met.
+#[test]
+fn a_failure_the_reports_do_not_explain_compares_unknown() {
+    use apb_core::baseline::Observation;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    junit_project(root, "ux", Some("reports/*.xml"), true);
+    fs::write(
+        root.join("Makefile"),
+        concat!(
+            "test:\n",
+            "\tmkdir -p reports\n",
+            "\tprintf '%s' '<testsuite><testcase classname=\"suite\" name=\"ok\"/></testsuite>' > reports/junit.xml\n",
+            "\texit 1\n"
+        ),
+    )
+    .unwrap();
+    let (_, ev) = run_ok(root, "ux");
+    let obs = before_value(&ev, "tests", "make_test.failed_tests");
+    assert!(
+        matches!(&obs, Observation::Unknown { reason, .. } if reason.contains("name no failing test")),
+        "{obs:?}"
+    );
+    let c = compared(&ev)
+        .into_iter()
+        .find(|c| c.0 == "make_test")
+        .expect("the make_test comparison");
+    assert_eq!(c.1, "unknown", "{c:?}");
+}
+
+/// A report the command did not write reads unknown, never stale failures
+/// of an older run (design D4.2 wrong implementation 1).
+#[test]
+fn a_report_the_command_did_not_write_reads_unknown() {
+    use apb_core::baseline::Observation;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    junit_project(root, "pr", Some("reports/*.xml"), true);
+    fs::write(root.join("Makefile"), "test:\n\texit 1\n").unwrap();
+    fs::create_dir_all(root.join("reports")).unwrap();
+    fs::write(
+        root.join("reports/junit.xml"),
+        "<testsuite><testcase classname=\"suite\" name=\"stale\"><failure/></testcase></testsuite>",
+    )
+    .unwrap();
+    let (_, ev) = run_ok(root, "pr");
+    let obs = before_value(&ev, "tests", "make_test.failed_tests");
+    assert!(
+        matches!(&obs, Observation::Unknown { reason, .. } if reason.contains("no JUnit report written")),
+        "{obs:?}"
+    );
+}
+
+/// A report written into a tracked place changes the tree: the whole read
+/// is unknown, whatever the report said.
+#[test]
+fn a_report_in_a_tracked_place_reads_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    junit_project(root, "tr", Some("reports/*.xml"), false);
+    let (_, ev) = run_ok(root, "tr");
+    let obs = observed(&ev);
+    assert_eq!(obs[0].1, "unknown", "{obs:?}");
+    assert_eq!(
+        obs[0].2.as_deref(),
+        Some("the check changed the working tree"),
+        "{obs:?}"
+    );
+}
+
+/// Before one failing case, after two: not met, regressed, naming the new
+/// case (spec "A failing make test").
+#[test]
+fn a_new_failing_case_is_a_regression() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    junit_project(root, "rg", Some("reports/*.xml"), true);
+    let (_, ev) = run_ok(root, "rg");
+    let c = compared(&ev)
+        .into_iter()
+        .find(|c| c.0 == "make_test")
+        .expect("the make_test comparison");
+    assert_eq!((c.1.as_str(), c.2), ("not_met", Some(true)), "{c:?}");
+    assert!(c.3.contains("it_fails_2"), "{c:?}");
+}
+
+/// A run started with `allow_shared_workdir` holds no tree lock: the
+/// command runs for its status, the failing tests read unknown with the
+/// reason naming that (spec "A run that shares its working tree"). The
+/// engine wiring is the contract here: the drive's `holds_tree` predicate
+/// reaches the baseline read.
+#[test]
+fn a_shared_workdir_run_reads_junit_unknown() {
+    use apb_core::baseline::Observation;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    junit_project(root, "sw", Some("reports/*.xml"), true);
+    let shared = run(
+        root,
+        "sw",
+        None,
+        RunOptions {
+            allow_shared_workdir: true,
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    let ev = events(root, &shared.run_id);
+    let obs = before_value(&ev, "tests", "make_test.failed_tests");
+    assert!(
+        matches!(&obs, Observation::Unknown { reason, .. }
+            if reason.contains("does not hold its working tree")),
+        "{obs:?}"
+    );
+}

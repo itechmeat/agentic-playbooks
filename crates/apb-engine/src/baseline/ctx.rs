@@ -31,6 +31,12 @@ pub(crate) struct ReadCtx<'a> {
     /// it. False only for a list item check while sibling items run, which
     /// legitimately change the tree.
     pub guard_tree: bool,
+    /// Whether the run holds its working tree for this read (it has a node
+    /// that takes the workdir lock, and does not share the workdir): only
+    /// then may a `project_checks.junit` scan trust that a report there
+    /// changed during the command. False: no scan, the failing tests read
+    /// unknown.
+    pub holds_tree: bool,
     /// What a tampered `scripts/` copy is named as in the reason.
     pub scripts_label: &'a str,
     /// The engine site the read acts under (`@baseline`, `@follow_up`): a

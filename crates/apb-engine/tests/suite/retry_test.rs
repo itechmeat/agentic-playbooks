@@ -86,7 +86,7 @@ fn retry_recovers_flaky_agent() {
 }
 
 // A pipeline with executor main (claude-code) and fallback claude. Both share the same
-// stub program via APB_AGENT_CMD (adapter_for maps both claude-code and claude to ClaudeAdapter).
+// stub program via APB_AGENT_CMD (adapter_for maps both claude-code and claude to CliAdapter).
 // defaults.max_retries is unset -> retries=0, i.e. one attempt per chain executor.
 const WF_FALLBACK: &str = r#"
 schema: 1

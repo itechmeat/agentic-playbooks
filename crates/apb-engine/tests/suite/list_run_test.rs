@@ -846,6 +846,43 @@ fn an_unstartable_item_in_a_host_session_run_fails_without_a_host_fallback() {
     assert_eq!(runs_of(root, "b"), 1);
 }
 
+/// The same refusal in a plain `cli` run with no host session: there is no
+/// host step to fall back to, so the item fails with the CLI's error, no
+/// `execution_fallback` and no `host_task_requested` is journaled, the
+/// other item passes and the run ends.
+#[test]
+fn an_unstartable_item_in_a_cli_run_fails_without_a_host_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let list = format!(
+        "items: {{ inline: [ {{ id: a }}, {{ id: b }} ] }}\nbatch: {{ size: 2, parallel: 2, retries: 0 }}\n{OUTPUT_CHECK}"
+    );
+    seed(root, &playbook(&list, "", ""), &[]);
+    let hook =
+        "if [ \"$I\" = a ]; then echo 'Error: Not logged in. Please run /login' >&2; exit 1; fi";
+    let _env = Env::set(&stub(root, hook), &[]);
+    let res = run_list(root);
+    assert_eq!(res.outcome, RunStatus::Succeeded, "the run ends");
+    let ev = events(root, &res.run_id);
+    let asked = ev.iter().any(|e| {
+        matches!(
+            e.payload,
+            EventPayload::HostTaskRequested { .. } | EventPayload::ExecutionFallback { .. }
+        )
+    });
+    assert!(!asked, "a list item never falls back to a host task");
+    let a = last_state(&ev, "a");
+    assert_eq!(a.state, "needs_look", "{a:?}");
+    assert!(
+        a.note
+            .as_deref()
+            .is_some_and(|n| n.contains("Not logged in")),
+        "the item carries the CLI's error: {a:?}"
+    );
+    assert_eq!(last_state(&ev, "b").state, "passed");
+    assert_eq!(runs_of(root, "b"), 1);
+}
+
 /// A script step runs once per item with the item in its environment: each
 /// run gets its own item's id and the file holding its own JSON; its stdout
 /// is the item's output.
@@ -887,6 +924,140 @@ printf '{"blocking":"0","id":"%s","n":"%s","file":"%s"}\n' "$APB_ITEM_ID" "$n" "
         .collect();
     assert_ne!(files[0], files[1], "each item has a file of its own");
     assert_eq!(out["passed"], 2);
+}
+
+/// The script a commit item runs: it writes its own file and commits it
+/// once, with the `Apb-Run` trailer naming the run. A lock directory under
+/// the ignored `stub/`, made with `mkdir` (atomic in plain sh, no `flock`
+/// command, which macOS does not ship), serializes the commits, so sibling
+/// items never race on git's index (a commit that meets a transient
+/// `index.lock`, git's own or one a read of the tree took, is tried again a
+/// few times); a commit that still fails fails the item, so a lost commit
+/// cannot pass a test.
+fn commit_script() -> &'static str {
+    r#"until mkdir stub/git.lock.d 2>/dev/null; do sleep 0.01; done
+echo "done-$APB_ITEM_ID" > "item-$APB_ITEM_ID.txt"
+rc=1
+for try in 1 2 3 4 5 6 7 8 9 10; do
+  git add "item-$APB_ITEM_ID.txt" &&
+    git -c user.name=t -c user.email=t@example.com commit -q -m "item $APB_ITEM_ID
+
+Apb-Run: $APB_RUN_ID" && { rc=0; break; }
+  sleep 0.1
+done
+rmdir stub/git.lock.d
+[ "$rc" -eq 0 ] || exit 1
+printf '{"blocking":"0"}\n'
+"#
+}
+
+/// The subjects of the commits on `HEAD` of the tree at `root`.
+fn commit_subjects(root: &Path) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .args(["log", "--format=%s"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// A list playbook whose `work` is a script node that commits, over items
+/// `a` and `b`.
+fn commit_playbook(batch: &str) -> String {
+    let list =
+        format!("items: {{ inline: [ {{ id: a }}, {{ id: b }} ] }}\n{batch}\n{OUTPUT_CHECK}");
+    playbook(&list, "", "").replace(
+        "    type: agent_task\n    prompt: \"Handle one item of the list.\"\n",
+        "    type: script\n    script: scripts/item.sh\n    runner: sh\n",
+    )
+}
+
+/// One worker: the items run one after another, so each execution's
+/// `artifacts_committed` is its item's own. The journal holds two
+/// `artifacts_committed` events for the node, each listing exactly one
+/// commit whose `Apb-Run` trailer names the run. Script executions journal
+/// no attempt, so the journal ties an event to its item only by order and
+/// by what the commit says: the first event lies before item `a` settles
+/// and holds `item a`, the second lies between the two settlements and
+/// holds `item b`.
+#[test]
+fn items_of_one_worker_each_record_their_own_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(
+        root,
+        &commit_playbook("batch: { size: 1, parallel: 1, retries: 0 }"),
+        &[("item.sh", commit_script())],
+    );
+    let _env = Env::set(&stub(root, ""), &[]);
+    let res = run_list(root);
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let ev = events(root, &res.run_id);
+    assert_eq!(last_state(&ev, "a").state, "passed");
+    assert_eq!(last_state(&ev, "b").state, "passed");
+    let committed: Vec<&Event> = ev
+        .iter()
+        .filter(|e| {
+            matches!(&e.payload, EventPayload::ArtifactsCommitted { node, .. } if node == "work")
+        })
+        .collect();
+    assert_eq!(committed.len(), 2, "one artifacts_committed per item");
+    let settled_at = |item: &str| {
+        ev.iter()
+            .find(|e| matches!(&e.payload, EventPayload::ListItemSettled { item: i, .. } if i == item))
+            .map(|e| e.seq)
+            .unwrap_or_else(|| panic!("item {item} settled"))
+    };
+    let windows = [(0, settled_at("a")), (settled_at("a"), settled_at("b"))];
+    for ((event, item), (after, before)) in committed.iter().zip(["a", "b"]).zip(windows) {
+        let EventPayload::ArtifactsCommitted { commits, .. } = &event.payload else {
+            unreachable!("filtered above")
+        };
+        assert!(
+            event.seq > after && event.seq < before,
+            "item {item}'s commits are journaled within its own execution"
+        );
+        assert_eq!(commits.len(), 1, "item {item} committed once");
+        assert_eq!(commits[0].subject, format!("item {item}"));
+        assert_eq!(
+            commits[0].apb_run,
+            Some(vec![res.run_id.clone()]),
+            "the commit's Apb-Run trailer names the run"
+        );
+    }
+}
+
+/// Several workers: the items share the tree and their commits move the
+/// same `HEAD`, so no execution is tracked and the journal holds no commit
+/// record for the node; the run still succeeds.
+#[test]
+fn items_of_several_workers_record_no_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(
+        root,
+        &commit_playbook("batch: { size: 2, parallel: 2, retries: 0 }"),
+        &[("item.sh", commit_script())],
+    );
+    let _env = Env::set(&stub(root, ""), &[]);
+    let res = run_list(root);
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let ev = events(root, &res.run_id);
+    assert_eq!(last_state(&ev, "a").state, "passed");
+    assert_eq!(last_state(&ev, "b").state, "passed");
+    assert!(
+        !ev.iter().any(|e| matches!(&e.payload,
+            EventPayload::ArtifactsCommitted { node, .. } if node == "work")),
+        "a member of a concurrent batch is not tracked"
+    );
+    // Both commits landed: the lock kept the items off each other's index.
+    let subjects = commit_subjects(root);
+    for item in ["a", "b"] {
+        assert!(subjects.contains(&format!("item {item}")), "{subjects:?}");
+    }
 }
 
 /// The parsed output of `work`'s (last) `node_finished`.

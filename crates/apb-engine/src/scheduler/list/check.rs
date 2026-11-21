@@ -155,6 +155,10 @@ fn read_ctx<'b>(run: &'b ListRun<'_, '_, '_>, events: &'b [crate::event::Event])
         events,
         // Sibling items change the tree while this one is checked.
         guard_tree: run.workers == 1,
+        // The tree lock predicate over the list run's playbook and config,
+        // and one worker (siblings write the tree, as `guard_tree` says):
+        // only then may a JUnit report scan trust the reports.
+        holds_tree: crate::scheduler::entry::holds_tree(ctx.playbook, ctx.cfg) && run.workers == 1,
         scripts_label: "item check scripts",
         site: apb_core::baseline::BASELINE_SITE,
         cap_secs: crate::run_deadline::latch(ctx.run_dir).map(|l| l.left_secs()),

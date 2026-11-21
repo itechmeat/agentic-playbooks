@@ -1,11 +1,11 @@
 //! Task 6: the stdout marker scan, exercised at the adapter boundary.
 //!
-//! These are pure adapter tests (no drive loop): a `ClaudeAdapter` runs a stub
+//! These are pure adapter tests (no drive loop): a `CliAdapter` runs a stub
 //! whose stdout carries the question marker, and we assert how the scan reacts
 //! to the `AgentTask.interactive` gate and to malformed JSON. No waits (the
 //! stub exits immediately), so nothing here needs a bounded poll.
 
-use apb_engine::adapter::{AgentAdapter, AgentFailure, AgentTask, ClaudeAdapter, ErrorClass};
+use apb_engine::adapter::{AgentAdapter, AgentFailure, AgentTask, CliAdapter, ErrorClass};
 use apb_engine::invocation::builtin;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -55,7 +55,7 @@ fn task<'a>(
 #[test]
 fn interactive_marker_parses_question_with_options() {
     let dir = tempfile::tempdir().unwrap();
-    let ad = ClaudeAdapter {
+    let ad = CliAdapter {
         program: stub_agent(
             dir.path(),
             "printf '%s\\n' '<<<apb:question>>>'\nprintf '%s\\n' '{\"question\":\"Which DB?\",\"options\":[\"pg\",\"sqlite\"]}'",
@@ -77,7 +77,7 @@ fn interactive_marker_parses_question_with_options() {
 #[test]
 fn interactive_malformed_marker_json_fails_naming_node() {
     let dir = tempfile::tempdir().unwrap();
-    let ad = ClaudeAdapter {
+    let ad = CliAdapter {
         program: stub_agent(
             dir.path(),
             // Truncated JSON object: not parseable as AskedQuestion.
@@ -113,7 +113,7 @@ fn interactive_malformed_marker_json_fails_naming_node() {
 #[test]
 fn non_interactive_marker_is_ordinary_output() {
     let dir = tempfile::tempdir().unwrap();
-    let ad = ClaudeAdapter {
+    let ad = CliAdapter {
         program: stub_agent(
             dir.path(),
             "printf '%s\\n' '<<<apb:question>>>'\nprintf '%s\\n' '{\"question\":\"ignored\"}'\nprintf '%s\\n' done",

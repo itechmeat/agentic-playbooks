@@ -219,11 +219,11 @@ cases:
 
   - function: create_release
     account: { api_base: https://gitlab.com/api/v4 }
-    args: { project: "42", tag_name: v1.4.0, name: "v1.4.0", description: "Ship it" }
+    args: { project: "42", tag_name: v1.4.0, name: "v1.4.0", description: "/close later" }
     expect:
       method: POST
       url: https://gitlab.com/api/v4/projects/42/releases
-      body_contains: { tag_name: v1.4.0, name: "v1.4.0", description: "Ship it" }
+      body_contains: { tag_name: v1.4.0, name: "v1.4.0", description: "/close later" }
 
   - function: get_release_by_tag
     account: { api_base: https://gitlab.com/api/v4 }
@@ -238,6 +238,20 @@ cases:
     expect:
       method: GET
       url: https://gitlab.com/api/v4/projects/42/releases/rc%201
+
+  - function: list_releases
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42" }
+    expect:
+      method: GET
+      url: "https://gitlab.com/api/v4/projects/42/releases"
+
+  - function: list_releases
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", order_by: created_at, sort: desc, per_page: 20 }
+    expect:
+      method: GET
+      url: "https://gitlab.com/api/v4/projects/42/releases?order_by=created_at&per_page=20&sort=desc"
 
   - function: list_pipelines
     account: { api_base: https://gitlab.com/api/v4 }

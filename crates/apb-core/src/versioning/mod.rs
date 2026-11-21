@@ -9,6 +9,7 @@
 //! comments will lose formatting.
 
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -1667,6 +1668,29 @@ fn temp_dir_name(version: &str) -> String {
     format!(".tmp-{version}-{nanos}")
 }
 
+/// Whether `name` is one of the names the creation of a draft itself writes
+/// into its claimed playbook directory: its staging directory
+/// (`.tmp-<DRAFT_VERSION>-<nanos>`, the name [`temp_dir_name`] builds), the
+/// pointer lock (`.candidate.lock`, taken by the draft's move of `current`)
+/// and the pointer's intent and history files. Exactly these four: any
+/// other name, dot or not (`.env`, `.git`), is someone's data, never debris.
+pub(crate) fn is_draft_debris(name: &OsStr) -> bool {
+    let Some(s) = name.to_str() else {
+        return false;
+    };
+    if s == crate::candidate_pointer::CANDIDATE_LOCK_FILE
+        || s == current::INTENT_FILE
+        || s == current::HISTORY_FILE
+    {
+        return true;
+    }
+    match s.strip_prefix(&format!(".tmp-{DRAFT_VERSION}-")) {
+        // The staging directory's nanos: all ASCII digits.
+        Some(nanos) => !nanos.is_empty() && nanos.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
+}
+
 fn playbook_yaml_for_version(
     playbook: &Playbook,
     version: &str,
@@ -1967,6 +1991,27 @@ mod tests {
         // Unfreezing lets a new version through again.
         fs::remove_file(pb_dir.join(crate::registry::FROZEN_MARKER)).unwrap();
         create_version(root, "implement-task", VALID, None, true).unwrap();
+    }
+
+    /// The doctor's draft-debris test and the staging name never drift: the
+    /// name `temp_dir_name(DRAFT_VERSION)` writes is debris, and no other
+    /// name is, dot or not (`.env`, `.git`), a version or `current`.
+    #[test]
+    fn a_staging_name_is_draft_debris() {
+        use std::ffi::OsStr;
+        assert!(is_draft_debris(OsStr::new(&temp_dir_name(DRAFT_VERSION))));
+        assert!(is_draft_debris(OsStr::new(".tmp-1.0.0-123")));
+        assert!(is_draft_debris(OsStr::new(
+            crate::candidate_pointer::CANDIDATE_LOCK_FILE
+        )));
+        assert!(is_draft_debris(OsStr::new(current::INTENT_FILE)));
+        assert!(is_draft_debris(OsStr::new(current::HISTORY_FILE)));
+        assert!(!is_draft_debris(OsStr::new(".tmp-2.0.0-1")));
+        assert!(!is_draft_debris(OsStr::new(".tmp-1.0.0-x")));
+        assert!(!is_draft_debris(OsStr::new(".env")));
+        assert!(!is_draft_debris(OsStr::new(".git")));
+        assert!(!is_draft_debris(OsStr::new("1.0.0")));
+        assert!(!is_draft_debris(OsStr::new("current")));
     }
 
     /// Shipped content goes through [`write_version_in`], into

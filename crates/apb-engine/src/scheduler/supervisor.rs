@@ -94,7 +94,7 @@ pub fn spawn_supervisor_agent(
     let mut last_err: Option<String> = None;
     let mut held: Option<(crate::pause::PauseRequest, String)> = None;
     for inv in &entry.chain {
-        let adapter = crate::adapter::ClaudeAdapter {
+        let adapter = crate::adapter::CliAdapter {
             program: inv.canonical_executable.to_string_lossy().into_owned(),
             spec: inv.spec.clone(),
         };
@@ -204,7 +204,7 @@ pub(crate) fn spawn_supervisor_or_hold(
 /// supervisor spends a model turn re-reading its whole conversation, so the
 /// wait should be as long as the agent's MCP tool-call limit allows. Claude
 /// Code's limit is set for the supervisor process (`MCP_TOOL_TIMEOUT`, see
-/// `ClaudeAdapter::spawn_supervisor`), so it can block for the server maximum;
+/// `CliAdapter::spawn_supervisor`), so it can block for the server maximum;
 /// other agents keep under the ~60 s default of the strictest hosts (Codex).
 pub(crate) fn supervisor_wait_ms(agent_id: &str) -> u64 {
     if apb_core::agents::lookup(agent_id)

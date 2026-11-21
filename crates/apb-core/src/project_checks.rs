@@ -24,6 +24,12 @@
 //! elsewhere in the file, and a workspace member's own manifest.
 
 mod cargo_manifest;
+mod junit;
+
+pub use junit::{
+    FailingTest, MAX_REPORT_BYTES, MAX_REPORT_FILES, TOO_MANY_FAILING, encode_item, failed_tests,
+    failed_tests_within, is_wildcard, junit_items, matcher, render_item,
+};
 
 use std::path::Path;
 
@@ -40,6 +46,15 @@ pub struct ProjectChecksSpec {
     /// project defines.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub only: Vec<String>,
+    /// A glob of JUnit XML reports, relative to the run's tree, that the
+    /// project's `test` commands other than `cargo test` write. Read after
+    /// each such command; only reports the command wrote (absent before
+    /// it ran, or with another length, content digest or modification
+    /// time than before) count. The reports
+    /// must sit in a git-ignored place, since a project check must leave
+    /// the tree as it found it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub junit: Option<String>,
 }
 
 /// One command found in the project.
@@ -479,6 +494,26 @@ mod tests {
             "test:\n\t./run\nbuild:\n\tcc\n",
             "test:\n\t./run\n\n\n\nbuild:\n\tcc\n"
         ));
+    }
+
+    #[test]
+    fn junit_round_trips() {
+        let spec: ProjectChecksSpec =
+            serde_json::from_str(r#"{"only":["test"],"junit":"reports/*.xml"}"#).unwrap();
+        assert_eq!(spec.junit.as_deref(), Some("reports/*.xml"));
+        let back = serde_json::to_string(&spec).unwrap();
+        assert!(back.contains(r#""junit":"reports/*.xml""#), "{back}");
+        assert_eq!(
+            serde_json::from_str::<ProjectChecksSpec>(&back).unwrap(),
+            spec
+        );
+    }
+
+    #[test]
+    fn an_absent_junit_is_not_serialized() {
+        let spec: ProjectChecksSpec = serde_json::from_str("{}").unwrap();
+        assert_eq!(spec.junit, None);
+        assert_eq!(serde_json::to_string(&spec).unwrap(), "{}");
     }
 
     #[test]
