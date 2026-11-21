@@ -7,8 +7,8 @@
 //!
 //! `Expectation` is one struct with all optional fields (not an untagged enum)
 //! so `deny_unknown_fields` actually applies (serde ignores it inside untagged
-//! variants); `resolve` discriminates by shape - `inbox` -> inbox, `imap` ->
-//! imap, `envelope` -> smtp, `status`/`body` -> mock, otherwise HTTP
+//! variants); `resolve` discriminates by shape - `inbox` -> inbox, `mcp` ->
+//! mcp, `imap` -> imap, `envelope` -> smtp, `status`/`body` -> mock, otherwise HTTP
 //! (`method` + `url`).
 //!
 //! Envelope semantics (cross-slice obligation 5): every `Envelope` field is
@@ -137,6 +137,8 @@ pub struct Expectation {
     #[serde(default)]
     pub inbox: Option<InboxExpect>,
     #[serde(default)]
+    pub mcp: Option<McpExpect>,
+    #[serde(default)]
     pub reconcile: Option<ReconcileExpect>,
     /// Responses the offline runner answers the rendered request (and each
     /// next page) with, in order.
@@ -257,6 +259,16 @@ pub struct InboxExpect {
     pub skipped: Option<u64>,
 }
 
+/// The mcp expectation: the tool the function maps and a subset of the
+/// arguments the call would send (the marker preview included).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpExpect {
+    pub tool: String,
+    #[serde(default)]
+    pub arguments_contain: Option<Value>,
+}
+
 /// The resolved, shape-typed view of an `Expectation`, borrowed from it.
 /// `reconcile` wins the discrimination: such a case checks a listing, not a
 /// rendered request.
@@ -279,11 +291,12 @@ pub enum ExpectKind<'a> {
     },
     Imap(&'a ImapExpect),
     Inbox(&'a InboxExpect),
+    Mcp(&'a McpExpect),
     Reconcile(&'a ReconcileExpect),
 }
 
 impl Expectation {
-    /// Discriminates the expectation shape. `imap` -> imap; `envelope` ->
+    /// Discriminates the expectation shape. `mcp` -> mcp; `imap` -> imap; `envelope` ->
     /// smtp; `status` or `body` -> mock; otherwise HTTP (which requires
     /// `method` and `url`). An incomplete shape is an error naming what is
     /// missing.
@@ -293,6 +306,9 @@ impl Expectation {
         }
         if let Some(inbox) = &self.inbox {
             return Ok(ExpectKind::Inbox(inbox));
+        }
+        if let Some(mcp) = &self.mcp {
+            return Ok(ExpectKind::Mcp(mcp));
         }
         if let Some(imap) = &self.imap {
             return Ok(ExpectKind::Imap(imap));
@@ -311,7 +327,7 @@ impl Expectation {
             return Ok(ExpectKind::Mock { status, body });
         }
         let method = self.method.as_deref().ok_or_else(|| {
-            "expectation must be inbox (`inbox`), imap (`imap`), http (`method` + `url`), smtp (`envelope`), or mock (`status` + `body`)".to_string()
+            "expectation must be inbox (`inbox`), mcp (`mcp`), imap (`imap`), http (`method` + `url`), smtp (`envelope`), or mock (`status` + `body`)".to_string()
         })?;
         let url = self
             .url
@@ -423,6 +439,42 @@ cases:
             _ => panic!("a reconcile expectation must resolve to reconcile"),
         }
         let bad = "cases:\n  - function: f\n    intent: { run: r, node: n, nonce: x, bogus: 1 }\n    expect: { status: 200, body: {} }\n";
+        assert!(TestsDoc::from_yaml(bad).is_err());
+    }
+
+    #[test]
+    fn an_mcp_expectation_resolves() {
+        let yaml = r#"
+cases:
+  - function: create_issue
+    args: { title: Hi }
+    expect:
+      mcp:
+        tool: create_issue
+        arguments_contain: { title: Hi }
+  - function: whoami
+    expect:
+      mcp: { tool: whoami }
+"#;
+        let doc = TestsDoc::from_yaml(yaml).unwrap();
+        match doc.cases[0].expect.resolve().unwrap() {
+            ExpectKind::Mcp(m) => {
+                assert_eq!(m.tool, "create_issue");
+                assert_eq!(
+                    m.arguments_contain,
+                    Some(serde_json::json!({ "title": "Hi" }))
+                );
+            }
+            _ => panic!("an mcp expectation must resolve to mcp"),
+        }
+        match doc.cases[1].expect.resolve().unwrap() {
+            ExpectKind::Mcp(m) => {
+                assert_eq!(m.tool, "whoami");
+                assert!(m.arguments_contain.is_none());
+            }
+            _ => panic!("an mcp expectation must resolve to mcp"),
+        }
+        let bad = "cases:\n  - function: f\n    expect:\n      mcp: { tool: t, bogus: 1 }\n";
         assert!(TestsDoc::from_yaml(bad).is_err());
     }
 

@@ -6,7 +6,7 @@
 pub mod consent;
 pub(crate) mod token;
 
-pub(crate) use token::TokenSource;
+pub(crate) use token::{TokenProxy, TokenSource, adopt_minted};
 
 // `consent` is reached as `connector::oauth::consent::{plan, start, finish}`.
 

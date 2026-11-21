@@ -652,9 +652,13 @@ impl ConnectorDoc {
     ///     HTTP field and declares `idempotency` unless `read_only`
     ///     (`super::mcp::validate_function_shape`). A connector carries an
     ///     `mcp:` block exactly when it declares mcp functions; with the
-    ///     block, every function is mcp or mock, `auth`, `webhook` and
+    ///     block, every function is mcp or mock, `webhook` and
     ///     `error_when` are absent, only read-only functions share a tool,
-    ///     and the block passes `super::mcp::validate_server_shape`.
+    ///     and the block passes `super::mcp::validate_server_shape`. A
+    ///     stdio block takes no `auth`; an http block (`url`, `https://`
+    ///     as its literal scheme, `protocol: modern`) takes `auth` of kind
+    ///     `header` or `oauth2_refresh` only, and its `url` takes
+    ///     `{{account.*}}` placeholders only.
     pub fn from_yaml(yaml: &str, expected_name: &str) -> Result<Self, ConnectorError> {
         let doc: ConnectorDoc =
             yaml_serde::from_str(yaml).map_err(|e| ConnectorError::Yaml(e.to_string()))?;
@@ -1347,7 +1351,6 @@ fn validate_mcp_connector(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
         )));
     }
     let fields = [
-        ("auth", doc.auth.is_some()),
         ("webhook", doc.webhook.is_some()),
         ("error_when", doc.error_when.is_some()),
     ];
@@ -1355,6 +1358,30 @@ fn validate_mcp_connector(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
         return Err(ConnectorError::Invalid(format!(
             "connector `{c}` has an `mcp:` block and must not set `{field}`"
         )));
+    }
+    match (spec.transport, &doc.auth) {
+        (_, None) => {}
+        (super::mcp::McpTransportKind::Stdio, Some(_)) => {
+            return Err(ConnectorError::Invalid(format!(
+                "connector `{c}` has a stdio `mcp:` block and must not set `auth`"
+            )));
+        }
+        (
+            super::mcp::McpTransportKind::Http,
+            Some(AuthSpec::Header { .. } | AuthSpec::Oauth2Refresh { .. }),
+        ) => {}
+        (super::mcp::McpTransportKind::Http, Some(auth)) => {
+            let kind = match auth {
+                AuthSpec::Query { .. } => "query",
+                AuthSpec::Path { .. } => "path",
+                AuthSpec::Basic { .. } => "basic",
+                AuthSpec::Header { .. } => "header",
+                AuthSpec::Oauth2Refresh { .. } => "oauth2_refresh",
+            };
+            return Err(ConnectorError::Invalid(format!(
+                "connector `{c}` reaches its MCP server over http and takes `auth` of kind `header` or `oauth2_refresh` only, not `{kind}`"
+            )));
+        }
     }
     if let Some(f) = doc.functions.iter().find(|f| !f.is_mcp() && !f.is_mock()) {
         return Err(ConnectorError::Invalid(format!(
@@ -1580,8 +1607,9 @@ pub fn validate_templates(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
 
 /// Validates the placeholders of a connector's `mcp:` block: `command`
 /// takes none, each `args` entry takes `{{account.*}}` only (an argument
-/// shows in the process list, so never a secret), and an `env` value takes
-/// `{{account.*}}` and `{{secret.*}}`. `{{args.*}}` is refused in the whole
+/// shows in the process list, so never a secret), an `env` value takes
+/// `{{account.*}}` and `{{secret.*}}`, and the http `url` takes
+/// `{{account.*}}` only (a secret goes in the `auth` block's header). `{{args.*}}` is refused in the whole
 /// block: the call's arguments go to the tool, not to the transport.
 fn validate_mcp_templates(
     mcp: &super::mcp::McpServerSpec,
@@ -1605,7 +1633,8 @@ fn validate_mcp_templates(
         .env
         .iter()
         .map(|(name, v)| (format!("mcp env.{name}"), v, true));
-    for (where_, template, secret_ok) in args.chain(env) {
+    let url = mcp.url.iter().map(|u| ("mcp url".to_string(), u, false));
+    for (where_, template, secret_ok) in url.chain(args).chain(env) {
         for (ns, name) in placeholders(template)? {
             reject_auth(ns, &where_)?;
             match ns {

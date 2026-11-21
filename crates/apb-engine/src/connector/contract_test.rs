@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 
 use apb_core::connector::contract::{
-    Envelope, ExpectKind, ImapExpect, InboxExpect, IntentCase, ReconcileExpect, ReconcileOutcome,
-    TestCase, TestsDoc,
+    Envelope, ExpectKind, ImapExpect, InboxExpect, IntentCase, McpExpect, ReconcileExpect,
+    ReconcileOutcome, TestCase, TestsDoc,
 };
 use apb_core::connector::def::{ConnectorDoc, FunctionSpec, InboxOp};
 use apb_core::connector::idempotency::Idempotency;
@@ -125,6 +125,7 @@ fn evaluate(doc: &ConnectorDoc, case: &TestCase) -> Result<(), String> {
         ExpectKind::Smtp(envelope) => eval_smtp(doc, function, &case.account, &args, envelope),
         ExpectKind::Imap(expected) => eval_imap(doc, function, &case.account, &args, expected),
         ExpectKind::Inbox(expected) => eval_inbox(function, &args, expected),
+        ExpectKind::Mcp(expected) => eval_mcp(doc, function, &case.account, &args, expected),
     }
 }
 
@@ -751,6 +752,52 @@ fn filter_of(
     serde_json::from_value(Value::Object(value))
         .map(Some)
         .map_err(|e| format!("the dry run carries an unreadable filter: {e}"))
+}
+
+/// Matches an `mcp` expectation (design mcp-http-and-surfaces D5 "Contract
+/// tests"): the function must be an mcp function mapping the expected
+/// tool, and the arguments the call would send, rendered through the same
+/// `mcp::dry_run` a `--dry-run` call takes with the marker preview, must
+/// contain `arguments_contain`. No server starts, no secret is resolved,
+/// nothing is sent.
+fn eval_mcp(
+    doc: &ConnectorDoc,
+    function: &FunctionSpec,
+    account: &BTreeMap<String, String>,
+    args: &Value,
+    expected: &McpExpect,
+) -> Result<(), String> {
+    let Some(mcp) = function.mcp.as_ref() else {
+        return Err(format!(
+            "function `{}` is not an mcp function but the case expects an mcp call",
+            function.name
+        ));
+    };
+    if mcp.tool != expected.tool {
+        return Err(format!(
+            "tool mismatch: the case expects `{}`, the function maps `{}`",
+            expected.tool, mcp.tool
+        ));
+    }
+    let dry = crate::connector::mcp::dry_run(
+        doc,
+        function,
+        &doc.name,
+        "contract",
+        account,
+        args,
+        Some(&Stamp::Preview),
+    )
+    .map_err(|e| format!("render failed: {}", e.message))?;
+    if let Some(want) = &expected.arguments_contain
+        && !json_subset(want, &dry["arguments"])
+    {
+        return Err(format!(
+            "arguments mismatch: expected to contain {want}, got {}",
+            dry["arguments"]
+        ));
+    }
+    Ok(())
 }
 
 /// Matches an `inbox` expectation. Fully offline and filesystem-free: the
@@ -1535,5 +1582,146 @@ functions:
             let result = run(&y, PAGED_YAML, 0);
             assert_eq!(result.passed, expect_pass, "{}: {}", ctype, result.detail);
         }
+    }
+
+    // -- mcp expectation (design mcp-http-and-surfaces D5 "Contract tests") --
+
+    const MCP_YAML: &str = r#"
+name: tracker-mcp
+version: 0.1.0
+mcp:
+  transport: stdio
+  command: /usr/local/bin/tracker-mcp
+  args: ["--workspace", "{{account.workspace}}"]
+  env:
+    TRACKER_TOKEN: "{{secret.token}}"
+account_fields:
+  - { name: workspace, required: true }
+  - { name: token, required: true, secret: true }
+identity: { function: whoami, path: id }
+functions:
+  - name: whoami
+    description: The account the server acts as
+    read_only: true
+    mcp: { tool: whoami }
+  - name: search_issues
+    description: Search issues by text
+    read_only: true
+    mcp: { tool: search_issues }
+    args_schema:
+      type: object
+      properties: { query: { type: string } }
+      required: [query]
+  - name: list_comments
+    description: Recent comments of one issue
+    read_only: true
+    mcp: { tool: list_comments }
+    args_schema:
+      type: object
+      properties: { issue: { type: string }, since: { type: string } }
+      required: [issue]
+  - name: create_comment
+    description: Add a comment to an issue
+    mcp: { tool: create_comment }
+    args_schema:
+      type: object
+      properties: { issue: { type: string }, body: { type: string } }
+      required: [issue, body]
+    idempotency:
+      mode: marker
+      arg: body
+      format: html_comment
+      reconcile:
+        function: list_comments
+        args_from_send: [issue]
+        since_arg: since
+        items: comments
+        text: body
+        author: author.id
+        item_ref: url
+"#;
+
+    fn mcp_doc() -> ConnectorDoc {
+        ConnectorDoc::from_yaml(MCP_YAML, "tracker-mcp").unwrap()
+    }
+
+    #[test]
+    fn an_mcp_case_checks_tool_and_arguments() {
+        let tests = TestsDoc::from_yaml(
+            r#"
+cases:
+  - function: search_issues
+    account: { workspace: acme }
+    args: { query: login bug }
+    expect:
+      mcp:
+        tool: search_issues
+        arguments_contain: { query: login bug }
+  - function: search_issues
+    account: { workspace: acme }
+    args: { query: login bug }
+    expect:
+      mcp:
+        tool: search_issues
+        arguments_contain: { query: another bug }
+"#,
+        )
+        .unwrap();
+        let report = run_tests(&mcp_doc(), &tests);
+        assert!(report.results[0].passed, "{}", report.results[0].detail);
+        assert!(!report.results[1].passed);
+        assert!(
+            report.results[1].detail.contains("arguments"),
+            "{}",
+            report.results[1].detail
+        );
+    }
+
+    #[test]
+    fn an_mcp_case_shows_the_marker_preview() {
+        let tests = TestsDoc::from_yaml(&format!(
+            r#"
+cases:
+  - function: create_comment
+    account: {{ workspace: acme }}
+    args: {{ issue: "7", body: Fixed }}
+    expect:
+      mcp:
+        tool: create_comment
+        arguments_contain: {{ issue: "7", body: "Fixed\n\n{}" }}
+"#,
+            crate::connector::intent::stamp::MARKER_PREVIEW
+        ))
+        .unwrap();
+        let report = run_tests(&mcp_doc(), &tests);
+        assert!(failing(&report).is_empty(), "{:?}", failing(&report));
+    }
+
+    #[test]
+    fn a_tool_mismatch_fails() {
+        let tests = TestsDoc::from_yaml(
+            "cases:\n  - function: whoami\n    account: { workspace: acme }\n    expect:\n      mcp: { tool: who_am_i }\n",
+        )
+        .unwrap();
+        let report = run_tests(&mcp_doc(), &tests);
+        assert!(!report.results[0].passed);
+        assert_eq!(
+            report.results[0].detail,
+            "tool mismatch: the case expects `who_am_i`, the function maps `whoami`"
+        );
+    }
+
+    #[test]
+    fn an_mcp_case_against_an_http_function_fails() {
+        let tests = TestsDoc::from_yaml(
+            "cases:\n  - function: get_item\n    args: { id: \"1\" }\n    expect:\n      mcp: { tool: get_item }\n",
+        )
+        .unwrap();
+        let report = run_tests(&doc(), &tests);
+        assert!(!report.results[0].passed);
+        assert_eq!(
+            report.results[0].detail,
+            "function `get_item` is not an mcp function but the case expects an mcp call"
+        );
     }
 }

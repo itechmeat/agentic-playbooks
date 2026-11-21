@@ -230,7 +230,7 @@ mod tests {
             );
             assert!(!ok);
             assert_eq!(value["error"]["code"], "permission", "{value}");
-            let (value, ok) = crate::connector::call::healthcheck(root.path(), "any", "a");
+            let (value, ok) = crate::connector::call::healthcheck(root.path(), "any", "a", crate::decision_channel::DecisionChannel::Terminal);
             assert!(!ok);
             assert!(value.to_string().contains(READ_ONLY_REFUSAL), "{value}");
         }

@@ -22,6 +22,8 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::Path;
 
+use apb_engine::decision_channel::DecisionChannel;
+
 use apb_core::connector::config::{self, account_digest};
 use apb_core::connector::resolve::resolve_playbook;
 use apb_core::connector::store;
@@ -369,7 +371,7 @@ fn e2e_healthcheck_mock_ping_after_approval() {
     );
 
     // Before any approval the probe refuses: the connector digest is unknown.
-    let (denied, ok0) = healthcheck(root.path(), CONNECTOR, "acct1");
+    let (denied, ok0) = healthcheck(root.path(), CONNECTOR, "acct1", DecisionChannel::Terminal);
     assert!(!ok0, "an unapproved connector must refuse: {denied}");
     assert_eq!(denied["error"]["code"], serde_json::json!("permission"));
 
@@ -399,7 +401,7 @@ fn e2e_healthcheck_mock_ping_after_approval() {
     }
 
     // The mock `ping` needs no network and answers the canned body.
-    let (value, ok) = healthcheck(root.path(), CONNECTOR, "acct1");
+    let (value, ok) = healthcheck(root.path(), CONNECTOR, "acct1", DecisionChannel::Terminal);
     assert!(
         ok,
         "mock healthcheck should succeed after approval: {value}"

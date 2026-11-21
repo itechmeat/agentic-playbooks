@@ -17,7 +17,7 @@ use apb_core::connector::config;
 use apb_core::connector::mcp::pins::{
     BindingDiff, LiveBinding, PinStore, ProgramFact, program_status,
 };
-use apb_core::connector::mcp::{McpProtocol, McpServerSpec};
+use apb_core::connector::mcp::{McpProtocol, McpServerSpec, McpTransportKind};
 use apb_core::connector::store;
 use apb_core::step_env::StepCaller;
 use apb_core::trust::{Kind, OriginKind, TrustStore, account_trust_id};
@@ -115,7 +115,13 @@ fn launcher_warning(name: &str) -> String {
 /// The tree confirmation: the digest and the whole `mcp:` block, every
 /// `env` entry with its template as written (no account value is read).
 pub(crate) fn print_tree(name: &str, digest: &str, spec: &McpServerSpec) -> Vec<String> {
-    let command = spec.command.clone().unwrap_or_default();
+    // An http block names its `url` template where a stdio block names
+    // its command.
+    let command = spec
+        .command
+        .clone()
+        .or_else(|| spec.url.clone())
+        .unwrap_or_default();
     let mut lines = vec![
         format!("connector {} digest {digest}", shown(name)),
         format!("mcp: {} {}", spec.transport.as_str(), shown(&command)),
@@ -132,7 +138,13 @@ pub(crate) fn print_tree(name: &str, digest: &str, spec: &McpServerSpec) -> Vec<
         McpProtocol::Legacy => "legacy",
     };
     lines.push(format!("protocol: {protocol}"));
-    if let Some(l) = apb_core::connector::mcp::launcher_name(&command) {
+    // Only a stdio command runs on this machine: an http url's last path
+    // segment names no program.
+    if let Some(l) = spec
+        .command
+        .as_deref()
+        .and_then(apb_core::connector::mcp::launcher_name)
+    {
         lines.push(launcher_warning(l));
     }
     lines
@@ -147,6 +159,41 @@ pub(crate) fn print_program(
     binding: &str,
     preview: &StartPreview,
 ) -> Vec<String> {
+    if let Some(http) = &preview.http {
+        // Nothing runs on this machine: no launcher warning, no
+        // `RUNS_AS_YOU` line.
+        let mut lines = vec![
+            shown(binding),
+            format!("endpoint: {}", shown(&http.endpoint)),
+            format!(
+                "endpoint digest: {} ({})",
+                facts.program_digest, facts.status
+            ),
+            format!("auth: {}", shown(&http.auth)),
+        ];
+        if let Some(t) = &http.token_url {
+            lines.push(format!("token endpoint: {}", shown(t)));
+        }
+        if let Some(c) = &http.client_id {
+            lines.push(format!("client id: {}", shown(c)));
+        }
+        if let Some((name, value)) = &http.header {
+            lines.push(format!("header: {}={}", shown(name), shown(value)));
+        }
+        lines.extend(
+            preview
+                .fields
+                .iter()
+                .map(|(k, v)| format!("field: {}={}", shown(k), shown(v))),
+        );
+        lines.extend(
+            preview
+                .secret_commands
+                .iter()
+                .map(|(k, v)| format!("secret command: {}: {}", shown(k), shown(v))),
+        );
+        return lines;
+    }
     let mut lines = vec![
         shown(binding),
         format!(
@@ -225,21 +272,28 @@ impl ServerLines {
 /// tool (its identity always shown), then the changed descriptions,
 /// titles, input schemas, annotations and unmapped names within
 /// `SERVER_TEXT_TOTAL`.
-fn server_lines(rows: &[ToolRow], unmapped: &[String]) -> ServerLines {
+///
+/// `digests`: whether each row's identity carries its digest (the
+/// approval's confirmation) or not (`apb connector tools`).
+fn server_lines(rows: &[ToolRow], unmapped: &[String], digests: bool) -> ServerLines {
     let mut server = ServerLines {
         lines: Vec::new(),
         used: 0,
         left_out: 0,
     };
     for row in rows {
+        let identity = format!(
+            "{}  {}  {}",
+            shown(&row.function),
+            shown(&row.tool),
+            row.status
+        );
         server.push_row(
-            format!(
-                "{}  {}  {}  {}",
-                shown(&row.function),
-                shown(&row.tool),
-                row.status,
-                row.digest.as_deref().unwrap_or("-"),
-            ),
+            if digests {
+                format!("{identity}  {}", row.digest.as_deref().unwrap_or("-"))
+            } else {
+                identity
+            },
             sanitize_for_terminal(
                 row.description.as_deref().unwrap_or_default(),
                 ROW_DESCRIPTION_CHARS,
@@ -314,7 +368,7 @@ pub(crate) fn print_pins(listing: &ToolListing) -> Vec<String> {
     if let Some(l) = &p.launcher {
         lines.push(launcher_warning(l));
     }
-    let mut server = server_lines(&listing.rows, &listing.unmapped);
+    let mut server = server_lines(&listing.rows, &listing.unmapped, true);
     lines.append(&mut server.lines);
     if server.left_out > 0 {
         lines.push(format!(
@@ -488,16 +542,30 @@ fn approve_account(
         ));
     };
     let account_digest = config::account_digest(account);
-    let command = loaded
-        .doc
-        .mcp
-        .as_ref()
-        .and_then(|m| m.command.clone())
-        .unwrap_or_default();
-    // The person's own terminal is the fixed source at approval.
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let (program, program_digest) =
-        pin::resolve_program(&command, &path).map_err(|e| failed(err, &e.message))?;
+    let spec = loaded.doc.mcp.as_ref();
+    let is_http = spec.is_some_and(|m| m.transport == McpTransportKind::Http);
+    let (command, (program, program_digest)) = if is_http {
+        // The endpoint and its digest from the account's non-secret
+        // fields: no secret, no request.
+        let secret = loaded.doc.secret_fields();
+        let fields = account
+            .fields
+            .iter()
+            .filter(|(k, _)| !secret.contains(k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let url = spec.and_then(|m| m.url.clone()).unwrap_or_default();
+        let target =
+            pin::http_program(&loaded.doc, &fields).map_err(|e| failed(err, &e.message))?;
+        (url, target)
+    } else {
+        let command = spec.and_then(|m| m.command.clone()).unwrap_or_default();
+        // The person's own terminal is the fixed source at approval.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let resolved =
+            pin::resolve_program(&command, &path).map_err(|e| failed(err, &e.message))?;
+        (command, resolved)
+    };
     let preview = apb_engine::connector::mcp::preview_start(&loaded.doc, account)
         .map_err(|e| failed(err, &e.message))?;
     // A store that does not read stops here, before the first question:
@@ -508,7 +576,11 @@ fn approve_account(
         .cloned();
     let status = program_status(record.as_ref(), &program, &program_digest);
     let facts = ProgramFacts {
-        launcher: apb_core::connector::mcp::launcher_name(&command).map(str::to_string),
+        launcher: if is_http {
+            None
+        } else {
+            apb_core::connector::mcp::launcher_name(&command).map(str::to_string)
+        },
         command,
         program: program.clone(),
         program_digest: program_digest.clone(),
@@ -519,11 +591,22 @@ fn approve_account(
         &format!("connector {name} account {acct}"),
         &preview,
     );
-    let question = format!(
-        "Start {} with these arguments and this environment, and the secrets of account `{}`? Type the connector name to confirm:",
-        shown(&program),
-        shown(acct)
-    );
+    let question = match preview.http.as_ref() {
+        Some(http) => format!(
+            "Send the secrets of account `{}` to {}{}? Type the connector name to confirm:",
+            shown(acct),
+            shown(&http.endpoint),
+            http.token_url
+                .as_ref()
+                .map(|t| format!(" and its token endpoint {}", shown(t)))
+                .unwrap_or_default()
+        ),
+        None => format!(
+            "Start {} with these arguments and this environment, and the secrets of account `{}`? Type the connector name to confirm:",
+            shown(&program),
+            shown(acct)
+        ),
+    };
     confirmed(confirm, err, name, &lines, &question)?;
     let listing = pin::list_live(
         root,
@@ -538,6 +621,9 @@ fn approve_account(
     )
     .map_err(|e| {
         let _ = writeln!(err, "{}", shown(&e.message));
+        for w in &e.warnings {
+            let _ = writeln!(err, "warning: {}", shown(w));
+        }
         2u8
     })?;
     let question = format!(
@@ -580,6 +666,111 @@ fn approve_account(
     Ok(())
 }
 
+/// `apb connector tools` (design D5 "`apb connector tools`"): the live
+/// listing of an approved account. Starts the approved server with the
+/// account's secrets; writes nothing. Exit 0 when every row is `pinned`, 3
+/// when any is not, 2 on a refusal.
+pub(crate) fn tools_cmd(
+    root: &Path,
+    name: &str,
+    account: Option<&str>,
+    json: bool,
+) -> std::process::ExitCode {
+    use std::process::ExitCode;
+    if let Some(why) = StepCaller::from_env().refusal("listing an MCP connector's tools") {
+        eprintln!("{}", shown(&why));
+        return ExitCode::from(2);
+    }
+    let loaded = match store::load(name) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("connector error: {}", shown(&e.to_string()));
+            return ExitCode::from(2);
+        }
+    };
+    if loaded.doc.mcp.is_none() {
+        eprintln!("connector `{}` has no MCP server", shown(name));
+        return ExitCode::from(2);
+    }
+    let deadline = std::time::Instant::now() + pin::MCP_PIN_CHECK_TIMEOUT;
+    // Outside a run step the command line is a person's, the rule a
+    // connector approval follows on the CLI.
+    let channel = apb_engine::decision_channel::DecisionChannel::Terminal;
+    let listing = match pin::list_approved(root, name, account, channel, deadline) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("{}", shown(&e.message));
+            for w in &e.warnings {
+                eprintln!("warning: {}", shown(w));
+            }
+            return ExitCode::from(2);
+        }
+    };
+    if json {
+        match serde_json::to_value(pin::listing_view(&listing)) {
+            Ok(v) => crate::util::print_json(&v),
+            Err(e) => {
+                eprintln!("connector error: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        let mints = matches!(
+            loaded.doc.auth,
+            Some(apb_core::connector::def::AuthSpec::Oauth2Refresh { .. })
+        );
+        for line in tools_lines(&listing, mints) {
+            println!("{line}");
+        }
+    }
+    if listing.rows.iter().all(|r| r.status == "pinned") {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(3)
+    }
+}
+
+/// The note of a listing that mints an access token.
+const MINTS_NOTE: &str = "note: listing mints an access token; a provider that rotates refresh tokens may invalidate the stored one (docs/CONNECTORS.md, OAuth accounts)";
+
+/// The text of `apb connector tools`: the account and its era, the server,
+/// the note of a connector whose listing mints a token (`mints`), one row
+/// per mapped tool without a digest and the server text within
+/// `SERVER_TEXT_TOTAL`, the cleanup warning, and the line of a listing
+/// with a row that is not `pinned`. No digest and no approve command.
+fn tools_lines(listing: &ToolListing, mints: bool) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "connector {} account {} ({})",
+            shown(&listing.connector),
+            shown(&listing.account),
+            cut_marked(&listing.era, ERA_CHARS)
+        ),
+        format!("server: {}", shown(&listing.program.program)),
+    ];
+    if mints {
+        lines.push(MINTS_NOTE.to_string());
+    }
+    let mut server = server_lines(&listing.rows, &listing.unmapped, false);
+    lines.append(&mut server.lines);
+    if server.left_out > 0 {
+        lines.push(format!(
+            "[{} more lines of server text left out: past the screen's limit of {SERVER_TEXT_TOTAL} characters]",
+            server.left_out
+        ));
+    }
+    if let Some(note) = &listing.cleanup {
+        lines.push(format!("warning: {}", shown(note)));
+    }
+    if listing.rows.iter().any(|r| r.status != "pinned") {
+        lines.push(
+            "a person approves changed tools again at a terminal (docs/CONNECTORS.md, MCP servers)"
+                .to_string(),
+        );
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -590,6 +781,37 @@ mod tests {
 
     const CONNECTOR: &str = "tracker-mcp";
     const ACCOUNT: &str = "work";
+
+    /// An http url whose last segment is a launcher's name gets no
+    /// launcher warning; a stdio command that is one keeps it.
+    #[test]
+    fn the_tree_warns_of_a_launcher_command_only() {
+        let http = McpServerSpec {
+            transport: apb_core::connector::mcp::McpTransportKind::Http,
+            command: None,
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            url: Some("https://tracker.example/node".into()),
+            protocol: McpProtocol::Modern,
+        };
+        let lines = print_tree(CONNECTOR, "sha256:t", &http);
+        assert!(
+            lines.iter().all(|l| !l.starts_with("warning:")),
+            "{lines:?}"
+        );
+        let stdio = McpServerSpec {
+            transport: apb_core::connector::mcp::McpTransportKind::Stdio,
+            command: Some("/usr/bin/node".into()),
+            url: None,
+            protocol: McpProtocol::Auto,
+            ..http
+        };
+        let lines = print_tree(CONNECTOR, "sha256:t", &stdio);
+        assert!(
+            lines.iter().any(|l| l.starts_with("warning: node")),
+            "{lines:?}"
+        );
+    }
     const TOKEN_VAR: &str = "APB_CLI_MCP_TOKEN";
     const TOKEN: &str = "cli-token-value-5521";
 
@@ -833,6 +1055,71 @@ functions:
                 String::from_utf8(err).unwrap(),
             )
         }
+    }
+
+    /// An http connector over `auth`, its endpoint and token endpoint on
+    /// `127.0.0.1` ports of the account.
+    fn http_yaml(auth: &str) -> String {
+        format!(
+            "name: tracker-mcp\nversion: 0.1.0\nmcp:\n  transport: http\n  url: \"http://127.0.0.1:{{{{account.port}}}}/mcp\"\n  protocol: modern\n{auth}account_fields:\n  - {{ name: port, required: true }}\n  - {{ name: token_port }}\n  - {{ name: client_id }}\n  - {{ name: token, required: true, secret: true }}\nfunctions:\n  - name: whoami\n    description: The account the server acts as\n    read_only: true\n    mcp: {{ tool: whoami }}\n"
+        )
+    }
+
+    #[test]
+    fn the_http_program_confirmation_shows_the_endpoint_and_token_url() {
+        child(
+            "the_http_program_confirmation_shows_the_endpoint_and_token_url",
+            || {
+                let mcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let tok = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                mcp.set_nonblocking(true).unwrap();
+                tok.set_nonblocking(true).unwrap();
+                let (mport, tport) = (
+                    mcp.local_addr().unwrap().port(),
+                    tok.local_addr().unwrap().port(),
+                );
+                let oauth = "auth:\n  kind: oauth2_refresh\n  token_url: \"http://127.0.0.1:{{account.token_port}}/token\"\n  client_id_template: \"{{account.client_id}}\"\n  refresh_token_template: \"{{secret.token}}\"\n";
+                let fx = Fx::with(|_| http_yaml(oauth));
+                fx.write_account(
+                    &format!("{{{{env.{TOKEN_VAR}}}}}"),
+                    &format!("port: \"{mport}\"\ntoken_port: \"{tport}\"\nclient_id: client-9\n"),
+                );
+                let mut script = Script::new(&[None]);
+                let (code, _, _) = fx.approve(&mut script, Some(ACCOUNT));
+                assert_ne!(code, 0);
+                let shown = script.shown();
+                assert!(
+                    shown.contains(&format!("endpoint: http://127.0.0.1:{mport}/mcp")),
+                    "{shown}"
+                );
+                assert!(
+                    shown.contains(&format!("token endpoint: http://127.0.0.1:{tport}/token")),
+                    "{shown}"
+                );
+                assert!(shown.contains("client id: client-9"), "{shown}");
+                assert!(shown.contains("auth: oauth2_refresh"), "{shown}");
+                assert!(shown.contains(&format!("Send the secrets of account `{ACCOUNT}` to http://127.0.0.1:{mport}/mcp and its token endpoint http://127.0.0.1:{tport}/token")), "{shown}");
+                assert!(!shown.contains(RUNS_AS_YOU), "{shown}");
+                assert!(!shown.contains(TOKEN), "{shown}");
+                // The header kind: the header with its masked template.
+                let header = "auth:\n  kind: header\n  header: X-Api-Key\n  value_template: \"{{secret.token}}\"\n";
+                fx.install(&http_yaml(header));
+                fx.approve_tree_directly();
+                let mut script = Script::new(&[None]);
+                let (code, _, _) = fx.approve(&mut script, Some(ACCOUNT));
+                assert_ne!(code, 0);
+                let shown = script.shown();
+                assert!(
+                    shown.contains(&format!(
+                        "header: X-Api-Key=[secret token from env {TOKEN_VAR}]"
+                    )),
+                    "{shown}"
+                );
+                assert!(mcp.accept().is_err(), "the MCP endpoint saw nothing");
+                assert!(tok.accept().is_err(), "the token endpoint saw nothing");
+                assert!(fx.pin_bytes().is_none());
+            },
+        );
     }
 
     #[test]
@@ -1141,7 +1428,7 @@ functions:
                 input_schema: Some(json!({ "x": "s".repeat(3_000) })),
             })
             .collect();
-        let server = server_lines(&rows, &[]);
+        let server = server_lines(&rows, &[], true);
         assert!(server.left_out > 0, "the budget was spent");
         for i in 0..40 {
             let identity = format!("f{i}  t{i}  unpinned  sha256:{i:064}");
@@ -1217,6 +1504,108 @@ functions:
                 assert!(lines[n - 3].starts_with("program digest: "), "{lines:?}");
             },
         );
+    }
+
+    /// `print_pins` keeps its lines byte for byte, the digest column of
+    /// every row included, now that `server_lines` takes a digest flag.
+    #[test]
+    fn print_pins_is_unchanged_by_the_digest_flag() {
+        child("print_pins_is_unchanged_by_the_digest_flag", || {
+            let fx = Fx::new();
+            let accounts = config::load_merged(&fx.root, CONNECTOR).unwrap();
+            let account = accounts.iter().find(|a| a.name == ACCOUNT).unwrap();
+            let bytes = std::fs::read(&fx.program).unwrap();
+            let program = fx.program.to_string_lossy().into_owned();
+            let program_digest = apb_core::content::sha256_hex(&bytes);
+            let listing = pin::list_live(
+                &fx.root,
+                CONNECTOR,
+                ACCOUNT,
+                &ConfirmedProgram {
+                    connector_digest: fx.tree(),
+                    account_digest: config::account_digest(account),
+                    program: program.clone(),
+                    program_digest: program_digest.clone(),
+                },
+            )
+            .unwrap();
+            let digest = |function: &str| {
+                listing
+                    .rows
+                    .iter()
+                    .find(|r| r.function == function)
+                    .and_then(|r| r.digest.clone())
+                    .unwrap()
+            };
+            let schema = |function: &str| {
+                listing
+                    .rows
+                    .iter()
+                    .find(|r| r.function == function)
+                    .and_then(|r| r.input_schema.clone())
+                    .unwrap()
+                    .to_string()
+            };
+            let expected = vec![
+                format!("connector tracker-mcp account work ({})", listing.era),
+                format!("program: {program} -> {program}"),
+                format!("program digest: {program_digest} (new)"),
+                format!(
+                    "whoami  whoami  unpinned  {}  The account the server acts as",
+                    digest("whoami")
+                ),
+                format!("input schema: {}", schema("whoami")),
+                "annotations (shown, not used): {\"readOnlyHint\":true}".to_string(),
+                format!(
+                    "search_issues  search_issues  unpinned  {}  Search issues by text",
+                    digest("search_issues")
+                ),
+                "title: Search".to_string(),
+                format!("input schema: {}", schema("search_issues")),
+                format!(
+                    "create_comment  create_comment  unpinned  {}  Add a comment to an issue",
+                    digest("create_comment")
+                ),
+                format!("input schema: {}", schema("create_comment")),
+                "unmapped: admin_tool".to_string(),
+                format!("program digest: {program_digest} (new)"),
+                "tools: 0 pinned, 3 unpinned, 0 changed, 0 missing".to_string(),
+                format!("pin digest: {}", listing.pin_digest),
+            ];
+            assert_eq!(print_pins(&listing), expected);
+        });
+    }
+
+    /// The listing of a connector whose listing mints a token says so
+    /// before the rows; no line carries a digest.
+    #[test]
+    fn tools_lines_note_a_minted_token_before_the_rows() {
+        child("tools_lines_note_a_minted_token_before_the_rows", || {
+            let fx = Fx::new();
+            let accounts = config::load_merged(&fx.root, CONNECTOR).unwrap();
+            let account = accounts.iter().find(|a| a.name == ACCOUNT).unwrap();
+            let bytes = std::fs::read(&fx.program).unwrap();
+            let listing = pin::list_live(
+                &fx.root,
+                CONNECTOR,
+                ACCOUNT,
+                &ConfirmedProgram {
+                    connector_digest: fx.tree(),
+                    account_digest: config::account_digest(account),
+                    program: fx.program.to_string_lossy().into_owned(),
+                    program_digest: apb_core::content::sha256_hex(&bytes),
+                },
+            )
+            .unwrap();
+            let lines = tools_lines(&listing, true);
+            assert_eq!(lines[2], MINTS_NOTE);
+            assert!(
+                lines[3].starts_with("whoami  whoami  unpinned  The account"),
+                "{lines:?}"
+            );
+            assert!(!lines.iter().any(|l| l.contains("sha256:")), "{lines:?}");
+            assert!(!tools_lines(&listing, false).iter().any(|l| l == MINTS_NOTE));
+        });
     }
 
     #[test]

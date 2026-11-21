@@ -421,7 +421,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_playbook_ref(playbook, &mut r); // V22
     check_connectors(playbook, ctx, &mut r); // V23-V26, V42, V43, V69, V84
     connectors::check_untrusted_output(playbook, ctx, &mut r); // V187
-    mcp::check_mcp_bindings(playbook, ctx, &mut r); // V300 to V302
+    mcp::check_mcp_bindings(playbook, ctx, &mut r); // V300 to V303
     baseline::check_baseline(playbook, ctx, &mut r); // V62-V67
     follow_up::check_follow_up(playbook, ctx, &mut r); // V183-V186
     check_cache(playbook, &mut r); // V27, V28, V29

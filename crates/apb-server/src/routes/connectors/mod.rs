@@ -410,7 +410,7 @@ pub(crate) async fn get_connector_handler(
     // On disk either way (parseable or broken); only `NotInstalled` is absent.
     let installed = !matches!(install, InstallState::NotInstalled);
 
-    Json(serde_json::json!({
+    let mut detail = serde_json::json!({
         "name": name,
         "version": public.doc.version,
         "installed": installed,
@@ -420,8 +420,225 @@ pub(crate) async fn get_connector_handler(
         "body_md": public.body_md,
         "functions": functions,
         "accounts": accounts,
-    }))
-    .into_response()
+    });
+    if let InstallState::Installed(loaded) = &install
+        && let Some(spec) = &loaded.doc.mcp
+    {
+        let workspaces = match selected_workspaces(&state, q.workspace.as_deref()) {
+            Ok(w) => w,
+            Err(e) => return e,
+        };
+        match mcp_block(&name, loaded, spec, &workspaces) {
+            Ok(block) => detail["mcp"] = block,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        }
+    }
+    Json(detail).into_response()
+}
+
+/// The `mcp` block of an MCP connector's detail (design D5 "Dashboard" item
+/// 1), from the manifest and the pin store, named fields only: no digest,
+/// nothing started. One account row per project and account, built per
+/// project from `config::load_merged` (never through [`merged_accounts`],
+/// which keeps the first project of an account name), each compared with
+/// its own account digest through `ServerPin::compare`, the program not
+/// read, as the doctor does. A project whose account config does not parse
+/// is skipped when several are listed and is the error with one. A pin
+/// store that does not read adds `pins_error` and reads as no pins.
+fn mcp_block(
+    name: &str,
+    loaded: &store::LoadedConnector,
+    spec: &apb_core::connector::mcp::McpServerSpec,
+    workspaces: &[(String, String, PathBuf)],
+) -> Result<serde_json::Value, apb_core::connector::ConnectorError> {
+    use apb_core::connector::mcp::pins::{BindingDiff, LiveBinding, PinStore, ProgramFact};
+    fn binding<'a>(tree: &'a str, account: &'a str, tool: &'a str) -> LiveBinding<'a> {
+        LiveBinding {
+            connector_digest: tree,
+            account_digest: account,
+            program: ProgramFact::NotRead,
+            tool,
+            tool_digest: None,
+        }
+    }
+    let (pins, pins_error) = match PinStore::load() {
+        Ok(store) => (store, None),
+        Err(_) => (
+            PinStore::default(),
+            Some(apb_core::connector::mcp::pins::PIN_STORE_UNREADABLE),
+        ),
+    };
+    let mut rows = Vec::new();
+    for (workspace, label, root) in workspaces {
+        let accounts = match config::load_merged(root, name) {
+            Ok(a) => a,
+            Err(e) if workspaces.len() == 1 => return Err(e),
+            Err(_) => continue,
+        };
+        for account in accounts {
+            let account_digest = config::account_digest(&account);
+            let record = pins.server(name, &account.name);
+            // The server's own approval: the record's binding of this
+            // definition and account, no tool required.
+            let approved_at_ms = record
+                .filter(|r| {
+                    matches!(
+                        r.compare(&binding(&loaded.digest, &account_digest, "")),
+                        Ok(()) | Err(BindingDiff::ToolUnpinned)
+                    )
+                })
+                .map(|r| r.approved_at_ms);
+            let functions: Vec<serde_json::Value> = loaded
+                .doc
+                .functions
+                .iter()
+                .filter_map(|f| f.mcp.as_ref().map(|m| (f, m)))
+                .map(|(f, m)| {
+                    let approved = record.filter(|r| {
+                        r.compare(&binding(&loaded.digest, &account_digest, &m.tool))
+                            .is_ok()
+                    });
+                    serde_json::json!({
+                        "function": f.name,
+                        "tool": m.tool,
+                        "approved": approved.is_some(),
+                        // The pin's description, redacted at approval.
+                        "description": approved
+                            .and_then(|r| r.tools.get(&m.tool))
+                            .map(|t| t.description.as_str()),
+                    })
+                })
+                .collect();
+            rows.push(serde_json::json!({
+                "workspace": workspace,
+                "root_label": label,
+                "account": account.name,
+                "approved_at_ms": approved_at_ms,
+                "functions": functions,
+            }));
+        }
+    }
+    let mut block = serde_json::json!({
+        "transport": spec.transport.as_str(),
+        "protocol": spec.protocol,
+        "command": spec.command,
+        "env": spec.env.keys().collect::<Vec<_>>(),
+        "accounts": rows,
+    });
+    if spec.transport == apb_core::connector::mcp::McpTransportKind::Http {
+        // The url template as written and the connector-level auth kind.
+        use apb_core::connector::def::AuthSpec;
+        let auth = match loaded.doc.auth.as_ref() {
+            None => "none",
+            Some(AuthSpec::Header { .. }) => "header",
+            Some(AuthSpec::Oauth2Refresh { .. }) => "oauth2_refresh",
+            Some(AuthSpec::Query { .. }) => "query",
+            Some(AuthSpec::Basic { .. }) => "basic",
+            Some(AuthSpec::Path { .. }) => "path",
+        };
+        block["url"] = serde_json::json!(spec.url);
+        block["auth"] = serde_json::json!(auth);
+    }
+    if let Some(e) = pins_error {
+        block["pins_error"] = serde_json::json!(e);
+    }
+    Ok(block)
+}
+
+/// The 403 of a caller refused by the engine's one rule of a surface that
+/// starts an MCP server with an account's secrets
+/// (`pin::refuse_caller`, decided on the definition it executes): the
+/// engine's own message under its `mcp_needs_a_person` code.
+fn refused_caller(message: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": apb_engine::connector::mcp::pin::MCP_NEEDS_A_PERSON,
+            "message": message,
+        })),
+    )
+        .into_response()
+}
+
+/// POST /api/connectors/{name}/mcp-tools/{account}: the live listing of an
+/// approved MCP account (design D5 "Dashboard" item 2), for a signed-in
+/// session only: the request's channel goes to `pin::list_approved`,
+/// which decides it on the definition it lists, before any secret, and a
+/// refusal answers 403. The project is
+/// the row's `?workspace=<id>`, resolved strictly; a dashboard bound to
+/// one project uses its root, and a machine-wide one without `workspace`
+/// answers 400. The account is looked up in that project's merged config
+/// (404 when it is not there). Then `pin::list_approved` (the
+/// healthcheck's order: nothing starts before the binding check), answered
+/// as `{ ok: true, listing: <ListingView> }` or `{ ok: false, error }`.
+/// Writes nothing.
+pub(crate) async fn mcp_tools_handler(
+    State(state): State<AppState>,
+    AxPath((name, account)): AxPath<(String, String)>,
+    Query(q): Query<WorkspaceQuery>,
+    channel: Option<axum::Extension<crate::auth::RequestChannel>>,
+) -> impl IntoResponse {
+    let channel = crate::auth::RequestChannel::of(channel.map(|c| c.0));
+    if q.workspace.is_none() && state.root.is_none() {
+        return (StatusCode::BAD_REQUEST, "name the project of the account").into_response();
+    }
+    let root = match resolve_root(&state, q.workspace.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    match config::load_merged(&root, &name) {
+        Ok(accounts) if accounts.iter().any(|a| a.name == account) => {}
+        Ok(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                format!("account `{account}` not configured for `{name}`"),
+            )
+                .into_response();
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+    let listed = tokio::task::spawn_blocking(move || {
+        use apb_engine::connector::mcp::pin;
+        match pin::list_approved(
+            &root,
+            &name,
+            Some(&account),
+            channel,
+            std::time::Instant::now() + pin::MCP_PIN_CHECK_TIMEOUT,
+        ) {
+            Ok(listing) => serde_json::to_value(pin::listing_view(&listing))
+                .map(|view| Ok(serde_json::json!({ "ok": true, "listing": view })))
+                .map_err(|e| e.to_string()),
+            // A refusal carries the engine's message, answered 403 below.
+            Err(e) if pin::is_caller_refusal(&e) => Ok(Err(e.message)),
+            Err(e) => Ok(Ok(call_error_json(&e))),
+        }
+    })
+    .await;
+    match listed {
+        Ok(Ok(Ok(body))) => Json(body).into_response(),
+        Ok(Ok(Err(message))) => refused_caller(&message),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// `{ "ok": false, "error": { code, message, http_status?, retry_after_sec? } }`,
+/// the shape of the call executor's error result (`CallError::to_json` is
+/// the engine's own), from the error's public fields.
+fn call_error_json(e: &apb_engine::connector::result::CallError) -> serde_json::Value {
+    let mut err = serde_json::json!({ "code": e.code.as_str(), "message": e.message });
+    if let Some(s) = e.http_status {
+        err["http_status"] = serde_json::json!(s);
+    }
+    if let Some(r) = e.retry_after_sec {
+        err["retry_after_sec"] = serde_json::json!(r);
+    }
+    let mut body = serde_json::json!({ "ok": false, "error": err });
+    if !e.warnings.is_empty() {
+        body["warnings"] = serde_json::json!(e.warnings);
+    }
+    body
 }
 
 /// POST /api/connectors/{name}/healthcheck/{account}: runs the connector's
@@ -429,17 +646,29 @@ pub(crate) async fn get_connector_handler(
 /// returns the call executor's JSON verbatim. A mock healthcheck needs no
 /// network; an HTTP healthcheck actually reaches the URL - that live
 /// reachability probe is the point of the button.
+///
+/// The healthcheck of a connector with `mcp:` starts its approved program
+/// with the account's secrets, so it takes only a signed-in session, as the
+/// MCP listing does (design D5 "Dashboard" item 6): the request's channel
+/// goes to the engine, which decides it on the definition it executes,
+/// and a refusal answers 403; every other connector's healthcheck is
+/// unchanged.
 pub(crate) async fn healthcheck_connector_handler(
     State(state): State<AppState>,
     AxPath((name, account)): AxPath<(String, String)>,
     Query(q): Query<WorkspaceQuery>,
+    channel: Option<axum::Extension<crate::auth::RequestChannel>>,
 ) -> impl IntoResponse {
+    let channel = crate::auth::RequestChannel::of(channel.map(|c| c.0));
     let root = match account_scope(&state, q.workspace.as_deref(), &name, Some(&account)) {
         Ok((root, _)) => root,
         Err(e) => return e,
     };
-    let (value, _ok) = apb_engine::connector::call::healthcheck(&root, &name, &account);
-    Json(value).into_response()
+    use apb_engine::connector::call::{HealthcheckOutcome, healthcheck_outcome};
+    match healthcheck_outcome(&root, &name, &account, channel) {
+        HealthcheckOutcome::CallerRefused(e) => refused_caller(&e.message),
+        HealthcheckOutcome::Answer(value, _ok) => Json(value).into_response(),
+    }
 }
 
 #[derive(Deserialize)]

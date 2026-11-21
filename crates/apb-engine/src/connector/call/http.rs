@@ -21,7 +21,7 @@ use crate::connector::call::response::{map_status, read_body, redact_value};
 use crate::connector::call::shape::{RawResponse, ShapeRules, check_content_type, shape};
 use crate::connector::call::url_encode::{assemble_url, encode_component};
 use crate::connector::call::wire::BODY_CAP;
-use crate::connector::oauth::{ROTATION_WARNING, TokenSource};
+use crate::connector::oauth::{TokenSource, adopt_minted};
 use crate::connector::result::{
     BodyIncomplete, CallError, CallErrorCode, CallOk, Dispatched, redact_message,
 };
@@ -179,17 +179,15 @@ impl HttpCall {
                 };
                 match minted {
                     Ok(minted) => {
-                        if minted.rotated {
-                            warnings.push(ROTATION_WARNING.to_string());
-                        }
-                        self.register_redaction(minted.access.clone(), "oauth:access_token");
-                        if let Some(new) = &minted.new_refresh {
-                            self.register_redaction(new.clone(), "oauth:refresh_token");
-                        }
+                        let fresh = adopt_minted(
+                            &minted,
+                            &mut |value, label| self.register_redaction(value, label),
+                            &mut warnings,
+                        );
                         // The retry's answer is final: a second 401
                         // maps to auth as today, any other status is
                         // taken as it comes.
-                        access = Some(minted.access.clone());
+                        access = Some(fresh);
                         raw = self.send_raw(url, access.as_ref(), allowance)?;
                     }
                     Err(token_err) => {

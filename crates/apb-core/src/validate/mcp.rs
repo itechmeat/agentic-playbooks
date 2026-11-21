@@ -1,7 +1,8 @@
-//! The binding rules of MCP connectors (V300 to V302): a binding that
+//! The binding rules of MCP connectors (V300 to V303): a binding that
 //! grants every function warns (V300), an interpreter or launcher command
-//! warns (V301),
-//! and an MCP connector at an engine site is refused (V302).
+//! warns (V301), an MCP connector at an engine site is refused (V302), and
+//! an http MCP connector whose auth header is one the transport sets is
+//! refused (V303).
 
 use super::*;
 
@@ -12,6 +13,9 @@ use super::*;
 /// (`MCP_LAUNCHERS`), whose approval covers that program file only, not
 /// the script or package it runs. V302 (error): an MCP connector bound at an engine
 /// site (the baseline check, the follow-up check or a list item check).
+/// V303 (error): an http MCP connector whose `auth: { kind: header }`
+/// names a header the transport sets itself
+/// (`ConnectorFacts.mcp_reserved_header`), at every binding site.
 /// Silent when `ctx.connectors` is empty or does not know the connector.
 pub(super) fn check_mcp_bindings(
     playbook: &Playbook,
@@ -31,6 +35,15 @@ pub(super) fn check_mcp_bindings(
                 continue;
             }
             let name = &b.name;
+            if let Some(header) = &facts.mcp_reserved_header {
+                r.error(
+                    "V303",
+                    Some(site),
+                    format!(
+                        "node `{site}` binds MCP connector `{name}`, whose auth header `{header}` is one the HTTP transport sets itself; name another header"
+                    ),
+                );
+            }
             if is_engine_site(site) || crate::list::check_site_node(site).is_some() {
                 r.error(
                     "V302",
@@ -316,5 +329,57 @@ edges:
             &ctx_with(facts(TRACKER)),
         );
         assert!(of_code(&found, "V302").is_empty(), "{found:?}");
+    }
+
+    /// An http MCP connector whose header auth names `header`.
+    fn http_tracker(header: &str) -> String {
+        format!(
+            r#"name: tracker
+version: 0.1.0
+mcp: {{ transport: http, url: "https://{{{{account.host}}}}/mcp", protocol: modern }}
+auth: {{ kind: header, header: "{header}", value_template: "{{{{secret.token}}}}" }}
+account_fields:
+  - {{ name: host, required: true }}
+  - {{ name: token, required: true, secret: true }}
+functions:
+  - name: search_issues
+    description: Search issues
+    read_only: true
+    mcp: {{ tool: search_issues }}
+"#
+        )
+    }
+
+    #[test]
+    fn a_reserved_auth_header_is_v303() {
+        for header in ["Content-Type", "mcp-method", "HOST"] {
+            let found = issues(
+                &node_playbook("{ name: tracker, functions: [search_issues] }"),
+                &ctx_with(facts(&http_tracker(header))),
+            );
+            let v303 = of_code(&found, "V303");
+            assert_eq!(v303.len(), 1, "{header}: {found:?}");
+            assert_eq!(v303[0].severity, Severity::Error);
+            assert_eq!(v303[0].node.as_deref(), Some("a"));
+            assert_eq!(
+                v303[0].message,
+                format!(
+                    "node `a` binds MCP connector `tracker`, whose auth header `{header}` is one the HTTP transport sets itself; name another header"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_auth_header_is_not_v303() {
+        for header in ["Authorization", "X-Api-Key"] {
+            let f = facts(&http_tracker(header));
+            assert_eq!(f.mcp_reserved_header, None, "{header}");
+            let found = issues(
+                &node_playbook("{ name: tracker, functions: [search_issues] }"),
+                &ctx_with(f),
+            );
+            assert!(of_code(&found, "V303").is_empty(), "{header}: {found:?}");
+        }
     }
 }

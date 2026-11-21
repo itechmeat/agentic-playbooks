@@ -290,6 +290,8 @@ mod connector_manifest;
 mod connector_mcp;
 #[path = "suite/connector_mcp_gate.rs"]
 mod connector_mcp_gate;
+#[path = "suite/connector_mcp_http.rs"]
+mod connector_mcp_http;
 #[path = "suite/connector_mcp_send.rs"]
 mod connector_mcp_send;
 #[path = "suite/connector_oauth.rs"]

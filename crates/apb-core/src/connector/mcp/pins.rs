@@ -21,6 +21,12 @@ pub const PIN_STORE_FILE: &str = "mcp-tools.json";
 /// store would be longer, so every record that succeeds loads again.
 pub const PIN_STORE_CAP: usize = 4 * 1024 * 1024;
 
+/// What a surface outside the terminal says of a pin store that does not
+/// read: fixed words, never the reader's diagnostic, which can quote a
+/// stored value and names the local path. `apb connector doctor` prints
+/// the diagnostic itself.
+pub const PIN_STORE_UNREADABLE: &str = "the MCP tool pin store does not read; run `apb connector doctor` at a terminal for the details";
+
 /// The lock file of the store, next to it.
 const PIN_STORE_LOCK: &str = "mcp-tools.json.lock";
 
@@ -51,11 +57,15 @@ pub struct ServerPin {
     /// for one project's account never serves another project's account of
     /// the same name.
     pub account_digest: String,
-    /// The definition's `command` as written when approved. Display only.
+    /// The definition's `command` as written when approved (for an http
+    /// server, its `url` template). Display only.
     pub command: String,
-    /// The absolute canonical path the approval resolved it to.
+    /// The absolute canonical path the approval resolved it to; for an
+    /// http server, the rendered endpoint (no file is opened by it).
     pub program: String,
-    /// `sha256:<hex>` of the program file's bytes at approval.
+    /// `sha256:<hex>` of the program file's bytes at approval; for an http
+    /// server, `digest::endpoint_digest` of the rendered endpoint and token
+    /// URL, recomputed and compared on every call.
     pub program_digest: String,
     /// Tool name -> its pin.
     pub tools: BTreeMap<String, ToolPin>,

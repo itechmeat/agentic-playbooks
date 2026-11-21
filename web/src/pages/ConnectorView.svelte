@@ -8,6 +8,7 @@
     revokeTrust,
     runConnectorHealthcheck,
     uninstallConnector,
+    type ConnectorDetailWithMcp,
     type HealthcheckResult,
   } from '../lib/api'
   import {
@@ -25,7 +26,6 @@
     showPlayground,
     trustBadge,
     type ConnectorAccount,
-    type ConnectorDetail,
   } from '../lib/connectors'
   import {
     errorRate,
@@ -43,6 +43,7 @@
   import StatusBar, { type StatusItem } from '$lib/components/StatusBar.svelte'
   import ConnectorPlaygroundPanel from '$lib/components/ConnectorPlaygroundPanel.svelte'
   import ConnectorInboxPanel from '$lib/components/ConnectorInboxPanel.svelte'
+  import McpToolsSection from '$lib/components/McpToolsSection.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Badge } from '$lib/components/ui/badge'
   import * as Table from '$lib/components/ui/table'
@@ -61,7 +62,7 @@
 
   let { name, workspace = '' }: { name: string; workspace?: string } = $props()
 
-  let detail = $state<ConnectorDetail | null>(null)
+  let detail = $state<ConnectorDetailWithMcp | null>(null)
   let loaded = $state(false)
   let stats = $state<ConnectorStats | null>(null)
   let statsLoaded = $state(false)
@@ -714,6 +715,12 @@
             {/if}
           </div>
         </section>
+      {/if}
+
+      <!-- An MCP connector: how apb reaches its server, each account row's
+           approval per tool, and a live listing a signed-in person asks for. -->
+      {#if detail.mcp}
+        <McpToolsSection connector={name} mcp={detail.mcp} {workspace} />
       {/if}
 
       <ConnectorInboxPanel

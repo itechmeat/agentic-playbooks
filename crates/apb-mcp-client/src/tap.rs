@@ -53,6 +53,12 @@ struct TapState {
     /// Whole lines from the server that did not start a JSON object and
     /// were dropped unread; a count only.
     dropped: usize,
+    /// The frames an HTTP session read (`read_frame`), toward `MAX_LINES`:
+    /// an HTTP session has no `TapReader` whose own counter holds them.
+    http_frames: usize,
+    /// The answer bytes an HTTP session read (`read_body`), toward
+    /// `MAX_SESSION_BYTES`.
+    http_bytes: usize,
 }
 
 /// The gate of every write to the server's stdin, under its own lock (held
@@ -179,7 +185,7 @@ impl LineTap {
         Poll::Ready(Ok(n))
     }
 
-    fn is_sealed(&self) -> bool {
+    pub(crate) fn is_sealed(&self) -> bool {
         self.gate.lock().map_or(true, |s| s.sealed)
     }
 
@@ -282,6 +288,73 @@ impl LineTap {
         Ok(())
     }
 
+    /// Classifies one whole message an HTTP session is about to post, as
+    /// the writer classifies a line (`classify_line`): a `tools/list` id
+    /// is registered before the request is built, and a message the tap
+    /// cannot classify is refused and seals the gate. `Ok(true)` for a
+    /// `tools/call`.
+    pub(crate) fn classify_message(&self, bytes: &[u8]) -> std::io::Result<bool> {
+        self.classify_line(bytes)
+    }
+
+    /// Counts a `tools/call` POST as handed over, under the gate's lock,
+    /// before its connection is opened: `false` (and nothing counted) once
+    /// the gate is sealed, so a sealed session starts no POST.
+    pub(crate) fn start_call(&self) -> bool {
+        let Ok(mut g) = self.gate.lock() else {
+            return false;
+        };
+        if g.sealed {
+            return false;
+        }
+        g.calls_handed = g.calls_handed.saturating_add(1);
+        true
+    }
+
+    /// Reads one frame of an HTTP answer (a JSON body, or the joined data
+    /// of one event) by the strict rule (`observe`), after counting it
+    /// toward `MAX_LINES`. `Err` with the message of the limit (also kept
+    /// as `too_large`) or of the refusal (kept as `invalid`); nothing of a
+    /// refused frame is handed on.
+    pub(crate) fn read_frame(&self, bytes: &[u8]) -> Result<(), String> {
+        let frames = match self.state.lock() {
+            Ok(mut s) => {
+                s.http_frames = s.http_frames.saturating_add(1);
+                s.http_frames
+            }
+            Err(_) => usize::MAX,
+        };
+        if frames > MAX_LINES {
+            return Err(self
+                .fail(format!(
+                    "mcp_message_too_large: the server sent more than {MAX_LINES} messages"
+                ))
+                .to_string());
+        }
+        self.observe(bytes)
+            .map_err(|message| self.refuse_incoming(message).to_string())
+    }
+
+    /// Counts `len` bytes of an HTTP answer toward `MAX_SESSION_BYTES`;
+    /// `Err` (kept as `too_large`) once the session passes it.
+    pub(crate) fn read_body(&self, len: usize) -> Result<(), String> {
+        let bytes = match self.state.lock() {
+            Ok(mut s) => {
+                s.http_bytes = s.http_bytes.saturating_add(len);
+                s.http_bytes
+            }
+            Err(_) => usize::MAX,
+        };
+        if bytes > MAX_SESSION_BYTES {
+            return Err(self
+                .fail(format!(
+                    "mcp_message_too_large: the server sent more than {MAX_SESSION_BYTES} bytes"
+                ))
+                .to_string());
+        }
+        Ok(())
+    }
+
     /// How many lines the reader dropped unread (`DROP` rule).
     pub(crate) fn dropped(&self) -> usize {
         self.state.lock().map_or(0, |s| s.dropped)
@@ -321,7 +394,7 @@ pub(crate) const LISTING_AMBIGUOUS: &str = "mcp_listing_ambiguous: the MCP serve
 
 /// The refusal of a request line past the line limit; nothing of it is
 /// sent.
-const REQUEST_TOO_LARGE: &str = "mcp_request_too_large: the message apb was about to send to the MCP server passed the line limit, so nothing of it was sent";
+pub(crate) const REQUEST_TOO_LARGE: &str = "mcp_request_too_large: the message apb was about to send to the MCP server passed the line limit, so nothing of it was sent";
 
 fn sealed_error() -> std::io::Error {
     std::io::Error::new(
@@ -901,6 +974,49 @@ mod tests {
         let line = listing(id);
         assert!(!tap.classify_line(line.trim_end().as_bytes()).unwrap());
         tap
+    }
+
+    /// The same listing answer read over HTTP (`read_frame`, after the
+    /// listing was classified by `classify_message`) and through the stdio
+    /// reader: the same captured result and length.
+    #[tokio::test]
+    async fn a_frame_read_over_http_is_captured_as_a_line_is() {
+        let answer =
+            br#"{"jsonrpc":"2.0","id":8,"result":{"tools":[{"name":"t","execution":{"x":1}}]}}"#;
+        let http = LineTap::new();
+        assert!(
+            !http
+                .classify_message(listing(8).trim_end().as_bytes())
+                .unwrap()
+        );
+        http.read_frame(answer).unwrap();
+        let over_http = http
+            .take_last_listing()
+            .unwrap()
+            .expect("captured over http");
+
+        let stdio = watched(8);
+        let mut line = answer.to_vec();
+        line.push(b'\n');
+        let mut reader = stdio.reader(tokio_test_stream(vec![line]));
+        let (_, failed) = drain(&mut reader).await;
+        assert_eq!(failed, None);
+        let over_stdio = stdio
+            .take_last_listing()
+            .unwrap()
+            .expect("captured over stdio");
+        assert_eq!(over_http, over_stdio);
+    }
+
+    /// Once the gate is sealed, `start_call` starts nothing and the
+    /// hand-over count stays where it was.
+    #[test]
+    fn start_call_after_the_seal_starts_nothing() {
+        let tap = LineTap::new();
+        assert!(tap.start_call());
+        assert_eq!(tap.seal(), 1);
+        assert!(!tap.start_call());
+        assert_eq!(tap.calls_handed(), 1);
     }
 
     /// Two frames for one listing id fail the listing closed, whichever

@@ -947,6 +947,28 @@ fn a_changed_execution_member_refuses_the_next_call() {
     assert_eq!(fx.stub.calls().len(), 1);
 }
 
+/// A changed tool's refusal names the listing that shows what changed,
+/// never the approve command or a digest.
+#[test]
+fn a_changed_tool_refusal_names_the_listing() {
+    let fx = Fx::new();
+    fx.pin();
+    let mut changed = tools();
+    changed[1]["description"] = json!("Search issues by text, changed");
+    fx.stub.set_tools(&changed).unwrap();
+    let (v, ok) = fx.search();
+    assert!(!ok, "{v}");
+    let text = error_message(&v);
+    assert!(text.starts_with("mcp_tool_changed:"), "{text}");
+    assert!(
+        text.contains("`apb connector tools tracker-mcp --account work` lists what changed"),
+        "{text}"
+    );
+    assert!(!text.contains("apb connector approve"), "{text}");
+    assert!(!holds_a_digest(&text), "{text}");
+    assert!(fx.stub.calls().is_empty());
+}
+
 /// The trigger of review pass 3 through the whole call path: the server
 /// answers the listing twice in one write, first with a byte order mark
 /// and `search_issues` changed in its unknown `execution` member (rmcp
@@ -1668,7 +1690,12 @@ fn the_healthcheck_checks_the_pins_without_a_call() {
     let fx = Fx::new();
     fx.install_pinned();
     let before = config_files(&fx.cfg);
-    let (v, ok) = healthcheck(&fx.root, CONNECTOR, ACCOUNT);
+    let (v, ok) = healthcheck(
+        &fx.root,
+        CONNECTOR,
+        ACCOUNT,
+        apb_engine::decision_channel::DecisionChannel::Terminal,
+    );
     assert!(ok, "{v}");
     assert_eq!(v["mcp"]["tools_checked"], json!(ALL_FUNCTIONS.len()), "{v}");
     assert!(
@@ -1683,6 +1710,63 @@ fn the_healthcheck_checks_the_pins_without_a_call() {
     assert_eq!(config_files(&fx.cfg), before, "the config dir changed");
 }
 
+/// The healthcheck and the live listing decide the caller's channel in
+/// the engine, on the one definition they then execute, before any trust
+/// read or secret: a caller that is not a person's channel is refused with
+/// the helper never run and nothing started, whatever the surface saw
+/// before (design D5 "Dashboard" items 2 and 6, Fix round 1).
+#[test]
+fn the_healthcheck_and_the_listing_refuse_a_caller_that_is_not_a_person_before_any_secret() {
+    use apb_engine::connector::mcp::pin;
+    use apb_engine::decision_channel::DecisionChannel;
+    let fx = Fx::new();
+    let helper = fx.write_helper();
+    let (tree, account) = fx.install(&format!("{{{{cmd:{}}}}}", helper.display()));
+    PinStore::record(
+        CONNECTOR,
+        ACCOUNT,
+        server_pin(&tree, &account, &fx.program, &tools()),
+    )
+    .unwrap();
+    for channel in [
+        DecisionChannel::DashboardKeyless,
+        DecisionChannel::HttpBearer,
+        DecisionChannel::Mcp,
+        DecisionChannel::RunStep,
+    ] {
+        let (v, ok) = healthcheck(&fx.root, CONNECTOR, ACCOUNT, channel);
+        assert!(!ok, "{v}");
+        assert!(
+            error_message(&v).starts_with("mcp_needs_a_person:"),
+            "{channel:?}: {v}"
+        );
+        let listed = pin::list_approved(
+            &fx.root,
+            CONNECTOR,
+            Some(ACCOUNT),
+            channel,
+            std::time::Instant::now() + pin::MCP_PIN_CHECK_TIMEOUT,
+        );
+        match listed {
+            Err(e) => assert!(pin::is_caller_refusal(&e), "{channel:?}: {}", e.message),
+            Ok(_) => panic!("{channel:?}: the listing was not refused"),
+        }
+        assert!(!fx.helper_marker().exists(), "{channel:?}: the helper ran");
+        fx.assert_not_started();
+    }
+    // A person's channel passes the same rule: the helper runs and the
+    // server starts.
+    let (v, ok) = healthcheck(
+        &fx.root,
+        CONNECTOR,
+        ACCOUNT,
+        DecisionChannel::DashboardSession,
+    );
+    assert!(ok, "{v}");
+    assert!(fx.helper_marker().exists(), "the helper ran for a session");
+    assert_eq!(fx.stub.starts().len(), 1);
+}
+
 #[test]
 fn the_healthcheck_refuses_a_changed_tool() {
     let fx = Fx::new();
@@ -1690,7 +1774,12 @@ fn the_healthcheck_refuses_a_changed_tool() {
     let mut changed = tools();
     changed[2]["description"] = json!("Recent comments of one issue, newest first");
     fx.stub.set_tools(&changed).unwrap();
-    let (v, ok) = healthcheck(&fx.root, CONNECTOR, ACCOUNT);
+    let (v, ok) = healthcheck(
+        &fx.root,
+        CONNECTOR,
+        ACCOUNT,
+        apb_engine::decision_channel::DecisionChannel::Terminal,
+    );
     assert!(!ok, "{v}");
     assert!(error_message(&v).starts_with("mcp_tool_changed:"), "{v}");
     assert!(error_message(&v).contains("list_comments"), "{v}");
@@ -1702,7 +1791,12 @@ fn the_healthcheck_of_an_unpinned_account_starts_nothing() {
     let fx = Fx::new();
     let helper = fx.write_helper();
     fx.install(&format!("{{{{cmd:{}}}}}", helper.display()));
-    let (v, ok) = healthcheck(&fx.root, CONNECTOR, ACCOUNT);
+    let (v, ok) = healthcheck(
+        &fx.root,
+        CONNECTOR,
+        ACCOUNT,
+        apb_engine::decision_channel::DecisionChannel::Terminal,
+    );
     assert!(!ok, "{v}");
     assert!(error_message(&v).starts_with("mcp_server_unpinned:"), "{v}");
     assert!(!fx.helper_marker().exists(), "the helper ran");
@@ -1713,9 +1807,41 @@ fn the_healthcheck_of_an_unpinned_account_starts_nothing() {
 fn the_healthcheck_of_a_connector_without_one_is_refused_as_on_main() {
     let fx = Fx::with(|y| y.replace("healthcheck: whoami\n", ""));
     fx.install_pinned();
-    let (v, ok) = healthcheck(&fx.root, CONNECTOR, ACCOUNT);
+    let (v, ok) = healthcheck(
+        &fx.root,
+        CONNECTOR,
+        ACCOUNT,
+        apb_engine::decision_channel::DecisionChannel::Terminal,
+    );
     assert!(!ok, "{v}");
     assert!(error_message(&v).contains("declares no healthcheck"), "{v}");
+    fx.assert_not_started();
+}
+
+/// The caller is decided before the definition's healthcheck is looked
+/// up: a channel that is not a person's is refused even when the MCP
+/// connector declares none.
+#[test]
+fn the_caller_of_an_mcp_connector_without_a_healthcheck_is_refused_first() {
+    let fx = Fx::with(|y| y.replace("healthcheck: whoami\n", ""));
+    fx.install_pinned();
+    match apb_engine::connector::call::healthcheck_outcome(
+        &fx.root,
+        CONNECTOR,
+        ACCOUNT,
+        apb_engine::decision_channel::DecisionChannel::DashboardKeyless,
+    ) {
+        apb_engine::connector::call::HealthcheckOutcome::CallerRefused(e) => {
+            assert!(
+                apb_engine::connector::mcp::pin::is_caller_refusal(&e),
+                "{}",
+                e.message
+            )
+        }
+        apb_engine::connector::call::HealthcheckOutcome::Answer(v, _) => {
+            panic!("not refused: {v}")
+        }
+    }
     fx.assert_not_started();
 }
 

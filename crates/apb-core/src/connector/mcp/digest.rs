@@ -105,6 +105,22 @@ pub fn pin_digest(
     domain_digest(PIN_DIGEST_DOMAIN, &binding)
 }
 
+/// The domain tag of an endpoint digest.
+pub const ENDPOINT_DIGEST_DOMAIN: &str = "mcp-http-endpoint/1";
+
+/// `sha256:<hex>` of `ENDPOINT_DIGEST_DOMAIN`, a newline and the canonical
+/// JSON of `{"endpoint": .., "token_url": ..}` (the token URL empty when
+/// `None`), the encoding `pin_digest` uses: what an http server pin
+/// record keeps in `program_digest`, so the pin binds the URL a call
+/// reaches and the URL its token request reaches.
+pub fn endpoint_digest(endpoint: &str, token_url: Option<&str>) -> String {
+    let binding = serde_json::json!({
+        "endpoint": endpoint,
+        "token_url": token_url.unwrap_or_default(),
+    });
+    domain_digest(ENDPOINT_DIGEST_DOMAIN, &binding)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +234,34 @@ mod tests {
         assert_eq!(
             base,
             pin_digest("sha256:c", "sha256:a", "/usr/bin/srv", "sha256:p", &tools)
+        );
+    }
+
+    #[test]
+    fn the_endpoint_digest_covers_the_token_url() {
+        let endpoint = "https://crm.example/mcp";
+        let token = Some("https://crm.example/oauth/token");
+        let base = endpoint_digest(endpoint, token);
+        assert!(base.starts_with("sha256:"), "{base}");
+        assert_eq!(base.len(), "sha256:".len() + 64, "{base}");
+        let variants = [
+            endpoint_digest("https://crm.example/mcp2", token),
+            endpoint_digest(endpoint, Some("https://crm.example/oauth/token2")),
+            endpoint_digest(endpoint, None),
+        ];
+        for v in &variants {
+            assert_ne!(*v, base);
+        }
+        assert_ne!(variants[0], variants[2]);
+        // The boundary between the two URLs is part of what is hashed.
+        assert_ne!(
+            endpoint_digest("https://a/b", Some("c")),
+            endpoint_digest("https://a/", Some("bc"))
+        );
+        assert_eq!(base, endpoint_digest(endpoint, token));
+        assert_eq!(
+            endpoint_digest(endpoint, None),
+            endpoint_digest(endpoint, None)
         );
     }
 }

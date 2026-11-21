@@ -215,6 +215,10 @@ pub fn build_router(state: AppState) -> Router {
             post(routes::connectors::healthcheck_connector_handler),
         )
         .route(
+            "/api/connectors/{name}/mcp-tools/{account}",
+            post(routes::connectors::mcp_tools_handler),
+        )
+        .route(
             "/api/connectors/{name}/call",
             post(routes::connectors::call_connector_handler),
         )

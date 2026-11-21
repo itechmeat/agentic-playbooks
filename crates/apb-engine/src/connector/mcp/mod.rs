@@ -17,7 +17,7 @@ pub(crate) mod server;
 
 pub(crate) use redact::redact_tree;
 
-pub use server::{StartPreview, preview_start};
+pub use server::{HttpPreview, StartPreview, preview_start};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -25,19 +25,22 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use apb_core::config::AccountEntry;
-use apb_core::connector::def::{ConnectorDoc, FunctionSpec};
+use apb_core::connector::def::{AuthSpec, ConnectorDoc, FunctionSpec};
 use apb_core::connector::mcp::pins::{BindingDiff, LiveBinding, PinStore, ProgramFact, ServerPin};
-use apb_core::connector::mcp::{McpProtocol, McpServerSpec};
+use apb_core::connector::mcp::{McpProtocol, McpServerSpec, McpTransportKind};
+use apb_core::connector::template::{RenderCtx, render_raw};
 use apb_core::secret::{Redaction, Secret};
 use apb_core::step_env::StepCaller;
 use apb_mcp_client::{
-    CallFailure, Ended, Era, Failure, FailureKind, GroupEnd, Lifecycle, ProgramFile, StartFrom,
-    ToolAnswer,
+    CallFailure, Ended, EnvValue, Era, Failure, FailureKind, GroupEnd, Lifecycle, ProgramFile,
+    StartFrom, ToolAnswer,
 };
 use serde_json::{Map, Value, json};
 
 use crate::connector::intent::stamp::{Stamp, prepare_body_args};
+use crate::connector::oauth::{TokenProxy, TokenSource, adopt_minted};
 use crate::connector::result::{CallError, CallErrorCode, Dispatched, redact_message};
+use server::HttpTarget;
 
 /// The client name apb gives every server it starts.
 const CLIENT_NAME: &str = "apb";
@@ -160,6 +163,31 @@ pub(crate) fn dry_run(
     require_call_arguments(connector, &function.name, args)?;
     let spec = spec_of(doc)?;
     let tool = tool_of(function)?;
+    if spec.transport == McpTransportKind::Http {
+        // The endpoint a call would reach, checked as a call checks it; no
+        // secret, no token, no request.
+        let target = server::http_target(doc, account_fields)?;
+        let auth = match doc.auth.as_ref() {
+            None => "none",
+            Some(AuthSpec::Header { .. }) => "header",
+            Some(AuthSpec::Oauth2Refresh { .. }) => "oauth2_refresh",
+            Some(AuthSpec::Query { .. }) => "query",
+            Some(AuthSpec::Basic { .. }) => "basic",
+            Some(AuthSpec::Path { .. }) => "path",
+        };
+        let arguments = prepare_body_args(function, args, stamp).into_owned();
+        return Ok(json!({
+            "ok": true,
+            "dry_run": true,
+            "connector": connector,
+            "account": account_name,
+            "transport": "http",
+            "url": target.endpoint,
+            "auth": auth,
+            "tool": tool,
+            "arguments": arguments,
+        }));
+    }
     // Display only: the program a call would start, as recorded.
     let program = PinStore::load()
         .ok()
@@ -194,8 +222,25 @@ pub(crate) fn check_pin(input: &McpConnectInput<'_>) -> Result<CheckedPin, CallE
 }
 
 /// [`check_pin`] for every `(function, tool)` of `tools`: the healthcheck
-/// checks every mcp function of the connector.
+/// checks every mcp function of the connector. [`check_server`] followed
+/// by the presence of each tool's pin.
 pub(crate) fn check_tools(
+    input: &McpConnectInput<'_>,
+    tools: Vec<(String, String)>,
+) -> Result<CheckedPin, CallError> {
+    let checked = check_server(input, tools)?;
+    for (_, tool) in &checked.tools {
+        checked.compare(tool, None)?;
+    }
+    Ok(checked)
+}
+
+/// The server-level part of [`check_tools`], for the listing surfaces
+/// (design D5 "`list_approved`"): the config dir rule, `PinStore::load`,
+/// the record, and `ServerPin::compare` of the tree digest, the account
+/// digest and the program file, with no tool required to be pinned. Every
+/// `Err` comes before any secret is resolved or anything starts.
+pub(crate) fn check_server(
     input: &McpConnectInput<'_>,
     tools: Vec<(String, String)>,
 ) -> Result<CheckedPin, CallError> {
@@ -215,14 +260,32 @@ pub(crate) fn check_tools(
                 ),
             )
         })?;
-    let program = program_file(Path::new(&record.program));
+    // The transport is the installed definition's, never the record's.
+    // Over http no program file is opened (the record's `program` holds
+    // the endpoint): the endpoint and the token URL are rendered and
+    // checked before the comparison and before any secret, and their
+    // endpoint digest is the program fact. Over stdio a missing file is
+    // still `ProgramFact::Gone`.
+    let (program, program_digest, http) = match spec.transport {
+        McpTransportKind::Http => {
+            let target = server::http_target(input.doc, input.account_fields)?;
+            (None, Some(target.digest.clone()), Some(target))
+        }
+        McpTransportKind::Stdio => {
+            let program = program_file(Path::new(&record.program));
+            let digest = program.as_ref().map(|p| p.digest().to_string());
+            (program, digest, None)
+        }
+    };
     let checked = CheckedPin {
         connector: input.connector.to_string(),
         account_name: input.account_name.to_string(),
         connector_digest: input.connector_digest.to_string(),
         account_digest: input.account_digest.to_string(),
-        program_digest: program.as_ref().map(|p| p.digest().to_string()),
+        program_digest,
         program,
+        http,
+        auth: input.doc.auth.clone(),
         record,
         spec,
         tools,
@@ -236,9 +299,7 @@ pub(crate) fn check_tools(
         deadline: input.deadline,
         home: None,
     };
-    for (_, tool) in &checked.tools {
-        checked.compare(tool, None)?;
-    }
+    checked.compare_server()?;
     let home = apb_core::config::account_entry().ok_or_else(no_home)?;
     Ok(CheckedPin {
         home: Some(home),
@@ -276,8 +337,13 @@ pub(crate) struct CheckedPin {
     /// descriptor; `None` when it was gone.
     program_digest: Option<String>,
     /// The program file `check_pin` hashed, its descriptor kept open
-    /// across the secret resolution until the start takes it.
+    /// across the secret resolution until the start takes it. Always
+    /// `None` for an http server.
     program: Option<ProgramFile>,
+    /// The checked target of an http server; `None` for stdio.
+    http: Option<HttpTarget>,
+    /// The connector-level authorization (an http server's).
+    auth: Option<AuthSpec>,
     record: ServerPin,
     spec: McpServerSpec,
     /// `(function, tool)` pairs the check covers.
@@ -292,19 +358,34 @@ pub(crate) struct CheckedPin {
 impl CheckedPin {
     /// The one comparison of the binding, with the program fact held.
     fn compare(&self, tool: &str, tool_digest: Option<&str>) -> Result<(), CallError> {
+        self.binding_diff(tool, tool_digest)
+            .map_err(|diff| self.refusal(&diff, tool))
+    }
+
+    /// `ServerPin::compare` of the record with the facts held.
+    fn binding_diff(&self, tool: &str, tool_digest: Option<&str>) -> Result<(), BindingDiff> {
         let program = match &self.program_digest {
             Some(d) => ProgramFact::Digest(d),
             None => ProgramFact::Gone,
         };
-        self.record
-            .compare(&LiveBinding {
-                connector_digest: &self.connector_digest,
-                account_digest: &self.account_digest,
-                program,
-                tool,
-                tool_digest,
-            })
-            .map_err(|diff| self.refusal(&diff, tool))
+        self.record.compare(&LiveBinding {
+            connector_digest: &self.connector_digest,
+            account_digest: &self.account_digest,
+            program,
+            tool,
+            tool_digest,
+        })
+    }
+
+    /// The comparison of the server alone: `ServerPin::compare` with an
+    /// empty tool name, `ToolUnpinned` read as passing. In `compare` the
+    /// tree, account and program arms come before the tool arm, so every
+    /// server-level difference still refuses.
+    fn compare_server(&self) -> Result<(), CallError> {
+        match self.binding_diff("", None) {
+            Ok(()) | Err(BindingDiff::ToolUnpinned) => Ok(()),
+            Err(diff) => Err(self.refusal(&diff, "")),
+        }
     }
 
     /// The refusal of one difference: it names what differs and carries
@@ -315,6 +396,7 @@ impl CheckedPin {
             BindingDiff::Tree { .. } => "the connector definition changed",
             BindingDiff::Account { .. } => "the account changed",
             BindingDiff::ProgramGone => "the program file is gone, a link or not a regular file",
+            BindingDiff::Program { .. } if self.http.is_some() => "the server endpoint changed",
             BindingDiff::Program { .. } => "the program file changed",
             BindingDiff::ToolUnpinned => {
                 return CallError::new(
@@ -328,7 +410,7 @@ impl CheckedPin {
                 return CallError::new(
                     CallErrorCode::Permission,
                     format!(
-                        "mcp_tool_changed: tool `{tool}` of `{c}` changed since it was approved for account `{a}`; a person approves it again at a terminal, which shows the new definition (docs/CONNECTORS.md, MCP servers)"
+                        "mcp_tool_changed: tool `{tool}` of `{c}` changed since it was approved for account `{a}`; `apb connector tools {c} --account {a}` lists what changed, and a person approves it again at a terminal, which shows the new definition (docs/CONNECTORS.md, MCP servers)"
                     ),
                 );
             }
@@ -348,6 +430,8 @@ pub(crate) struct Opened {
     session: SessionHandle,
     tools: Vec<Value>,
     era: String,
+    /// Warnings of the open (an http server's rotated refresh token).
+    warnings: Vec<String>,
 }
 
 /// Starts the pinned program, the file `check_pin` hashed, with the fixed
@@ -356,8 +440,34 @@ pub(crate) struct Opened {
 pub(crate) fn open(
     checked: &mut CheckedPin,
     secrets: &BTreeMap<String, Secret>,
-    redactions: &[Redaction],
+    redactions: &mut Vec<Redaction>,
 ) -> Result<Opened, CallError> {
+    if let Some(target) = checked.http.clone() {
+        let changed = || {
+            checked.refusal(
+                &BindingDiff::Program {
+                    pinned: String::new(),
+                },
+                "",
+            )
+        };
+        return open_http(
+            HttpStart {
+                target: &target,
+                auth: checked.auth.as_ref(),
+                account_fields: &checked.account_fields,
+                connector: &checked.connector,
+                account: &checked.account_name,
+                deadline: checked.deadline,
+            },
+            secrets,
+            redactions,
+        )
+        .map_err(|e| match e {
+            OpenError::Call(e) => e,
+            OpenError::ProgramChanged => changed(),
+        });
+    }
     let home = checked.home.clone().ok_or_else(no_home)?;
     let program = checked
         .program
@@ -448,11 +558,193 @@ pub(crate) fn open_program(
             session,
             tools,
             era,
+            warnings: Vec::new(),
         }),
         Err(f) => Err(OpenError::Call(with_warning(
             map::connect_error(f, redactions),
             session.close_noted(),
         ))),
+    }
+}
+
+/// What reaching an http server takes besides the secrets: its checked
+/// target and the connector-level authorization.
+pub(crate) struct HttpStart<'a> {
+    pub target: &'a HttpTarget,
+    pub auth: Option<&'a AuthSpec>,
+    pub account_fields: &'a BTreeMap<String, String>,
+    pub connector: &'a str,
+    pub account: &'a str,
+    pub deadline: Instant,
+}
+
+/// The request headers of an http server's `header` auth, rendered with
+/// the resolved secrets into one secret header; none for another kind.
+fn auth_headers(
+    auth: Option<&AuthSpec>,
+    fields: &BTreeMap<String, String>,
+    secrets: &BTreeMap<String, Secret>,
+) -> Result<Vec<(String, EnvValue)>, CallError> {
+    let Some(AuthSpec::Header {
+        header,
+        value_template,
+    }) = auth
+    else {
+        return Ok(Vec::new());
+    };
+    let ctx = RenderCtx {
+        account: fields,
+        args: &Value::Null,
+        secrets,
+    };
+    let value = render_raw(value_template, &ctx).map_err(|e| {
+        CallError::new(
+            CallErrorCode::Config,
+            format!("auth header render failed: {e}"),
+        )
+    })?;
+    Ok(vec![(header.clone(), EnvValue::Secret(Secret::new(value)))])
+}
+
+/// Reaches an http server whose target was checked, after the secrets were
+/// resolved: the authorization (a `header` value, or for `oauth2_refresh`
+/// a token minted through an agent with no proxy, its tokens registered in
+/// `redactions` before anything is sent with them), the connect in the
+/// modern revision and the listing within its limits. A 401 while
+/// connecting or listing with `oauth2_refresh` takes one refresh: the new
+/// tokens registered first, the server value rebuilt with the new bearer
+/// (the old one dropped), and one more connect within the same deadline.
+/// Nothing here hands a `tools/call` over.
+///
+/// It owns the open's warnings: every return after a mint, success or
+/// error, carries the ones accumulated so far (a rotated refresh token
+/// warns even when the connect, the refresh or the listing then fails).
+pub(crate) fn open_http(
+    start: HttpStart<'_>,
+    secrets: &BTreeMap<String, Secret>,
+    redactions: &mut Vec<Redaction>,
+) -> Result<Opened, OpenError> {
+    let mut warnings = Vec::new();
+    match open_http_steps(start, secrets, redactions, &mut warnings) {
+        Ok(mut opened) => {
+            opened.warnings = warnings;
+            Ok(opened)
+        }
+        Err(OpenError::Call(e)) => Err(OpenError::Call(e.carrying(&warnings))),
+        Err(OpenError::ProgramChanged) => Err(OpenError::ProgramChanged),
+    }
+}
+
+/// The steps of [`open_http`], adding every warning to `warnings` as it
+/// arises; the caller attaches them to whatever this answers.
+fn open_http_steps(
+    start: HttpStart<'_>,
+    secrets: &BTreeMap<String, Secret>,
+    redactions: &mut Vec<Redaction>,
+    warnings: &mut Vec<String>,
+) -> Result<Opened, OpenError> {
+    let source = TokenSource::render(
+        start.auth,
+        start.account_fields,
+        secrets,
+        start.connector,
+        start.account,
+        TokenProxy::None,
+    )
+    .map_err(OpenError::Call)?;
+    let mut bearer = None;
+    if let Some(source) = &source {
+        // The token URL the source renders is the one the binding check
+        // passed, or nothing is requested.
+        if Some(source.token_url()) != start.target.token_url.as_deref() {
+            return Err(OpenError::ProgramChanged);
+        }
+        let minted = source
+            .access_token(start.deadline, redactions)
+            .map_err(|e| OpenError::Call(CallError::from(e)))?;
+        bearer = Some(adopt_minted(
+            &minted,
+            &mut |value, label| redactions.push(Redaction::new(value, label)),
+            warnings,
+        ));
+    }
+    let mut refreshed = false;
+    loop {
+        let headers =
+            auth_headers(start.auth, start.account_fields, secrets).map_err(OpenError::Call)?;
+        let server = server::http_server(&start.target.endpoint, headers, bearer.take());
+        let attempt = connect_and_list(server, start.deadline);
+        let failure = match attempt {
+            Ok((session, tools, era)) => {
+                return Ok(Opened {
+                    session,
+                    tools,
+                    era,
+                    warnings: Vec::new(),
+                });
+            }
+            Err(failure) => failure,
+        };
+        let (f, note) = failure;
+        let retry = matches!(f.kind, FailureKind::Auth { status: 401 }) && !refreshed;
+        let Some(source) = source.as_ref().filter(|_| retry) else {
+            return Err(OpenError::Call(with_warning(
+                map::connect_error(f, redactions),
+                note,
+            )));
+        };
+        refreshed = true;
+        match source.refresh_now(start.deadline, redactions) {
+            Ok(minted) => {
+                bearer = Some(adopt_minted(
+                    &minted,
+                    &mut |value, label| redactions.push(Redaction::new(value, label)),
+                    warnings,
+                ));
+            }
+            Err(token_err) => {
+                let mut err = map::connect_error(f, redactions);
+                err.message = redact_message(
+                    format!(
+                        "{}; renewing the token failed: {}",
+                        err.message, token_err.message
+                    ),
+                    redactions,
+                );
+                return Err(OpenError::Call(with_warning(err, note)));
+            }
+        }
+    }
+}
+
+/// A connected session, its raw listing and its era.
+type Listed = (SessionHandle, Vec<Value>, String);
+
+/// One connect of an http server and its listing; a failure answers the
+/// client's `Failure` and the close's note.
+fn connect_and_list(
+    server: apb_mcp_client::HttpServer,
+    deadline: Instant,
+) -> Result<Listed, (Failure, Option<String>)> {
+    let session = apb_mcp_client::Session::connect(
+        apb_mcp_client::Server::Http(server),
+        Lifecycle::Modern,
+        CLIENT_NAME,
+        env!("CARGO_PKG_VERSION"),
+        deadline,
+    )
+    .map_err(|f| (f, None))?;
+    let era = match session.era() {
+        Era::Modern(v) => format!("modern {v}"),
+        Era::Legacy(v) => format!("legacy {v}"),
+    };
+    let session = SessionHandle::new(session);
+    match session.list_tools(deadline) {
+        Ok(tools) => Ok((session, tools, era)),
+        Err(f) => {
+            let note = session.close_noted();
+            Err((f, note))
+        }
     }
 }
 
@@ -496,9 +788,21 @@ impl Opened {
         Ok(digest)
     }
 
-    /// Closes the session after a failure, the end's warning added.
+    /// Closes the session after a failure, the end's warning added and
+    /// the open's warnings carried.
     fn fail(self, err: CallError) -> CallError {
-        with_warning(err, self.session.close_noted())
+        with_warning(err, self.session.close_noted()).carrying(&self.warnings)
+    }
+
+    /// Runs the steps that follow the open with its warnings carried on
+    /// every error they answer: the one point every post-open refusal
+    /// (a changed pinned tool, a reflected secret, a verification
+    /// refusal) passes through.
+    pub(crate) fn carrying<T>(
+        warnings: &[String],
+        steps: impl FnOnce() -> Result<T, CallError>,
+    ) -> Result<T, CallError> {
+        steps().map_err(|e| e.carrying(warnings))
     }
 }
 
@@ -509,21 +813,28 @@ impl Opened {
 pub(crate) fn connect(
     mut checked: CheckedPin,
     secrets: &BTreeMap<String, Secret>,
-    redactions: Vec<Redaction>,
+    mut redactions: Vec<Redaction>,
 ) -> Result<Connected, CallError> {
     let (function, tool) = checked
         .tools
         .first()
         .cloned()
         .ok_or_else(|| CallError::new(CallErrorCode::Config, "mcp: the call names no tool"))?;
-    let opened = open(&mut checked, secrets, &redactions)?;
+    let mut opened = open(&mut checked, secrets, &mut redactions)?;
     let tool_digest = match opened.verify(&checked, &function, &tool, &redactions) {
         Ok(d) => d,
         Err(e) => return Err(opened.fail(e)),
     };
+    // An http endpoint has no query, so no account-specific parameter is
+    // journaled.
+    let endpoint = match &checked.http {
+        Some(target) => format!("mcp+{}#{tool}", target.endpoint),
+        None => format!("mcp+stdio://{}/{tool}", checked.connector),
+    };
     Ok(Connected {
         session: opened.session,
-        endpoint: format!("mcp+stdio://{}/{tool}", checked.connector),
+        warnings: std::mem::take(&mut opened.warnings),
+        endpoint,
         tool,
         tool_digest,
         read_only: checked.read_only,
@@ -544,6 +855,8 @@ pub(crate) struct Connected {
     response_pick: Vec<String>,
     redactions: Vec<Redaction>,
     deadline: Instant,
+    /// Warnings of the open, carried into the dispatch.
+    warnings: Vec<String>,
 }
 
 impl Connected {
@@ -655,7 +968,8 @@ pub(crate) struct McpCall {
 }
 
 impl McpCall {
-    /// `mcp+stdio://<connector>/<tool>`.
+    /// `mcp+stdio://<connector>/<tool>`, or `mcp+<endpoint>#<tool>` for an
+    /// http server.
     pub(crate) fn endpoint(&self) -> String {
         self.connected.endpoint.clone()
     }
@@ -701,7 +1015,7 @@ impl McpCall {
             ),
             http_status: None,
             pages: None,
-            warnings: Vec::new(),
+            warnings: connected.warnings,
         }
     }
 }

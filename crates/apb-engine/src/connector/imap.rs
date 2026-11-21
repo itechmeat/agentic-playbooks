@@ -1023,6 +1023,7 @@ fn render_connection(
                 ctx.secrets,
                 extras.connector,
                 extras.account,
+                crate::connector::oauth::TokenProxy::Caller,
             )?
             .ok_or_else(|| {
                 CallError::new(

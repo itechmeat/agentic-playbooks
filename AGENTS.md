@@ -344,8 +344,9 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   one shared HTTP exchange, limit checks and strict reply validation,
   retries, the provider chain, the per-run cache and the `ApiKey` wrapper; the `testing` feature adds a
   multi-response HTTP stub. Knows nothing about runs.
-- `apb-mcp-client` - a blocking stdio client of the Model Context Protocol
-  over rmcp `=3.9.0` (the version `apb-mcp` pins), depending on `apb-core`
+- `apb-mcp-client` - a blocking client of the Model Context Protocol over
+  stdio and Streamable HTTP over rmcp `=3.9.0` (the version `apb-mcp`
+  pins), depending on `apb-core`
   only (core <- mcp-client <- engine): `Session` with its own runtime on its
   own thread (`connect` in `auto`, `modern` or `legacy`, `list_tools` as
   the raw JSON the server sent, `call_tool`, `close`), the program file
@@ -364,8 +365,17 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   (`Ended::Reaped { killed, group }` the only proof, `GroupEnd` what was
   seen of the group; a late reap waits in the worker); the `testing`
   feature adds the `sh` stub server, refused in a build without debug
-  assertions. Knows nothing about runs, grants, pins
-  or the send ledger.
+  assertions. `http.rs` is the Streamable HTTP client (`HttpServer`, the
+  private `UreqClient` under rmcp's worker, over ureq with no proxy and no
+  redirect, the modern revision only): every message classified by the
+  same tap before its POST (`LineTap::classify_message`), a `tools/call`
+  counted before its connection opens (`start_call`), every answer (a
+  JSON body, or each event of its own strict event-stream reader up to
+  the answer) read by `read_frame` and counted by `read_body` before
+  rmcp sees it, only the three protocol headers rmcp names sent, a
+  listing with `x-mcp-header` annotations refused, `FailureKind::Auth`
+  for a 401 or 403, `close` answering `Ended::NotStarted`. Knows nothing
+  about runs, grants, pins or the send ledger.
 - `apb-engine` - execution. The drive loop (`scheduler.rs`) with its phases in
   `scheduler/` (`entry` start, handoff and dead-attempt reaping, `control_apply`
   the control scan (a park applied only as the last entry of a pass at its
@@ -799,12 +809,15 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   before a failure's, `end_warning`, `server_text` (redact the whole
   text, then cut to 500 characters) and `redact_tree` (strings, member
   names and numbers), `server` the server's environment from a fixed
-  source (`server_path`, the program's directory last) and
-  `preview_start`, `map` answers and failures to results with
+  source (`server_path`, the program's directory last),
+  `preview_start` and the http target (`resolve_endpoint`, `http_target`
+  with the endpoint digest, `HttpPreview`; `open_http` reaches it with
+  one 401 refresh before the hand-over), `map` answers and failures to results with
   `tool_error`, `redact` the one redaction walk (`redact_tree`, strings,
   member names and numbers) and the bound of server text (`server_text`,
-  redacted whole, then cut), `pin` the person's listing `list_live`,
-  `record` and the pin-check `healthcheck`; `intent/` the
+  redacted whole, then cut), `pin` the person's listing `list_live`
+  (`http_program` for an http server), `record`, the pin-check
+  `healthcheck` and `list_approved`, the listing surfaces' live rows; `intent/` the
   send ledger: `identity` what makes two sends the same, `ledger` the fold
   and the admission table, `stamp` the key and the marker, `reconcile` the
   lookup of a marker send; `effect` what a call says about its effect), background
@@ -959,7 +972,8 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   `connector_mcp.rs` is the approval of an MCP connector (`approve_mcp`
   over a `Confirm`, the binary passing the terminal; `print_tree`,
   `print_program` and `print_pins`, the approve output, every string
-  sanitized for the terminal).
+  sanitized for the terminal) and `apb connector tools` (`tools_cmd`, the
+  live listing of an approved account, exit 3 when a row is not pinned).
   `passkey.rs` is `apb passkey enroll|list|remove` (person only, refused
   inside a run step, at an interactive terminal; the enrollment code is
   stored only after the person typed it back, and every removal needs a
@@ -989,7 +1003,9 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   ledger, `results` for a run's result snapshots
   (the listing, one entry, the raw download and the live comparison),
   `discover` for history discovery, loopback
-  only; `auth.rs` inserts the `RequestChannel` (keyless, bearer, session)
+  only, `connectors` the connector pages with an MCP connector's `mcp`
+  block and its live listing (`mcp_tools_handler`), which, like the MCP
+  healthcheck, takes only a signed-in session; `auth.rs` inserts the `RequestChannel` (keyless, bearer, session)
   a decision route maps to its channel; `state.rs` also holds the tool-layer
   answer and refusal mapping they share (`ToolError::Refused` is 403);
   `runs` also serves the report page), `passkeys.rs` the in-memory
@@ -1303,10 +1319,25 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   connectors reference only to scrub them (and withholds the args when
   one is unresolved); no value leaves the call process. A declared
   `irreversible` effect stays refused, doubles or not.
-- **MCP tool connectors** (`docs/CONNECTORS.md` "MCP servers", spec
-  `docs/superpowers/specs/2026-11-20-mcp-tool-connectors-design.md`): a
-  connector with an `mcp:` block maps the tools of an MCP server, stdio
-  only in this version (`transport: http` refused). Its functions are
+- **MCP tool connectors** (`docs/CONNECTORS.md` "MCP servers", specs
+  `docs/superpowers/specs/2026-11-20-mcp-tool-connectors-design.md` and
+  `docs/superpowers/specs/2026-11-21-mcp-http-and-surfaces-design.md`): a
+  connector with an `mcp:` block maps the tools of an MCP server, over
+  stdio or over Streamable HTTP (the 2026-07-28 revision, `transport:
+  http`, an https `url` whose scheme is literal, the connector-level
+  `header` or `oauth2_refresh` auth with V303 on a reserved header, the
+  endpoint bound by the tree and account digests and the endpoint digest
+  (`digest::endpoint_digest`, recomputed by `server::http_target` before
+  any secret on every call, listing and approval), the token request
+  without the caller's proxy (`TokenProxy::None`), one 401 refresh before
+  the hand-over, every answer through the same strict reader, every
+  failure of a write after the hand-over `unknown`). The listing surfaces
+  (`apb connector tools`, the doctor rows, MCP `connectors_list`, the
+  dashboard's MCP section, `pin::list_approved` in the healthcheck's
+  order) write no pin and show no digest; the dashboard's listing and the
+  MCP healthcheck take only a signed-in session, decided in the engine
+  (`pin::refuse_caller`, over `DecisionChannel::person_only_refusal`) on
+  the one definition they load and execute. Its functions are
   called by apb through `apb connector call`, never handed to an agent
   (nothing is added to any agent's MCP configuration), and count as
   `untrusted_output`; `read_only`, `irreversible` and `idempotency` are

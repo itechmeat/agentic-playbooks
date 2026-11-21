@@ -185,7 +185,12 @@ mod tests {
                 assert!(!ok);
                 assert_eq!(value["error"]["code"], "permission", "{value}");
                 scenario_refused(&value.to_string());
-                let (value, ok) = crate::connector::call::healthcheck(project.path(), "any", "a");
+                let (value, ok) = crate::connector::call::healthcheck(
+                    project.path(),
+                    "any",
+                    "a",
+                    crate::decision_channel::DecisionChannel::Terminal,
+                );
                 assert!(!ok);
                 scenario_refused(&value.to_string());
 
