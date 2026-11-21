@@ -121,12 +121,14 @@ export function filterByProject<T extends { workspace_id: string }>(
  * `filterByProject`'s existing "unknown id falls back to all items" behavior,
  * scoped here to the project-scope subset rather than every row.
  */
-export function filterProfilesByProject<T extends { scope: string; workspace_id: string }>(
+export function filterScopedByProject<T extends { scope?: string; workspace_id: string }>(
   items: T[],
   selected: string,
 ): T[] {
   if (selected === ALL_PROJECTS) return items
-  const known = items.some((item) => item.scope !== 'global' && item.workspace_id === selected)
+  const known = items.some(
+    (item) => item.scope !== 'global' && item.workspace_id === selected,
+  )
   if (!known) return items
   return items.filter((item) => item.scope === 'global' || item.workspace_id === selected)
 }
@@ -136,6 +138,6 @@ export function filterProfilesByProject<T extends { scope: string; workspace_id:
  * build the project-filter selector options: global-scope rows have no
  * project of their own and would otherwise inject a bogus workspace option.
  */
-export function projectScopeItems<T extends { scope: string }>(items: T[]): T[] {
+export function projectScopeItems<T extends { scope?: string }>(items: T[]): T[] {
   return items.filter((item) => item.scope !== 'global')
 }

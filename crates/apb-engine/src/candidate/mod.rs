@@ -21,6 +21,7 @@
 
 mod line;
 mod quality;
+mod runs;
 mod settle;
 pub mod summary;
 
@@ -136,6 +137,13 @@ fn settle_inner(log: &mut EventLog, run_dir: &Path, succeeded: bool) -> Result<(
     // A run that processed external data never settles a candidate (its
     // manifest never marks a trial; this is the backstop).
     if !trial || !crate::external_data::learns_from(run_dir) {
+        return Ok(());
+    }
+    // The trial bit authorizes nothing by itself: a candidate lives in a
+    // project, so a run of a global definition (a manifest written before
+    // the start checked the scope can carry the bit) or of unknown scope
+    // never opens the project's candidate line.
+    if !runs::is_project_run(run_dir) {
         return Ok(());
     }
     let events = read_all(run_dir)?;
@@ -310,7 +318,9 @@ pub fn skipped_of(run_dir: &Path) -> Option<String> {
 /// not one.
 pub fn trial_of(run_dir: &Path, events: &[Event]) -> Option<CandidateTrial> {
     let manifest = crate::manifest::read(run_dir).ok().flatten()?;
-    if !manifest.candidate_trial {
+    // As in `settle_inner`: only a project run is a trial of a project
+    // candidate, whatever its manifest says.
+    if !manifest.candidate_trial || !runs::is_project_run(run_dir) {
         return None;
     }
     let version = events.iter().find_map(|e| match &e.payload {

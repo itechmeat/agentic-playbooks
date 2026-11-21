@@ -292,10 +292,20 @@ pub fn playbook_patch(
             "invalid classification `{classification}`"
         )));
     }
+    // A candidate lives in a project: a run of a global definition has no
+    // project definition to patch, the project playbook of the same id is
+    // not the run's, and a run of unknown scope is neither. Refused after
+    // the run id is checked and before any definition is read or written.
+    let run_dir = apb_engine::scheduler::run_dir_of(root, run_id)?;
+    if let Some((code, why)) =
+        apb_engine::run_origin::patch_refusal(apb_engine::run_origin::run_scope(&run_dir))
+    {
+        return Err(ToolError::Engine(format!("{code}: {why}")));
+    }
     let (id, base_version) = apb_engine::scheduler::run_playbook_ref(root, run_id)?;
     // A flagged run's patch version records the run, which fences it off
     // from `current`, candidates and other runs.
-    let external_data = apb_engine::external_data::is_flagged(&root.join(".apb/runs").join(run_id));
+    let external_data = apb_engine::external_data::is_flagged(&run_dir);
     let version = apb_core::versioning::create_run_patch_version(
         root,
         &id,

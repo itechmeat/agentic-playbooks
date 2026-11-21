@@ -10,6 +10,8 @@ use apb_core::registry::init_project;
 use apb_engine::event::{EventPayload, read_all};
 use apb_engine::forward_patch::ForwardPatchRequest;
 use apb_engine::scheduler::{RunMode, RunOptions, prepare_supervised_background, run};
+
+use crate::common::config_sandbox;
 use apb_mcp::tools::{DetailMode, playbook_forward_patch, playbook_get};
 
 const BASE: &str = r#"
@@ -94,6 +96,7 @@ fn no_candidate(root: &Path) {
 
 #[test]
 fn a_forward_patch_of_an_executed_node_becomes_the_candidate() {
+    let _cfg = config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let run_id = finished_run(dir.path());
@@ -121,6 +124,7 @@ fn a_forward_patch_of_an_executed_node_becomes_the_candidate() {
 
 #[test]
 fn a_live_run_keeps_its_version_and_gets_no_migration() {
+    let _cfg = config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let run_id = live_run(dir.path());
@@ -139,6 +143,7 @@ fn a_live_run_keeps_its_version_and_gets_no_migration() {
 
 #[test]
 fn a_workaround_is_refused_for_next_runs() {
+    let _cfg = config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let run_id = finished_run(dir.path());
@@ -149,6 +154,7 @@ fn a_workaround_is_refused_for_next_runs() {
 
 #[test]
 fn an_invalid_patch_is_refused_by_the_validator() {
+    let _cfg = config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let run_id = finished_run(dir.path());
@@ -161,6 +167,7 @@ fn an_invalid_patch_is_refused_by_the_validator() {
 
 #[test]
 fn a_goal_criteria_change_is_refused() {
+    let _cfg = config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let run_id = finished_run(dir.path());
@@ -172,6 +179,7 @@ fn a_goal_criteria_change_is_refused() {
 
 #[test]
 fn effects_changes_are_refused() {
+    let _cfg = config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let run_id = finished_run(dir.path());
@@ -200,6 +208,7 @@ fn effects_changes_are_refused() {
 
 #[test]
 fn trust_relevant_fields_are_refused() {
+    let _cfg = config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let run_id = finished_run(dir.path());
@@ -229,6 +238,7 @@ fn trust_relevant_fields_are_refused() {
 
 #[test]
 fn the_window_closes_some_time_after_the_run_ended() {
+    let _cfg = config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let run_id = finished_run(dir.path());
@@ -258,6 +268,7 @@ fn the_window_closes_some_time_after_the_run_ended() {
 
 #[test]
 fn max_patches_per_run_counts_forward_patches() {
+    let _cfg = config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let run_id = run(

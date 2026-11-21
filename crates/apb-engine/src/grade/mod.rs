@@ -212,7 +212,15 @@ pub fn backfill(
     grader: GraderChoice,
 ) -> Vec<Backfilled> {
     let dirs: Vec<PathBuf> =
-        crate::run_history::runs_of(&[root.to_path_buf()], id, version, BACKFILL_SCAN);
+        crate::run_history::runs_of(&[root.to_path_buf()], id, version, BACKFILL_SCAN)
+            // A run of a global definition is never graded as, or counted
+            // for, the project playbook's candidate: a candidate lives in a
+            // project, and the project playbook of the same id is not the
+            // run's. A run whose journal does not read has an unknown
+            // scope and is left out too.
+            .into_iter()
+            .filter(|d| crate::run_origin::run_scope(d) == crate::run_origin::RunScope::Project)
+            .collect();
     let mut out = Vec::new();
     let mut tried = 0;
     for d in dirs {

@@ -11,6 +11,29 @@ import { isTerminalRunStatus } from './status'
 /** Key of a playbook across projects, the same one the list uses. */
 export const playbookKey = (workspaceId: string, id: string) => `${workspaceId}/${id}`
 
+/** The list group an entry belongs to: the global group, else its workspace. */
+export function groupKey(entry: Pick<PlaybookSummary, 'scope' | 'workspace_id'>): string {
+  if (entry.scope === 'global') return 'global'
+  return entry.workspace_id || '_'
+}
+
+/** The heading of a list group: the global group's, else the project name. */
+export function groupLabel(key: string, project: string): string {
+  if (key === 'global') return 'Global playbooks'
+  return project
+}
+
+/** The list groups, the global group first and the rest by project name. */
+export function sortGroups<T extends { key: string; project: string }>(
+  groups: T[],
+): T[] {
+  return [...groups].sort((a, b) => {
+    if (a.key === 'global') return -1
+    if (b.key === 'global') return 1
+    return a.project.localeCompare(b.project)
+  })
+}
+
 /** Runs grouped by playbook key, newest first. Child runs count too: each is a run of its playbook. */
 export function runsByPlaybook(runs: RunSummary[]): Map<string, RunSummary[]> {
   const m = new Map<string, RunSummary[]>()

@@ -57,6 +57,13 @@ impl RunCheck {
     }
 }
 
+/// Whether the journal `events` carries a labelled `run_provenance` and
+/// `run_origin::origin_of_events` reads `scope` from it.
+pub(crate) fn provenance_is(events: &[Event], scope: Scope) -> bool {
+    crate::run_origin::first_label(events).is_some()
+        && crate::run_origin::scope_of_events(events) == scope
+}
+
 /// Checks the run a stored file names (a slot holder, a health fact): a
 /// safe segment, a real directory under `.apb/runs`, this installation's
 /// origin stamp, a strict journal read, its `run_started.playbook` and
@@ -87,11 +94,7 @@ pub fn checked_run(
     if head.map(|h| h.playbook).as_deref() != Some(playbook) {
         return RunCheck::Void;
     }
-    let provenance = events.iter().find_map(|e| match &e.payload {
-        EventPayload::RunProvenance { origin, .. } => origin.clone(),
-        _ => None,
-    });
-    if provenance.as_deref() != Some(scope.as_str()) {
+    if !provenance_is(&events, scope) {
         return RunCheck::Void;
     }
     if let Some(digest) = key_digest {
@@ -740,6 +743,13 @@ pub enum Turn {
     Paused,
 }
 
+/// The definition scope of the run whose journal is `events`, as
+/// `run_origin::origin_of_events` reads it: the scope its slot file lives
+/// under.
+pub(crate) fn run_scope_of(events: &[Event]) -> Scope {
+    crate::run_origin::scope_of_events(events)
+}
+
 /// Waits until this run is the slot's active run. Every look at the slot
 /// is one transaction (heal, decide, write), and the slot's stops are
 /// posted after it; the journal checks run outside the lock. Called
@@ -762,14 +772,7 @@ pub fn wait_turn(
     }) else {
         return Ok(Turn::Active);
     };
-    let scope = events
-        .iter()
-        .find_map(|e| match &e.payload {
-            EventPayload::RunProvenance { origin, .. } => origin.clone(),
-            _ => None,
-        })
-        .and_then(|o| Scope::parse(&o))
-        .unwrap_or(Scope::Project);
+    let scope = run_scope_of(&events);
     let playbook = crate::run_history::started(run_dir)
         .map(|h| h.playbook)
         .unwrap_or_default();
@@ -1044,14 +1047,7 @@ pub fn reserve_resume(
     }) else {
         return Ok(None);
     };
-    let scope = events
-        .iter()
-        .find_map(|e| match &e.payload {
-            EventPayload::RunProvenance { origin, .. } => origin.clone(),
-            _ => None,
-        })
-        .and_then(|o| Scope::parse(&o))
-        .unwrap_or(Scope::Project);
+    let scope = run_scope_of(&events);
     let playbook = crate::run_history::started(run_dir)
         .map(|h| h.playbook)
         .unwrap_or_default();

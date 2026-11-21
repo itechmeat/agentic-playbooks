@@ -99,7 +99,7 @@ apb setup           plan [--json] [--project DIR] [--replace-modified [NAME,...]
 apb hook stop       Claude Code's Stop hook (registered by apb setup apply, action register_hook): reads the hook JSON on stdin, prints {"decision":"block",...} once per session when the turn looked like a repeatable process and no playbook tool was used, else nothing; always exits 0; APB_SAVE_NUDGE=off silences it, APB_SAVE_NUDGE_MIN_STEPS and APB_SAVE_NUDGE_MIN_KINDS set its bounds (8, 3)
 apb list            playbooks and versions
 apb validate        validate playbooks, the profiles and scripts they reference, profile models, requires and connectors
-apb run <id>        run a playbook (--confirm-irreversible: consent without a terminal; --confirm-launch: a person's confirmation of a playbook that asks before an agent launches it; --remember: keep its params and instruction for this project; --notify / --no-notify: tell a person about its reviews, questions, pauses and end)
+apb run <id>        run a playbook (--confirm-irreversible: consent without a terminal; --confirm-launch: a person's confirmation of a playbook that asks before an agent launches it; --remember: keep its params and instruction for this project; --notify / --no-notify: tell a person about its reviews, questions, pauses and end; --scope project|global: start a global playbook in this project)
 apb runs            list runs, marking those that need a look (apb runs <id> [--json]: one run with its execution mode and outcome; --items [--node N] [--state S]: one line per list item; --html <path|->: the report as one self-contained page; apb runs prune [--yes] [--json] [--playbook <id>]: remove old runs the retention settings no longer keep, a dry run without --yes)
 apb results <run>   a run's result snapshots by node, execution and item ([--node N] [--json]); show <run> r:<snapshot>/<entry> [--out FILE] prints one entry's stored text, re-verified; clean <run> [--dry-run] removes what no stamp names; also lists the claims each evidence session checked
 apb evidence read  read through an attempt's evidence session (--session ID, default APB_EVIDENCE_SESSION): outline | children --view V | read --ref R [--span A,B] | page --view V | search --phrase P; JSON, the same object as MCP run_evidence_read
@@ -122,6 +122,7 @@ apb profile         manage agent profiles
 apb connector       list or manage connectors (apb connector oauth <connector> [--account A] [--scope S]: a person's loopback consent that prints a refresh token once)
 apb detect          detect installed coding agents (--json)
 apb models          the cloud model catalogs (NEAR AI Cloud): rows, privacy classes, prices (--refresh, --json)
+apb templates       list / show / install the example playbooks apb ships, as drafts (--scope project|global, --as <id>)
 apb adopt           will it fit here: adoption readiness report for a playbook (--scope project|global)
 apb memory          show or clear the remembered run input of a playbook in this project
 apb make-global     make a project playbook available in every project (--variant trash|retire|keep, --dry-run)

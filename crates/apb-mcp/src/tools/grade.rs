@@ -43,8 +43,20 @@ pub struct CandidateAfter {
 /// calls: a grade never changes a candidate's standing silently or on one
 /// surface only. A playbook without a candidate is left untouched (no lock,
 /// no directory is created). A failure is reported, never raised: the grade
-/// is stored either way.
-pub fn after_stored(root: &Path, id: &str) -> CandidateAfter {
+/// is stored either way. A run of a global definition re-decides nothing:
+/// a candidate lives in a project, and the project playbook of the same id
+/// is not judged by it; nor does a run whose journal does not read (its
+/// scope is unknown).
+pub fn after_stored(root: &Path, run_dir: &Path, id: &str) -> CandidateAfter {
+    if apb_engine::run_origin::run_scope(run_dir) != apb_engine::run_origin::RunScope::Project {
+        return CandidateAfter::default();
+    }
+    after_backfill(root, id)
+}
+
+/// [`after_stored`] for a grade stored by the backfill, which re-decides
+/// once for the playbook as today and so always names no run.
+pub fn after_backfill(root: &Path, id: &str) -> CandidateAfter {
     let dir = apb_core::candidate::playbook_dir(root, id);
     if apb_core::candidate::read_candidate(&dir).is_none() {
         return CandidateAfter::default();
@@ -101,7 +113,7 @@ pub fn grade_by(
     Ok(match graded {
         ModelGraded::Graded(grade) => Graded {
             grader: grader.as_str().to_string(),
-            after: after_stored(root, &grade.playbook),
+            after: after_stored(root, &dir, &grade.playbook),
             grade: Some(shown.grade(*grade)),
             skipped: None,
         },
@@ -176,7 +188,7 @@ pub fn grade_submit(
     let outcome = apb_engine::grade::submit(&dir, session, proposals)?;
     let (outcome, after) = match outcome {
         SubmitOutcome::Graded { grade } => {
-            let after = after_stored(root, &grade.playbook);
+            let after = after_stored(root, &dir, &grade.playbook);
             let grade = Box::new(shown.grade(*grade));
             (SubmitOutcome::Graded { grade }, after)
         }
@@ -366,7 +378,7 @@ pub fn backfill(
     }
     let runs = apb_engine::grade::backfill(root, id, version, last, grader);
     let after = if runs.iter().any(|r| r.grade_id.is_some()) {
-        after_stored(root, id)
+        after_backfill(root, id)
     } else {
         CandidateAfter::default()
     };

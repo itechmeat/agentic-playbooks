@@ -7,7 +7,7 @@
 //! runtime.
 
 use apb_core::registry::RegistryError;
-use apb_core::scope::{Origin, PlaybookRef, Scope};
+use apb_core::scope::PlaybookRef;
 use apb_engine::fit::{FitError, assess};
 use axum::extract::{Path as AxPath, Query, State};
 use axum::http::StatusCode;
@@ -37,12 +37,9 @@ pub(crate) async fn get_fit_handler(
     if !is_safe_id(&id) || q.version.as_deref().is_some_and(|v| !is_safe_id(v)) {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
-    let origin = match Scope::parse(q.scope.as_deref().unwrap_or("project")) {
-        Some(Scope::Project) => Origin::Project { workspace_id: None },
-        Some(Scope::Global) => Origin::Global,
-        None => {
-            return (StatusCode::BAD_REQUEST, "scope must be project or global").into_response();
-        }
+    let origin = match super::playbooks::origin_of(q.scope.as_deref()) {
+        Ok(o) => o,
+        Err(e) => return e,
     };
     let root = match resolve_root(&state, q.workspace.as_deref()) {
         Ok(r) => r,

@@ -2,7 +2,7 @@
   import { ApiError, deleteProfile, fetchProfiles, type ProfileSummary } from '../lib/api'
   import {
     ALL_PROJECTS,
-    filterProfilesByProject,
+    filterScopedByProject,
     projectFilter,
     projectScopeItems,
   } from '../lib/projectfilter'
@@ -35,7 +35,7 @@
   // Options come from project-scope rows only; global rows have no project
   // identity of their own and would otherwise add a bogus option.
   const projectScopeProfiles = $derived(projectScopeItems(items))
-  const filtered = $derived(filterProfilesByProject(items, $projectFilter))
+  const filtered = $derived(filterScopedByProject(items, $projectFilter))
 
   // Profiles grouped by owning project, plus a `global` group for the shared
   // global-scope store.

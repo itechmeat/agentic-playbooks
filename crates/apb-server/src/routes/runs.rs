@@ -590,14 +590,7 @@ pub(crate) async fn get_run_handler(
         ),
     };
     let concurrency_view = {
-        let scope = events
-            .iter()
-            .find_map(|e| match &e.payload {
-                apb_engine::event::EventPayload::RunProvenance { origin, .. } => origin.clone(),
-                _ => None,
-            })
-            .and_then(|o| apb_core::scope::Scope::parse(&o))
-            .unwrap_or(apb_core::scope::Scope::Project);
+        let scope = apb_engine::run_origin::scope_of_events(&events);
         apb_engine::run_view::concurrency(&root, &id, scope, &playbook_id, &events)
     };
     let detail = RunDetail {

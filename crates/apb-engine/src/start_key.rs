@@ -123,24 +123,30 @@ fn checked_run(root: &Path, scope: Scope, id: &str, run_id: &str) -> Option<RunS
     if !started {
         return None;
     }
-    let origin = events.iter().find_map(|e| match &e.payload {
-        EventPayload::RunProvenance { origin, .. } => Some(origin.clone()),
-        _ => None,
-    });
-    let ok = match origin {
-        Some(o) => o.as_deref().is_none_or(|o| o == scope.as_str()),
-        None => matches!(
-            events.last().map(|e| &e.payload),
-            Some(EventPayload::RunFinished { .. })
-        ),
-    };
-    ok.then(|| {
+    provenance_names(&events, scope).then(|| {
         crate::liveness::reported_run_status(
             &events,
             false,
             crate::liveness::driver_alive(&dir, run_id),
         )
     })
+}
+
+/// Whether the journal `events` names `scope`: it has a provenance and
+/// `run_origin::origin_of_events` reads `scope` from it, or it has none and
+/// ended (a preparation that failed before provenance).
+pub(crate) fn provenance_names(events: &[crate::event::Event], scope: Scope) -> bool {
+    let has_provenance = events
+        .iter()
+        .any(|e| matches!(&e.payload, EventPayload::RunProvenance { .. }));
+    if has_provenance {
+        crate::run_origin::scope_of_events(events) == scope
+    } else {
+        matches!(
+            events.last().map(|e| &e.payload),
+            Some(EventPayload::RunFinished { .. })
+        )
+    }
 }
 
 /// How a reader judges `e`, under the store lock.
@@ -238,7 +244,7 @@ pub fn lookup(
     let key = apb_core::start_key::key_tag(&req.key).map_err(|e| key_error(&e))?;
     let days = days(root);
     let step = StepCaller::from_env();
-    while_busy(|| {
+    let found = while_busy(|| {
         signed_store::transact(
             root,
             scope,
@@ -253,7 +259,38 @@ pub fn lookup(
             },
         )
         .map_err(|e| unwrap_store(root, scope, id, e))
-    })
+    })?;
+    #[cfg(feature = "testing")]
+    if matches!(found, Lookup::Free) {
+        testing::after_free_lookup();
+    }
+    Ok(found)
+}
+
+/// The test barrier of a keyed start (compiled only with the `testing`
+/// feature, which a build without debug assertions refuses).
+#[cfg(feature = "testing")]
+pub mod testing {
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    /// The variable naming the barrier's directory.
+    pub const AFTER_FREE_LOOKUP: &str = "APB_TEST_AFTER_KEY_LOOKUP";
+
+    /// With [`AFTER_FREE_LOOKUP`] set, a lookup that found the key free
+    /// creates `reached` in that directory and waits (at most two minutes)
+    /// until `go` exists there: a test claims the key in between, so the
+    /// start that follows meets a key another start holds.
+    pub(super) fn after_free_lookup() {
+        let Some(dir) = std::env::var_os(AFTER_FREE_LOOKUP).map(PathBuf::from) else {
+            return;
+        };
+        let _ = std::fs::write(dir.join("reached"), b"");
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !dir.join("go").exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 fn key_error(e: &std::io::Error) -> EngineError {

@@ -968,3 +968,192 @@ async fn the_playbook_list_carries_health() {
     assert_eq!(entry("routine")["health"]["status"], "held");
     assert!(entry("implement-task").get("health").is_none());
 }
+
+// --- Global playbooks in the dashboard (scope on the list and the detail) ---
+
+/// Registers `root` in the projects registry and returns its workspace id.
+fn register_workspace(root: &std::path::Path) -> String {
+    apb_core::projects::touch(root);
+    fs::read_to_string(root.join(".apb/workspace.local"))
+        .expect("workspace.local written by registration")
+        .trim()
+        .to_string()
+}
+
+/// Writes the global playbook `id` (schema 2, version 1.0.0, `current`)
+/// into the sandbox config dir `cfg`.
+fn seed_global_playbook(cfg: &std::path::Path, id: &str, yaml: &str) {
+    let vdir = cfg.join("playbooks").join(id).join("1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
+    fs::write(cfg.join("playbooks").join(id).join("current"), "1.0.0").unwrap();
+}
+
+const GLOBAL_DUP: &str = r#"
+schema: 2
+id: dup
+name: Global Dup
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: note, type: prompt, prompt: "hi" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: note }
+  - { from: note, to: done }
+"#;
+
+/// Two registered projects and one global playbook: the list carries the
+/// global one exactly once, tagged `scope: global` with no workspace, and
+/// every project entry is `scope: project`.
+#[tokio::test]
+async fn the_playbook_list_carries_global_playbooks() {
+    let cfg = crate::common::config_sandbox().await;
+    let _ci = crate::common::EnvVar::unset("CI");
+    let _noreg = crate::common::EnvVar::unset("APB_NO_REGISTRY");
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    for d in [&a, &b] {
+        apb_core::registry::init_project(d.path()).unwrap();
+        let vdir = d.path().join(".apb/playbooks/implement-task/1.0.0");
+        fs::create_dir_all(&vdir).unwrap();
+        fs::write(vdir.join("playbook.yaml"), VALID).unwrap();
+        fs::write(
+            d.path().join(".apb/playbooks/implement-task/current"),
+            "1.0.0",
+        )
+        .unwrap();
+        register_workspace(d.path());
+    }
+    seed_global_playbook(cfg.path(), "dup", GLOBAL_DUP);
+
+    let app = build_router(AppState::new_global());
+    let (status, json) = get_json(app, "/api/playbooks").await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = json.as_array().unwrap();
+    let global: Vec<&serde_json::Value> = rows.iter().filter(|r| r["id"] == "dup").collect();
+    assert_eq!(
+        global.len(),
+        1,
+        "the global playbook is listed once: {json}"
+    );
+    assert_eq!(global[0]["scope"], "global");
+    assert_eq!(global[0]["workspace_id"], "");
+    for row in rows.iter().filter(|r| r["id"] != "dup") {
+        assert_eq!(row["scope"], "project", "{row}");
+    }
+}
+
+/// A global playbook whose agent node binds `profile: { name: x, scope:
+/// project }` is validated as a global definition: V14.
+#[tokio::test]
+async fn a_global_playbook_detail_validates_as_global() {
+    let cfg = crate::common::config_sandbox().await;
+    let yaml = r#"
+schema: 2
+id: withprofile
+name: With Profile
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: agent_task, prompt: "hi", profile: { name: x, scope: project } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: done }
+"#;
+    seed_global_playbook(cfg.path(), "withprofile", yaml);
+    let app = build_router(AppState::new_global());
+    let (status, json) = get_json(app, "/api/playbooks/withprofile?scope=global").await;
+    assert_eq!(status, StatusCode::OK);
+    let issues = json["validation"].as_array().unwrap();
+    assert!(
+        issues
+            .iter()
+            .any(|i| i["code"] == "V14" && i["severity"] == "error"),
+        "V14 in validation: {json}"
+    );
+}
+
+/// A global detail needs no workspace: on a server without a pinned root,
+/// `GET /api/playbooks/<id>?scope=global` answers 200.
+#[tokio::test]
+async fn a_global_detail_needs_no_workspace() {
+    let cfg = crate::common::config_sandbox().await;
+    seed_global_playbook(cfg.path(), "dup", GLOBAL_DUP);
+    let app = build_router(AppState::new_global());
+    let (status, json) = get_json(app, "/api/playbooks/dup?scope=global").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["scope"], "global");
+}
+
+/// Both scopes hold `dup` with different names: `scope=global` answers the
+/// global name, no scope the project one.
+#[tokio::test]
+async fn a_global_detail_is_not_the_project_playbook() {
+    let cfg = crate::common::config_sandbox().await;
+    let dir = seed();
+    seed_global_playbook(cfg.path(), "dup", GLOBAL_DUP);
+    let vdir = dir.path().join(".apb/playbooks/dup/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        r#"
+schema: 2
+id: dup
+name: Project Dup
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join(".apb/playbooks/dup/current"), "1.0.0").unwrap();
+
+    let (status, json) = get_json(
+        build_router(AppState::new(dir.path().to_path_buf())),
+        "/api/playbooks/dup?scope=global",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["playbook"]["name"], "Global Dup");
+    let (status, json) = get_json(
+        build_router(AppState::new(dir.path().to_path_buf())),
+        "/api/playbooks/dup",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["playbook"]["name"], "Project Dup");
+    assert_eq!(json["scope"], "project");
+}
+
+/// An unknown scope answers 400 on the detail and on the fit.
+#[tokio::test]
+async fn an_unknown_scope_is_400() {
+    let dir = seed();
+    let (status, _) = get_json(
+        build_router(AppState::new(dir.path().to_path_buf())),
+        "/api/playbooks/implement-task?scope=team",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = get_json(
+        build_router(AppState::new(dir.path().to_path_buf())),
+        "/api/playbooks/implement-task/fit?scope=team",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// A global detail for an id only the project holds is 404.
+#[tokio::test]
+async fn a_missing_global_playbook_is_404() {
+    let _cfg = crate::common::config_sandbox().await;
+    let dir = seed();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, _) = get_json(app, "/api/playbooks/implement-task?scope=global").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

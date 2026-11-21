@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest'
 import {
   finishedCount,
   glyphLetter,
+  groupKey,
+  groupLabel,
   healthBadge,
   medianRunTime,
   runHistory,
   runsByPlaybook,
+  sortGroups,
   startedToday,
   successRate,
 } from './playbooklist'
@@ -130,5 +133,37 @@ describe('healthBadge', () => {
     expect(healthBadge(entry('ok', false))).toBeNull()
     expect(healthBadge(entry('unwatched', false))).toBeNull()
     expect(healthBadge({} as Parameters<typeof healthBadge>[0])).toBeNull()
+  })
+})
+
+describe('groupKey', () => {
+  it('puts global entries in one group', () => {
+    expect(groupKey({ scope: 'global', workspace_id: '' })).toBe('global')
+    expect(groupKey({ scope: 'global', workspace_id: 'w1' })).toBe('global')
+  })
+
+  it('keys a project entry by its workspace', () => {
+    expect(groupKey({ scope: 'project', workspace_id: 'w1' })).toBe('w1')
+    expect(groupKey({ workspace_id: 'w2' })).toBe('w2')
+    expect(groupKey({ workspace_id: '' })).toBe('_')
+  })
+})
+
+describe('groupLabel', () => {
+  it('names the global group', () => {
+    expect(groupLabel('global', 'proj')).toBe('Global playbooks')
+    expect(groupLabel('w1', 'proj')).toBe('proj')
+  })
+})
+
+describe('sortGroups', () => {
+  it('puts the global group first', () => {
+    const groups = [
+      { key: 'w2', project: 'zeta', items: [] },
+      { key: 'global', project: '', items: [] },
+      { key: 'w1', project: 'alpha', items: [] },
+    ]
+    const sorted = sortGroups(groups as never)
+    expect(sorted.map((g) => g.key)).toEqual(['global', 'w1', 'w2'])
   })
 })

@@ -77,7 +77,8 @@ pub(crate) fn find(
         // Same playbook id in the same scope (an absent label reads as
         // `project`, as `run_origin::parent_run_origin` does). Another
         // scope is a different window, never counted.
-        if head.playbook != playbook || head.origin.as_deref().unwrap_or("project") != scope_label {
+        let scope = head.scope().unwrap_or(apb_core::scope::Scope::Project);
+        if head.playbook != playbook || scope.as_str() != scope_label {
             continue;
         }
         heads.push((head.ts, d));

@@ -209,6 +209,7 @@ dependencies = [
  "apb-core",
  "apb-decide",
  "apb-engine",
+ "apb-mcp",
  "hmac",
  "rmcp",
  "schemars",

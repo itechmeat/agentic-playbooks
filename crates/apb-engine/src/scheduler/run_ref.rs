@@ -1,7 +1,7 @@
 //! Read-only lookups of an existing run by id: the playbook and the active
 //! version it runs, and the origin it was started under.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use apb_core::profile_store::PlaybookOrigin;
 use apb_core::registry::is_safe_segment;
@@ -9,10 +9,10 @@ use apb_core::registry::is_safe_segment;
 use crate::error::EngineError;
 use crate::event::{EventPayload, read_all};
 
-/// Returns (playbook id, run's active version). The active version is
-/// the latest `RunMigrated.to_version`; if there were no migrations - `RunStarted.version`.
-/// Used by the `playbook_patch` tool to choose the base of the patch version.
-pub fn run_playbook_ref(root: &Path, run_id: &str) -> Result<(String, String), EngineError> {
+/// The directory of run `run_id` under `root`, checked before anything in
+/// it is read: an id that is not one safe path segment, or a run that does
+/// not exist, is not found.
+pub fn run_dir_of(root: &Path, run_id: &str) -> Result<PathBuf, EngineError> {
     if !is_safe_segment(run_id) {
         return Err(EngineError::NotFound(run_id.to_string()));
     }
@@ -20,6 +20,14 @@ pub fn run_playbook_ref(root: &Path, run_id: &str) -> Result<(String, String), E
     if !run_dir.is_dir() {
         return Err(EngineError::NotFound(run_id.to_string()));
     }
+    Ok(run_dir)
+}
+
+/// Returns (playbook id, run's active version). The active version is
+/// the latest `RunMigrated.to_version`; if there were no migrations - `RunStarted.version`.
+/// Used by the `playbook_patch` tool to choose the base of the patch version.
+pub fn run_playbook_ref(root: &Path, run_id: &str) -> Result<(String, String), EngineError> {
+    let run_dir = run_dir_of(root, run_id)?;
     let events = read_all(&run_dir)?;
     let mut id: Option<String> = None;
     let mut version: Option<String> = None;
@@ -51,12 +59,5 @@ pub fn run_playbook_ref(root: &Path, run_id: &str) -> Result<(String, String), E
 /// Used by the MCP rebind gate to resolve and trust-check a new profile the same
 /// way run start resolved the run's node profiles (issue #45 finding 5).
 pub fn run_profile_origin(root: &Path, run_id: &str) -> Result<PlaybookOrigin, EngineError> {
-    if !is_safe_segment(run_id) {
-        return Err(EngineError::NotFound(run_id.to_string()));
-    }
-    let run_dir = root.join(".apb/runs").join(run_id);
-    if !run_dir.is_dir() {
-        return Err(EngineError::NotFound(run_id.to_string()));
-    }
-    super::rebind::run_origin(&run_dir)
+    super::rebind::run_origin(&run_dir_of(root, run_id)?)
 }

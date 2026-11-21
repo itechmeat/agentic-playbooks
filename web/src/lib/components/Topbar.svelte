@@ -6,6 +6,7 @@
   import Plug from '@lucide/svelte/icons/plug'
   import ShieldCheck from '@lucide/svelte/icons/shield-check'
   import KeyRound from '@lucide/svelte/icons/key-round'
+  import LayoutTemplate from '@lucide/svelte/icons/layout-template'
   import Repeat from '@lucide/svelte/icons/repeat'
   import LogOut from '@lucide/svelte/icons/log-out'
   import Moon from '@lucide/svelte/icons/moon'
@@ -37,7 +38,7 @@
     actions,
     project = '',
   }: {
-    active?: 'playbooks' | 'runs' | 'profiles' | 'connectors' | 'trust' | 'discover' | 'passkeys' | ''
+    active?: 'playbooks' | 'templates' | 'runs' | 'profiles' | 'connectors' | 'trust' | 'discover' | 'passkeys' | ''
     title?: Snippet
     actions?: Snippet
     /** Optional project name shown as a chip on the right. */
@@ -46,6 +47,7 @@
 
   const links = [
     { key: 'playbooks', label: 'Playbooks', href: '#/', icon: BookMarked },
+    { key: 'templates', label: 'Templates', href: '#/templates', icon: LayoutTemplate },
     { key: 'runs', label: 'Runs', href: '#/runs', icon: PlayCircle },
     { key: 'profiles', label: 'Profiles', href: '#/profiles', icon: UserCog },
     { key: 'connectors', label: 'Connectors', href: '#/connectors', icon: Plug },

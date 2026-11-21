@@ -370,15 +370,7 @@ pub fn run_status_as(root: &Path, run_id: &str, caller: ActionCaller) -> Result<
         out["deadline"] = json!(d);
     }
     // The run's concurrency key, when its start took a slot.
-    let scope = view
-        .events
-        .iter()
-        .find_map(|e| match &e.payload {
-            apb_engine::event::EventPayload::RunProvenance { origin, .. } => origin.clone(),
-            _ => None,
-        })
-        .and_then(|o| apb_core::scope::Scope::parse(&o))
-        .unwrap_or(apb_core::scope::Scope::Project);
+    let scope = apb_engine::run_origin::scope_of_events(&view.events);
     let playbook = view
         .events
         .iter()

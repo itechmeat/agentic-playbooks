@@ -130,28 +130,21 @@ static NO_OVERRIDES: RunOverrides = RunOverrides {
 
 fn resolve(
     root: &Path,
-    name: &str,
-    version: Option<&str>,
+    wref: &apb_core::scope::PlaybookRef,
 ) -> Result<apb_core::store::ResolvedPlaybook, String> {
-    let wref = apb_core::scope::PlaybookRef {
-        origin: apb_core::scope::Origin::Project { workspace_id: None },
-        id: name.to_string(),
-        version: version.map(str::to_string),
-    };
-    apb_core::store::resolve(root, &wref).map_err(|e| e.to_string())
+    apb_core::store::resolve(root, wref).map_err(|e| e.to_string())
 }
 
 /// `apb run --estimate`: prints the estimate of playbook `name`, its nodes
 /// keyed as a start with `overrides` binds them, and starts nothing.
 pub(crate) fn estimate_cmd(
     root: &Path,
-    name: &str,
-    version: Option<&str>,
+    wref: &apb_core::scope::PlaybookRef,
     execution: &str,
     req: Option<&BudgetRequest>,
     overrides: Option<&RunOverrides>,
 ) -> ExitCode {
-    let check = resolve(root, name, version).and_then(|r| {
+    let check = resolve(root, wref).and_then(|r| {
         apb_engine::budget::check_resolved(&r, execution, req, overrides.unwrap_or(&NO_OVERRIDES))
             .map_err(|e| e.to_string())
     });
@@ -189,13 +182,12 @@ pub(crate) struct Prestart {
 /// with budget flags, and is said for one without.
 pub(crate) fn prestart(
     root: &Path,
-    name: &str,
-    version: Option<&str>,
+    wref: &apb_core::scope::PlaybookRef,
     execution: &str,
     req: Option<BudgetRequest>,
     overrides: Option<&RunOverrides>,
 ) -> Result<Prestart, String> {
-    let check = match resolve(root, name, version).and_then(|r| {
+    let check = match resolve(root, wref).and_then(|r| {
         apb_engine::budget::check_resolved(
             &r,
             execution,

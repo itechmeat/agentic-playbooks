@@ -139,7 +139,7 @@ pub(crate) use resume::{
 };
 pub use resume::{ResumeDecision, ResumeReason, StartMode, lifecycle_seq, plan_resume};
 use revive::{reoffer_revived_joins, restore_revived_frontier};
-pub use run_ref::{run_playbook_ref, run_profile_origin};
+pub use run_ref::{run_dir_of, run_playbook_ref, run_profile_origin};
 use supervisor::*;
 pub use supervisor::{SUPERVISOR_BILLING_HOLD, SupervisorSpawn, spawn_supervisor_agent};
 

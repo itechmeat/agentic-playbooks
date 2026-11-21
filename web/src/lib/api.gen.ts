@@ -3410,6 +3410,22 @@ waived: boolean,
  */
 ledger_ok: boolean, };
 
+export type TemplateSummary = { id: string, name: string, description: string, version: string, 
+/**
+ * The effective effects (`crate::effects::effective`), as that
+ * function's values serialize.
+ */
+effects: Array<string>, 
+/**
+ * How many eval scenario files ship with it (the files under
+ * `evals/scenarios/`).
+ */
+scenarios: number, 
+/**
+ * `sha256:<hex>` of its yaml bytes.
+ */
+digest: string, };
+
 export type Incompat = "removed" | "type_changed" | "option_gone" | "now_secret" | "pattern_mismatch";
 
 export type InstructionSource = "memory" | "legacy_draft" | "none";

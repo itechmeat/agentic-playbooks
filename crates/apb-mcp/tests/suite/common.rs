@@ -44,6 +44,13 @@ pub fn config_sandbox() -> ConfigSandbox {
     sandbox(&[])
 }
 
+impl ConfigSandbox {
+    /// The sandboxed config dir.
+    pub fn path(&self) -> &std::path::Path {
+        self._dir.path()
+    }
+}
+
 /// A [`config_sandbox`] in which project registration works even on CI:
 /// `CI` and `APB_NO_REGISTRY` are cleared for the test and restored on drop.
 pub fn registry_sandbox() -> ConfigSandbox {

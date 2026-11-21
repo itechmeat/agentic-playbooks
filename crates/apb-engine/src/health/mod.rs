@@ -739,7 +739,7 @@ fn observe_ended(run_dir: &Path) {
     let Some(head) = head else {
         return;
     };
-    let Some(scope) = head.origin.as_deref().and_then(Scope::parse) else {
+    let Some(scope) = head.scope() else {
         return;
     };
     if watched(&root, scope, &head.playbook).is_none() {

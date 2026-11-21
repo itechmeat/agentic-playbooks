@@ -92,6 +92,8 @@ mod discover_cli_test;
 mod doctor_agents_cli_test;
 #[path = "suite/eval_doubles_cli_test.rs"]
 mod eval_doubles_cli_test;
+#[path = "suite/global_run_cli_test.rs"]
+mod global_run_cli_test;
 #[path = "suite/grade_cli_test.rs"]
 mod grade_cli_test;
 #[path = "suite/health_cli_test.rs"]
@@ -208,6 +210,8 @@ mod server_key_cli_test;
 mod setup_cli_test;
 #[path = "suite/stats_cli_test.rs"]
 mod stats_cli_test;
+#[path = "suite/templates_cli_test.rs"]
+mod templates_cli_test;
 // --- 0.24.0 eval suites ---
 #[path = "suite/eval_cli_test.rs"]
 mod eval_cli_test;

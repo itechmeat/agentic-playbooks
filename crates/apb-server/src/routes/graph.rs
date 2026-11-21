@@ -67,7 +67,13 @@ pub(crate) async fn post_validate_draft(
         // directory under the run root reports them as missing warnings.
         _ => root.join(".apb").join("draft-validation-none"),
     };
-    let issues = super::playbooks::validation_issues(&reg, &root, &version_dir, &playbook);
+    let issues = super::playbooks::validation_issues(
+        &reg,
+        &root,
+        &version_dir,
+        &playbook,
+        apb_core::profile_store::PlaybookOrigin::Project,
+    );
     Json(DraftValidation {
         parse_error: None,
         issues,

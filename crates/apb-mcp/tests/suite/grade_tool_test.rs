@@ -14,7 +14,9 @@ use apb_core::quality::grade::{Cite, Level};
 use apb_core::registry::init_project;
 use apb_core::scope::{Origin, PlaybookRef};
 use apb_core::step_env::StepCaller;
+use apb_core::versioning::read_provenance;
 use apb_engine::candidate::PersonDecision;
+use apb_engine::event::{EventPayload, read_all};
 use apb_engine::forward_patch::{ForwardPatchRequest, create};
 use apb_engine::grade::evidence::Proposal;
 use apb_engine::grade::reader::ReadRequest;
@@ -277,7 +279,7 @@ fn a_grade_without_a_candidate_leaves_the_playbook_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let root: PathBuf = dir.path().to_path_buf();
     init_project(&root).unwrap();
-    let after = after_stored(&root, "never-saved");
+    let after = after_stored(&root, &root.join(".apb/runs/never-saved"), "never-saved");
     assert_eq!(after, Default::default());
     assert!(!root.join(".apb/playbooks/never-saved").exists());
     let refused =
@@ -399,4 +401,101 @@ fn a_run_step_evaluates_given_answers_but_never_spends_or_saves() {
         judge_evaluate(root, "../doc", "triage", &given, JudgeCaller::of(&person)),
         Err(ToolError::NotFound(_))
     ));
+}
+
+/// Grading a run of a global definition stores the grade and re-decides
+/// nothing: the project candidate of the same id stands untouched.
+#[test]
+fn grading_a_global_run_leaves_the_project_candidate() {
+    let cfg = config_sandbox();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root);
+    apb_core::run_origin::ensure_key().unwrap();
+    let base = start(root);
+    let version = forward(root, &base);
+    // The trial runs the candidate (the gate picks it) and is held.
+    let t1 = start(root);
+    let events = read_all(&root.join(".apb/runs").join(&t1)).unwrap();
+    assert!(matches!(
+        events.iter().find(|e| matches!(e.payload, EventPayload::RunStarted { .. })).map(|e| &e.payload),
+        Some(EventPayload::RunStarted { version: v, .. }) if v == &version
+    ));
+    let candidate_before = pointer(root, "candidate");
+    assert_eq!(candidate_before.as_deref(), Some(version.as_str()));
+    let trial_before = read_provenance(root, ID, &version).unwrap().unwrap().trial;
+
+    // A global `trial` 1.0.0 runs in this project and is graded with the
+    // rules grader.
+    let vdir = cfg.path().join("playbooks").join(ID).join("1.0.0");
+    fs::create_dir_all(vdir.join("scripts")).unwrap();
+    fs::write(vdir.join("playbook.yaml"), playbook("ok.sh")).unwrap();
+    fs::write(vdir.join("scripts/ok.sh"), "echo changed the parser\n").unwrap();
+    fs::write(vdir.parent().unwrap().join("current"), "1.0.0").unwrap();
+    let wref = PlaybookRef {
+        origin: Origin::Global,
+        id: ID.into(),
+        version: Some("1.0.0".into()),
+    };
+    let resolved = apb_core::store::resolve(root, &wref).unwrap();
+    let res = apb_engine::scheduler::run_resolved(
+        &resolved,
+        apb_engine::scheduler::RunOptions::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        res.outcome,
+        apb_engine::state::RunStatus::Succeeded
+    ));
+
+    let graded = grade_by(root, &res.run_id, GraderChoice::Rules, &person()).unwrap();
+    // The grade is stored; the candidate block is empty: a global run
+    // re-decides no project candidate.
+    assert!(graded.grade.is_some() && graded.skipped.is_none());
+    assert_eq!(graded.after, Default::default());
+    assert_eq!(pointer(root, "candidate"), candidate_before);
+    assert_eq!(
+        read_provenance(root, ID, &version).unwrap().unwrap().trial,
+        trial_before
+    );
+}
+
+/// The backfill of a project playbook never grades a run of a global
+/// definition of the same id.
+#[test]
+fn a_backfill_of_a_project_playbook_skips_global_runs() {
+    let cfg = config_sandbox();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root);
+    apb_core::run_origin::ensure_key().unwrap();
+    let project_run = start(root);
+
+    let vdir = cfg.path().join("playbooks").join(ID).join("1.0.0");
+    fs::create_dir_all(vdir.join("scripts")).unwrap();
+    fs::write(vdir.join("playbook.yaml"), playbook("ok.sh")).unwrap();
+    fs::write(vdir.join("scripts/ok.sh"), "echo changed the parser\n").unwrap();
+    fs::write(vdir.parent().unwrap().join("current"), "1.0.0").unwrap();
+    let wref = PlaybookRef {
+        origin: Origin::Global,
+        id: ID.into(),
+        version: Some("1.0.0".into()),
+    };
+    let resolved = apb_core::store::resolve(root, &wref).unwrap();
+    let global_run = apb_engine::scheduler::run_resolved(
+        &resolved,
+        apb_engine::scheduler::RunOptions::default(),
+    )
+    .unwrap()
+    .run_id;
+
+    let report = backfill(root, ID, Some("1.0.0"), 5, GraderChoice::Rules, &person()).unwrap();
+    assert!(
+        report.runs.iter().any(|r| r.run_id == project_run),
+        "the project run is backfilled"
+    );
+    assert!(
+        !report.runs.iter().any(|r| r.run_id == global_run),
+        "a global run of the same id is never backfilled for the project playbook"
+    );
 }

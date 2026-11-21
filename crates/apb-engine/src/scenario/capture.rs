@@ -656,15 +656,17 @@ pub fn capture(root: &Path, run_dir: &Path, req: &CaptureRequest) -> Result<Capt
         digest,
         playbook: playbook_id,
         version: run_version,
-        scope: events.iter().find_map(|e| match &e.payload {
-            EventPayload::RunProvenance { origin, .. } => {
-                origin.as_deref().and_then(apb_core::scope::Scope::parse)
-            }
-            _ => None,
-        }),
+        scope: capture_scope(&events),
         redacted,
         warnings,
     })
+}
+
+/// The scope a captured scenario is saved under: the run's scope as
+/// `run_origin::origin_of_events` reads it, `None` without a labelled
+/// `run_provenance`.
+pub(crate) fn capture_scope(events: &[Event]) -> Option<apb_core::scope::Scope> {
+    crate::run_origin::first_label(events).map(crate::run_origin::scope_of_label)
 }
 
 /// The playbook id and version the run executed, from `run_started`.

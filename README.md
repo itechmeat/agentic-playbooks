@@ -189,7 +189,7 @@ apb init            create the .apb structure (--standing-block, --feedback-loop
 apb setup           plan (read only), apply --plan <digest>, remove: default playbooks, skills, role profiles, MCP registration
 apb list            playbooks and versions
 apb validate        validate playbooks, the profiles and scripts they reference, requires and connectors
-apb run <id>        run a playbook (--param k=v, --overrides, --supervise, --detach, --execution, --confirm-irreversible)
+apb run <id>        run a playbook (--param k=v, --overrides, --supervise, --detach, --execution, --confirm-irreversible, --scope project|global)
 apb wait <run>      block until a run finishes, needs input or stops (exit code = verdict)
 apb runs [run]      list runs, or one run with its execution mode and tokens (--json)
 apb pause <run>     pause a run (--drain default, --now, --reason, --until, --keep-lock)
@@ -214,6 +214,7 @@ apb profile         list / show / write / edit / move / delete agent profiles
 apb subscriptions   view or declare the agent subscriptions you pay for
 apb connector       list / show / call / approve / doctor / env / init / install / test - connectors to external services
 apb migrate         migrate schema 1 playbooks (executors) to schema 2 (profiles)
+apb templates       list / show / install the example playbooks apb ships, as drafts
 apb adopt           adoption readiness report for a playbook
 apb doctor          diagnose agents, profiles, runners, playbooks, the defaults (--run <id> one run's health, --agents every installed agent, --probe-agent <id> one paid format check, --json)
 apb export/import   move a playbook version (YAML, layout, scripts) as one bundle file

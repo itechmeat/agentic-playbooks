@@ -902,3 +902,63 @@ fn an_acknowledgement_does_not_cover_quality_counts_that_changed() {
     .unwrap();
     assert_eq!(pointer(root, "current").as_deref(), Some(version.as_str()));
 }
+
+/// A graded global run of the project's `current` id and version never
+/// counts for the project comparison: its poor grade is not current's
+/// evidence, and the verdict stays the one without it.
+#[test]
+fn a_global_grade_does_not_move_the_project_comparison() {
+    let _lock = crate::common::env_lock();
+    let config = tempfile::tempdir().unwrap();
+    let _var = crate::common::EnvVar::set("APB_CONFIG_DIR", config.path());
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, "quality: {}");
+    apb_core::run_origin::ensure_key().unwrap();
+
+    // The project line: one graded run of `current`, a candidate, one poor
+    // trial.
+    let (base, _, _) = start(root);
+    let version = forward(root, &base, &playbook("quality: {}", "maybe.sh"));
+    assert_eq!(
+        pointer(root, "candidate").as_deref(),
+        Some(version.as_str())
+    );
+    fs::write(root.join("fail-next"), "").unwrap();
+    let (_t1, outcome, _) = start(root);
+    assert_eq!(outcome, RunStatus::Failed);
+    let before = quality_view(root, ID).unwrap().unwrap().decision.unwrap();
+
+    // A global `trial` 1.0.0 (same id and version as the project's
+    // `current`), whose run in this project fails and is graded poor.
+    let vdir = config.path().join("playbooks").join(ID).join("1.0.0");
+    fs::create_dir_all(vdir.join("scripts")).unwrap();
+    fs::write(vdir.join("playbook.yaml"), playbook("quality: {}", "ok.sh")).unwrap();
+    fs::write(vdir.join("scripts/ok.sh"), "echo broken 1>&2\nexit 1\n").unwrap();
+    fs::write(
+        config.path().join("playbooks").join(ID).join("current"),
+        "1.0.0",
+    )
+    .unwrap();
+    let wref = apb_core::scope::PlaybookRef {
+        origin: apb_core::scope::Origin::Global,
+        id: ID.into(),
+        version: Some("1.0.0".into()),
+    };
+    let resolved = apb_core::store::resolve(root, &wref).unwrap();
+    let res = apb_engine::scheduler::run_resolved(
+        &resolved,
+        apb_engine::scheduler::RunOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let grades = grades_of(&run_dir(root, &res.run_id));
+    assert_eq!(grades.len(), 1, "the global run is graded as any run");
+
+    // The comparison is the one without the global grade.
+    let after = quality_view(root, ID).unwrap().unwrap().decision.unwrap();
+    assert_eq!(
+        after, before,
+        "a global run never moves the project comparison"
+    );
+}

@@ -152,6 +152,10 @@ struct Unstarted<'a> {
     /// The start's effective external data flag: a failed preparation
     /// records it on the `run_started` it writes, so the run stays flagged.
     external_data: bool,
+    /// The definition origin of the start (`project` or `global`). A failed
+    /// preparation of a global run journals it, so the run never reads as
+    /// a project run of the same id.
+    origin_label: &'a str,
 }
 
 /// [`prep_try`] for the steps before `run_started`: on a failure it first
@@ -169,9 +173,36 @@ fn prep_try_unstarted<T, E: Into<EngineError>>(
             definition: None,
             external_data: u.external_data,
         });
+        // A run journal without an origin reads as a project run, so a
+        // global one names its origin before it ends. A project run's
+        // failure journal is left as it was.
+        if crate::run_origin::scope_of_label(u.origin_label) == apb_core::scope::Scope::Global {
+            let _ = log.append(origin_only_provenance(u.origin_label));
+        }
         let _ = apb_core::run_origin::stamp(u.run_dir, u.run_id);
         finalize_prepare_failure(log, e.into())
     })
+}
+
+/// A `run_provenance` that carries the origin label and nothing else: the
+/// record of a run that failed before its full provenance was known.
+fn origin_only_provenance(label: &str) -> EventPayload {
+    EventPayload::RunProvenance {
+        origin: Some(label.into()),
+        digest: None,
+        execution_root: None,
+        scripts_digest: None,
+        profiles: Vec::new(),
+        remembered: Vec::new(),
+        apb: crate::event::apb_version(),
+        limits: Vec::new(),
+        previous_success: None,
+        untrusted: Vec::new(),
+        deadline: None,
+        start_key: None,
+        concurrency: None,
+        eval_doubles: false,
+    }
 }
 
 pub(crate) fn soul_delivery_str(d: SoulDelivery) -> String {
@@ -1376,6 +1407,7 @@ pub(crate) fn prepare_placed(
         playbook: id,
         version: &loaded.version,
         external_data: opts.external_data,
+        origin_label: t.origin_label,
     };
     // Every run path (CLI, MCP, dashboard, detached driver, child runs) comes
     // through here, and nothing but the event log is in the run yet: make sure
@@ -1588,6 +1620,9 @@ pub(crate) fn prepare_placed(
         && opts.depth == 0
         && opts.parent_run.is_none()
         && opts.eval.is_none()
+        // A candidate lives in a project (`apb_core::candidate::playbook_dir`):
+        // a global definition has none.
+        && t.origin_label == "project"
         && crate::candidate::is_trial_start(
             &t.definition_parent.join("playbooks").join(id),
             &loaded.version,
@@ -2243,6 +2278,42 @@ mod run_guard_tests {
             requires(run_guard_of(&pb, true, false, true)),
             Some(vec!["deadline".to_string(), "eval_doubles".to_string()])
         );
+    }
+
+    /// A global run that fails before its `run_started` still names its
+    /// origin, so no reader takes it for a project run of the same id; a
+    /// project run's failure journal stays as it was (no provenance).
+    #[test]
+    fn a_failed_preparation_keeps_a_global_origin() {
+        for (label, want) in [
+            ("global", crate::run_origin::RunScope::Global),
+            ("project", crate::run_origin::RunScope::Project),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut log = EventLog::create(dir.path()).unwrap();
+            let u = Unstarted {
+                run_dir: dir.path(),
+                run_id: "r1",
+                playbook: "dup",
+                version: "1.0.0",
+                external_data: false,
+                origin_label: label,
+            };
+            let r: Result<(), EngineError> =
+                prep_try_unstarted(&mut log, &u, Err(EngineError::Invalid("boom".into())));
+            assert!(r.is_err());
+            assert_eq!(crate::run_origin::run_scope(dir.path()), want, "{label}");
+            let events = crate::event::read_all(dir.path()).unwrap();
+            let provenances = events
+                .iter()
+                .filter(|e| matches!(e.payload, EventPayload::RunProvenance { .. }))
+                .count();
+            assert_eq!(provenances, usize::from(label == "global"), "{label}");
+            assert!(matches!(
+                events.last().unwrap().payload,
+                EventPayload::RunFinished { .. }
+            ));
+        }
     }
 
     /// A doubled start's provenance and guard go out in one write: the
