@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use apb_core::agent_output::AgentUsage;
 use apb_core::config::InvocationDef;
-use apb_engine::adapter::{AgentAdapter, AgentFailure, AgentReport, AgentTask, ClaudeAdapter};
+use apb_engine::adapter::{AgentAdapter, AgentFailure, AgentReport, AgentTask, CliAdapter};
 use serde::Deserialize;
 
 use crate::common;
@@ -219,7 +219,7 @@ impl Stub {
             common::EnvVar::remove(apb_core::zcode::BUILTIN_CONFIG_ENV),
             common::EnvVar::remove(apb_core::zcode::PERSONAL_CONFIG_ENV),
         ];
-        let adapter = ClaudeAdapter {
+        let adapter = CliAdapter {
             program: self.program.clone(),
             spec,
         };

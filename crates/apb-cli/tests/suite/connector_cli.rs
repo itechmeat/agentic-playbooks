@@ -498,6 +498,50 @@ fn approve_marks_connector_then_account_as_trusted() {
     assert!(!bad.status.success(), "unknown account must fail");
 }
 
+/// Approving a connector is a person's act (design D4.13 item 1): a process
+/// inside a run step (`APB_RUN_ID` set) is refused for the connector and for
+/// one account, and the connector stays unapproved.
+#[test]
+fn approve_is_refused_inside_a_run_step() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    apb_ok(dir.path(), &["connector", "init", "widget"]);
+    write_widget_account(dir.path(), "WIDGET_TOKEN");
+
+    let before = apb_ok(dir.path(), &["connector", "list"]);
+    let before_out = String::from_utf8_lossy(&before.stdout);
+    assert!(
+        before_out.contains("unapproved"),
+        "connector should start unapproved: {before_out}"
+    );
+
+    for args in [
+        vec!["connector", "approve", "widget"],
+        vec!["connector", "approve", "widget", "--account", "default"],
+    ] {
+        let out = playbook_env(dir.path(), &args, &[("APB_RUN_ID", "r-conn")]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "`apb {}` must exit 2 inside a run step: {stderr}",
+            args.join(" ")
+        );
+        assert!(
+            stderr.contains("inside run"),
+            "the refusal must name the run step: {stderr}"
+        );
+    }
+
+    // The connector stays unapproved.
+    let after = apb_ok(dir.path(), &["connector", "list"]);
+    let after_out = String::from_utf8_lossy(&after.stdout);
+    assert!(
+        after_out.contains("unapproved"),
+        "connector must stay unapproved: {after_out}"
+    );
+}
+
 // --- run: connector permit gate (final-review fix) -------------------------
 //
 // Task 19 review follow-up: `apb run`'s two `RunOptions` sites (foreground and

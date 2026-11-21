@@ -157,6 +157,9 @@ fn observe_due_leased(
         phase: "follow_up",
         events: &events,
         guard_tree: true,
+        // The run has ended, so no driver holds its tree; V185 refuses a
+        // `project_checks` source here anyway.
+        holds_tree: false,
         scripts_label: "follow-up scripts",
         site: apb_core::follow_up::FOLLOW_UP_SITE,
         // Read after the run ended: outside its deadline.

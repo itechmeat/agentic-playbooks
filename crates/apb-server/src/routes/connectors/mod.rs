@@ -520,8 +520,30 @@ pub(crate) struct ConnectorApproveBody {
 pub(crate) async fn approve_connector_handler(
     State(state): State<AppState>,
     Query(q): Query<WorkspaceQuery>,
+    channel: Option<axum::Extension<crate::auth::RequestChannel>>,
     Json(body): Json<ConnectorApproveBody>,
 ) -> impl IntoResponse {
+    // Approving a connector is a person's act: over HTTP only a signed-in
+    // dashboard session takes it, and the request's credential decides,
+    // never this server's own environment (design D4.13 item 1). The
+    // refusal is the first statement, so nothing is read or written; the
+    // status is the one every channel refusal of this route family answers.
+    let channel = crate::auth::RequestChannel::of(channel.map(|c| c.0));
+    if let Some(refusal) = channel.person_only_refusal() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": refusal.as_str(),
+                "message": "approving a connector is a person's act, and over HTTP only a \
+                     signed-in dashboard session takes it: a dashboard without keys is \
+                     reachable by anything on this machine, and a bearer key may be a \
+                     script's; approve with `apb connector approve <name> [--account \
+                     <acct>]` at a terminal, or issue a key with `apb server key issue` \
+                     and sign in",
+            })),
+        )
+            .into_response();
+    }
     let loaded = match store::load(&body.name) {
         Ok(l) => l,
         Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),

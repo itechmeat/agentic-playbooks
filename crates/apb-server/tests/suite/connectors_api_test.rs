@@ -9,13 +9,17 @@
 //! secret env var), so all of them take `common::env_lock()` to serialize
 //! against other env-mutating modules in this consolidated binary.
 
+use apb_core::config::ServerConfig;
 use apb_core::connector::config;
+use apb_core::server_auth;
 use apb_core::trust::{Kind, OriginKind, TrustStore, account_trust_id};
+use apb_server::auth::{AuthState, CSRF_HEADER, CSRF_VALUE, SESSION_COOKIE};
 use apb_server::{AppState, build_router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use std::path::Path;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 // --- env guards -------------------------------------------------------------
@@ -58,9 +62,31 @@ fn unset_var(var: &str) -> EnvGuard {
 
 // --- http helpers ------------------------------------------------------------
 
-async fn get_json(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+/// A `Some(cookie)` request carries the signed-in session's credentials: the
+/// `Cookie` pair and the CSRF marker, what every write of the dashboard
+/// sends (design D4.13 item 1, test item 3). `None` keeps the old anonymous
+/// shape, what the keyless tests and the rest of the file use.
+fn auth_headers(cookie: Option<&str>) -> Vec<(&'static str, String)> {
+    match cookie {
+        None => Vec::new(),
+        Some(cookie) => vec![
+            ("cookie", cookie.to_string()),
+            (CSRF_HEADER, CSRF_VALUE.into()),
+        ],
+    }
+}
+
+async fn get_json(
+    app: axum::Router,
+    uri: &str,
+    cookie: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::get(uri);
+    for (name, value) in auth_headers(cookie) {
+        builder = builder.header(name, value);
+    }
     let res = app
-        .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .oneshot(builder.body(Body::empty()).unwrap())
         .await
         .unwrap();
     let status = res.status();
@@ -73,11 +99,16 @@ async fn post_json(
     app: axum::Router,
     uri: &str,
     body: serde_json::Value,
+    cookie: Option<&str>,
 ) -> (StatusCode, serde_json::Value) {
-    let req = Request::builder()
+    let mut builder = Request::builder()
         .method("POST")
         .uri(uri)
-        .header("content-type", "application/json")
+        .header("content-type", "application/json");
+    for (name, value) in auth_headers(cookie) {
+        builder = builder.header(name, value);
+    }
+    let req = builder
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
@@ -85,6 +116,54 @@ async fn post_json(
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
+}
+
+// --- keyed-state helpers (design D4.13 item 1, test item 3) -------------------
+
+/// A keyed state over the same root: a key issued into a temp
+/// `server-auth.yaml`, an `AuthState` built from it attached through
+/// `with_auth`, exactly as `auth_endpoints_test.rs`'s `authed_with` builds
+/// one. A keyless `AppState` cannot sign in (`login_handler` answers
+/// `auth_disabled`), so the approval tests that need a signed-in session
+/// build a keyed one. Returns the keyed state and the key.
+fn keyed(state: AppState) -> (AppState, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("server-auth.yaml");
+    let (key, _record) = server_auth::issue_into(&path).unwrap();
+    let file = server_auth::load_from(&path).unwrap();
+    let auth = Arc::new(AuthState::new(None, file.keys, &ServerConfig::default()).unwrap());
+    (state.with_auth(auth), key.expose_secret().to_string())
+}
+
+/// Signs in with the key and returns the `<SESSION_COOKIE>=<value>` pair of
+/// its `Set-Cookie`. The session lives in the auth state the clones share,
+/// so every later request through `build_router(state.clone())` of the same
+/// state authenticates with this pair.
+async fn sign_in(state: &AppState, key: &str) -> String {
+    let res = build_router(state.clone())
+        .oneshot(
+            Request::post("/api/auth/login")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, CSRF_VALUE)
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({ "key": key })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "sign in failed");
+    let set_cookie = res
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .expect("a session cookie is set");
+    assert!(
+        set_cookie.starts_with(&format!("{SESSION_COOKIE}=")),
+        "{set_cookie}"
+    );
+    set_cookie.split(';').next().unwrap().to_string()
 }
 
 // --- fixture -----------------------------------------------------------------
@@ -221,7 +300,7 @@ async fn list_endpoint_shows_fixture_connector_unapproved() {
     let _g = setup(cfg.path(), root.path());
 
     let app = build_router(AppState::new(root.path().to_path_buf()));
-    let (status, json) = get_json(app, "/api/connectors").await;
+    let (status, json) = get_json(app, "/api/connectors", None).await;
     assert_eq!(status, StatusCode::OK);
     let entry = json
         .as_array()
@@ -254,7 +333,7 @@ async fn list_endpoint_marks_broken_connector_invalid() {
     std::os::unix::fs::symlink("/nonexistent-absolute-target", dir.join("broken-link")).unwrap();
 
     let app = build_router(AppState::new(root.path().to_path_buf()));
-    let (status, json) = get_json(app, "/api/connectors").await;
+    let (status, json) = get_json(app, "/api/connectors", None).await;
     assert_eq!(status, StatusCode::OK);
     let entry = json
         .as_array()
@@ -300,8 +379,12 @@ async fn detail_endpoint_surfaces_a_broken_installed_official_connector_as_inval
     std::os::unix::fs::symlink("/nonexistent-absolute-target", dir.join("broken-link")).unwrap();
 
     // Detail: it must be reported installed + invalid, NOT not_installed.
-    let (status, detail) =
-        get_json(router(root.path()), &format!("/api/connectors/{EMBEDDED}")).await;
+    let (status, detail) = get_json(
+        router(root.path()),
+        &format!("/api/connectors/{EMBEDDED}"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{detail}");
     assert_eq!(detail["name"], EMBEDDED);
     assert_eq!(
@@ -315,7 +398,7 @@ async fn detail_endpoint_surfaces_a_broken_installed_official_connector_as_inval
     );
 
     // List: the same connector is invalid there too.
-    let (status, list) = get_json(router(root.path()), "/api/connectors").await;
+    let (status, list) = get_json(router(root.path()), "/api/connectors", None).await;
     assert_eq!(status, StatusCode::OK, "{list}");
     let listed = list
         .as_array()
@@ -332,25 +415,31 @@ async fn detail_endpoint_surfaces_a_broken_installed_official_connector_as_inval
     assert_eq!(listed["trust"], "invalid", "list view: {listed}");
 }
 
+/// The approval is a person's act, so the test signs in on a keyed server:
+/// every request below (the approval and the listing) carries the session
+/// cookie and the CSRF marker (design D4.13 item 1, test item 3).
 #[tokio::test]
 async fn approve_endpoint_flips_connector_trust() {
     let _guard = crate::common::env_lock().await;
     let cfg = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     let _g = setup(cfg.path(), root.path());
+    let (state, key) = keyed(AppState::new(root.path().to_path_buf()));
+    let cookie = sign_in(&state, &key).await;
 
-    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let app = build_router(state.clone());
     let (status, approved) = post_json(
         app,
         "/api/connectors/approve",
         serde_json::json!({ "name": CONNECTOR, "account": null }),
+        Some(&cookie),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "approve failed: {approved}");
     assert_eq!(approved["ok"], serde_json::json!(true));
 
-    let app = build_router(AppState::new(root.path().to_path_buf()));
-    let (_status, json) = get_json(app, "/api/connectors").await;
+    let app = build_router(state.clone());
+    let (_status, json) = get_json(app, "/api/connectors", Some(&cookie)).await;
     let entry = json
         .as_array()
         .unwrap()
@@ -358,6 +447,163 @@ async fn approve_endpoint_flips_connector_trust() {
         .find(|c| c["name"] == CONNECTOR)
         .expect("fixture connector listed");
     assert_eq!(entry["trust"], "approved", "trust must flip: {entry}");
+}
+
+/// Posts an approval with exactly these extra headers.
+async fn post_approve(
+    state: &AppState,
+    body: serde_json::Value,
+    headers: &[(&str, String)],
+) -> (StatusCode, serde_json::Value) {
+    let mut builder =
+        Request::post("/api/connectors/approve").header("content-type", "application/json");
+    for (name, value) in headers {
+        builder = builder.header(*name, value.as_str());
+    }
+    let req = builder
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let res = build_router(state.clone()).oneshot(req).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+/// The trust the detail page shows for the fixture connector and its
+/// account `acct1`.
+async fn trust_of(state: &AppState, cookie: Option<&str>) -> (String, String) {
+    let (_, json) = get_json(
+        build_router(state.clone()),
+        &format!("/api/connectors/{CONNECTOR}"),
+        cookie,
+    )
+    .await;
+    let account = json["accounts"]
+        .as_array()
+        .and_then(|a| a.iter().find(|a| a["name"] == "acct1"))
+        .map(|a| a["trust"].as_str().unwrap_or_default().to_string())
+        .unwrap_or_default();
+    (
+        json["trust"].as_str().unwrap_or_default().to_string(),
+        account,
+    )
+}
+
+/// The two approval bodies: the connector, and one of its accounts.
+fn approve_bodies() -> [serde_json::Value; 2] {
+    [
+        serde_json::json!({ "name": CONNECTOR, "account": null }),
+        serde_json::json!({ "name": CONNECTOR, "account": "acct1" }),
+    ]
+}
+
+/// A keyless dashboard is reachable by anything on this machine, so it must
+/// not take an approval (design D4.13 item 1), whatever shape the request
+/// has: a local process posting without an `Origin` (what a run step's
+/// script sends), the keyless page's own request with the CSRF marker, and
+/// a same-origin browser request, each for the connector and for an
+/// account. Each is refused before anything is approved, and the server's
+/// own environment has no run id either: the credential decides, never the
+/// environment.
+#[tokio::test]
+async fn approve_endpoint_refuses_a_keyless_request_from_a_local_process() {
+    let _guard = crate::common::env_lock().await;
+    let _no_run = unset_var("APB_RUN_ID");
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let state = AppState::new(root.path().to_path_buf());
+    let shapes: [Vec<(&str, String)>; 3] = [
+        Vec::new(),
+        vec![(CSRF_HEADER, CSRF_VALUE.to_string())],
+        vec![
+            ("origin", "http://127.0.0.1:8770".to_string()),
+            ("sec-fetch-site", "same-origin".to_string()),
+        ],
+    ];
+    for headers in &shapes {
+        for body in approve_bodies() {
+            let (status, json) = post_approve(&state, body, headers).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "keyless approve must be refused for {headers:?}: {json}"
+            );
+            assert_eq!(
+                json["error"],
+                serde_json::json!("keyless_dashboard"),
+                "{json}"
+            );
+            assert!(
+                json["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("apb connector approve"),
+                "the refusal names the CLI command: {json}"
+            );
+            assert_eq!(
+                trust_of(&state, None).await,
+                ("unapproved".to_string(), "unapproved".to_string()),
+                "nothing approved after {headers:?}"
+            );
+        }
+    }
+}
+
+/// A bearer key is not a person (a script may hold it), so the route
+/// refuses an approval posted with one, for the connector and for an
+/// account, and nothing is approved (design D4.13 item 1).
+#[tokio::test]
+async fn approve_endpoint_refuses_a_bearer_key() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let (state, key) = keyed(AppState::new(root.path().to_path_buf()));
+    let cookie = sign_in(&state, &key).await;
+
+    for body in approve_bodies() {
+        let (status, json) =
+            post_approve(&state, body, &[("authorization", format!("Bearer {key}"))]).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+        assert_eq!(json["error"], serde_json::json!("bearer_key"), "{json}");
+    }
+    assert_eq!(
+        trust_of(&state, Some(&cookie)).await,
+        ("unapproved".to_string(), "unapproved".to_string()),
+        "nothing approved"
+    );
+}
+
+/// The credential decides, never the environment: a signed-in session
+/// approves even while the server's own environment names a run (a
+/// dashboard started from inside a run step's shell).
+#[tokio::test]
+async fn a_signed_in_session_approves_while_the_server_has_a_run_id() {
+    let _guard = crate::common::env_lock().await;
+    let _run = set_var("APB_RUN_ID", "run-of-the-server");
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let (state, key) = keyed(AppState::new(root.path().to_path_buf()));
+    let cookie = sign_in(&state, &key).await;
+
+    for body in approve_bodies() {
+        let (status, json) = post_json(
+            build_router(state.clone()),
+            "/api/connectors/approve",
+            body,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+    }
+    assert_eq!(
+        trust_of(&state, Some(&cookie)).await,
+        ("approved".to_string(), "approved".to_string())
+    );
 }
 
 #[tokio::test]
@@ -369,7 +615,7 @@ async fn detail_endpoint_carries_missing_env() {
     // Deliberately do NOT set TOKEN_VAR: the account's secret must not resolve.
 
     let app = build_router(AppState::new(root.path().to_path_buf()));
-    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}")).await;
+    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["name"], CONNECTOR);
     let accounts = json["accounts"].as_array().expect("accounts array");
@@ -408,7 +654,7 @@ async fn detail_endpoint_shows_a_command_sourced_secret() {
     .unwrap();
 
     let app = build_router(AppState::new(root.path().to_path_buf()));
-    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}")).await;
+    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}"), None).await;
     assert_eq!(status, StatusCode::OK);
     let mine = json["accounts"]
         .as_array()
@@ -461,6 +707,7 @@ async fn healthcheck_endpoint_refuses_unapproved_connector() {
         app,
         &format!("/api/connectors/{CONNECTOR}/healthcheck/acct1"),
         serde_json::json!({}),
+        None,
     )
     .await;
     // The endpoint always returns 200 with the executor's JSON verbatim
@@ -484,6 +731,7 @@ async fn healthcheck_endpoint_runs_mock_function_once_approved() {
         app,
         &format!("/api/connectors/{CONNECTOR}/healthcheck/acct1"),
         serde_json::json!({}),
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -510,6 +758,7 @@ async fn run_handler_refuses_unapproved_connector_binding_playbook() {
         app,
         &format!("/api/playbooks/{PLAYBOOK_ID}/run"),
         serde_json::json!({}),
+        None,
     )
     .await;
     assert_eq!(
@@ -577,6 +826,7 @@ async fn run_handler_starts_once_connector_and_account_are_approved() {
         app,
         &format!("/api/playbooks/{PLAYBOOK_ID}/run"),
         serde_json::json!({}),
+        None,
     )
     .await;
     assert_eq!(
@@ -653,6 +903,7 @@ async fn run_handler_pins_the_connector_permit_of_a_playbook_child() {
         app,
         &format!("/api/playbooks/{PARENT_ID}/run"),
         serde_json::json!({}),
+        None,
     )
     .await;
     assert_eq!(
@@ -706,6 +957,7 @@ async fn run_handler_refuses_a_parent_whose_child_connector_is_untrusted() {
         app,
         &format!("/api/playbooks/{PARENT_ID}/run"),
         serde_json::json!({}),
+        None,
     )
     .await;
     assert_eq!(
@@ -755,7 +1007,7 @@ async fn list_endpoint_without_workspace_lists_each_connector_once() {
     let (_id2, _reg2) = register_workspace(root2.path());
 
     let app = build_router(AppState::new_global());
-    let (status, json) = get_json(app, "/api/connectors").await;
+    let (status, json) = get_json(app, "/api/connectors", None).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -783,7 +1035,7 @@ async fn list_endpoint_with_workspace_keeps_single_project_behavior() {
     let (id, _reg) = register_workspace(root.path());
 
     let app = build_router(AppState::new_global());
-    let (status, json) = get_json(app, &format!("/api/connectors?workspace={id}")).await;
+    let (status, json) = get_json(app, &format!("/api/connectors?workspace={id}"), None).await;
     assert_eq!(status, StatusCode::OK, "scoped connector list: {json}");
     let entry = json
         .as_array()
@@ -798,7 +1050,7 @@ async fn list_endpoint_with_workspace_keeps_single_project_behavior() {
 
     // An unknown workspace stays strict.
     let app = build_router(AppState::new_global());
-    let (status, _) = get_json(app, "/api/connectors?workspace=no-such-workspace").await;
+    let (status, _) = get_json(app, "/api/connectors?workspace=no-such-workspace", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -815,7 +1067,7 @@ async fn detail_endpoint_without_workspace_returns_connector() {
     let (_id, _reg) = register_workspace(root.path());
 
     let app = build_router(AppState::new_global());
-    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}")).await;
+    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}"), None).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -843,7 +1095,10 @@ async fn detail_endpoint_without_workspace_returns_connector() {
 /// for the account rows it lists without a workspace, so those three call-path
 /// endpoints must find the account the same way the listing did: in the
 /// reachable project that configures it. They used to demand `?workspace=`
-/// and answered every click from the global view with a 400.
+/// and answered every click from the global view with a 400. The approval is
+/// a person's act, so the test signs in on a keyed server and every request
+/// carries the session cookie and the CSRF marker (design D4.13 item 1,
+/// test item 3).
 #[tokio::test]
 async fn account_actions_without_workspace_use_the_listed_account() {
     let _guard = crate::common::env_lock().await;
@@ -852,17 +1107,19 @@ async fn account_actions_without_workspace_use_the_listed_account() {
     let _g = setup(cfg.path(), root.path());
     let _token = set_var(TOKEN_VAR, "secret-value");
     let (_id, _reg) = register_workspace(root.path());
+    let (state, key) = keyed(AppState::new_global());
+    let cookie = sign_in(&state, &key).await;
 
     for body in [
         serde_json::json!({ "name": CONNECTOR }),
         serde_json::json!({ "name": CONNECTOR, "account": "acct1" }),
     ] {
-        let app = build_router(AppState::new_global());
-        let (status, json) = post_json(app, "/api/connectors/approve", body).await;
+        let app = build_router(state.clone());
+        let (status, json) = post_json(app, "/api/connectors/approve", body, Some(&cookie)).await;
         assert_eq!(status, StatusCode::OK, "workspace-less approve: {json}");
     }
-    let app = build_router(AppState::new_global());
-    let (_, detail) = get_json(app, &format!("/api/connectors/{CONNECTOR}")).await;
+    let app = build_router(state.clone());
+    let (_, detail) = get_json(app, &format!("/api/connectors/{CONNECTOR}"), Some(&cookie)).await;
     let acct = detail["accounts"]
         .as_array()
         .unwrap()
@@ -875,21 +1132,23 @@ async fn account_actions_without_workspace_use_the_listed_account() {
         "the listed account is approved: {detail}"
     );
 
-    let app = build_router(AppState::new_global());
+    let app = build_router(state.clone());
     let (status, probe) = post_json(
         app,
         &format!("/api/connectors/{CONNECTOR}/healthcheck/acct1"),
         serde_json::json!({}),
+        Some(&cookie),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "workspace-less probe: {probe}");
     assert_eq!(probe["ok"], serde_json::json!(true), "probe: {probe}");
 
-    let app = build_router(AppState::new_global());
+    let app = build_router(state.clone());
     let (status, call) = post_json(
         app,
         &format!("/api/connectors/{CONNECTOR}/call"),
         serde_json::json!({ "function": "list_items", "args": {}, "dry_run": true }),
+        Some(&cookie),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "workspace-less dry run: {call}");
@@ -900,11 +1159,12 @@ async fn account_actions_without_workspace_use_the_listed_account() {
     );
 
     // An account no reachable project configures is a 404, not a 400.
-    let app = build_router(AppState::new_global());
+    let app = build_router(state.clone());
     let (status, _) = post_json(
         app,
         "/api/connectors/approve",
         serde_json::json!({ "name": CONNECTOR, "account": "nobody" }),
+        Some(&cookie),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -966,7 +1226,7 @@ async fn stats_endpoint_aggregates_connector_calls_across_recent_runs() {
     write_connector_call_event(&run2, "other-connector", "ping", "acct1", "ok", 5);
 
     let app = build_router(AppState::new(root.path().to_path_buf()));
-    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}/stats")).await;
+    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}/stats"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["connector"], CONNECTOR);
     assert_eq!(json["runs_scanned"], serde_json::json!(2), "stats: {json}");
@@ -1008,7 +1268,7 @@ async fn stats_endpoint_empty_when_no_calls_recorded() {
     let _g = setup(cfg.path(), root.path());
 
     let app = build_router(AppState::new(root.path().to_path_buf()));
-    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}/stats")).await;
+    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}/stats"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["connector"], CONNECTOR);
     assert_eq!(json["runs_scanned"], serde_json::json!(0));
@@ -1027,7 +1287,7 @@ async fn detail_endpoint_exposes_function_args_schema() {
     let _g = setup(cfg.path(), root.path());
 
     let app = build_router(AppState::new(root.path().to_path_buf()));
-    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}")).await;
+    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}"), None).await;
     assert_eq!(status, StatusCode::OK);
     let functions = json["functions"].as_array().unwrap();
     let list_items = functions
@@ -1062,6 +1322,7 @@ async fn call_endpoint_refuses_unapproved_connector_for_real_call() {
         app,
         &format!("/api/connectors/{CONNECTOR}/call"),
         serde_json::json!({ "function": "list_items", "account": "acct1", "args": {}, "dry_run": false }),
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1082,6 +1343,7 @@ async fn call_endpoint_dry_run_works_without_approval_or_secrets() {
         app,
         &format!("/api/connectors/{CONNECTOR}/call"),
         serde_json::json!({ "function": "list_items", "account": "acct1", "args": {}, "dry_run": true }),
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1121,6 +1383,7 @@ async fn call_endpoint_real_call_reaches_a_live_mock_http_server() {
         app,
         &format!("/api/connectors/{CONNECTOR}/call"),
         serde_json::json!({ "function": "list_items", "account": "acct1", "args": {}, "dry_run": false }),
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1174,6 +1437,7 @@ async fn call_endpoint_full_flag_controls_the_response_pick_projection() {
         app,
         &format!("/api/connectors/{CONNECTOR}/call"),
         serde_json::json!({ "function": "list_pick", "account": "acct1", "args": {}, "dry_run": false }),
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1203,6 +1467,7 @@ async fn call_endpoint_full_flag_controls_the_response_pick_projection() {
         app,
         &format!("/api/connectors/{CONNECTOR}/call"),
         serde_json::json!({ "function": "list_pick", "account": "acct1", "args": {}, "dry_run": false, "full": true }),
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1229,6 +1494,7 @@ async fn call_endpoint_unknown_function_is_config_error() {
         app,
         &format!("/api/connectors/{CONNECTOR}/call"),
         serde_json::json!({ "function": "no_such_fn", "account": "acct1", "args": {}, "dry_run": true }),
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1271,7 +1537,7 @@ async fn available_endpoint_lists_embedded_and_omits_installed() {
     let root = tempfile::tempdir().unwrap();
     let _g = setup(cfg.path(), root.path());
 
-    let (status, json) = get_json(router(root.path()), "/api/connectors/available").await;
+    let (status, json) = get_json(router(root.path()), "/api/connectors/available", None).await;
     assert_eq!(status, StatusCode::OK);
     let entry = json
         .as_array()
@@ -1296,7 +1562,7 @@ async fn available_endpoint_lists_embedded_and_omits_installed() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let (_status, json) = get_json(router(root.path()), "/api/connectors/available").await;
+    let (_status, json) = get_json(router(root.path()), "/api/connectors/available", None).await;
     assert!(
         !json
             .as_array()
@@ -1326,7 +1592,7 @@ async fn install_endpoint_then_list_shows_the_connector() {
     assert_eq!(json["trust_recorded"], serde_json::json!(true));
     assert!(json["digest"].as_str().unwrap().starts_with("sha256:"));
 
-    let (status, json) = get_json(router(root.path()), "/api/connectors").await;
+    let (status, json) = get_json(router(root.path()), "/api/connectors", None).await;
     assert_eq!(status, StatusCode::OK);
     let entry = json
         .as_array()
@@ -1419,7 +1685,7 @@ async fn uninstall_endpoint_removes_connector_but_keeps_account_config() {
     assert_eq!(json["ok"], serde_json::json!(true));
     assert_eq!(json["no_op"], serde_json::json!(false));
 
-    let (_status, json) = get_json(router(root.path()), "/api/connectors").await;
+    let (_status, json) = get_json(router(root.path()), "/api/connectors", None).await;
     assert!(
         !json
             .as_array()
@@ -1514,7 +1780,7 @@ async fn detail_endpoint_serves_embedded_connector_that_is_not_installed() {
     // `setup` installs only the fixture connector, so `github` is embedded but
     // definitely not installed under this temp config dir.
 
-    let (status, json) = get_json(router(root.path()), "/api/connectors/github").await;
+    let (status, json) = get_json(router(root.path()), "/api/connectors/github", None).await;
     assert_eq!(status, StatusCode::OK, "{json}");
     assert_eq!(json["name"], "github");
     assert_eq!(json["installed"], serde_json::json!(false));
@@ -1552,8 +1818,12 @@ async fn detail_endpoint_marks_installed_connector_installed() {
     let root = tempfile::tempdir().unwrap();
     let _g = setup(cfg.path(), root.path());
 
-    let (status, json) =
-        get_json(router(root.path()), &format!("/api/connectors/{CONNECTOR}")).await;
+    let (status, json) = get_json(
+        router(root.path()),
+        &format!("/api/connectors/{CONNECTOR}"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{json}");
     assert_eq!(json["installed"], serde_json::json!(true));
     assert_eq!(json["trust"], "unapproved");
@@ -1571,6 +1841,7 @@ async fn detail_endpoint_404s_only_for_a_name_that_is_neither_installed_nor_embe
     let (status, _json) = get_json(
         router(root.path()),
         "/api/connectors/definitely-not-a-connector",
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -1586,7 +1857,7 @@ async fn stats_endpoint_aggregates_without_a_workspace() {
     let root = tempfile::tempdir().unwrap();
     let _g = setup(cfg.path(), root.path());
 
-    let (status, json) = get_json(router(root.path()), "/api/connectors/github/stats").await;
+    let (status, json) = get_json(router(root.path()), "/api/connectors/github/stats", None).await;
     assert_eq!(status, StatusCode::OK, "{json}");
     assert_eq!(json["connector"], "github");
     assert_eq!(json["calls"], serde_json::json!(0));
@@ -1630,11 +1901,20 @@ fn install_mcp(cfg: &Path, root: &Path) -> apb_mcp_client::testing::StubServer {
     stub
 }
 
-async fn post_raw(app: axum::Router, uri: &str, body: serde_json::Value) -> (StatusCode, String) {
-    let req = Request::builder()
+async fn post_raw(
+    app: axum::Router,
+    uri: &str,
+    body: serde_json::Value,
+    cookie: Option<&str>,
+) -> (StatusCode, String) {
+    let mut builder = Request::builder()
         .method("POST")
         .uri(uri)
-        .header("content-type", "application/json")
+        .header("content-type", "application/json");
+    for (name, value) in auth_headers(cookie) {
+        builder = builder.header(name, value);
+    }
+    let req = builder
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
@@ -1651,17 +1931,33 @@ async fn the_dashboard_refuses_to_approve_an_mcp_connector() {
     let _g = setup(cfg.path(), root.path());
     let stub = install_mcp(cfg.path(), root.path());
     let trust_before = std::fs::read(cfg.path().join("trust.json")).ok();
+    // Even a signed-in session, the one HTTP credential that approves the
+    // other kinds, never approves an MCP connector.
+    let (state, key) = keyed(AppState::new(root.path().to_path_buf()));
+    let cookie = sign_in(&state, &key).await;
     for account in [serde_json::Value::Null, serde_json::json!("work")] {
         let (status, text) = post_raw(
-            build_router(AppState::new(root.path().to_path_buf())),
+            build_router(state.clone()),
             "/api/connectors/approve",
             serde_json::json!({ "name": MCP_CONNECTOR, "account": account }),
+            Some(&cookie),
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
         assert!(text.starts_with("mcp_approve_needs_a_person:"), "{text}");
         assert!(!text.contains("sha256:"), "{text}");
     }
+    // Without a session the person-only refusal comes first.
+    let (status, text) = post_raw(
+        build_router(AppState::new(root.path().to_path_buf())),
+        "/api/connectors/approve",
+        serde_json::json!({ "name": MCP_CONNECTOR }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
+    assert!(!text.contains("mcp_approve_needs_a_person"), "{text}");
+    assert!(!text.contains("sha256:"), "{text}");
     assert_eq!(
         std::fs::read(cfg.path().join("trust.json")).ok(),
         trust_before
@@ -1734,6 +2030,7 @@ async fn the_dashboard_healthcheck_of_an_mcp_connector_checks_the_pins() {
         build_router(AppState::new(root.path().to_path_buf())),
         &format!("/api/connectors/{MCP_CONNECTOR}/healthcheck/work"),
         serde_json::json!({}),
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1748,6 +2045,7 @@ async fn the_dashboard_healthcheck_of_an_mcp_connector_checks_the_pins() {
         build_router(AppState::new(root.path().to_path_buf())),
         &format!("/api/connectors/{MCP_CONNECTOR}/healthcheck/work"),
         serde_json::json!({}),
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);

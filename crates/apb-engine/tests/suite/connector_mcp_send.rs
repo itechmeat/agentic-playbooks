@@ -576,7 +576,22 @@ fn a_kill_once_the_intent_is_recorded_is_never_sent_again_blindly() {
     // after the hand-over of `tools/call`, which nobody can tell apart
     // afterwards, so the repeat must not send it blindly either way.
     wait_until(&child, "the intent record", || sx.fx.intents() == 1);
+    let server = sx.fx.stub.last_pid().expect("the server started");
     child.kill();
+    // Count the hand-over only once the server has ended: until then it
+    // may still read a `tools/call` the killed caller left in its pipe and
+    // record it, which is the original call and not a repeat.
+    // On Linux the server got SIGKILL with the death of the thread that
+    // started it; elsewhere there is no parent-death signal, so the test
+    // ends the server it left.
+    if !cfg!(target_os = "linux") {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &server.to_string()])
+            .status();
+    }
+    wait_until(&child, "the server's end", || {
+        StubServer::has_exited(server)
+    });
     let handed = sx.calls_of("create_comment").len();
     assert!(handed <= 1);
     // The tracker lists no comment with the marker: the send stays

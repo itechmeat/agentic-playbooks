@@ -2,10 +2,11 @@
 //! "Surfaces"): the text a version's YAML renders, `--out`, `--rebuild
 //! --all` with a version that does not read, the doctor's line (nothing,
 //! OK, WARN), a hand-edited `playbook.mmd` never changes what prints, and
-//! a rebuild overwrites it.
+//! a rebuild overwrites it. And the doctor's empty playbook directories.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -235,6 +236,37 @@ fn a_linked_playbook_directory_is_never_followed() {
 fn set_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt as _;
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// The doctor names an empty playbook directory a stopped copy or draft
+/// creation may have left, offers its removal for an empty one, and
+/// removes nothing itself.
+#[test]
+fn doctor_names_an_empty_claimed_playbook_directory() {
+    let cfg = tempfile::tempdir().unwrap();
+    let (t, _dir) = project();
+    let gone = t.path().join(".apb").join("playbooks").join("gone");
+    fs::create_dir_all(&gone).unwrap();
+    // Old enough to be a stopped claim, not a creation in progress.
+    let f = fs::File::open(&gone).unwrap();
+    f.set_modified(SystemTime::now() - Duration::from_secs(700))
+        .unwrap();
+    let (code, out) = doctor(cfg.path(), t.path());
+    // The doctor resolves the project from its working directory, the
+    // physical path (`/private/var/...` on macOS for a `/var/...` tempdir).
+    let gone_real = fs::canonicalize(&gone).unwrap();
+    let named = format!("empty directory {}", gone_real.display());
+    // One line names it: the failed load the report already holds, with the
+    // removal guidance joined to it, never a second line.
+    let lines: Vec<&str> = out.lines().filter(|l| l.contains(&named)).collect();
+    assert_eq!(lines.len(), 1, "{code} {out:?}");
+    assert!(lines[0].contains("playbook gone: load failed"), "{lines:?}");
+    assert!(lines[0].contains("`rmdir "), "{lines:?}");
+    assert!(!out.contains("playbooks: empty directory"), "{out:?}");
+    assert!(
+        fs::symlink_metadata(&gone).unwrap().is_dir(),
+        "the doctor removes nothing: {gone:?} stays"
+    );
 }
 
 #[test]

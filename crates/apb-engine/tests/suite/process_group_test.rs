@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use apb_engine::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, ErrorClass};
+use apb_engine::adapter::{AgentAdapter, AgentTask, CliAdapter, ErrorClass};
 use apb_engine::invocation::builtin;
 
 // An agent that spawns a background descendant (grandchild), records its pid in
@@ -89,7 +89,7 @@ fn timeout_kills_whole_process_tree() {
     let bindir = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let prog = write_spawning_agent(bindir.path());
-    let ad = ClaudeAdapter {
+    let ad = CliAdapter {
         program: prog,
         spec: builtin("claude").unwrap(),
     };
@@ -118,7 +118,7 @@ fn cancel_kills_whole_process_tree() {
     let bindir = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let prog = write_spawning_agent(bindir.path());
-    let ad = ClaudeAdapter {
+    let ad = CliAdapter {
         program: prog,
         spec: builtin("claude").unwrap(),
     };

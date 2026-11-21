@@ -69,6 +69,11 @@ impl BaselineRun<'_> {
             phase,
             events,
             guard_tree: true,
+            // The same predicate `scheduler/entry.rs` takes the tree lock
+            // by: a run whose node takes the lock and that does not share
+            // the workdir holds its tree, so a JUnit report there may only
+            // be this command's.
+            holds_tree: super::entry::holds_tree(self.playbook, self.cfg),
             scripts_label: "baseline scripts",
             site: apb_core::baseline::BASELINE_SITE,
             // A read on the drive thread ends with the run's deadline.

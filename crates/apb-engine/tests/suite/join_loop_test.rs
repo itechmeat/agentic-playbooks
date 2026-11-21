@@ -158,6 +158,56 @@ fn a_join_in_a_loop_waits_for_the_branch_that_runs_again() {
     );
 }
 
+/// The same panel driven one node at a time: round 1 runs both reviewers,
+/// and from round 2 `a` is clean while `b`'s gate of that round has not run
+/// yet when the collector is weighed. The collector must wait for the
+/// branch of the new round that has not started: its second start comes
+/// after `b`'s second review finished.
+#[test]
+fn a_join_waits_when_one_branch_of_the_new_round_has_not_started() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let panel = PANEL.replace("schema: 2", "schema: 2\ndefaults: { max_parallel: 1 }");
+    seed(
+        root,
+        &panel,
+        &[
+            ("gate_a.sh", counted(root, "gate_a", &["open", "clean"], "")),
+            ("gate_b.sh", counted(root, "gate_b", &["open"], "")),
+            ("rev_a.sh", counted(root, "rev_a", &["ok"], "")),
+            ("rev_b.sh", counted(root, "rev_b", &["ok", "ok"], "")),
+            (
+                "collect.sh",
+                counted(root, "collect", &["again", "again", "finished"], ""),
+            ),
+        ],
+    );
+    let res = run(root, "jl", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let ev = read_all(&root.join(".apb/runs").join(&res.run_id)).unwrap();
+    let gate_a_done = positions(&ev, "gate_a", true);
+    let gate_b_started = positions(&ev, "gate_b", false);
+    let rev_b_done = positions(&ev, "rev_b", true);
+    let collect_started = positions(&ev, "collect", false);
+    assert_eq!((gate_a_done.len(), gate_b_started.len()), (3, 3));
+    assert_eq!((rev_b_done.len(), collect_started.len()), (3, 3));
+    // The scenario: round 2's clean delivery of `a` was weighed while `b`'s
+    // gate had not run yet.
+    assert!(
+        gate_a_done[1] < gate_b_started[1],
+        "round 2: `b`'s gate ran before `a`'s clean delivery was weighed"
+    );
+    assert!(
+        rev_b_done[1] < collect_started[1],
+        "round 2: the collector started before rev_b finished"
+    );
+    assert_eq!(
+        positions(&ev, "rev_a", false).len(),
+        1,
+        "a is clean after round 1"
+    );
+}
+
 /// `collect` is clean at once: the run ends at `done`, although `handoff`,
 /// the finish's other input, never ran.
 #[test]

@@ -1163,6 +1163,155 @@ fn a_github_issue_with_a_lost_answer_is_found_among_the_recent_issues() {
     assert!(requests[2].contains("per_page=100") && requests[2].contains("since="));
 }
 
+// -- GitLab: a release found by its marker in the releases listing --------
+
+fn release_args() -> Value {
+    json!({ "project": "42", "tag_name": "v1.4.0", "name": "v1.4.0", "description": "Ship it." })
+}
+
+/// The listing a reconciliation reads: one release by `author` whose
+/// description is the description the first request sent (marker included).
+fn release_listing(author: &'static str, url: &'static str) -> Reply {
+    Reply::From(Box::new(move |seen: &[String]| {
+        let sent = request_json(&seen[0]);
+        let item = json!([{
+            "_links": { "self": url },
+            "author": { "username": author },
+            "description": sent["description"],
+        }]);
+        (200, item.to_string())
+    }))
+}
+
+/// A cut connection leaves the release unknown; the repeat reads the own
+/// account and the newest releases, finds its own marker, and answers with
+/// the release's link instead of creating it again.
+#[test]
+fn a_gitlab_release_with_a_lost_answer_is_found_by_its_marker_and_not_created_again() {
+    let _lock = common::env_lock();
+    let stub = spawn_script(vec![
+        Reply::Cut,
+        Reply::Respond(200, r#"{"username":"bot"}"#.into()),
+        release_listing("bot", "https://gitlab.example/acme/site/-/releases/v1.4.0"),
+    ]);
+    let run = run_with("gitlab", &stub.base_url, Grant::of(&["create_release"]));
+
+    let (first, ok) = run.call("create_release", release_args(), Some("release-1.4.0"));
+    assert!(!ok);
+    assert_eq!(first["effect"], "unknown");
+
+    let (second, ok) = run.call("create_release", release_args(), Some("release-1.4.0"));
+    assert!(ok, "the earlier release must be found");
+    assert_eq!(second["already_sent"], true);
+    assert_eq!(
+        second["ref"],
+        "https://gitlab.example/acme/site/-/releases/v1.4.0"
+    );
+
+    let requests = stub.requests();
+    assert_eq!(requests.len(), 3, "no second POST");
+    assert!(requests[0].starts_with("POST /projects/42/releases"));
+    assert!(requests[1].starts_with("GET /user"));
+    assert!(requests[2].starts_with("GET /projects/42/releases?"));
+    assert!(
+        requests[2].contains("order_by=created_at"),
+        "the listing is newest by creation time: {}",
+        requests[2]
+    );
+    assert!(
+        requests[2].contains("per_page=20"),
+        "the listing reads 20 releases: {}",
+        requests[2]
+    );
+    assert!(requests[2].contains("sort=desc"), "{}", requests[2]);
+    let sent = request_json(&requests[0]);
+    let description = sent["description"].as_str().unwrap_or_default();
+    assert!(description.starts_with("Ship it.\n\n<!-- apb-intent v1 run="));
+
+    let ledger = run.ledger();
+    assert!(matches!(
+        &ledger.records()[0].state,
+        IntentState::Confirmed { source, .. } if source == "reconcile"
+    ));
+}
+
+/// The marker under another account's name is not the send: the repeat is
+/// refused and nothing is created.
+#[test]
+fn a_gitlab_release_by_another_account_is_not_taken_for_the_send() {
+    let _lock = common::env_lock();
+    let stub = spawn_script(vec![
+        Reply::Cut,
+        Reply::Respond(200, r#"{"username":"bot"}"#.into()),
+        release_listing(
+            "other",
+            "https://gitlab.example/acme/site/-/releases/v1.4.0",
+        ),
+    ]);
+    let run = run_with("gitlab", &stub.base_url, Grant::of(&["create_release"]));
+    let (_, ok) = run.call("create_release", release_args(), Some("release-1.4.0"));
+    assert!(!ok);
+    let (refused, ok) = run.call("create_release", release_args(), Some("release-1.4.0"));
+    assert!(!ok);
+    assert_eq!(code(&refused), "unknown_effect");
+    let requests = stub.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1..].iter().all(|r| r.starts_with("GET ")));
+}
+
+/// The lookup reads only the 20 newest releases: when the marker is not
+/// among them and GitLab names a further page, the release may be older
+/// than the page, so the send stays unknown and nothing is created again.
+#[test]
+fn a_gitlab_release_beyond_the_first_page_stays_unknown() {
+    let _lock = common::env_lock();
+    let page = json!([{
+        "_links": { "self": "https://gitlab.example/acme/site/-/releases/v1.3.0" },
+        "author": { "username": "bot" },
+        "description": "An earlier release.",
+    }])
+    .to_string();
+    let stub = spawn_script(vec![
+        Reply::Cut,
+        Reply::Respond(200, r#"{"username":"bot"}"#.into()),
+        Reply::RespondWith(
+            200,
+            vec![(
+                "Link".into(),
+                "<https://gitlab.example/api/v4/projects/42/releases?page=2>; rel=\"next\"".into(),
+            )],
+            page,
+        ),
+    ]);
+    let run = run_with("gitlab", &stub.base_url, Grant::of(&["create_release"]));
+    let (_, ok) = run.call("create_release", release_args(), Some("release-1.4.0"));
+    assert!(!ok);
+    let (refused, ok) = run.call("create_release", release_args(), Some("release-1.4.0"));
+    assert!(!ok);
+    assert_eq!(code(&refused), "unknown_effect");
+    let requests = stub.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "no second POST, no page beyond the first"
+    );
+    assert!(requests[1..].iter().all(|r| r.starts_with("GET ")));
+    assert!(requests[2].contains("per_page=20"), "{}", requests[2]);
+    // The paging rule decided it, not a plain absence: the settlement and
+    // the refusal name the further page.
+    let message = refused["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("more pages exist"), "{refused}");
+    let ledger = run.ledger();
+    assert!(
+        matches!(
+            &ledger.records()[0].state,
+            IntentState::Unknown { detail: Some(d), .. } if d.contains("more pages exist")
+        ),
+        "{:?}",
+        ledger.records()[0].state
+    );
+}
+
 // -- A person's decision -------------------------------------------------
 
 /// A pending intent whose sender is alive is still in flight and cannot be

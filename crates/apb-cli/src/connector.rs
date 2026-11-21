@@ -343,6 +343,13 @@ fn show_cmd(root: &Path, name: &str) -> ExitCode {
 /// config, never the value, so printing every field is safe; `cmd` names each
 /// command the approval lets apb run.
 fn approve_cmd(root: &Path, name: &str, account: Option<&str>) -> ExitCode {
+    // Approving a connector is a person's act: a run step is refused before
+    // anything is read or written, as `apb health clear` refuses (design
+    // D4.13 item 1).
+    if let Some(why) = apb_core::step_env::StepCaller::from_env().refusal("approving a connector") {
+        eprintln!("{why}");
+        return ExitCode::from(2);
+    }
     let loaded = match store::load(name) {
         Ok(l) => l,
         Err(e) => {

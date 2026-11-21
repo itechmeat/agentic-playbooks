@@ -25,7 +25,7 @@ use apb_core::agents::{AgentUsage, Conformance, ExposedTools, Promises};
 use apb_core::config::GlobalConfig;
 use apb_core::step_env::StepCaller;
 
-use crate::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, HermeticEnv, SpawnEnv};
+use crate::adapter::{AgentAdapter, AgentTask, CliAdapter, HermeticEnv, SpawnEnv};
 use crate::gate::launch::Initiator;
 
 /// Printed before the probe runs.
@@ -138,7 +138,7 @@ pub fn probe(
     let spec =
         crate::invocation::spec_for(req.agent, global).map_err(|e| ProbeError(e.to_string()))?;
     let omitted_flags = spec.autonomous_args.clone();
-    let adapter = ClaudeAdapter {
+    let adapter = CliAdapter {
         program: crate::invocation::program_for(req.agent, global),
         spec,
     };

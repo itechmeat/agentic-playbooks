@@ -109,7 +109,7 @@ pub(crate) fn run_quota_probe(
             .map(crate::run_config::RunConfig::output_limits)
             .unwrap_or_default(),
     };
-    let adapter = crate::adapter::ClaudeAdapter {
+    let adapter = crate::adapter::CliAdapter {
         program: ri.canonical_executable.to_string_lossy().into_owned(),
         spec: ri.spec.clone(),
     };

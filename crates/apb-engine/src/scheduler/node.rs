@@ -2089,7 +2089,7 @@ fn execute_node_kind(
                                         spec
                                     }
                                 };
-                                Box::new(crate::adapter::ClaudeAdapter {
+                                Box::new(crate::adapter::CliAdapter {
                                     program: program.to_string_lossy().into_owned(),
                                     spec,
                                 })
@@ -4370,7 +4370,7 @@ pub(crate) fn execute_finish_answer(
         last_tried = Some((ri.agent_id.clone(), ri.model.clone()));
         last_hint = hint.clone();
         walked += 1;
-        let cli_adapter = crate::adapter::ClaudeAdapter {
+        let cli_adapter = crate::adapter::CliAdapter {
             program: ri.canonical_executable.to_string_lossy().into_owned(),
             spec: ri.spec.clone(),
         };

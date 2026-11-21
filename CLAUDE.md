@@ -93,7 +93,8 @@ engine, mcp, and core <- mcp-client <- engine. Do not introduce import cycles
   V179 to V182 live in `validate/untrusted`), the baseline check
   (`baseline/`: the `baseline_check` block, the observation path reader and
   the rule comparison), the project's own test and lint commands
-  (`project_checks.rs`), the findings and warnings an attempt reports and
+  (`project_checks.rs`, with `project_checks/junit` the bounded JUnit XML
+  reader of failing tests), the findings and warnings an attempt reports and
   their sanitizer (`run_notes.rs`), one walk over every connector binding
   site, nodes, a list node's item check `<node>#check` and the engine sites
   `@baseline` and `@notify` (`connector/sites.rs`, `is_engine_site`), a
@@ -740,7 +741,8 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   a model only when all name one, and `ExecutionIdentityView`, the row
   every run surface shows; `digest` the `x1:` executor digest and the
   estimate key), invocation resolution
-  (`invocation.rs`), agent adapters (`adapter.rs`, with `adapter/command`
+  (`invocation.rs`), agent adapters (`adapter.rs`, `CliAdapter`, the one
+  adapter of every command-line agent, with `adapter/command`
   the one `spawn_agent` both transports use, the sandbox wrap and `setsid`
   included, with the agent's run-scoped leading arguments in front
   (`spawn_env::with_scoped_args`, dsh's model patch,

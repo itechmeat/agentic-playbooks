@@ -10,11 +10,15 @@ import {
   modelOptionsForAgent,
   nextFallbackPair,
   parseProfileDoc,
+  allowText,
+  parseAllow,
+  processEnvChange,
   cloudModelNote,
   cloudOptionFor,
   modelHint,
   resolvedChain,
 } from './profileedit'
+import type { ProcessEnv } from './profileedit'
 import type { AgentInfo, CloudCatalog, ModelOption, ModelRow, PrivacyClass } from './api'
 
 // `optionsByAgent` mirrors the server's `/api/models` `options_by_agent`
@@ -431,5 +435,66 @@ describe('cloud catalog models', () => {
     expect(pure).toMatchObject({ uniform: true, leastPrivate: 'confidential_tee', warning: false })
     const plain = resolvedChain([{ agent: 'claude', model: 'claude-haiku-5-5' }], [], optionsByAgent)
     expect(plain.warning).toBe(false)
+  })
+})
+
+describe('process_env (design D4.3: editor state and save body)', () => {
+  it('parseProfileDoc reads an allowlist and defaults to inherit', () => {
+    const parsed = parseProfileDoc(
+      'executor: { agent: claude, model: m }\nprocess_env:\n  policy: allowlist\n  allow:\n    - GITHUB_TOKEN\n    - AWS_*\n',
+    )
+    expect(parsed.processEnv).toEqual({ policy: 'allowlist', allow: ['GITHUB_TOKEN', 'AWS_*'] })
+    // The stored form drops `inherit` (ProcessEnvPolicy::stored), so absence
+    // is inherit; a policy other than allowlist reads the same way and its
+    // allow names are dropped with it.
+    expect(parseProfileDoc('executor: { agent: claude, model: m }\n').processEnv).toEqual({
+      policy: 'inherit',
+      allow: [],
+    })
+    expect(parseProfileDoc('process_env: { policy: inherit, allow: [X] }\n').processEnv).toEqual({
+      policy: 'inherit',
+      allow: [],
+    })
+  })
+
+  it('parseAllow drops blanks and repeats', () => {
+    // One name or pattern per line; surrounding spaces and blank lines are
+    // not entries, and a repeat is kept once, in first order.
+    expect(parseAllow('  GITHUB_TOKEN  \n\nAWS_*\nGITHUB_TOKEN\n   \nAWS_*')).toEqual([
+      'GITHUB_TOKEN',
+      'AWS_*',
+    ])
+    expect(parseAllow('')).toEqual([])
+  })
+
+  it('allowText joins with newlines', () => {
+    expect(allowText(['GITHUB_TOKEN', 'AWS_*'])).toBe('GITHUB_TOKEN\nAWS_*')
+    expect(allowText([])).toBe('')
+  })
+
+  it('processEnvChange is undefined for an untouched profile', () => {
+    const stored: ProcessEnv = { policy: 'allowlist', allow: ['GITHUB_TOKEN', 'AWS_*'] }
+    // The same list typed back with extra blank lines and spaces is still the
+    // stored one; the save then sends no process_env and keeps the stored
+    // value (ProfileOptions::keep_stored).
+    expect(processEnvChange(stored, 'allowlist', '\n  GITHUB_TOKEN  \n\nAWS_*\n')).toBeUndefined()
+    expect(processEnvChange({ policy: 'inherit', allow: [] }, 'inherit', '')).toBeUndefined()
+  })
+
+  it('processEnvChange drops allow for inherit', () => {
+    // `allow` has no effect under inherit, so the body carries the policy
+    // alone whatever the (hidden) text area holds.
+    expect(
+      processEnvChange({ policy: 'allowlist', allow: ['GITHUB_TOKEN'] }, 'inherit', 'GITHUB_TOKEN'),
+    ).toEqual({ policy: 'inherit' })
+  })
+
+  it('processEnvChange sends a changed allowlist', () => {
+    expect(
+      processEnvChange({ policy: 'inherit', allow: [] }, 'allowlist', 'GITHUB_TOKEN\n\nAWS_*'),
+    ).toEqual({ policy: 'allowlist', allow: ['GITHUB_TOKEN', 'AWS_*'] })
+    expect(
+      processEnvChange({ policy: 'allowlist', allow: ['GITHUB_TOKEN'] }, 'allowlist', 'AWS_*'),
+    ).toEqual({ policy: 'allowlist', allow: ['AWS_*'] })
   })
 })

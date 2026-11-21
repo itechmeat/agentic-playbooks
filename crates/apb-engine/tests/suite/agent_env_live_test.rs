@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use apb_core::process_env::ProcessEnvPolicy;
-use apb_engine::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, SpawnEnv};
+use apb_engine::adapter::{AgentAdapter, AgentTask, CliAdapter, SpawnEnv};
 use apb_engine::invocation::{builtin, resume_spec};
 
 fn default_model(agent: &str) -> &'static str {
@@ -29,7 +29,7 @@ fn ask(
     env: &SpawnEnv,
     workdir: &std::path::Path,
 ) -> apb_engine::adapter::AgentReport {
-    let adapter = ClaudeAdapter {
+    let adapter = CliAdapter {
         program: apb_core::detect::default_program(agent),
         spec,
     };

@@ -602,9 +602,10 @@ pub fn capture_session(agent_id: &str, raw: &str) -> Option<String> {
 /// form (`{session}`), in front of the `--` that ends its options. It comes
 /// from the agent's output, so only an id that cannot read as an option or
 /// carry anything but an identifier is taken: ASCII letters, digits, `-`,
-/// `_`, `.` and `:`, not starting with `-`, at most 128 characters.
+/// `_`, `.` and `:`, not starting with `-`, one to 128 characters.
 fn is_plausible_session_id(id: &str) -> bool {
-    id.len() <= 128
+    !id.is_empty()
+        && id.len() <= 128
         && !id.starts_with('-')
         && id
             .chars()
@@ -833,12 +834,10 @@ pub const MCP_ROLE_ENV: &str = "APB_MCP_ROLE";
 /// The [`MCP_ROLE_ENV`] value of a background supervisor agent.
 pub const MCP_ROLE_SUPERVISOR: &str = "supervisor";
 
-pub struct ClaudeAdapter {
+pub struct CliAdapter {
     pub program: String,
     /// Declarative invocation form (argv template, prompt_via, SOUL delivery,
-    /// transport). The type name is historical: the adapter is now
-    /// parameterized by the form and serves any headless/acp-compatible CLI,
-    /// not just claude.
+    /// transport).
     pub spec: InvocationDef,
 }
 
@@ -1169,7 +1168,7 @@ fn collect_assistant_text(lines: &[String]) -> String {
     parts.join("\n")
 }
 
-impl ClaudeAdapter {
+impl CliAdapter {
     pub fn from_env() -> Self {
         let claude = apb_core::agents::claude::ID;
         let program = std::env::var("APB_AGENT_CMD").unwrap_or_else(|_| claude.to_string());
@@ -1860,7 +1859,7 @@ fn parse_stream_result(
     ))
 }
 
-impl AgentAdapter for ClaudeAdapter {
+impl AgentAdapter for CliAdapter {
     fn run(&self, task: &AgentTask) -> Result<AgentReport, AgentFailure> {
         // A non-cancellable run is a cancellable run with an always-false flag,
         // no spawn hook, no live sidecar, no stall watch, and no control
@@ -2016,7 +2015,7 @@ pub fn adapter_for(agent: &str) -> Result<Box<dyn AgentAdapter>, EngineError> {
     if let Ok(program) = std::env::var("APB_AGENT_CMD") {
         let spec =
             crate::invocation::builtin(apb_core::agents::claude::ID).expect("builtin claude spec");
-        return Ok(Box::new(ClaudeAdapter { program, spec }));
+        return Ok(Box::new(CliAdapter { program, spec }));
     }
     // Agent invocation form: config overrides the built-in default. An
     // unknown agent with no form -> error (same as the former "unsupported
@@ -2024,7 +2023,7 @@ pub fn adapter_for(agent: &str) -> Result<Box<dyn AgentAdapter>, EngineError> {
     let global = apb_core::config::GlobalConfig::load().unwrap_or_default();
     let spec = crate::invocation::spec_for(agent, &global)?;
     let program = crate::invocation::program_for(agent, &global);
-    Ok(Box::new(ClaudeAdapter { program, spec }))
+    Ok(Box::new(CliAdapter { program, spec }))
 }
 
 #[cfg(test)]

@@ -43,7 +43,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use apb_core::config::Transport;
-use apb_engine::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, ErrorClass};
+use apb_engine::adapter::{AgentAdapter, AgentTask, CliAdapter, ErrorClass};
 use apb_engine::invocation::builtin;
 use apb_engine::state::NodeStatus;
 
@@ -63,17 +63,17 @@ fn stub(dir: &Path, name: &str, body: &str) -> String {
     path.to_string_lossy().to_string()
 }
 
-fn headless(program: String) -> ClaudeAdapter {
-    ClaudeAdapter {
+fn headless(program: String) -> CliAdapter {
+    CliAdapter {
         program,
         spec: builtin("claude").unwrap(),
     }
 }
 
-fn acp(program: String) -> ClaudeAdapter {
+fn acp(program: String) -> CliAdapter {
     let mut spec = builtin("claude").unwrap();
     spec.transport = Transport::Acp;
-    ClaudeAdapter { program, spec }
+    CliAdapter { program, spec }
 }
 
 fn task<'a>(workdir: &'a Path, policy: &'a apb_engine::adapter::SpawnEnv) -> AgentTask<'a> {

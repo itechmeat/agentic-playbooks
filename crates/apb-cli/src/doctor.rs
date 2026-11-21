@@ -12,10 +12,13 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use apb_core::doctor::{CheckStatus, DoctorReport};
+use apb_core::scope_move::{ClaimLeft, StaleClaim};
+use apb_core::text::replace_hidden;
 use apb_engine::agent_probe::{COST_NOTICE, ProbeRequest, probe, refusal};
+use apb_engine::next_action::command::shell_quote;
 use apb_engine::run_doctor::{FAIL, OK, WARN};
 
-use crate::util::{QUESTION_TEXT_MAX, StepCaller, sanitize_for_terminal};
+use crate::util::{QUESTION_TEXT_MAX, StepCaller, sanitize_for_terminal, sanitize_plain};
 
 /// How long the paid probe waits for the agent.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(180);
@@ -133,8 +136,87 @@ fn finish(blocking: bool) -> ExitCode {
     }
 }
 
+/// One line for a playbook directory a stopped copy or draft creation may
+/// have left (`apb_core::scope_move::stale_claims`): a removal command only
+/// for an empty directory, the one case where removing it can lose nothing
+/// (`rmdir` refuses a directory that is no longer empty); the other two ask
+/// a person to inspect it. The path in a command is preserved byte for
+/// byte: quoted with `shell_quote`, and the command is printed only when
+/// the path is UTF-8 and holds no control or hidden character, so the line
+/// is never sanitized. A path that cannot be quoted gets no command and is
+/// named through `sanitize_plain` like every other path.
+fn stale_claim_line(claim: &StaleClaim) -> String {
+    let path = &claim.path;
+    match claim.left {
+        ClaimLeft::Empty => {
+            let quotable = path.to_str().filter(|s| replace_hidden(s, ' ') == *s);
+            match quotable {
+                Some(s) => format!(
+                    "empty directory {}: a copy or a draft creation stopped before it \
+                     finished; remove it with `rmdir {}`",
+                    sanitize_plain(s, SANDBOX_LINE_MAX),
+                    shell_quote(s)
+                ),
+                None => format!(
+                    "empty directory {}: a copy or a draft creation stopped before it \
+                     finished; remove it by hand",
+                    sanitize_plain(&path.to_string_lossy(), SANDBOX_LINE_MAX)
+                ),
+            }
+        }
+        ClaimLeft::DraftDebris => format!(
+            "directory {} holds only what a stopped draft creation leaves; inspect it \
+             before removing anything (creating the draft again may finish it)",
+            sanitize_plain(&path.to_string_lossy(), SANDBOX_LINE_MAX)
+        ),
+        ClaimLeft::Staging => format!(
+            "directory {} has no `current` and a staged copy of it is still in the staging \
+             area; a copy may still be running, inspect it before removing anything",
+            sanitize_plain(&path.to_string_lossy(), SANDBOX_LINE_MAX)
+        ),
+        ClaimLeft::Other => format!(
+            "directory {} has no `current` and holds entries apb did not leave; inspect it",
+            sanitize_plain(&path.to_string_lossy(), SANDBOX_LINE_MAX)
+        ),
+    }
+}
+
+/// Joins each claim's line to the failed load the report already holds
+/// for that playbook id; the claims no failed load names come back.
+fn fold_claims(report: &mut DoctorReport, claims: Vec<StaleClaim>) -> Vec<StaleClaim> {
+    let mut unnamed = Vec::new();
+    for claim in claims {
+        let check = claim
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|id| format!("playbook {id}"))
+            .and_then(|name| {
+                report
+                    .checks
+                    .iter_mut()
+                    .find(|c| c.name == name && c.status == CheckStatus::Fail)
+            });
+        match check {
+            Some(c) => c.detail = format!("{}; {}", c.detail, stale_claim_line(&claim)),
+            None => unnamed.push(claim),
+        }
+    }
+    unnamed
+}
+
 fn doctor_env(root: &Path, mut out: Out) -> ExitCode {
-    let blocking = print_report(&mut out, &apb_core::doctor::diagnose(root));
+    // A project playbook directory a stopped copy or draft creation left is
+    // already a failed load in the report: its guidance joins that line,
+    // never a second line naming the same directory.
+    let now = std::time::SystemTime::now();
+    let mut report = apb_core::doctor::diagnose(root);
+    let project_store = root.join(".apb").join("playbooks");
+    let mut unnamed = fold_claims(
+        &mut report,
+        apb_core::scope_move::stale_claims(&project_store, now),
+    );
+    let blocking = print_report(&mut out, &report);
     // The isolation sandbox: not blocking, only `isolation: full` needs it.
     let host = apb_engine::sandbox::probe::host_facts();
     let (ok, detail) = apb_engine::sandbox::probe::doctor_line(&host);
@@ -207,6 +289,17 @@ fn doctor_env(root: &Path, mut out: Out) -> ExitCode {
         missing += s.missing;
         stale += s.stale;
         edited += s.edited;
+        // A playbook directory a stopped copy or draft creation may have
+        // left: named read-only, a removal command only for an empty one;
+        // the project's own are on their failed load line already.
+        let claims = if *store == project_store {
+            std::mem::take(&mut unnamed)
+        } else {
+            apb_core::scope_move::stale_claims(store, now)
+        };
+        for claim in &claims {
+            out.line(WARN, "playbooks", &stale_claim_line(claim));
+        }
     }
     let total = current + missing + stale + edited;
     if total > 0 {
@@ -401,5 +494,101 @@ fn print_probe(report: &apb_engine::agent_probe::ProbeReport) {
                 e.servers.len()
             ),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use apb_core::doctor::Check;
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn claim(path: &str, left: ClaimLeft) -> StaleClaim {
+        StaleClaim {
+            path: PathBuf::from(OsStr::new(path)),
+            left,
+        }
+    }
+
+    /// A claim the report already names as a failed load joins that line;
+    /// one no line names comes back to be printed on its own.
+    #[test]
+    fn a_claim_joins_the_failed_load_of_its_id() {
+        let mut report = DoctorReport {
+            checks: vec![Check {
+                name: "playbook gone".into(),
+                status: CheckStatus::Fail,
+                detail: "load failed: playbook `gone` has no current pointer".into(),
+            }],
+        };
+        let unnamed = fold_claims(
+            &mut report,
+            vec![
+                claim("/p/.apb/playbooks/gone", ClaimLeft::Empty),
+                claim("/p/.apb/playbooks/other", ClaimLeft::Empty),
+            ],
+        );
+        assert_eq!(report.checks.len(), 1);
+        assert!(
+            report.checks[0].detail.starts_with("load failed:")
+                && report.checks[0]
+                    .detail
+                    .contains("rmdir /p/.apb/playbooks/gone"),
+            "{:?}",
+            report.checks[0]
+        );
+        assert_eq!(unnamed.len(), 1);
+        assert_eq!(unnamed[0].path, PathBuf::from("/p/.apb/playbooks/other"));
+    }
+
+    /// The path in the removal command goes through `shell_quote` byte for
+    /// byte: a space, shell syntax and a quote come back exactly as they
+    /// went in, one shell word.
+    #[test]
+    fn an_empty_claim_command_keeps_the_path_whole() {
+        let line = stale_claim_line(&claim("/tmp/a b/$(x)/it's", ClaimLeft::Empty));
+        assert!(
+            line.ends_with("rmdir '/tmp/a b/$(x)/it'\\''s'`"),
+            "the command quotes the path byte for byte: {line}"
+        );
+    }
+
+    /// A path that is not UTF-8, or holds a control or hidden character,
+    /// gets no command: the line names it sanitized and asks for a hand
+    /// removal instead.
+    #[test]
+    fn a_path_that_cannot_be_quoted_gets_no_command() {
+        // Not UTF-8: a byte sequence a `str` cannot hold.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let line = stale_claim_line(&StaleClaim {
+                path: PathBuf::from(OsStr::from_bytes(b"/tmp/\xffx")),
+                left: ClaimLeft::Empty,
+            });
+            assert!(!line.contains("rmdir"), "{line}");
+            assert!(line.contains("remove it by hand"), "{line}");
+        }
+        // A newline: a control character, never one shell word.
+        let line = stale_claim_line(&claim("/tmp/a\nb", ClaimLeft::Empty));
+        assert!(!line.contains("rmdir"), "{line}");
+        assert!(line.contains("remove it by hand"), "{line}");
+    }
+
+    /// Only an empty directory gets a removal command: a draft creation may
+    /// resume, a copy whose staged copy is still there may still be running,
+    /// and a name apb does not know may be a person's data.
+    #[test]
+    fn only_an_empty_claim_gets_a_command() {
+        let line = stale_claim_line(&claim("/tmp/gone", ClaimLeft::Empty));
+        assert!(line.contains("rmdir "), "{line}");
+        for left in [ClaimLeft::DraftDebris, ClaimLeft::Staging, ClaimLeft::Other] {
+            let line = stale_claim_line(&claim("/tmp/gone", left));
+            assert!(!line.contains("rmdir"), "{line}");
+            assert!(!line.contains("rm "), "{line}");
+        }
     }
 }

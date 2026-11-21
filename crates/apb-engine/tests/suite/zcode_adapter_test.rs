@@ -18,7 +18,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use apb_engine::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, SpawnEnv, capture_session};
+use apb_engine::adapter::{AgentAdapter, AgentTask, CliAdapter, SpawnEnv, capture_session};
 use apb_engine::event::{EventPayload, read_all};
 use apb_engine::invocation::builtin;
 use apb_engine::scheduler::{RunOptions, run};
@@ -95,7 +95,7 @@ fn zcode_json_output_is_unwrapped_and_its_session_captured() {
     );
     let json = dir.path().join("result.json");
     fs::write(&json, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
-    let ad = ClaudeAdapter {
+    let ad = CliAdapter {
         program: stub_zcode(dir.path(), &format!("cat '{}'", json.display())),
         spec: builtin("zcode").unwrap(),
     };
@@ -129,7 +129,7 @@ fn zcode_json_output_is_unwrapped_and_its_session_captured() {
 fn zcode_autonomy_switches_the_mode_to_yolo_last() {
     let dir = tempfile::tempdir().unwrap();
     let json = Path::new(FIXTURES).join("json_plan.json");
-    let ad = ClaudeAdapter {
+    let ad = CliAdapter {
         program: stub_zcode(dir.path(), &format!("cat '{}'", json.display())),
         spec: builtin("zcode").unwrap(),
     };

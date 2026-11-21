@@ -389,7 +389,7 @@ impl ProfileEmulation<'_, '_> {
                     node: self.node_id,
                     item: None,
                 }),
-                false => Box::new(crate::adapter::ClaudeAdapter {
+                false => Box::new(crate::adapter::CliAdapter {
                     program: ri.canonical_executable.to_string_lossy().into_owned(),
                     spec: ri.spec.clone(),
                 }),

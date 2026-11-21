@@ -193,7 +193,7 @@ fn approve_in_a_run_step_is_refused() {
     assert_refused(
         code,
         &text,
-        "approving an MCP connector is refused inside run `x`",
+        "approving a connector is refused inside run `x`",
     );
     fx.assert_untouched();
 }
@@ -205,7 +205,7 @@ fn approve_tree_in_a_run_step_is_refused() {
     assert_refused(
         code,
         &text,
-        "approving an MCP connector is refused inside run `x`",
+        "approving a connector is refused inside run `x`",
     );
     fx.assert_untouched();
 }
@@ -244,7 +244,7 @@ fn an_escape_sequence_in_mcp_args_is_refused_at_install() {
 }
 
 #[test]
-fn approve_of_an_http_connector_is_unchanged() {
+fn approve_of_an_http_connector_needs_no_terminal_outside_a_step() {
     let fx = Fx::new();
     let dir = fx.dir.join("cfg/connectors/widget");
     std::fs::create_dir_all(&dir).unwrap();
@@ -260,8 +260,24 @@ fn approve_of_an_http_connector_is_unchanged() {
         "accounts:\n  - name: default\n    base_url: https://example.com\n",
     )
     .unwrap();
+    // Inside a run step every connector kind is refused first, before
+    // anything is read (the one-point-oh-fixes step refusal).
     let step = [("APB_RUN_ID", "x")];
-    let out = fx.apb(&["connector", "approve", "widget"], &step);
+    for args in [
+        &["connector", "approve", "widget"][..],
+        &["connector", "approve", "widget", "--account", "default"][..],
+    ] {
+        let out = fx.apb(args, &step);
+        assert_eq!(out.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("approving a connector is refused inside run `x`"),
+            "{stderr}"
+        );
+    }
+    // Outside a run step an HTTP connector still approves without a
+    // terminal: the MCP terminal rule does not reach it.
+    let out = fx.apb(&["connector", "approve", "widget"], &[]);
     assert!(
         out.status.success(),
         "{}",
@@ -269,7 +285,7 @@ fn approve_of_an_http_connector_is_unchanged() {
     );
     let out = fx.apb(
         &["connector", "approve", "widget", "--account", "default"],
-        &step,
+        &[],
     );
     assert!(
         out.status.success(),

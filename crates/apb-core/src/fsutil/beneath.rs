@@ -25,6 +25,7 @@
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// An open anchor directory.
 #[derive(Debug)]
@@ -41,6 +42,14 @@ pub enum CappedRead {
     Read { bytes: Vec<u8>, digest: String },
     /// The file was not read.
     Refused(ReadRefusal),
+}
+
+/// A regular file's length and its last modification, taken without
+/// following a link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    pub len: u64,
+    pub modified: SystemTime,
 }
 
 /// Why a file was not read.
@@ -516,6 +525,30 @@ impl Beneath {
         }
     }
 
+    /// The length and last modification of the regular file at `rel`,
+    /// without following it; `None` when there is none or it is something
+    /// else. The same body as [`Beneath::file_size`], with the `stat`'s
+    /// modification time.
+    pub fn file_stamp(&self, rel: &str) -> io::Result<Option<FileStamp>> {
+        use std::os::fd::AsFd;
+        let (parents, leaf) = split_leaf(rel)?;
+        let dir = match self.walk(&parents) {
+            Ok(fd) => fd,
+            Err(Walk::Missing | Walk::NotDir) => return Ok(None),
+            Err(Walk::Link) => return Err(link_error(rel)),
+            Err(Walk::Io(e)) => return Err(e),
+        };
+        match sys::lstat_at(dir.as_fd(), &sys::cstr(leaf)?) {
+            Ok(st) if sys::kind_of(&st) == EntryKind::File => Ok(Some(FileStamp {
+                len: st.st_size.max(0) as u64,
+                modified: st_time(st.st_mtime, st.st_mtime_nsec),
+            })),
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Creates every missing directory of `rel`, mode 0700.
     pub fn mkdir_all(&self, rel: &str) -> io::Result<()> {
         use std::os::fd::AsFd;
@@ -795,6 +828,20 @@ fn finish_read(bytes: Vec<u8>, cap: u64) -> CappedRead {
     CappedRead::Read { bytes, digest }
 }
 
+/// A `stat`'s seconds and nanoseconds since the epoch as a `SystemTime`;
+/// the seconds may predate it.
+#[cfg(unix)]
+fn st_time(secs: i64, nsecs: i64) -> SystemTime {
+    if secs >= 0 {
+        std::time::UNIX_EPOCH + std::time::Duration::new(secs.unsigned_abs(), nsecs.max(0) as u32)
+    } else if nsecs > 0 {
+        std::time::UNIX_EPOCH
+            - std::time::Duration::new((secs + 1).unsigned_abs(), (1_000_000_000 - nsecs) as u32)
+    } else {
+        std::time::UNIX_EPOCH - std::time::Duration::new(secs.unsigned_abs(), 0)
+    }
+}
+
 fn one_segment(name: &str) -> io::Result<&str> {
     match segments(name)?.as_slice() {
         [one] => Ok(one),
@@ -913,6 +960,22 @@ impl Beneath {
         let path = self.checked(&segments(rel)?, rel)?;
         match std::fs::symlink_metadata(&path) {
             Ok(m) if m.is_file() => Ok(Some(m.len())),
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The length and last modification of the regular file at `rel`,
+    /// without following it; the portable twin of the descriptor-relative
+    /// [`Beneath::file_stamp`].
+    pub fn file_stamp(&self, rel: &str) -> io::Result<Option<FileStamp>> {
+        let path = self.checked(&segments(rel)?, rel)?;
+        match std::fs::symlink_metadata(&path) {
+            Ok(m) if m.is_file() => Ok(Some(FileStamp {
+                len: m.len(),
+                modified: m.modified()?,
+            })),
             Ok(_) => Ok(None),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
@@ -1564,6 +1627,33 @@ pub(crate) mod tests {
             std::fs::read(run.join("attachments/aside/a.txt")).unwrap(),
             b"{}"
         );
+    }
+
+    /// `file_stamp` reads a regular file's length and time without
+    /// following a link, like `file_size`: a link at the leaf is `None`, a
+    /// directory link on the way an error.
+    #[test]
+    fn file_stamp_reads_a_regular_file_without_following_links() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join("reports")).unwrap();
+        std::fs::write(t.path().join("reports/junit.xml"), b"0123456789").unwrap();
+        let b = Beneath::open(t.path()).unwrap();
+        let stamp = b.file_stamp("reports/junit.xml").unwrap().unwrap();
+        assert_eq!(stamp.len, 10);
+        let meta = std::fs::metadata(t.path().join("reports/junit.xml")).unwrap();
+        assert_eq!(stamp.modified, meta.modified().unwrap());
+        // A link at the leaf: None, never what it points at.
+        std::os::unix::fs::symlink(
+            t.path().join("elsewhere.xml"),
+            t.path().join("reports/link.xml"),
+        )
+        .unwrap();
+        assert_eq!(b.file_stamp("reports/link.xml").unwrap(), None);
+        // A directory link on the way: an error, as `file_size` gives.
+        std::os::unix::fs::symlink(t.path().join("outside"), t.path().join("loop")).unwrap();
+        assert!(b.file_stamp("loop/reports/junit.xml").is_err());
+        // Nothing at the path: None.
+        assert_eq!(b.file_stamp("reports/absent.xml").unwrap(), None);
     }
 
     crate::read_only_test! {

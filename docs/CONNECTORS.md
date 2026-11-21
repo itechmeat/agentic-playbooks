@@ -218,6 +218,12 @@ apb connector approve <name>                    # approve the connector tree dig
 apb connector approve <name> --account <acct>   # approve one account's non-secret fields
 ```
 
+Approving a connector of any kind is refused inside a run step before
+anything is read. Over HTTP a connector is approved only through a signed-in
+dashboard session, and an MCP connector never over HTTP (see "MCP servers");
+whoever holds a server key can sign in, so this guards against a script or a
+run step posting by mistake, not against a key holder.
+
 Approving an account shows the concrete field values so you see exactly where
 secrets will be sent. A secret read from a command is shown with its command
 line wherever an account is approved from, because approving the account lets
@@ -778,11 +784,12 @@ tool the server does not list is reported as a
 warning and not pinned; its function is refused (`mcp_tool_missing`) until
 the server lists it and you approve again.
 
-There is no other way to approve an MCP connector. Without an interactive
-terminal, inside a run step, over MCP and from the dashboard the approval
-is refused `mcp_approve_needs_a_person`, and that refusal prints no digest,
-program or tool, so a caller cannot learn a value to replay. No flag names
-an expected digest. Approval without a terminal (for example in
+There is no other way to approve an MCP connector. Inside a run step the
+approval is refused first, as for every connector kind. Without an
+interactive terminal, over MCP and from the dashboard, a signed-in session
+included, it is refused `mcp_approve_needs_a_person`. Neither refusal prints
+a digest, program or tool, so a caller cannot learn a value to replay. No
+flag names an expected digest. Approval without a terminal (for example in
 provisioning scripts) is future work. Connectors of other kinds keep their
 approval as described in "Approving trust".
 
@@ -1744,7 +1751,12 @@ action from them, and it stores a title as given, so a `literal` escape would
 stay in it as a visible backslash. `trigger_pipeline`
 starts CI on a branch or tag (optional `variables` is an array of
 `{key, value}` objects); grant it only when a playbook is meant to
-start pipelines, not just observe them. Healthcheck: `get_user`.
+start pipelines, not just observe them. `create_release` is sent once in
+`marker` mode: the lookup reads the token's account (`get_user`) and the
+20 newest releases by creation time (`list_releases`); a release not among
+them leaves the send unknown for a person, and apb never sends it again on
+its own.
+Healthcheck: `get_user`.
 
 ### youtrack
 

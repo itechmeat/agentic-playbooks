@@ -99,7 +99,15 @@ that, so these fields are prepared before they are sent (`text_args`, see
   it stores a title as given, so an escape there would stay as a visible
   backslash; references and mentions in a title link as GitLab renders them.
 - `name` and `description` of `create_release` are sent as written; GitLab
-  runs no quick action from release text.
+  runs no quick action from release text. A release is sent once: apb
+  appends a hidden marker to `description` and, after a lost answer, looks
+  the release up among the project's 20 newest releases (`list_releases`,
+  by creation time) under the token's own account, so the retry is
+  recognized as already sent instead of failing with GitLab's 409 for an
+  existing tag. When the release is not among them, the send stays unknown
+  for a person to resolve (`apb intent resolve`); apb never sends it again
+  on its own. The marker (run, node, attempt and a nonce) stays in the
+  release description.
 
 To change state, labels, assignees or merge, call the dedicated function
 (`update_issue`, `merge_merge_request`, `approve_merge_request`) instead.

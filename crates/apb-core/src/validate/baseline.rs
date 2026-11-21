@@ -5,6 +5,7 @@
 //! own label (`follow_up.rs`).
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use super::*;
 use crate::baseline::{BaselineCheck, BaselineSource, MAX_TIMEOUT_SECONDS};
@@ -95,6 +96,13 @@ pub(super) fn check_structure(label: &str, c: &BaselineCheck, r: &mut Validation
                     );
                 }
             }
+            // V320: the JUnit report glob must be usable before the run
+            // starts; the engine walks with the same matcher.
+            if let Some(glob) = spec.junit.as_deref()
+                && let Some(why) = junit_glob_problem(glob, &spec.only)
+            {
+                r.error("V320", None, format!("{at}: project_checks.junit {why}"));
+            }
         }
         Some(src) if c.observe.is_empty() => r.error(
             "V62",
@@ -141,6 +149,51 @@ pub(super) fn check_structure(label: &str, c: &BaselineCheck, r: &mut Validation
             );
         }
     }
+}
+
+/// V320: one problem of a `project_checks.junit` glob, or none. It is read
+/// after the `test` commands in the run's tree, so it must be relative,
+/// stay inside the tree, walk from a literal directory prefix (a wildcard
+/// in the first component would walk from the tree's root, through `.git`,
+/// `target/` and `node_modules/`), and compile the same way the engine
+/// compiles it (`globset` with a literal separator, so `*` never crosses
+/// `/`); an empty or `.` component would make every read unknown, since
+/// `fsutil::beneath` refuses both segments. A glob of one literal
+/// component names one file and passes.
+fn junit_glob_problem(glob: &str, only: &[String]) -> Option<String> {
+    if glob.trim().is_empty() {
+        return Some("is empty".into());
+    }
+    if glob.chars().count() > 256 {
+        return Some("is longer than 256 characters".into());
+    }
+    if Path::new(glob).is_absolute() || glob.starts_with(['/', '\\', '~']) {
+        return Some("must be relative to the run's tree".into());
+    }
+    // The engine splits components on `/` only and the glob matcher reads
+    // `\` as an escape, so a backslash would hide a component boundary
+    // from this check that the walk never sees.
+    if glob.contains('\\') {
+        return Some("must separate directories with /, never \\".into());
+    }
+    let parts: Vec<&str> = glob.split('/').collect();
+    if parts.contains(&"..") {
+        return Some("must not leave the run's tree (..)".into());
+    }
+    if parts.iter().any(|p| p.is_empty() || *p == ".") {
+        return Some("has an empty or . component".into());
+    }
+    let first = glob.split('/').next().unwrap_or(glob);
+    if first.chars().any(crate::project_checks::is_wildcard) {
+        return Some("must start with a literal directory, such as reports/".into());
+    }
+    if crate::project_checks::matcher(glob).is_err() {
+        return Some("is not a valid glob".into());
+    }
+    if !only.is_empty() && !only.iter().any(|k| k == "test") {
+        return Some("is read only after test commands, but only names no test".into());
+    }
+    None
 }
 
 /// V63: a script stays under `scripts/`; a connector source, when the

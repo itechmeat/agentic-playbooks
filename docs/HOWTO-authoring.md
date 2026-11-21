@@ -5358,8 +5358,53 @@ change `baseline_check` once a node that can act has started.
   every test binary printed its result, and more than 500 failing tests
   read unknown. The rule is "no new failures": a command that passed must
   still pass; one that failed may fail only on tests that already failed.
-  For a runner other than `cargo test`, a command that fails on both sides
-  reads unknown. The commands run under the same tree rule as a script: a
+  With `junit: "<glob>"`, the failing tests of every `test` command other
+  than `cargo test` come from the JUnit XML reports the glob matches that
+  the command wrote (a `<testcase>` with a `<failure>` or `<error>`
+  directly inside it; `<skipped>` is not a failure). Each failing test is
+  compared by its report's path, its classname, its name and its
+  occurrence, kept apart (the observation's items are the JSON arrays
+  `[report, classname, name, occurrence]`), never by a joined text; the
+  comparison's detail shows it as `<report>: <classname>::<name>`. apb reads
+  a list only from a report it understood completely, and anything else
+  reads unknown with the reason, never a partial list: the report must be
+  UTF-8 (a UTF-8 byte order mark is fine; UTF-16, or an XML declaration
+  naming another encoding, is not), have one root element with every
+  element closed in order, attribute values in single or double quotes,
+  only the five XML entities and valid character references, no DOCTYPE
+  or entity declaration, and nothing after the root but whitespace,
+  comments and processing instructions. A report a runner stopped writing
+  halfway therefore reads unknown. Each failing test is one list item held
+  to the rules of every observed list item: an item longer than 256
+  characters, or a name with a control or invisible format character,
+  makes the list unknown; a name is never cut. The walk
+  for a pattern examines every path the glob can match or reads unknown:
+  more than 10000 entries, more than 64 reports, a match that could lie
+  more than 8 directories below the glob's literal directory, a name that
+  is not UTF-8, or a link where a report could lie (links are never
+  followed). A report counts only when the command wrote it
+  (absent before it ran, or with another length, content digest or
+  modification time than before), so keep the reports in a git-ignored
+  place: a project check must leave the tree as it found it, and a report
+  in a tracked place reads unknown like any tree change.
+  A command that fails while the reports it wrote name no failing test
+  (a coverage threshold, a lint step inside the test script, a suite that
+  crashed before its report) reads unknown, never "no failing test". A
+  suite that crashes without a report beside other suites whose reports do
+  name failing tests cannot be told apart from those failures: the list
+  then holds only the failures the reports name. A command that passes
+  while a report names a failing test (a retried flaky test) keeps that
+  list; it decides nothing, since a command that passes meets the rule. The glob is
+  relative to the run's tree; `*` and `?` stay inside one directory, `**`
+  crosses directories, and a character class `[...]` may match `/` (a
+  negated one such as `[!x]` does), so a glob with one is searched to
+  every depth like `**`. It must start with a literal directory (V320). Reports are read only in a run that holds its
+  working tree; in a run started with `--allow-shared-workdir`, or one
+  with no node that takes the tree, the failing tests read unknown. A run
+  started with `--allow-shared-workdir` beside a run that holds the tree
+  can still write reports there. Without `junit`, a runner other than
+  `cargo test`, one that fails on both sides, reads unknown. The commands
+  run under the same tree rule as a script: a
   command that writes into the tree (an untracked lockfile, a build output
   that is not ignored) or a tree that cannot be checked reads unknown.
   What a command is compared against is its definition only: the
@@ -5433,7 +5478,10 @@ list or a count, `count` on a non-number), **V65** (connector args or
 manual criteria), **V67** (warning: a script or `project_checks` source while
 `worktree` reads a node output, so the two snapshots would run in different
 trees), **V68** (a node id that starts with `@`: those ids, `@baseline` and
-`@notify`, are reserved for the engine).
+`@notify`, are reserved for the engine). **V320** (a `project_checks.junit` that is empty, over 256 characters,
+absolute, holds a `\`, leaves the tree, has an empty or `.` component or
+a wildcard in its first component, is not a glob, or sits beside an `only`
+without `test`).
 
 `run_status`, `run_report`, `apb runs <id>` and the dashboard run page show
 each check and observation with both values and the verdict; `apb stats`

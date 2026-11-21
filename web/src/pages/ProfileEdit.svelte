@@ -23,7 +23,11 @@
     modelOptionsForAgent,
     nextFallbackPair,
     parseProfileDoc,
+    allowText,
+    processEnvChange,
     type ExecutorGroup,
+    type ProcessEnv,
+    type ProcessEnvPolicy,
   } from '../lib/profileedit'
   import type { Project } from '../lib/types'
   import { nestProjects } from '../lib/projectnest'
@@ -81,6 +85,13 @@
   let groups = $state<ExecutorGroup[]>([{ agent: '', model: '' }])
   let description = $state('')
   let skills = $state<string[]>([])
+  // The profile's stored `process_env` (read on load) and the editor's state:
+  // the policy the select shows and the allowlist text. `processEnvChange`
+  // compares the editor's state with `storedEnv` at save time; the page never
+  // compares on its own. A new profile starts at inherit.
+  let storedEnv = $state<ProcessEnv>({ policy: 'inherit', allow: [] })
+  let envPolicy = $state<ProcessEnvPolicy>('inherit')
+  let envText = $state('')
   let tiers = $state<ProfileTier[]>([])
   let soul = $state('')
   let expectedDigest = $state<string | null>(null)
@@ -229,6 +240,9 @@
       groups = [{ agent: parsed.agent, model: parsed.model }, ...parsed.fallbacks]
       description = parsed.description
       skills = parsed.skills
+      storedEnv = parsed.processEnv
+      envPolicy = parsed.processEnv.policy
+      envText = allowText(parsed.processEnv.allow)
       tiers = parsed.tiers
     } catch (e) {
       if (token === loadToken) toast.error('Failed to load profile', { description: String(e) })
@@ -253,6 +267,9 @@
     groups = [{ agent: untrack(() => groups[0]?.agent ?? ''), model: '' }]
     description = ''
     skills = []
+    storedEnv = { policy: 'inherit', allow: [] }
+    envPolicy = 'inherit'
+    envText = ''
     // Re-seed the primary pair when the new target is a new profile and the
     // metadata already arrived (loadMeta runs once at mount, so a later route
     // change gets no second chance from it). `untrack` keeps this effect from
@@ -332,6 +349,10 @@
           description,
           soul,
           skills,
+          // Sent only when the editor's state differs from the stored value;
+          // undefined is left out of the JSON, so an untouched profile keeps
+          // its stored value (ProfileOptions::keep_stored).
+          process_env: processEnvChange(storedEnv, envPolicy, envText),
           soul_requirement: 'any',
           expected_digest: isNew ? undefined : (expectedDigest ?? undefined),
         },
@@ -658,6 +679,37 @@
         </Field.Field>
       </Field.FieldGroup>
     </section>
+
+    <section class="box process-env">
+      <h2 class="box-cap">Process environment</h2>
+      <fieldset class="env-set">
+        <legend class="env-sr">Process environment</legend>
+        <label class="env-label" for="pf-env-policy">Policy</label>
+        <select
+          id="pf-env-policy"
+          class="env-select"
+          value={envPolicy}
+          onchange={(e) => (envPolicy = e.currentTarget.value as ProcessEnvPolicy)}
+        >
+          <option value="inherit">Inherit every variable (default)</option>
+          <option value="allowlist">Allowlist: the base set, the agent's own variables and these</option>
+        </select>
+        {#if envPolicy === 'allowlist'}
+          <label class="env-label" for="pf-env-allow">Allow</label>
+          <textarea
+            id="pf-env-allow"
+            class="env-textarea"
+            bind:value={envText}
+            rows={6}
+            spellcheck="false"
+          ></textarea>
+          <p class="env-hint">
+            One variable name or pattern per line, for example <code>GITHUB_TOKEN</code> or
+            <code>AWS_*</code>.
+          </p>
+        {/if}
+      </fieldset>
+    </section>
   </div>
 </PageScroll>
 
@@ -727,6 +779,72 @@
     align-items: center;
     justify-content: space-between;
     color: var(--muted-foreground);
+    font-size: 0.75rem;
+  }
+  /* Process environment: the same panel rhythm as the privacy box, with the
+     select and the allowlist text area styled from the app's variables. */
+  .process-env {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 1.25rem 1rem 1rem;
+  }
+  .env-set {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+  .env-sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .env-label {
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+  }
+  .env-select {
+    max-width: 100%;
+    padding: 0.375rem 0.5rem;
+    border: 1px solid var(--c-line);
+    border-radius: var(--radius);
+    background: var(--c-field);
+    color: var(--foreground);
+    font-size: 0.875rem;
+  }
+  .env-textarea {
+    width: 100%;
+    padding: 0.5rem 0.625rem;
+    border: 1px solid var(--c-line);
+    border-radius: var(--radius);
+    background: var(--c-field);
+    color: var(--foreground);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    line-height: 1.625;
+    resize: vertical;
+  }
+  .env-select:focus-visible,
+  .env-textarea:focus-visible {
+    outline: 1px solid var(--c-violet);
+    outline-offset: -1px;
+  }
+  .env-hint {
+    margin: 0;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+  }
+  .env-hint code {
+    font-family: var(--font-mono);
     font-size: 0.75rem;
   }
 </style>
