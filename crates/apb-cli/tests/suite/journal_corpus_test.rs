@@ -141,6 +141,25 @@
 //! carry name exactly `wait_park` and stand right after `run_provenance`
 //! and every checkpoint. The literal type sequences never change.
 //!
+//! Rows I1 to I3 pin an inbox wait against the old binaries (the inbox
+//! waits change). I1: an inbox wait over an empty `echo-hooks` inbox times
+//! out after 1 s and never parks; its journal, with every `run_guard` line
+//! removed, is the timer wait's sequence with the wait's start line before
+//! `wait_started` (`kind` `inbox`) and its end line before `wait_timeout`,
+//! and both old binaries read the finished run (the new lines skipped and
+//! counted) and refuse to resume it with a definition parse error. I2: a
+//! long wait parks over its empty inbox; a stored delivery its `types`
+//! pass and its `match` refuse wakes it through the park's waker, and the
+//! resumed visit parks again over the examined delivery, leaving the
+//! progress line before `run_paused`. The journal cut after the progress
+//! line and before `run_paused` gives both old binaries a strict read they
+//! refuse, and their stop still goes through (`run_aborted` appended).
+//! I3: the same cut after the end pair, before
+//! `node_finished`, with the same two results. The writer uses the engine
+//! test suite's `echo-hooks` fixture connector, installed and approved in
+//! the case's config dir; the deliveries are stored where the binary under
+//! test reads them.
+//!
 //! Rows 3 and 4 run with a real notification subscription the new writer
 //! takes at start: a filtered end-of-run notice (`finished:failed`) and the
 //! `host_task` transition, sent through a connector of the case's config
@@ -971,6 +990,19 @@ fn copy_tree(from: &Path, to: &Path) {
 
 /// Rewrites the run's journal: `edit` gets the records and returns the new
 /// list; `seq` is renumbered in order, as one writer would have.
+/// The number of unknown events a reader's `apb runs` output reports
+/// (`<n> unknown event...`), 0 when it reports none.
+fn unknown_count(stdout: &str) -> usize {
+    let Some(at) = stdout.find(" unknown event") else {
+        return 0;
+    };
+    stdout[..at]
+        .rsplit(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|n| n.parse().ok())
+        .expect("a count before `unknown event`")
+}
+
 fn rewrite_journal(run_dir: &Path, edit: impl FnOnce(Vec<Value>) -> Vec<Value>) {
     let records = edit(journal_at(run_dir));
     let mut text = String::new();
@@ -4670,6 +4702,529 @@ fn w2_guard_lines(journal: &[Value]) {
             Value::from(["wait_park"]),
             "row W2: a guard names exactly wait_park: {e}"
         );
+    }
+}
+
+// ------------------------------------------------- inbox waits
+
+/// The fixture connector of the inbox rows: the engine test suite's
+/// ingest-only fake (`crates/apb-engine/tests/fixtures/connectors/
+/// echo-hooks`), installed into the case's config dir like the sink.
+const ECHO_HOOKS: &str = "echo-hooks";
+
+/// The one account of the inbox rows.
+const ECHO_ACCOUNT: &str = "main";
+
+/// The values of the account's two secret fields. The case env carries
+/// them for the gate's secret check, and `<root>/.apb/secrets.env` records
+/// them for the storage redactor, as the engine test suite does.
+const ECHO_LONG: &str = "abcd1234";
+const ECHO_SHORT: &str = "ab12";
+
+/// The inbox rows' playbook: a script node, then an inbox wait on the
+/// fixture connector's one account, routed on its timeout to the failure
+/// finish (the shape of `plain_yaml` in the engine's `inbox_wait_test.rs`).
+/// `extra` carries further `wait_for` keys: the parked row gives the wait
+/// a `types` list the stored delivery passes (so the park's waker, which
+/// reads only the type, wakes the run) and a `match` condition its body
+/// fails (so the resumed visit examines it, does not match, and parks over
+/// it). A delivery of another type would not wake the run at all.
+fn inbox_yaml(timeout: u64, extra: &str) -> String {
+    format!(
+        r#"schema: 1
+id: corpus-wait-inbox
+name: Journal corpus inbox wait
+version: 1.0.0
+nodes:
+  - {{ id: start, type: start }}
+  - {{ id: work, type: script, script: "scripts/go.sh", runner: sh }}
+  - id: wait
+    type: wait
+    wait_for:
+      type: inbox
+      connector: echo-hooks
+      account: main{extra}
+    timeout_seconds: {timeout}
+  - {{ id: ok, type: finish, outcome: success }}
+  - {{ id: no, type: finish, outcome: failure }}
+edges:
+  - {{ from: start, to: work }}
+  - {{ from: work, to: wait }}
+  - {{ from: wait, to: ok, condition: {{ type: node_status, node: wait, equals: success }} }}
+  - {{ from: wait, to: no, fallback: true }}
+"#
+    )
+}
+
+impl Case {
+    /// The `echo-hooks` fixture connector, installed in the case's config
+    /// dir with its one account configured and both digests approved by
+    /// `binary` (the sink's shape).
+    fn install_echo_hooks(&self, binary: &Path) {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../apb-engine/tests/fixtures/connectors/echo-hooks/connector.yaml");
+        let dst = self
+            .dir
+            .path()
+            .join("home/.config/apb/connectors")
+            .join(ECHO_HOOKS);
+        fs::create_dir_all(&dst).unwrap();
+        fs::copy(&fixture, dst.join("connector.yaml")).unwrap();
+        let accounts = self.root().join(".apb/connector-config");
+        fs::create_dir_all(&accounts).unwrap();
+        fs::write(
+            accounts.join(format!("{ECHO_HOOKS}.yaml")),
+            "accounts:\n  - name: main\n    default: true\n    verify_token: \"{{env.APB_IW_LONG}}\"\n    app_secret: \"{{env.APB_IW_SHORT}}\"\n",
+        )
+        .unwrap();
+        fs::write(
+            self.root().join(".apb/secrets.env"),
+            format!("APB_IW_LONG={ECHO_LONG}\nAPB_IW_SHORT={ECHO_SHORT}\n"),
+        )
+        .unwrap();
+        for args in [
+            vec!["connector", "approve", ECHO_HOOKS],
+            vec![
+                "connector",
+                "approve",
+                ECHO_HOOKS,
+                "--account",
+                ECHO_ACCOUNT,
+            ],
+        ] {
+            let ran = self.run(binary, &args);
+            assert!(ran.ok(), "{}: {}: {ran:?}", self.name, args.join(" "));
+        }
+    }
+
+    /// `apb stop <run>` by `reader` on the saved state, over a journal cut
+    /// before the checkpoint that would settle its unknown lines: the
+    /// stop's first strict read refuses (its warning names the type and
+    /// the newer binary), and the stop still goes through, appending
+    /// `run_aborted` and nothing else.
+    fn stop_after_refused_strict_read(&self, reader: &Path, run: &str, kind: &str) {
+        self.restore();
+        let before = self.journal_bytes(run);
+        let ran = self.run(reader, &["stop", run]);
+        assert!(ran.ok(), "{}: {} stop: {ran:?}", self.name, label(reader));
+        assert!(
+            ran.stderr.contains("written by a newer apb") && ran.stderr.contains(kind),
+            "{}: {} refuses the strict read, naming `{kind}`: {ran:?}",
+            self.name,
+            label(reader)
+        );
+        assert!(
+            ran.stderr.contains("stopping the run anyway"),
+            "{}: {} still stops the run: {ran:?}",
+            self.name,
+            label(reader)
+        );
+        let journal = self.journal(run);
+        assert_eq!(
+            journal.last().map(|e| e["type"].clone()),
+            Some(Value::from("run_aborted")),
+            "{}: {} stop appends run_aborted last: {}",
+            self.name,
+            label(reader),
+            summary(&journal)
+        );
+        let after = self.journal_bytes(run);
+        assert!(
+            after.starts_with(&before) && after.len() > before.len(),
+            "{}: {} stop only appended: {} records over {} bytes",
+            self.name,
+            label(reader),
+            journal.len(),
+            before.len()
+        );
+        // Exactly one record was appended, and it is `run_aborted`.
+        let appended: Vec<Value> = String::from_utf8_lossy(&after[before.len()..])
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("an appended record"))
+            .collect();
+        assert!(
+            appended.len() == 1 && appended[0]["type"] == "run_aborted",
+            "{}: {} stop appends run_aborted and nothing else: {appended:?}",
+            self.name,
+            label(reader)
+        );
+    }
+}
+
+/// The case's `echo-hooks` inbox, under the case's config dir: deliveries
+/// are stored exactly where the binary under test reads them.
+fn echo_inbox(case: &Case) -> apb_core::connector::inbox::Inbox {
+    let cfg = case.dir.path().join("home/.config/apb");
+    apb_core::connector::inbox::Inbox::at(&cfg.join("connector-inbox"), ECHO_HOOKS, ECHO_ACCOUNT)
+        .unwrap()
+}
+
+/// Stores one delivery in the case's inbox, the way the webhook listener
+/// would.
+fn store_delivery(case: &Case, event_type: Option<&str>, body: serde_json::Value) {
+    match echo_inbox(case).append_typed(
+        &format!("m-{}", apb_core::connector::marker::new_nonce()),
+        event_type,
+        &body,
+    ) {
+        Ok(apb_core::connector::inbox::Appended::Stored(_)) => {}
+        other => panic!("{}: the delivery was not stored: {other:?}", case.name),
+    }
+}
+
+/// The guard rules the inbox rows share with row W2: every `run_guard`
+/// names exactly `wait_park` and stands right after `run_provenance` or
+/// right after a checkpoint, and nowhere else.
+fn wait_park_guard_lines(journal: &[Value], row: &str) {
+    let guards: Vec<usize> = journal
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| (e["type"] == "run_guard").then_some(i))
+        .collect();
+    let expected: Vec<usize> = journal
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| {
+            let t = e["type"].as_str()?;
+            (t == "run_provenance" || is_checkpoint(e)).then_some(i + 1)
+        })
+        .collect();
+    assert_eq!(
+        guards,
+        expected,
+        "{row}: guard lines right after run_provenance and every checkpoint: {}",
+        summary(journal)
+    );
+    for e in journal.iter().filter(|e| e["type"] == "run_guard") {
+        assert_eq!(
+            e["requires"],
+            Value::from(["wait_park"]),
+            "{row}: a guard names exactly wait_park: {e}"
+        );
+    }
+}
+
+/// Row I1's literal journal without its guard lines: the timer wait's
+/// sequence with the wait's start line before `wait_started` and its end
+/// line before `wait_timeout`, by construction.
+const I1_TYPES: &[&str] = &[
+    "run_started",
+    "run_provenance",
+    "node_started",
+    "node_finished",
+    "edge_traversed",
+    "node_started",
+    "node_finished",
+    "edge_traversed",
+    "node_started",
+    "inbox_wait_read",
+    "wait_started",
+    "inbox_wait_read",
+    "wait_timeout",
+    "node_finished",
+    "edge_traversed",
+    "node_finished",
+    "run_finished",
+];
+
+/// Row I1: an inbox wait over an empty inbox times out after 1 s and never
+/// parks. Its journal, with every `run_guard` line removed, is the timer
+/// wait's sequence with the wait's start line before `wait_started`
+/// (`kind` `inbox`) and its end line before `wait_timeout`. Both old
+/// binaries read the finished run, counting the lines they skip, and
+/// refuse to resume it with a definition parse error, writing nothing.
+#[test]
+fn i1_inbox_timeout_journals_as_main_old_read_and_refuse_resume() {
+    let new = new_binary();
+    let mut case = Case::new("row I1");
+    // The one-second wait never parks, whatever the caller's environment
+    // says about the release threshold.
+    case.env
+        .push(("APB_RELEASE_AFTER_MS", NO_RELEASE.to_string()));
+    case.seed_inline(
+        &new,
+        "corpus-wait-inbox",
+        &inbox_yaml(1, ""),
+        &[("go.sh", GO_SH)],
+    );
+    case.install_echo_hooks(&new);
+    let ran = case.run(&new, &["run", "corpus-wait-inbox"]);
+    assert_eq!(ran.code, Some(1), "row I1: the run fails: {ran:?}");
+    let run = only_run_id(&case);
+    let journal = case.journal(&run);
+    assert!(
+        !journal.iter().any(|e| e["type"] == "run_paused"),
+        "row I1: no run_paused: {}",
+        summary(&journal)
+    );
+    assert!(
+        !journal.iter().any(|e| e["type"] == "run_resumed"),
+        "row I1: no run_resumed: {}",
+        summary(&journal)
+    );
+    assert!(
+        control_file_is_empty(&case.run_dir(&run)),
+        "row I1: no control entry"
+    );
+    let without_guards: Vec<Value> = journal
+        .iter()
+        .filter(|e| e["type"] != "run_guard")
+        .cloned()
+        .collect();
+    assert_eq!(
+        types_of(&without_guards),
+        I1_TYPES.to_vec(),
+        "row I1: actual sequence: {:?}",
+        types_of(&without_guards)
+    );
+    let started = journal
+        .iter()
+        .find(|e| e["type"] == "wait_started")
+        .expect("row I1: the wait started");
+    assert_eq!(
+        started["kind"],
+        Value::from("inbox"),
+        "row I1: the wait is an inbox wait: {started}"
+    );
+    let at = journal
+        .iter()
+        .position(|e| e["type"] == "inbox_wait_read")
+        .expect("row I1: the wait's start line");
+    assert_eq!(
+        journal[at + 1]["type"],
+        Value::from("wait_started"),
+        "row I1: the start line stands right before wait_started: {}",
+        summary(&journal)
+    );
+    assert!(
+        journal[at].get("end").is_none(),
+        "row I1: the start line carries no end: {}",
+        journal[at]
+    );
+    let end_at = journal
+        .iter()
+        .rposition(|e| e["type"] == "inbox_wait_read")
+        .expect("row I1: the wait's end line");
+    assert_eq!(
+        journal[end_at]["end"],
+        Value::from("timeout"),
+        "row I1: the visit ended at its timeout: {}",
+        journal[end_at]
+    );
+    assert_eq!(
+        journal[end_at + 1]["type"],
+        Value::from("wait_timeout"),
+        "row I1: the end line stands right before wait_timeout: {}",
+        summary(&journal)
+    );
+    wait_park_guard_lines(&journal, "row I1");
+    case.save();
+
+    for (tag, name) in [(BETA1, "row I1 (beta.1)"), (V025, "row I1 (0.25.0)")] {
+        let Some(old) = old_binary(tag, &case) else {
+            continue;
+        };
+        case.restore();
+        let shown = case.read(&old, &run);
+        assert!(
+            shown.stdout.contains("unknown event"),
+            "{name}: {tag} counts the lines it skips: {shown:?}"
+        );
+        assert!(
+            shown.stdout.contains("failed"),
+            "{name}: {tag} reads the failed run: {shown:?}"
+        );
+        // The count holds both `inbox_wait_read` lines: the same reader over
+        // the journal without them counts two fewer (whatever else this
+        // release does not know is counted the same in both).
+        let saved_journal = case.saved().join(&run).join("events.jsonl");
+        let original = fs::read(&saved_journal).unwrap();
+        rewrite_journal(&case.saved().join(&run), |records| {
+            records
+                .into_iter()
+                .filter(|e| e["type"] != "inbox_wait_read")
+                .collect()
+        });
+        let without = case.read(&old, &run);
+        fs::write(&saved_journal, original).unwrap();
+        assert_eq!(
+            unknown_count(&shown.stdout),
+            unknown_count(&without.stdout) + 2,
+            "{name}: {tag} counts each inbox_wait_read line: {shown:?} vs {without:?}"
+        );
+        case.restore();
+        let before = case.journal_bytes(&run);
+        let resume = case.run(&old, &["resume", &run]);
+        assert!(!resume.ok(), "{name}: {tag} refuses to resume: {resume:?}");
+        assert!(
+            resume.stderr.contains("unknown variant `inbox`"),
+            "{name}: {tag} refuses with the definition parse error: {resume:?}"
+        );
+        assert_eq!(
+            case.journal_bytes(&run),
+            before,
+            "{name}: {tag} wrote nothing"
+        );
+    }
+}
+
+/// Row I2: a long inbox wait parks over its empty inbox, a stored delivery
+/// its `types` pass and its `match` refuses wakes it (the park's waker),
+/// and the resumed visit examines it and parks again, leaving the progress
+/// line before `run_paused`. The journal cut after the progress line,
+/// before `run_paused`, holds unknown lines no checkpoint settles: each
+/// old binary refuses that strict read and still stops the run, appending
+/// `run_aborted`.
+#[test]
+fn i2_cut_after_the_progress_line_old_refuse_read_and_stop() {
+    let new = new_binary();
+    let mut case = Case::new("row I2");
+    // The wait parks at once, and the waker wakes within one poll: the
+    // first park holds nothing examined, the second leaves the progress
+    // line over the examined delivery.
+    case.env.push(("APB_RELEASE_AFTER_MS", "1000".to_string()));
+    case.env.push(("APB_WAKER_POLL_MS", "100".to_string()));
+    case.seed_inline(
+        &new,
+        "corpus-wait-inbox",
+        &inbox_yaml(
+            3600,
+            "\n      types: [review]\n      match:\n        - { path: kind, equals: signal }",
+        ),
+        &[("go.sh", GO_SH)],
+    );
+    case.install_echo_hooks(&new);
+    let run = case.start_inline(&new, "corpus-wait-inbox", &[]);
+    let first = case.wait_journal(&run, "the first park", |j| {
+        j.iter().any(|e| e["type"] == "run_paused")
+    });
+    assert!(
+        first
+            .iter()
+            .all(|e| e["type"] != "inbox_wait_read" || e["examined"].as_u64() == Some(0)),
+        "row I2: the first park holds the start line only: {}",
+        summary(&first)
+    );
+    // The delivery passes the wait's `types` and fails its `match`, so the
+    // waker wakes the run and the resumed visit examines it without
+    // matching: the second park writes the progress line.
+    store_delivery(
+        &case,
+        Some("review"),
+        serde_json::json!({ "kind": "noise" }),
+    );
+    let journal = case.wait_journal(&run, "the second park", |j| {
+        j.iter().filter(|e| e["type"] == "run_paused").count() >= 2
+    });
+    let paused = journal
+        .iter()
+        .rposition(|e| e["type"] == "run_paused")
+        .expect("row I2: the second park");
+    assert_eq!(
+        journal[paused - 1]["type"],
+        Value::from("inbox_wait_read"),
+        "row I2: the progress line stands right before run_paused: {}",
+        summary(&journal)
+    );
+    assert!(
+        journal[paused - 1].get("end").is_none(),
+        "row I2: the progress line carries no end: {}",
+        journal[paused - 1]
+    );
+    assert!(
+        journal[paused - 1]["examined"]
+            .as_u64()
+            .is_some_and(|n| n >= 1),
+        "row I2: the progress line covers the examined delivery: {}",
+        journal[paused - 1]
+    );
+    wait_driver_gone(&case, &run);
+    case.forget_driver(&run);
+    case.kill_wakers(&run);
+    // Re-read once the driver is gone: the snapshot above may have caught
+    // the second `run_paused` before the guard line written with it.
+    let journal = case.journal(&run);
+    let paused = journal
+        .iter()
+        .rposition(|e| e["type"] == "run_paused")
+        .expect("row I2: the second park");
+    wait_park_guard_lines(&journal, "row I2");
+    // The cut: everything before the second `run_paused`, the progress
+    // line last.
+    rewrite_journal(&case.run_dir(&run), |records| records[..paused].to_vec());
+    let cut = case.journal(&run);
+    assert_eq!(
+        cut.last().map(|e| e["type"].clone()),
+        Some(Value::from("inbox_wait_read")),
+        "row I2: the cut journal ends at the progress line: {}",
+        summary(&cut)
+    );
+    case.save();
+
+    let Some((beta1, v025)) = old_readers(&case) else {
+        return;
+    };
+    for reader in [beta1, v025] {
+        case.stop_after_refused_strict_read(&reader, &run, "inbox_wait_read");
+    }
+}
+
+/// Row I3: the same 1 s run as row I1, its journal cut after the end pair
+/// (`inbox_wait_read` with its end and `wait_timeout`), before
+/// `node_finished`: again each old binary refuses the strict read and
+/// still stops the run.
+#[test]
+fn i3_cut_after_the_end_pair_old_refuse_read_and_stop() {
+    let new = new_binary();
+    let mut case = Case::new("row I3");
+    case.env
+        .push(("APB_RELEASE_AFTER_MS", NO_RELEASE.to_string()));
+    case.seed_inline(
+        &new,
+        "corpus-wait-inbox",
+        &inbox_yaml(1, ""),
+        &[("go.sh", GO_SH)],
+    );
+    case.install_echo_hooks(&new);
+    let ran = case.run(&new, &["run", "corpus-wait-inbox"]);
+    assert_eq!(ran.code, Some(1), "row I3: the run fails: {ran:?}");
+    let run = only_run_id(&case);
+    let journal = case.journal(&run);
+    let end_at = journal
+        .iter()
+        .rposition(|e| e["type"] == "inbox_wait_read")
+        .expect("row I3: the wait's end line");
+    assert_eq!(
+        journal[end_at]["end"],
+        Value::from("timeout"),
+        "row I3: the visit ended at its timeout: {}",
+        journal[end_at]
+    );
+    assert_eq!(
+        journal[end_at + 1]["type"],
+        Value::from("wait_timeout"),
+        "row I3: the end event follows the end line: {}",
+        summary(&journal)
+    );
+    // The cut: everything through the end pair, `node_finished` dropped.
+    rewrite_journal(&case.run_dir(&run), |records| {
+        records[..end_at + 2].to_vec()
+    });
+    let cut = case.journal(&run);
+    assert_eq!(
+        cut.last().map(|e| e["type"].clone()),
+        Some(Value::from("wait_timeout")),
+        "row I3: the cut journal ends at the end pair: {}",
+        summary(&cut)
+    );
+    case.save();
+
+    let Some((beta1, v025)) = old_readers(&case) else {
+        return;
+    };
+    for reader in [beta1, v025] {
+        case.stop_after_refused_strict_read(&reader, &run, "inbox_wait_read");
     }
 }
 

@@ -634,10 +634,10 @@ fn a_park_offers_the_resume_with_its_until() {
         .find(|a| a.code == ActionCode::ResumeRun)
         .expect("a parked run offers the resume");
     assert!(
-        resume.reason.starts_with("waiting on timer `timer` until ")
-            && resume
-                .reason
-                .contains("; a waker resumes it then (a resume before then only parks it again)"),
+        resume.reason.starts_with("waiting at `timer` until ")
+            && resume.reason.contains(
+                " at the latest; a waker resumes it (a resume before then parks it again unless the wait can end)"
+            ),
         "{}",
         resume.reason
     );
@@ -667,9 +667,7 @@ fn an_overdue_park_says_so() {
         .find(|a| a.code == ActionCode::ResumeRun)
         .expect("a parked run offers the resume");
     assert!(
-        resume
-            .reason
-            .starts_with("the wait on timer `timer` was due at ")
+        resume.reason.starts_with("the wait at `timer` was due at ")
             && resume
                 .reason
                 .contains(" and no waker resumed it; resume it"),

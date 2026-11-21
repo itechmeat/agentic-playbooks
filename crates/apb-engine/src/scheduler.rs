@@ -58,6 +58,7 @@ mod finish_hooks;
 mod fork;
 mod goal;
 mod handoff;
+use crate::inbox_wait;
 pub(crate) mod wait_park;
 // host execution mode (0.23.0)
 mod host;
@@ -677,10 +678,13 @@ enum ScriptedWait {
     /// The timer elapsed or the signal came.
     Ended,
     TimedOut,
+    /// The boundary has no answer: the caller runs the `on_missing` effect.
+    Missing,
 }
 
-/// A scenario run's wait, due at once: `None` for a real run. A missing
-/// answer under `on_missing: fail` times the wait out.
+/// A scenario run's wait, due at once: `None` for a real run. The answer
+/// is read without the `on_missing` effect: the caller runs that effect
+/// where the visit is declared.
 fn scripted_wait(run_dir: &Path, node: &str) -> Result<Option<ScriptedWait>, EngineError> {
     use crate::scenario::{Answer, BoundaryKind, Resolution};
     let key = crate::scenario::session::node_key(node);
@@ -689,12 +693,18 @@ fn scripted_wait(run_dir: &Path, node: &str) -> Result<Option<ScriptedWait>, Eng
             Resolution::Real | Resolution::Skip => None,
             Resolution::Answer(Answer::Wait(w)) if w.timed_out => Some(ScriptedWait::TimedOut),
             Resolution::Answer(_) => Some(ScriptedWait::Ended),
-            Resolution::Missing => {
-                crate::scenario::session::on_missing(run_dir, BoundaryKind::Wait, &key)?;
-                Some(ScriptedWait::TimedOut)
-            }
+            Resolution::Missing => Some(ScriptedWait::Missing),
         },
     )
+}
+
+/// The `on_missing` effect of a scenario run's wait with no answer: under
+/// `on_missing: error` the run stops at once, under `on_missing: fail` the
+/// wait times out.
+fn scripted_wait_missing(run_dir: &Path, node: &str) -> Result<(), EngineError> {
+    use crate::scenario::BoundaryKind;
+    let key = crate::scenario::session::node_key(node);
+    crate::scenario::session::on_missing(run_dir, BoundaryKind::Wait, &key)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1004,8 +1014,25 @@ fn drive_inner(
     // The last park this drive posted, so a discarded one is not posted
     // again on every poll (`wait_park::ParkRetry`).
     let mut park_retry = wait_park::ParkRetry::default();
+    // One open inbox visit's in-memory state per node (inbox-waits D4
+    // "The visit"), created at the first poll of each drive and dropped
+    // when its node's visit ends.
+    let mut inbox_scans: std::collections::BTreeMap<String, inbox_wait::Scan> =
+        std::collections::BTreeMap::new();
+    // What a patch did to the definition the drive executes. Every path
+    // that applies a patch reports it here, and the one place that
+    // receives it drops the inbox scans.
+    let mut definition = patch::Definition::Current;
 
     loop {
+        // A patch replaced the definition the drive executes: every inbox
+        // scan is dropped, so the next poll of an open inbox wait is a
+        // first poll (authorize, render, the position from the journal,
+        // the redactor, the read state).
+        if definition == patch::Definition::Replaced {
+            inbox_scans.clear();
+            definition = patch::Definition::Current;
+        }
         supervisor::ensure_run_dir(run_dir)?;
         // A run past its deadline starts nothing more: the stop is posted
         // here, and the control scan below applies it.
@@ -1063,7 +1090,13 @@ fn drive_inner(
                 }
                 return Ok(RunResult { run_id, outcome });
             }
-            ControlScan::Migrated => {
+            ControlScan::Migrated {
+                definition: replaced,
+            } => {
+                // A patch replaced the definition the drive executes: the
+                // inbox scans are dropped at the top of the loop, the one
+                // place that receives the signal.
+                definition = replaced;
                 frontier.clear();
                 continue;
             }
@@ -2253,7 +2286,16 @@ fn drive_inner(
                     )? {
                         BatchWake::NoFailures => {}
                         BatchWake::Terminal(outcome) => return Ok(RunResult { run_id, outcome }),
-                        BatchWake::Resumed { next, also } => {
+                        BatchWake::Resumed {
+                            next,
+                            also,
+                            definition: replaced,
+                        } => {
+                            // A patch replaced the definition the drive
+                            // executes: the inbox scans are dropped at the
+                            // top of the loop, the one place that receives
+                            // the signal.
+                            definition = replaced;
                             // The supervisor's directives lead. This iteration
                             // never advances the batch's own successors, so the
                             // heads the SUCCEEDED members would have produced are
@@ -2647,8 +2689,52 @@ fn drive_inner(
         } = &node_kind
         {
             let events = read_all(run_dir)?;
+            // A scenario run's wait is due at once: its scripted end. A
+            // scripted inbox wait reads nothing and authorizes nothing (D4
+            // "The wait arm" item 3), so its answer is read before the
+            // visit is declared. A timer or webhook wait reads its answer
+            // where main has it: after the declaration, so the journal of
+            // a scenario run names the visit it stops.
+            let scripted = match wait_for {
+                WaitFor::Inbox(_) => scripted_wait(run_dir, &current)?,
+                WaitFor::Timer { .. } | WaitFor::Webhook { .. } => None,
+            };
             // We declare the start of the wait once per visit (order/loop-resilient).
-            if wait_started_count(&events, &current) <= wait_ended_count(&events, &current) {
+            // A timer or webhook wait keeps main's count comparison exactly,
+            // crash behaviour included (D4 "An ended visit"): a run without
+            // an inbox wait writes main's journal in every state. An inbox
+            // wait reads its visit positionally, so a visit that ended
+            // before the node's `node_finished` is finished from the journal
+            // instead of waited again.
+            let mut inbox_ended: Option<(NodeStatus, String)> = None;
+            let declare_visit = match wait_for {
+                WaitFor::Inbox(_) => match journal::wait_visit(&events, &current) {
+                    // A journaled end (a whole end pair, crash table row 10)
+                    // finishes the node from the journal alone: no
+                    // authorize, no read (D4 "An ended visit", D4
+                    // "Authorization").
+                    journal::WaitVisit::Ended(end) => {
+                        let (status, output) = match &end.payload {
+                            EventPayload::WaitSignalled { .. } => (
+                                NodeStatus::Succeeded,
+                                inbox_wait::signalled_output(&events, &current),
+                            ),
+                            _ => (NodeStatus::TimedOut, "wait timeout".to_string()),
+                        };
+                        inbox_ended = Some((status, output));
+                        false
+                    }
+                    journal::WaitVisit::New => true,
+                    journal::WaitVisit::Open => false,
+                },
+                WaitFor::Timer { .. } | WaitFor::Webhook { .. } => {
+                    wait_started_count(&events, &current) <= wait_ended_count(&events, &current)
+                }
+            };
+            // A wait decision made in place of the resolution below: a
+            // journaled end, or a refused start.
+            let mut inbox_done: Option<(NodeStatus, String)> = inbox_ended;
+            if declare_visit {
                 log.append(EventPayload::NodeStarted {
                     node: current.clone(),
                     attempt: 1,
@@ -2656,97 +2742,269 @@ fn drive_inner(
                 let kind = match wait_for {
                     WaitFor::Timer { .. } => "timer",
                     WaitFor::Webhook { .. } => "webhook",
+                    WaitFor::Inbox(_) => "inbox",
                 };
-                log.append(EventPayload::WaitStarted {
-                    node: current.clone(),
-                    kind: kind.into(),
-                })?;
-            }
-            let events = read_all(run_dir)?;
-            let elapsed = wait_active_ms(&events, &current, apb_core::clock::now_ms()).unwrap_or(0);
-            // A scenario run's wait is due at once: its scripted end.
-            let scripted = scripted_wait(run_dir, &current)?;
-            let elapsed = match scripted {
-                Some(ScriptedWait::TimedOut) => u128::MAX,
-                _ => elapsed,
-            };
-            let signalled = scripted.map(|w| w == ScriptedWait::Ended).unwrap_or(false)
-                || match wait_for {
-                    WaitFor::Timer { seconds } => elapsed >= u128::from(*seconds) * 1000,
-                    // We only resolve the wait via an UNCONSUMED signal: how many
-                    // signals total have arrived for the key versus how many this node
-                    // has already consumed (its WaitSignalled entries in the log). This way a
-                    // repeated entry into wait (a loop) is not resolved by a historical, already
-                    // consumed signal - a new one is required.
-                    WaitFor::Webhook { key } => {
-                        let matching = read_signals_after(run_dir, None)?
-                            .iter()
-                            .filter(|e| &e.cmd.key == key)
-                            .count();
-                        let consumed = wait_signalled_count(&read_all(run_dir)?, &current);
-                        matching > consumed
-                    }
-                } && scripted.is_none();
-            if signalled {
-                steps += 1;
-                log.append(EventPayload::WaitSignalled {
-                    node: current.clone(),
-                })?;
-                (NodeStatus::Succeeded, String::new())
-            } else if elapsed >= u128::from(*timeout_seconds) * 1000 {
-                steps += 1;
-                log.append(EventPayload::WaitTimeout {
-                    node: current.clone(),
-                })?;
-                (NodeStatus::TimedOut, "wait timeout".into())
-            } else {
-                // The wait park (routine operations): a long timer wait in a
-                // run that may release, with nothing else to run and no
-                // control pending, posts the engine's own pause and goes to
-                // the loop top, where the control scan applies it. The drive
-                // itself journals, locks or spawns nothing here.
-                let now = apb_core::clock::now_ms();
-                let timer_seconds = match wait_for {
-                    WaitFor::Timer { seconds } => *seconds,
-                    WaitFor::Webhook { .. } => 0,
-                };
-                // No due time, no park: a park never carries an unbounded
-                // `until`. A park the scan discarded is not posted again
-                // before the journal or the control channel changed, or
-                // `wait_park::PARK_RETRY` passed (`ParkRetry`).
-                let due =
-                    wait_park::due_at_ms(&events, &current, timer_seconds, *timeout_seconds, now)
-                        .filter(|_| !park_retry.holds(events.len(), control_cursor));
-                let pause = match due {
-                    Some(wake_at_ms) => wait_park::park_request(wait_park::ParkCheck {
-                        timer: matches!(wait_for, WaitFor::Timer { .. }),
-                        scripted: scripted.is_some(),
-                        scenario: crate::scenario::session::is_scenario(run_dir),
-                        alone: state.deferred.is_empty() && frontier.iter().all(|n| n == &current),
-                        controls_pending: !read_control_after(run_dir, control_cursor)?.is_empty(),
-                        may_release: deferred::may_release(cfg, mode, wake_at_ms, now),
-                        guarded: crate::event::latest_run_guard(&events)
-                            .is_some_and(|g| g.iter().any(|f| f == "wait_park")),
-                        node: &current,
-                        wake_at_ms,
-                        keep_lock: lock.is_some(),
-                    }),
-                    None => None,
-                };
-                if let Some(pause) = pause {
-                    // A park is optional: while the numbering lock stays
-                    // busy past its bound nothing is posted, and the wait
-                    // sleeps and decides again at its next poll.
-                    if let Some(seq) = crate::control::post_control_unless_busy(
-                        run_dir,
-                        crate::control::Control::Pause(pause),
-                    )? {
-                        park_retry.posted(events.len(), seq);
-                        continue;
+                // An inbox New declares its visit through `authorize` and
+                // `inbox_wait::start`: with no counted line yet (a torn
+                // start line included) `start` reads the head and writes the
+                // start pair, `wait_started` included; with one,
+                // `wait_started` is appended alone, after `authorize`
+                // passed (D4 "The wait arm" item 1). A refusal fails the
+                // node with nothing journaled for the wait.
+                let mut inbox_fail: Option<String> = None;
+                // `start` wrote the pair: `wait_started` is already in the
+                // journal.
+                let mut inbox_started = false;
+                if let (WaitFor::Inbox(w), None) = (wait_for, scripted) {
+                    if inbox_wait::position(&events, &current).is_none() {
+                        let mut cx = inbox_wait::WaitCx {
+                            root,
+                            run_dir,
+                            node: &current,
+                            log: &mut *log,
+                            state: &state,
+                            cfg,
+                            cancel: &run_cancel,
+                            playbook: &playbook,
+                            run_id: &run_id,
+                        };
+                        match inbox_wait::start(&mut cx, w)? {
+                            Ok(()) => inbox_started = true,
+                            Err(reason) => inbox_fail = Some(reason),
+                        }
+                    } else if let Err(reason) = inbox_wait::authorize(root, run_dir, &current, w) {
+                        inbox_fail = Some(format!("inbox_wait_unauthorized: {reason}"));
                     }
                 }
-                std::thread::sleep(AWAIT_CONTROL_POLL);
-                continue;
+                match inbox_fail {
+                    Some(reason) => {
+                        inbox_done = Some((NodeStatus::Failed, reason));
+                    }
+                    None if inbox_started => {}
+                    None => {
+                        log.append(EventPayload::WaitStarted {
+                            node: current.clone(),
+                            kind: kind.into(),
+                        })?;
+                    }
+                }
+            }
+            // The `on_missing` effect of a scripted wait with no answer
+            // runs after the declaration, for every wait kind: the journal
+            // names the visit the scenario stopped at. A timer or webhook
+            // wait reads its answer here, where main reads it.
+            let scripted = match scripted {
+                Some(answer) => Some(answer),
+                None => match wait_for {
+                    WaitFor::Inbox(_) => None,
+                    WaitFor::Timer { .. } | WaitFor::Webhook { .. } => {
+                        scripted_wait(run_dir, &current)?
+                    }
+                },
+            };
+            let scripted = match scripted {
+                Some(ScriptedWait::Missing) => {
+                    scripted_wait_missing(run_dir, &current)?;
+                    Some(ScriptedWait::TimedOut)
+                }
+                other => other,
+            };
+            if let Some((status, output)) = inbox_done {
+                steps += 1;
+                (status, output)
+            } else {
+                let events = read_all(run_dir)?;
+                let elapsed =
+                    wait_active_ms(&events, &current, apb_core::clock::now_ms()).unwrap_or(0);
+                let elapsed = match scripted {
+                    Some(ScriptedWait::TimedOut) => u128::MAX,
+                    _ => elapsed,
+                };
+                // An open inbox visit that is not scripted decides through
+                // `poll` (D4 "The wait arm" item 2). A scripted inbox wait
+                // reads nothing and authorizes nothing (item 3): its scripted
+                // end is the empty object.
+                let mut inbox_poll: Option<inbox_wait::Poll> = None;
+                if let (WaitFor::Inbox(w), None) = (wait_for, scripted) {
+                    let mut cx = inbox_wait::WaitCx {
+                        root,
+                        run_dir,
+                        node: &current,
+                        log: &mut *log,
+                        state: &state,
+                        cfg,
+                        cancel: &run_cancel,
+                        playbook: &playbook,
+                        run_id: &run_id,
+                    };
+                    let scan = inbox_scans.entry(current.clone()).or_default();
+                    let poll = inbox_wait::poll(&mut cx, w, scan, elapsed, *timeout_seconds)?;
+                    if !matches!(poll, inbox_wait::Poll::Open) {
+                        // The visit is over or refused: its scan is dropped
+                        // with the node's visit (D4 "The visit").
+                        inbox_scans.remove(&current);
+                    }
+                    inbox_poll = Some(poll);
+                }
+                let signalled = scripted.map(|w| w == ScriptedWait::Ended).unwrap_or(false)
+                    || match wait_for {
+                        WaitFor::Timer { seconds } => elapsed >= u128::from(*seconds) * 1000,
+                        // We only resolve the wait via an UNCONSUMED signal: how many
+                        // signals total have arrived for the key versus how many this node
+                        // has already consumed (its WaitSignalled entries in the log). This way a
+                        // repeated entry into wait (a loop) is not resolved by a historical, already
+                        // consumed signal - a new one is required.
+                        WaitFor::Webhook { key } => {
+                            let matching = read_signals_after(run_dir, None)?
+                                .iter()
+                                .filter(|e| &e.cmd.key == key)
+                                .count();
+                            let consumed = wait_signalled_count(&read_all(run_dir)?, &current);
+                            matching > consumed
+                        }
+                        // An inbox wait is never resolved by a signal (D4 "The
+                        // wait arm" item 2).
+                        WaitFor::Inbox(_) => false,
+                    } && scripted.is_none();
+                if let Some(inbox_wait::Poll::Ended { output }) = &inbox_poll {
+                    steps += 1;
+                    (NodeStatus::Succeeded, output.clone())
+                } else if matches!(inbox_poll, Some(inbox_wait::Poll::TimedOut)) {
+                    // The end pair (its second line `wait_timeout`) is already
+                    // journaled by `poll`; the node just settles.
+                    steps += 1;
+                    (NodeStatus::TimedOut, "wait timeout".into())
+                } else if let Some(inbox_wait::Poll::Failed { reason }) = &inbox_poll {
+                    steps += 1;
+                    (NodeStatus::Failed, reason.clone())
+                } else if signalled {
+                    steps += 1;
+                    log.append(EventPayload::WaitSignalled {
+                        node: current.clone(),
+                    })?;
+                    // A scripted inbox wait ends with the empty object (D4
+                    // "The wait arm" item 3).
+                    let output = if matches!(wait_for, WaitFor::Inbox(_)) {
+                        "{}".to_string()
+                    } else {
+                        String::new()
+                    };
+                    (NodeStatus::Succeeded, output)
+                } else if elapsed >= u128::from(*timeout_seconds) * 1000 {
+                    steps += 1;
+                    log.append(EventPayload::WaitTimeout {
+                        node: current.clone(),
+                    })?;
+                    (NodeStatus::TimedOut, "wait timeout".into())
+                } else {
+                    // The wait park (routine operations; inbox-waits D4
+                    // "Parking"): a long timer or inbox wait in a run that may
+                    // release, with nothing else to run and no control
+                    // pending, posts the engine's own pause and goes to the
+                    // loop top, where the control scan applies it. The drive
+                    // itself locks or spawns nothing here; an inbox wait adds
+                    // one progress line (below). A webhook wait never parks,
+                    // nor an inbox one whose last read failed or whose gap
+                    // line is not written: they sleep and decide again.
+                    let now = apb_core::clock::now_ms();
+                    let seconds = wait_park::park_seconds(wait_for, *timeout_seconds);
+                    // Whether this wait's kind may park now (D4 "Parking"
+                    // item 1). An inbox wait parks only when its scan is
+                    // caught up and nothing was stored since its last read;
+                    // an open failure reads as a failed read.
+                    let parks = match wait_for {
+                        WaitFor::Timer { .. } => true,
+                        WaitFor::Webhook { .. } => false,
+                        WaitFor::Inbox(w) => match inbox_scans.get(&current) {
+                            Some(scan) => {
+                                scan.caught_up
+                                    && apb_core::connector::inbox::Inbox::open(
+                                        &w.connector,
+                                        &w.account,
+                                    )
+                                    .map(|inbox| !scan.read_state.read_due(inbox.log_stamp()))
+                                    .unwrap_or(false)
+                            }
+                            None => false,
+                        },
+                    };
+                    // No due time, no park: a park never carries an unbounded
+                    // `until`. A park the scan discarded is not posted again
+                    // before the journal or the control channel changed, or
+                    // `wait_park::PARK_RETRY` passed (`ParkRetry`).
+                    let due =
+                        wait_park::due_at_ms(&events, &current, seconds, *timeout_seconds, now)
+                            .filter(|_| !park_retry.holds(events.len(), control_cursor));
+                    let pause = match due {
+                        Some(wake_at_ms) => wait_park::park_request(wait_park::ParkCheck {
+                            parks,
+                            scripted: scripted.is_some(),
+                            scenario: crate::scenario::session::is_scenario(run_dir),
+                            alone: state.deferred.is_empty()
+                                && frontier.iter().all(|n| n == &current),
+                            controls_pending: !read_control_after(run_dir, control_cursor)?
+                                .is_empty(),
+                            may_release: deferred::may_release(cfg, mode, wake_at_ms, now),
+                            guarded: crate::event::latest_run_guard(&events)
+                                .is_some_and(|g| g.iter().any(|f| f == "wait_park")),
+                            node: &current,
+                            wake_at_ms,
+                            keep_lock: lock.is_some(),
+                        }),
+                        None => None,
+                    };
+                    if let Some(pause) = pause {
+                        // The progress line (inbox-waits D4 "Parking" item 3):
+                        // right before an inbox wait posts a park, one
+                        // `inbox_wait_read` with no `end` and no `output` over
+                        // what the visit examined past the position, so the
+                        // position equals what the scan examined and the
+                        // waker and a resumed drive start after those events.
+                        // Written only for an inbox wait (a timer park writes
+                        // no progress line) and only once the read's gap line
+                        // is in the journal (`parks` above). A timer park's
+                        // journal keeps main's shape exactly.
+                        let mut appended = 0usize;
+                        if let (WaitFor::Inbox(_), Some(scan)) =
+                            (wait_for, inbox_scans.get(&current))
+                            && let Some(pos) = inbox_wait::position(&events, &current)
+                            && scan.after > pos
+                        {
+                            log.append(EventPayload::InboxWaitRead {
+                                node: current.clone(),
+                                through_seq: scan.after,
+                                examined: scan.examined,
+                                end: None,
+                                output: None,
+                            })?;
+                            appended = 1;
+                        }
+                        // The inbox-waits barrier (D4 "Parking" item 3):
+                        // before the park is posted. Every inbox park passes
+                        // here, with or without a progress line.
+                        #[cfg(any(test, feature = "testing"))]
+                        if matches!(wait_for, WaitFor::Inbox(_)) {
+                            crate::deadline_hooks::at(
+                                crate::deadline_hooks::Hook::InboxWaitBeforePark,
+                                run_dir,
+                            );
+                        }
+                        // A park is optional: while the numbering lock stays
+                        // busy past its bound nothing is posted, and the wait
+                        // sleeps and decides again at its next poll. The
+                        // retry's journal length counts the progress line, so
+                        // `ParkRetry` compares the journal it will read next.
+                        if let Some(seq) = crate::control::post_control_unless_busy(
+                            run_dir,
+                            crate::control::Control::Pause(pause),
+                        )? {
+                            park_retry.posted(events.len() + appended, seq);
+                            continue;
+                        }
+                    }
+                    std::thread::sleep(AWAIT_CONTROL_POLL);
+                    continue;
+                }
             }
         } else if let Some(verdict) = fork::failing_barrier(
             &playbook,
@@ -3646,6 +3904,15 @@ fn drive_inner(
                 (st, out)
             }
         };
+        // The inbox-waits barrier (D4): between a wait's end (`wait_signalled`
+        // or `wait_timeout`, the only outcomes of the wait branch that reach
+        // this tail) and the `node_finished` below, for every wait kind. A
+        // wait that is still open (a park or a sleep) continues above and
+        // never reaches this.
+        #[cfg(any(test, feature = "testing"))]
+        if matches!(node_kind, NodeKind::Wait { .. }) {
+            crate::deadline_hooks::at(crate::deadline_hooks::Hook::WaitBeforeNodeFinished, run_dir);
+        }
         let taken = match node_unsnapshotted {
             true => None,
             false => result::of_node(
@@ -3740,7 +4007,13 @@ fn drive_inner(
                 // No head rebuild: the frontier is still the drive's own,
                 // and the parked node's own routing is what the directive
                 // decided against.
-                WakeOutcome::Resumed => {
+                WakeOutcome::Resumed {
+                    definition: replaced,
+                } => {
+                    // A patch replaced the definition the drive executes:
+                    // the inbox scans are dropped at the top of the loop, the
+                    // one place that receives the signal.
+                    definition = replaced;
                     revive::revive(
                         log,
                         &playbook,

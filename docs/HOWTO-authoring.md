@@ -677,7 +677,7 @@ nodes:
 | --- | --- | --- |
 | V300 | warning | a binding of an MCP connector names no `functions` list, so it grants every tool the manifest maps (`functions: read_only` counts as a list) |
 | V301 | warning | the connector's stdio `command` is an interpreter or a launcher (`node`, `python3`, `sh`, `npx`, `uvx`, `docker` and the like, a versioned name such as `python3.12` included): its approval covers that program file only, not the script or package it runs; point `command` at the installed server program |
-| V302 | error | an MCP connector at an engine site (the baseline check, the follow-up check or a list item check): those reads run from the drive or a waker, where this version starts no MCP server |
+| V302 | error | an MCP connector at an engine site (the baseline check, the follow-up check, a list item check or an inbox wait): those reads run from the drive or a waker, where this version starts no MCP server |
 | V303 | error | an http MCP connector whose `auth` header names a header the HTTP transport sets itself (`mcp-protocol-version`, `mcp-method`, `mcp-name`, `content-type`, `accept`, `host`, `content-length`, `transfer-encoding`, `mcp-session-id`, `last-event-id`, and `authorization` beside a minted token): name another header |
 
 An MCP connector on a node with `isolation` is refused by V113, as every
@@ -689,6 +689,80 @@ One rule applies when the connector is installed, not at validation: an
 the list in CONNECTORS.md "MCP servers") is refused with
 `mcp_env_loads_code`, since the approval of the server's program does not
 cover the code such a variable pulls in.
+### Waiting for an inbox event (wait_for: inbox)
+
+A `wait` node can wait for the first matching event in a connector
+account's inbox instead of a timer or a signal:
+
+```yaml
+nodes:
+  - id: watch
+    type: wait
+    timeout_seconds: 1800              # required, as for every wait
+    wait_for:
+      type: inbox
+      connector: github
+      account: acme
+      types: [pull_request]            # optional: stored event types that match
+      match:                           # optional: conditions the event meets (all of them)
+        - { path: pull_request.number, equals: "{{params.pr}}" }
+      take:                            # optional: the event fields the output keeps
+        - { name: action, path: action }
+```
+
+The connector and account go through the same trust as any binding: the
+connector must be installed and approved, the account's secrets set, the
+account approved. The wait calls no function, and its site grants none.
+The wait ends at its first matching event or at the timeout. Its output is
+read as `nodes.<wait>.output.<name>`: `seq` and `received_at`, `type` when
+the stored event has one, and one value per `take` entry read out of the
+event body. A taken value is `null` when the path does not resolve, when
+the text is over 256 characters or holds a hidden character, when the
+value is not a scalar (an object or an array), or when a number is not
+finite. A `take` entry may declare `type: number`, which reads a number
+only (a text reads as `null`). No event body is stored. A declared field
+can still hold a secret apb does not know (a known secret shorter than 6
+characters is not scrubbed by value either), so the author chooses which
+fields a wait takes.
+
+A `match` condition compares the value at the path with the `equals` text
+as text: a string as it is, anything else as its compact JSON, so
+`equals: "42"` matches the number 42 and `equals: "true"` matches the
+boolean. The `equals` text is a template, so it may name `params.*` and
+`nodes.<id>.output.<field>`; it is rendered when the visit starts. Every
+condition of the block must hold for the event to match.
+
+The wait keeps its position in its own run's journal. It examines events
+stored after the wait first started, then after what the previous visit
+examined; nothing is acknowledged, and the wait holds no consumer. A wait
+does not hold events: what retention removed above its position shows as
+an inbox gap. The output is untrusted: it is written by whoever can reach
+the connector's callback URL, and a node that renders
+`nodes.<wait>.output` and can send outward is a follower under V179 to
+V182, as for any outside text.
+
+One wait takes one event. Collecting several events in one wait is future
+work; a loop around the wait already expresses it. To answer each review
+comment on a pull request until it closes, loop a wait that takes `action`
+and the comment's own fields (a comment body over 256 characters reads as
+`null`), an agent that answers, and an `output_field` edge on `action`
+that leaves the loop. A run that waits for one customer's next reply takes
+the sender and the subject and loops until an `output_field` edge on the
+subject finds the exact value `accepted`, or 3 days pass.
+
+A long wait with nothing matched parks the run like a long timer wait, and
+a stored event of a listed type resumes it within the waker's poll; set
+`types` on a busy account, so only the events you wait for wake the run.
+A visit fails `inbox_wait_unauthorized` when the connector or account
+changed or lost its approval, and `inbox_wait_secrets_unresolved` when a
+secret the workspace's connectors reference cannot be resolved, so the
+event's values cannot be stored scrubbed. An eval case refuses a playbook
+with an inbox wait. An event counts only when it was stored before the
+wait's timeout on the run's clock, however late the run looks at it. The
+block is validated by V284 to V287 (V284 a malformed block, V285 a
+connector that is not installed or has no webhook block, V286 a warning:
+`types` on a connector whose webhook block names no event type, V287 two
+binding sites with one id).
 
 ## Success checks
 
@@ -4613,9 +4687,10 @@ an untrusted child blocks the parent, and a reference cycle is refused. Nesting
 is limited to 5 levels. Set expected_duration explicitly on a playbook node
 (validator V19 nudges you): the parent cannot sum the child's own estimates.
 
-## wait (a timer or a signal)
+## wait (a timer, a signal or an inbox event)
 
-A `wait` node stops the run until a timer fires or a signal arrives:
+A `wait` node stops the run until a timer fires, a signal arrives or an
+inbox event is stored:
 
 ```yaml
 nodes:
@@ -4629,14 +4704,22 @@ nodes:
 - `timeout_seconds` is required: past it the node fails (route the failure
   with a `fallback` edge).
 
-A timer wait with more than a minute left pauses the run until it is due,
+The third kind, `wait_for: { type: inbox, ... }`, waits for the first
+matching event in a connector account's inbox; it is covered under
+"Connectors (external services)", "Waiting for an inbox event".
+
+A timer or inbox wait with more than a minute left pauses the run until it is due,
 when it is the only thing the run is doing (no other node ready or running,
 no deferred retry open, no control waiting): no driver and no agent runs (only the small pause waker waits), the busy lock of
 a write run stays parked, the pause waker resumes the run when it is due and
-`apb resume --all` after a restart. A webhook wait and every wait of an
+`apb resume --all` after a restart, and an inbox wait also when an event of a
+listed type is stored above its position (within the waker's poll). The park
+line names no kind: a parked wait reads "waiting at `<node>` until <T> at
+the latest; a waker resumes the run" on every surface, for a timer and an
+inbox wait alike. A webhook wait and every wait of an
 unattended, supervised, eval or child run keep their driver. A playbook with
-a timer wait carries the run guard `wait_park`, so an older apb refuses to
-resume or pause its runs while they wait on the timer.
+a timer or inbox wait carries the run guard `wait_park`, so an older apb refuses to
+resume or pause its runs while they wait.
 
 <!-- issue #192: forward patches and candidate trials -->
 ## Supervisor policy (supervisor.policy)

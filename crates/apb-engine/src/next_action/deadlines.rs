@@ -86,7 +86,9 @@ pub fn wait_node(
         WaitFor::Timer { seconds } if u128::from(*seconds) * 1000 <= timeout => {
             (u128::from(*seconds) * 1000, AutoOutcome::TimerElapses)
         }
-        WaitFor::Timer { .. } | WaitFor::Webhook { .. } => (timeout, AutoOutcome::WaitTimesOut),
+        WaitFor::Timer { .. } | WaitFor::Webhook { .. } | WaitFor::Inbox(_) => {
+            (timeout, AutoOutcome::WaitTimesOut)
+        }
     };
     clock.progress(left_of(limit, open), outcome)
 }

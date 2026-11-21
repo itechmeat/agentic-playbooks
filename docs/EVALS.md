@@ -36,6 +36,7 @@ in an eval that could ship something:
   (`check.connector`, the `<node>#check` binding site), the `@baseline`
   and `@follow_up` sites, unless the case doubles every function of every
   binding site (see "Connector doubles" below),
+- a wait node that waits for an inbox event (`wait_for: { type: inbox }`),
 - a `playbook` node (the child's effects are not visible to the case).
 
 Such a playbook is refused before anything is created
@@ -1226,7 +1227,7 @@ A capture is refused with every gap named and nothing written:
 | `live_question` | a live agent asked and got its answer inside a running attempt; the format scripts only a question that ends its attempt |
 | `judge_cancelled` | a judge decision was cancelled |
 | `judge_edge_address` | a judge decision carries no edge addresses (an older journal) |
-| `wait_signal` | a signalled wait whose signal the journal does not hold |
+| `wait_signal` | a signalled wait whose signal the journal does not hold, or an inbox wait that ended with an event |
 | `attempt_status` | an attempt ended in a state the format cannot script (`interrupted`, `cancelled`, an unknown word), or a timed-out script node |
 | `unknown_node` | a `--node` name the playbook does not have |
 | `credential_shaped` | text that still looks like a credential after scrubbing |

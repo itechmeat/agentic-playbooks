@@ -531,7 +531,9 @@ pub(crate) fn apply_move_directive(
 pub(crate) enum WakeOutcome {
     /// A directive (retry, continue-from, patch) moved the run on; the drive
     /// loop restarts its iteration from the possibly-changed `current`.
-    Resumed,
+    /// `definition` says what the directive did to the definition the drive
+    /// executes: a patch replaced it, a retry left it as it was.
+    Resumed { definition: Definition },
     /// The run ends here with this outcome.
     Terminal(RunStatus),
 }
@@ -545,8 +547,13 @@ pub(crate) enum BatchWake {
     /// The supervisor named what runs next. `next` becomes `current`; `also`
     /// carries the further directives (one per additional failed member) for the
     /// frontier, and is empty whenever exactly one member failed - there is
-    /// always at least `next`.
-    Resumed { next: String, also: Vec<String> },
+    /// always at least `next`. `definition` says what the directives did to the
+    /// definition the drive executes.
+    Resumed {
+        next: String,
+        also: Vec<String>,
+        definition: Definition,
+    },
 }
 
 /// Raises one wake per failed batch member, in batch order, and blocks on each
@@ -575,6 +582,7 @@ pub(crate) fn park_for_batch_failures(
     decisions: Option<&crate::decision::DecisionRunner>,
 ) -> Result<BatchWake, EngineError> {
     let mut targets: Vec<String> = Vec::new();
+    let mut definition = Definition::Current;
     for (node, status, output) in failed {
         // An earlier park in this same batch may have applied a patch that
         // dropped this node; there is nothing left to intervene on, and raising a
@@ -603,7 +611,12 @@ pub(crate) fn park_for_batch_failures(
             decisions,
         )? {
             WakeOutcome::Terminal(outcome) => return Ok(BatchWake::Terminal(outcome)),
-            WakeOutcome::Resumed => {
+            WakeOutcome::Resumed {
+                definition: replaced,
+            } => {
+                if replaced == Definition::Replaced {
+                    definition = Definition::Replaced;
+                }
                 if !targets.contains(&parked) {
                     targets.push(parked);
                 }
@@ -615,6 +628,7 @@ pub(crate) fn park_for_batch_failures(
         Some(next) => Ok(BatchWake::Resumed {
             next,
             also: it.collect(),
+            definition,
         }),
         None => Ok(BatchWake::NoFailures),
     }
@@ -691,6 +705,10 @@ pub(crate) fn park_for_supervisor(
         )?;
     }
 
+    // What the directive that ends this park did to the definition the drive
+    // executes: a patch replaced it, a retry left it as it was.
+    let mut definition = Definition::Current;
+
     loop {
         let (cmd, seq) = await_control(run_dir, log, *control_cursor, current)?;
         // `await_control` applies ContextAppend/Progress in place (and
@@ -746,6 +764,7 @@ pub(crate) fn park_for_supervisor(
                 write_control_cursor(run_dir, seq)?;
                 match result {
                     PatchResult::Applied(applied) => {
+                        definition = applied.definition;
                         *last_applied_patch = Some(*applied);
                         frontier.clear();
                         break;
@@ -811,7 +830,7 @@ pub(crate) fn park_for_supervisor(
             }
         }
     }
-    Ok(WakeOutcome::Resumed)
+    Ok(WakeOutcome::Resumed { definition })
 }
 
 #[cfg(test)]

@@ -26,17 +26,17 @@ engine, mcp, and core <- mcp-client <- engine. Do not introduce import cycles
   rule family: `graph`, `nodes`, `connectors`, `templates`, `node_io` for
   `continue_session`, declared output fields, node `workdir`, the run
   `worktree` and `cache.key`, `baseline` for V62-V67, `list` for the list
-  rules V85-V89 and V93-V95, V283, V288 and V289, `budget` for V96-V98, `params` for the secret
+  rules V85-V89 and V93-V95, V283, V288 and V289, `inbox_wait` for inbox wait rules V284-V287, `budget` for V96-V98, `params` for the secret
   param rules V99 and V100, V340 (no string of a definition references a
   secret param, over `secret_param_refs`, the one walk every check of a
   definition shares) and the search param rules V160-V162, `quality` for the `quality:` block and the
   supervisor policy V102-V107, `known_problems` for the `known_problems:`
   block and `quality.criteria_grader` V108-V111, `isolation` for a node's
   `isolation` V112-V115 (V113's message names the MCP reason), `mcp` for
-  the bindings of MCP connectors V300 to V302 (`validate/mcp.rs`: V300 a
+  the bindings of MCP connectors V300 to V303 (`validate/mcp.rs`: V300 a
   binding with no `functions` list, V301 a launcher `command`, V302 an
   engine site), `publish` for a `publish` node and `publish_only`
-  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `review_form` for the form of a `human_review` (a malformed `max_scope` V243, `fields` V244, `show` V245, a required field without a default on a gate the engine may decide V246, a default over untrusted text V247), `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`; `list_pilot` names a definition whose list uses `pilot` or `stop_when`, `wait_park` one with a timer wait, `list_skip` one whose list uses `skip`, `eval_doubles` (never a definition
+  V116-V120 and a publish from a read-only node V140, `edges` for edge ids, pairs and judge values V121-V125 and the one `output_field` comparator V169, `review` for the routes out of a `human_review` (`review_routes`, `review_takes`) with V136 a decision only bounded edges route, V144 a `review_status` edge no decision matches and V145 an option no edge carries, `review_form` for the form of a `human_review` (a malformed `max_scope` V243, `fields` V244, `show` V245, a required field without a default on a gate the engine may decide V246, a default over untrusted text V247), `retry` for `retry_delay` V126-V130 and the stall exit V174-V175 (`stall_after` on a node or `defaults`), `outputs` for the run `outputs:` block V131-V135, `read_only` for a node's `read_only` V137-V139, `unattended` for a gate's `unattended` outcome V141-V143 with the walk the run rechecks (`unattended_decide_refusal`), `results` for a node's `results:` declaration V152-V154 (kinds, the path grammar, the cap) with `snapshotted_nodes`, the nodes whose executions take a snapshot (also every node an `approves`, a `requires_approval` or an `evidence.from` names), `approval` for a gate's `approves`, a node's `requires_approval` and `person_only` V155-V158, `evidence` for an `agent_task`'s `evidence:` block V159, `guarded` for the features a run guard names (`GuardedFeature`, `guarded_features` of a definition, a name this binary does not know refused by `parse`; `write_scope` names a definition with `writes` or `max_changed_files`; `list_pilot` names a definition whose list uses `pilot` or `stop_when`, `wait_park` one with a timer or inbox wait, `list_skip` one whose list uses `skip`, `eval_doubles` (never a definition
   feature) a doubled eval run, named from `run_provenance.eval_doubles`,
   the names in this declaration order), `output_types` for the typed output field contract V167-V168, `write_scope` for a declared write scope V170-V172, `deadline` for a run's `deadline` V200, `concurrency` for the `concurrency:` block V210 and V211, `health` for the `health:` block V212, `previous_success` for the `run.previous_success` grammar, the `when_none` block and V176; `nodes` also holds V68, ids that start with `@`
   are the engine's, V101, `audience` on a finish without a prompt, and
@@ -96,7 +96,7 @@ engine, mcp, and core <- mcp-client <- engine. Do not introduce import cycles
   (`project_checks.rs`, with `project_checks/junit` the bounded JUnit XML
   reader of failing tests), the findings and warnings an attempt reports and
   their sanitizer (`run_notes.rs`), one walk over every connector binding
-  site, nodes, a list node's item check `<node>#check` and the engine sites
+  site, nodes, a list node's item check `<node>#check`, the inbox wait site `<node>#inbox` and the engine sites
   `@baseline` and `@notify` (`connector/sites.rs`, `is_engine_site`), a
   function's `people:` block, the args people read and whether it can carry
   a notification (`connector/people.rs`), a
@@ -104,6 +104,7 @@ engine, mcp, and core <- mcp-client <- engine. Do not introduce import cycles
   (`connector/idempotency.rs`) and the hidden send marker
   (`connector/marker.rs`), the `types` and `where` filter of an inbox read,
   whose `explain` never carries body text (`connector/event_filter.rs`), the
+  inbox wait's site, its matching and its declared values (`inbox_wait.rs`), the
   OAuth pure helpers (the token response,
   scopes, PKCE, the authorization URL, the callback;
   `connector/oauth.rs`), the paging block with its manifest rules
@@ -389,7 +390,7 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   passed), `supervisor` heartbeat and wake park, `node` execution,
   `stop_context` the stop a chain step reads after a failed attempt (a pause
   or abort ends the chain, a supervisor interrupt names itself),
-  `journal` event-log folds, `status_file` the attempt verdict contract and its
+  `journal` event-log folds including inbox `WaitVisit`, `status_file` the attempt verdict contract and its
   findings and warnings, `attempt_notes` their journal entry,
   `attempt_memory` the retry briefing on what earlier attempts did,
   `batch_class` the write class of a node and the one batch admission rule
@@ -526,9 +527,9 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   duration goes through (`pause.rs`; `pause/`: `kind` the journal-facing
   types, `request` the one pause entry point and what a paused drive leaves
   behind, `interrupt` the graceful kill registry of a `--now` pause,
-  `waker` the body of the pause waker (`--seq`, the resume at `until`, and
-  the waker of a park resumes the run once when a control is pending at any
-  poll) and
+  `waker` the body of the pause waker (`--seq`, the resume at `until`, the
+  inbox delivery wake checks of a parked inbox wait, and the waker of a park
+  resumes the run once when a control is pending at any poll) and
   of the release waker (`--release`, the resume of a released run when its
   deferred retry is due), each resuming only while its pause or release
   (`WakeHold`) still holds the run, `resume_all` behind
@@ -858,7 +859,9 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   daily-capped use shares, and `report/`: the labellers, statistics
   and replay behind `apb decisions`, labelling through `label_in` over
   `RunJournal.run_dir`, the completion check's `chain_decision` following
-  a gate's scope re-asks; see `docs/DECISIONS.md`).
+  a gate's scope re-asks; the inbox wait is its own module beside the
+  drive (`inbox_wait/`: `mod` the authorization, the visit, `position` and
+  `in_time`; `pending` the park waker's check); see `docs/DECISIONS.md`).
 - `apb-mcp` - rmcp stdio MCP server (`server/`, with `read_only` the
   allowlist of `apb mcp --read-only` and the tables every tool is classified
   in) and the tool layer in `tools/`

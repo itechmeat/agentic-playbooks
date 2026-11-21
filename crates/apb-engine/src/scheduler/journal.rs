@@ -227,6 +227,47 @@ pub(crate) fn last_wait_started_ts(events: &[Event], node: &str) -> Option<u128>
         .map(|e| e.ts)
 }
 
+/// The visit of `node`'s wait, read positionally rather than by counting
+/// (inbox-waits D4 "An ended visit"). The wait arm asks it only for a node
+/// whose `wait_for` is an inbox wait; a timer or webhook wait keeps main's
+/// count comparison exactly, so the journal of a run without an inbox wait
+/// is main's in every state.
+#[derive(Debug)]
+pub(crate) enum WaitVisit<'a> {
+    /// No `wait_started`, or the latest is followed by a `node_finished`
+    /// of the node: declare a new visit.
+    New,
+    /// The latest `wait_started` has no end and no `node_finished` after it.
+    Open,
+    /// It has an end (`wait_signalled`, `wait_timeout`) after it and no
+    /// `node_finished`: finish the node from that end.
+    Ended(&'a Event),
+}
+
+/// Walks the journal in order, keeping the latest `wait_started` of `node`
+/// and whether an end or a `node_finished` of the node followed it. An end
+/// or a `node_finished` of another node between changes nothing.
+pub(crate) fn wait_visit<'a>(events: &'a [Event], node: &str) -> WaitVisit<'a> {
+    let mut visit = WaitVisit::New;
+    for e in events {
+        match &e.payload {
+            EventPayload::WaitStarted { node: n, .. } if n == node => {
+                visit = WaitVisit::Open;
+            }
+            EventPayload::WaitSignalled { node: n } | EventPayload::WaitTimeout { node: n }
+                if n == node && matches!(visit, WaitVisit::Open) =>
+            {
+                visit = WaitVisit::Ended(e);
+            }
+            EventPayload::NodeFinished { node: n, .. } if n == node => {
+                visit = WaitVisit::New;
+            }
+            _ => {}
+        }
+    }
+    visit
+}
+
 /// The `ts` of the most recent `QuestionAsked` event for `node` - the moment
 /// the currently pending (unanswered) question was raised, since by
 /// construction only one question is ever open per node at a time (spec
@@ -614,6 +655,127 @@ mod tests {
     }
 
     use super::*;
+
+    // --- wait_visit (inbox-waits D4 "An ended visit") ---
+
+    fn ws(seq: u128, node: &str) -> Event {
+        at(
+            seq,
+            EventPayload::WaitStarted {
+                node: node.into(),
+                kind: "timer".into(),
+            },
+        )
+    }
+
+    fn signalled(seq: u128, node: &str) -> Event {
+        at(seq, EventPayload::WaitSignalled { node: node.into() })
+    }
+
+    fn timed_out(seq: u128, node: &str) -> Event {
+        at(seq, EventPayload::WaitTimeout { node: node.into() })
+    }
+
+    fn done(seq: u128, node: &str) -> Event {
+        at(
+            seq,
+            EventPayload::node_finished(node, "succeeded", 1, String::new()),
+        )
+    }
+
+    /// The visit of a wait node is read positionally, not by counting: a
+    /// `wait_started` declares a visit, the node's own end event ends it
+    /// (finished from that end on resume) and the node's own `node_finished`
+    /// closes it (a new visit on resume). Another node's events between
+    /// never count.
+    #[test]
+    fn wait_visit_reads_positions() {
+        // New: no wait_started at all.
+        assert!(matches!(wait_visit(&[], "wait"), WaitVisit::New));
+        // New: the node started but never declared a visit.
+        let only_start = vec![at(
+            1,
+            EventPayload::NodeStarted {
+                node: "wait".into(),
+                attempt: 1,
+            },
+        )];
+        assert!(matches!(wait_visit(&only_start, "wait"), WaitVisit::New));
+        // Open: the latest wait_started has no end and no node_finished.
+        assert!(matches!(
+            wait_visit(&[ws(1, "wait")], "wait"),
+            WaitVisit::Open
+        ));
+        // Ended: an end after the latest wait_started, no node_finished.
+        let signalled_pair = [ws(1, "wait"), signalled(2, "wait")];
+        let ended = wait_visit(&signalled_pair, "wait");
+        assert!(
+            matches!(ended, WaitVisit::Ended(e) if e.seq == 2),
+            "{ended:?}"
+        );
+        let timeout_pair = [ws(1, "wait"), timed_out(2, "wait")];
+        let timed_out_visit = wait_visit(&timeout_pair, "wait");
+        assert!(
+            matches!(timed_out_visit, WaitVisit::Ended(e) if e.seq == 2),
+            "{timed_out_visit:?}"
+        );
+        // A node_finished closes the visit: a failed visit ends in a
+        // node_finished and the resume declares a new one.
+        assert!(
+            matches!(
+                wait_visit(&[ws(1, "wait"), done(2, "wait")], "wait"),
+                WaitVisit::New
+            ),
+            "a wait_started followed by a node_finished is New"
+        );
+        // A duplicate node_started: the first visit finished (its
+        // node_finished), a later visit of the node is open again. The
+        // latest wait_started is the second one, which nothing follows.
+        assert!(
+            matches!(
+                wait_visit(&[ws(1, "wait"), done(2, "wait"), ws(3, "wait")], "wait"),
+                WaitVisit::Open
+            ),
+            "a node_finished before the latest wait_started leaves it open"
+        );
+        // A duplicate node_started with no wait_started after it (a drive
+        // died between its node_started and its wait_started): the latest
+        // wait_started is the first one, which its node_finished closes.
+        assert!(matches!(
+            wait_visit(
+                &[
+                    ws(1, "wait"),
+                    done(2, "wait"),
+                    at(
+                        3,
+                        EventPayload::NodeStarted {
+                            node: "wait".into(),
+                            attempt: 1
+                        }
+                    )
+                ],
+                "wait"
+            ),
+            WaitVisit::New
+        ));
+        // The latest wait_started is the node's own; an end of another node
+        // in between ends nothing, a wait_started of another node declares
+        // nothing.
+        assert!(matches!(
+            wait_visit(
+                &[ws(1, "wait"), signalled(2, "other"), ws(3, "other")],
+                "wait"
+            ),
+            WaitVisit::Open
+        ));
+        assert!(
+            matches!(
+                wait_visit(&[ws(1, "wait"), done(2, "other"), signalled(3, "wait")], "wait"),
+                WaitVisit::Ended(e) if e.seq == 3
+            ),
+            "only the node's own node_finished closes its visit"
+        );
+    }
 
     fn at(ts: u128, payload: EventPayload) -> Event {
         Event {

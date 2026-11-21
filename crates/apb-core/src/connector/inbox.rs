@@ -24,12 +24,14 @@
 //!
 //! Bodies stored here are authored by whoever can reach the ingest endpoint.
 //! Nothing in this module logs one, and no caller may put one in a run's
-//! event log.
+//! event log; an inbox wait journals the values of the fields its playbook
+//! declares, scrubbed, never a body.
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -288,14 +290,16 @@ impl Inbox {
         body: &Value,
         retention: &Retention,
     ) -> Result<Appended, InboxError> {
-        self.append_bounded(
+        self.append_at(
             provider_id,
             body,
             None,
             retention,
             DEDUPE_RETENTION_MS,
             DEDUPE_MAX_ENTRIES,
-            crate::clock::now_ms_u64(),
+            // The function, not its value: the clock is read under the
+            // lock, so the receipt is the moment the seq is assigned.
+            crate::clock::now_ms_u64,
         )
     }
 
@@ -309,14 +313,14 @@ impl Inbox {
         event_type: Option<&str>,
         body: &Value,
     ) -> Result<Appended, InboxError> {
-        self.append_bounded(
+        self.append_at(
             provider_id,
             body,
             event_type,
             &Retention::default(),
             DEDUPE_RETENTION_MS,
             DEDUPE_MAX_ENTRIES,
-            crate::clock::now_ms_u64(),
+            crate::clock::now_ms_u64,
         )
     }
 
@@ -326,9 +330,10 @@ impl Inbox {
     /// seam exists so a test can drive the time-based eviction deterministically
     /// and prove the size cap rolls without writing ten thousand events.
     ///
-    /// `now` stamps both the stored event's `received_at` and the dedupe entry,
-    /// so a duplicate is judged against the same clock the entry was recorded
-    /// with.
+    /// `now` stamps the dedupe entry, so a duplicate is judged against the
+    /// same clock the entry was recorded with; the stored event's
+    /// `received_at` is never below the previous event's stamp (see
+    /// [`Self::append_at`]).
     #[allow(clippy::too_many_arguments)]
     pub fn append_bounded(
         &self,
@@ -340,8 +345,43 @@ impl Inbox {
         dedupe_max_entries: usize,
         now: u64,
     ) -> Result<Appended, InboxError> {
+        self.append_at(
+            provider_id,
+            body,
+            event_type,
+            retention,
+            dedupe_retention_ms,
+            dedupe_max_entries,
+            move || now,
+        )
+    }
+
+    /// The one append body, with the wall clock read under the lock
+    /// (inbox-waits design D4 "The deadline"): a delivery stamped before it
+    /// took the lock could be stored after it, and two concurrent
+    /// deliveries could take seqs in the opposite order of their stamps.
+    /// `clock` is called exactly once, right after [`lock_dir`] returned
+    /// and after the read of the last stored event, and the stored event's
+    /// `received_at` is `max(clock(), last.received_at)`, so `seq` and
+    /// `received_at` are monotonic together: a later seq never has an
+    /// earlier stamp. The dedupe check and the dedupe entry keep the
+    /// clock's own value.
+    #[allow(clippy::too_many_arguments)]
+    fn append_at(
+        &self,
+        provider_id: &str,
+        body: &Value,
+        event_type: Option<&str>,
+        retention: &Retention,
+        dedupe_retention_ms: u64,
+        dedupe_max_entries: usize,
+        clock: impl FnOnce() -> u64,
+    ) -> Result<Appended, InboxError> {
         std::fs::create_dir_all(&self.dir).map_err(|e| self.io(&e))?;
         let _lock = lock_dir(&self.dir, INBOX_LOCK).map_err(|e| self.io(&e))?;
+
+        let last = self.last_event()?;
+        let now = clock();
 
         let key = dedupe_key(provider_id);
         let mut seen = self.read_dedupe()?;
@@ -353,10 +393,11 @@ impl Inbox {
             return Ok(Appended::Duplicate);
         }
 
-        let seq = self.last_seq()? + 1;
+        let seq = last.as_ref().map(|e| e.seq).unwrap_or(0) + 1;
+        let received_at = last.map(|e| e.received_at).unwrap_or(0).max(now);
         let event = InboxEvent {
             seq,
-            received_at: now,
+            received_at,
             provider_id: provider_id.to_string(),
             event_type: event_type.map(str::to_string),
             body: body.clone(),
@@ -376,6 +417,16 @@ impl Inbox {
 
         self.enforce_retention(retention)?;
         Ok(Appended::Stored(seq))
+    }
+
+    /// The log's stamp: the length and the modification time of
+    /// `events.jsonl`, from one metadata call, `None` when the file does
+    /// not exist. Any append changes it, so a reader that compares stamps
+    /// never re-reads an unchanged log (inbox-waits design D4 "The visit"
+    /// step 3).
+    pub fn log_stamp(&self) -> Option<(u64, SystemTime)> {
+        let meta = std::fs::metadata(self.dir.join(EVENTS_FILE)).ok()?;
+        Some((meta.len(), meta.modified().ok()?))
     }
 
     /// The events `consumer` has not acknowledged, oldest first, at most
@@ -584,6 +635,27 @@ impl Inbox {
     /// probe and a dashboard panel.
     pub fn dropped_count(&self) -> Result<u64, InboxError> {
         self.read_dropped()
+    }
+
+    /// [`Inbox::read_events`] once no append is in flight, waiting at most
+    /// `bound` for one to finish. An append stamps `received_at` after it
+    /// took the store's lock and releases the lock only once its line is
+    /// written, so a read made while the lock is free holds every event
+    /// stamped before that moment. The wait only looks at the lock
+    /// ([`crate::fsutil::lock_held`], no lock taken, nothing written), so a
+    /// reader that must leave the store untouched can use it; past `bound`
+    /// it reads anyway.
+    pub fn read_events_settled(
+        &self,
+        bound: std::time::Duration,
+    ) -> Result<Vec<InboxEvent>, InboxError> {
+        let until = std::time::Instant::now() + bound;
+        while crate::fsutil::lock_held(&self.dir, INBOX_LOCK, SystemTime::now())
+            && std::time::Instant::now() < until
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        self.read_events()
     }
 
     /// Every stored event, oldest first.
@@ -918,8 +990,9 @@ fn line_bytes(event: &InboxEvent) -> u64 {
 /// `None` when everything after the cursor is still stored. Shared by
 /// `read`'s gap detection so the range arithmetic lives in one place:
 /// `from` is the first seq the consumer has not seen, `through` the seq just
-/// before the oldest survivor.
-fn lost_prefix(cursor: u64, first_stored: Option<u64>) -> Option<InboxGap> {
+/// before the oldest survivor. Public so an inbox wait's visit computes the
+/// same gap for its position (inbox-waits design D4 "The visit" step 4).
+pub fn lost_prefix(cursor: u64, first_stored: Option<u64>) -> Option<InboxGap> {
     let from = cursor.checked_add(1)?;
     let first = first_stored?;
     (first > from).then(|| InboxGap {
@@ -1181,5 +1254,206 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, None);
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// An append changes the log stamp: the length grows with every stored
+    /// event, so a reader that compares stamps never re-reads an unchanged
+    /// log (inbox-waits D4 "The visit" step 3).
+    #[test]
+    fn log_stamp_changes_on_append() {
+        let t = temp_inbox();
+        assert!(t.inbox.log_stamp().is_none(), "no log, no stamp");
+        t.inbox
+            .append_typed("p1", Some("push"), &json!({}))
+            .unwrap();
+        let first = t.inbox.log_stamp().expect("the append makes a log");
+        t.inbox
+            .append_typed("p2", Some("push"), &json!({}))
+            .unwrap();
+        let second = t.inbox.log_stamp().expect("the log exists");
+        assert!(
+            second.0 > first.0,
+            "the length grew: {} to {}",
+            first.0,
+            second.0
+        );
+    }
+
+    /// An account whose log was never written has no stamp.
+    #[test]
+    fn log_stamp_is_none_without_a_log() {
+        let t = temp_inbox();
+        assert!(t.inbox.log_stamp().is_none());
+        // A delivered-but-duplicate append writes nothing: still no log.
+        t.inbox
+            .append_typed("p1", Some("push"), &json!({}))
+            .unwrap();
+        t.inbox
+            .append_typed("p1", Some("push"), &json!({}))
+            .unwrap();
+        assert_eq!(
+            t.inbox.read_events().unwrap().len(),
+            1,
+            "the duplicate stored nothing"
+        );
+    }
+
+    /// Two threads appending at once: every later `seq` has a stamp at or
+    /// above the earlier one, because the receipt is stamped under the
+    /// lock the `seq` is handed out under (inbox-waits D4 "The deadline").
+    #[test]
+    fn concurrent_deliveries_are_stamped_in_seq_order() {
+        let t = temp_inbox();
+        let dir = t.inbox.dir.clone();
+        let handles: Vec<_> = (0..2)
+            .map(|worker| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    let inbox = Inbox { dir };
+                    for i in 0..25 {
+                        let id = format!("w{worker}-{i}");
+                        inbox
+                            .append_typed(&id, Some("push"), &json!({ "i": i }))
+                            .expect("append");
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let mut events = t.inbox.read_events().unwrap();
+        assert_eq!(events.len(), 50, "every append stored one event");
+        events.sort_by_key(|e| e.seq);
+        assert!(
+            events.windows(2).all(|w| w[0].seq < w[1].seq),
+            "seqs are unique"
+        );
+        assert!(
+            events
+                .windows(2)
+                .all(|w| w[0].received_at <= w[1].received_at),
+            "a later seq never has an earlier stamp"
+        );
+    }
+
+    /// A delivery that waits on the store's lock is stamped when it gets
+    /// the lock, not when it asked for it: the stamp is read under the
+    /// lock, so the receipt is the moment the `seq` is assigned.
+    #[test]
+    fn a_delivery_waiting_on_the_lock_is_stamped_when_it_gets_it() {
+        let t = temp_inbox();
+        // Hold the account's lock while the delivery tries to append.
+        let held = crate::fsutil::lock_dir(&t.inbox.dir, INBOX_LOCK).expect("hold the lock");
+        let before = crate::clock::now_ms_u64();
+        let dir = t.inbox.dir.clone();
+        let handle = std::thread::spawn(move || {
+            let inbox = Inbox { dir };
+            inbox
+                .append_typed("p1", Some("push"), &json!({}))
+                .expect("append")
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let released_at = crate::clock::now_ms_u64();
+        drop(held);
+        let appended = handle.join().unwrap();
+        assert!(
+            matches!(appended, Appended::Stored(1)),
+            "the waiting delivery stored event 1: {appended:?}"
+        );
+        let events = t.inbox.read_events().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(
+            events[0].received_at >= released_at,
+            "stamped at or after the release ({} < {released_at})",
+            events[0].received_at
+        );
+        assert!(
+            events[0].received_at >= before,
+            "stamped at or after the append started"
+        );
+    }
+
+    /// A settled read waits for the append that holds the store's lock and
+    /// then holds its event; it takes no lock and writes nothing itself.
+    #[test]
+    fn a_settled_read_waits_for_the_append_in_flight() {
+        let t = temp_inbox();
+        t.inbox
+            .append_typed("p0", Some("push"), &json!({}))
+            .expect("append");
+        // An append in flight: the lock is held and its line not yet written.
+        let held = crate::fsutil::lock_dir(&t.inbox.dir, INBOX_LOCK).expect("hold the lock");
+        let dir = t.inbox.dir.clone();
+        let reader = std::thread::spawn(move || {
+            Inbox { dir }
+                .read_events_settled(std::time::Duration::from_secs(10))
+                .expect("read")
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mut line = serde_json::to_string(&t.inbox.read_events().unwrap()[0]).unwrap();
+        line = line.replace("\"seq\":1", "\"seq\":2");
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(t.inbox.dir.join(EVENTS_FILE))
+            .unwrap();
+        writeln!(f, "{line}").unwrap();
+        drop(f);
+        drop(held);
+        let events = reader.join().unwrap();
+        assert_eq!(
+            events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2],
+            "the settled read holds the event the append in flight wrote"
+        );
+        assert!(
+            !t.inbox.dir.join(INBOX_LOCK).exists(),
+            "the reader took no lock"
+        );
+        // A free lock reads at once.
+        assert_eq!(
+            t.inbox
+                .read_events_settled(std::time::Duration::ZERO)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// A clock that steps back never moves a stamp backwards: the receipt
+    /// is at or above the previous event's stamp (`max` rule), while the
+    /// dedupe entry keeps the clock's own value (D4 "The deadline").
+    #[test]
+    fn received_at_never_goes_back() {
+        let t = temp_inbox();
+        t.inbox
+            .append_bounded(
+                "p1",
+                &json!({}),
+                None,
+                &Retention::default(),
+                DEDUPE_RETENTION_MS,
+                DEDUPE_MAX_ENTRIES,
+                1_000,
+            )
+            .unwrap();
+        t.inbox
+            .append_bounded(
+                "p2",
+                &json!({}),
+                None,
+                &Retention::default(),
+                DEDUPE_RETENTION_MS,
+                DEDUPE_MAX_ENTRIES,
+                500,
+            )
+            .unwrap();
+        let events = t.inbox.read_events().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].received_at, 1_000);
+        assert_eq!(
+            events[1].received_at, 1_000,
+            "a stepping-back clock stamps the previous event's time"
+        );
     }
 }

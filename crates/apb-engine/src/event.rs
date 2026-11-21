@@ -945,6 +945,24 @@ pub enum EventPayload {
     WaitTimeout {
         node: String,
     },
+    /// An inbox wait's place in its account's log (D4). A start line
+    /// (written with `wait_started`) and a progress line (written right
+    /// before a park) carry no `end`; an end line (written with
+    /// `wait_signalled` or `wait_timeout`) carries `end` and, when it
+    /// matched, the output: the event's seq, receive time, type and the
+    /// declared values, scrubbed. Never an event body. Not a checkpoint.
+    InboxWaitRead {
+        node: String,
+        #[serde(default)]
+        through_seq: u64,
+        #[serde(default)]
+        examined: u32,
+        /// `matched` or `timeout`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+    },
     /// Old context sections have been compacted by a cheap model into a
     /// separate file (a materialized artifact outside the primary log). The
     /// event references the file, the model, and the up_to_seq boundary

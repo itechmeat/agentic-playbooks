@@ -821,12 +821,13 @@ pub fn run_wait_result_as(
         WaitReason::Stopped if view.released().is_some() => {
             "the run is released while a deferred retry waits (see released); its waker resumes it at released.wake_at_ms, and run_resume with retry_now: true starts the retry now"
         }
-        // A park: the run waits on its timer and its waker resumes it, so
-        // the caller waits out the time instead of resuming.
+        // A park: its cause is `wait` for a timer and an inbox park alike
+        // (the reason no longer tells them apart) and its waker resumes the
+        // run, so the caller waits instead of resuming.
         WaitReason::Stopped
             if res.pause().and_then(|p| p.cause) == Some(apb_engine::pause::PauseCause::Wait) =>
         {
-            "the run waits on a timer (see pause); no driver runs, its waker resumes it at pause.until. Call run_wait again after that time; run_stop ends the run"
+            "the run is parked at a wait (see pause); no driver runs, its waker resumes it at pause.until at the latest, an inbox wait as soon as an event arrives. Call run_wait again; run_stop ends the run"
         }
         WaitReason::Stopped if res.driver_alive == Some(false) => {
             "the run's driver is dead, so the run is interrupted; run_resume continues it"
@@ -1443,8 +1444,9 @@ pub fn run_progress_report(
 mod progress_tests {
     use super::*;
 
-    /// The `run_wait` instruction for a parked run: the run waits on a
-    /// timer and its waker resumes it at `pause.until`.
+    /// The `run_wait` instruction for a parked run: its waker resumes it at
+    /// `pause.until` at the latest, an inbox wait as soon as an event
+    /// arrives.
     #[test]
     fn run_wait_explains_a_park() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1476,7 +1478,10 @@ mod progress_tests {
         let out = run_wait_result_as(tmp.path(), "r1", &res, ActionCaller::Host).unwrap();
         let instruction = out["instruction"].as_str().unwrap();
         assert!(
-            instruction.contains("waits on a timer") && instruction.contains("pause.until"),
+            instruction.contains("parked at a wait")
+                && instruction.contains("pause.until at the latest")
+                && instruction.contains("an inbox wait as soon as an event arrives")
+                && instruction.contains("Call run_wait again"),
             "{instruction}"
         );
     }

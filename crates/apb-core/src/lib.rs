@@ -59,6 +59,8 @@ pub mod fsutil;
 pub mod git;
 pub mod graphutil;
 pub mod health;
+// inbox waits (2026-11-20)
+pub mod inbox_wait;
 pub mod isolation;
 pub mod judge;
 pub mod judge_example;

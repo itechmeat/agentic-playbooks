@@ -43,22 +43,22 @@ pub(crate) fn check_connectors(
     ctx: &ValidationContext,
     r: &mut ValidationReport,
 ) {
-    for (site, bindings) in playbook.connector_sites() {
-        let site: &str = &site;
-        let label = crate::connector::sites::site_label(site);
+    for site in playbook.connector_sites() {
+        let site_id: &str = site.id.as_ref();
+        let label = crate::connector::sites::site_label(&site);
         let mut seen_connectors = HashSet::new();
-        for b in bindings.iter() {
+        for b in site.bindings.iter() {
             if !seen_connectors.insert(b.name.as_str()) {
                 r.error(
                     "V24",
-                    Some(site),
+                    Some(site_id),
                     format!("{} binds connector `{}` more than once", label, b.name),
                 );
             }
             if let Err(msg) = crate::profile::validate_profile_name(&b.name) {
                 r.error(
                     "V23",
-                    Some(site),
+                    Some(site_id),
                     format!(
                         "{} connector `{}` has an invalid name: {msg}",
                         label, b.name
@@ -66,24 +66,28 @@ pub(crate) fn check_connectors(
                 );
             }
             if let Some(accounts) = &b.accounts {
-                check_connector_list(site, &b.name, "accounts", accounts, r, |item| {
+                check_connector_list(site_id, &label, &b.name, "accounts", accounts, r, |item| {
                     crate::profile::validate_profile_name(item)
                 });
             }
             if let FunctionsAllow::List(names) = &b.functions {
-                check_connector_list(site, &b.name, "functions", names, r, |item| {
+                check_connector_list(site_id, &label, &b.name, "functions", names, r, |item| {
                     crate::connector::validate_snake_name(item)
                 });
             }
             if b.max_calls == Some(0) {
                 r.error(
                     "V26",
-                    Some(site),
+                    Some(site_id),
                     format!("{label} connector `{}` has max_calls 0", b.name),
                 );
             }
-            check_inbox_binding(site, b, ctx, r);
-            check_send_policy(site, b, ctx, r);
+            let inbox_wait = matches!(
+                site.kind,
+                crate::connector::sites::SiteKind::InboxWait { .. }
+            );
+            check_inbox_binding(site_id, &label, b, inbox_wait, ctx, r);
+            check_send_policy(site_id, &label, b, ctx, r);
         }
     }
 }
@@ -98,6 +102,7 @@ pub(crate) fn check_connectors(
 /// there or its manifest no longer loads (V42 reports that).
 fn check_send_policy(
     site: &str,
+    label: &str,
     b: &crate::schema::ConnectorBinding,
     ctx: &ValidationContext,
     r: &mut ValidationReport,
@@ -113,7 +118,6 @@ fn check_send_policy(
     if facts.load_error.is_some() {
         return;
     }
-    let label = crate::connector::sites::site_label(site);
     let applies: Vec<String> = facts
         .idempotency
         .iter()
@@ -152,14 +156,18 @@ fn check_send_policy(
 
 /// V42 and V43 for one binding, plus the unloadable-manifest case they share.
 /// Does nothing unless the connector is known and either failed to load or the
-/// binding actually reaches at least one of its inbox functions.
+/// binding actually reaches at least one of its inbox functions. An inbox
+/// wait's binding (`inbox_wait`) grants no function but reads the account's
+/// inbox, so V43 checks its account as it checks an inbox function's; a
+/// connector without a webhook block is V285's to report there, not V42's.
 fn check_inbox_binding(
     node_id: &str,
+    label: &str,
     b: &crate::schema::ConnectorBinding,
+    inbox_wait: bool,
     ctx: &ValidationContext,
     r: &mut ValidationReport,
 ) {
-    let label = crate::connector::sites::site_label(node_id);
     let Some(facts) = ctx.connectors.get(&b.name) else {
         return;
     };
@@ -203,11 +211,14 @@ fn check_inbox_binding(
             .collect(),
         _ => facts.inbox_functions.iter().collect(),
     };
-    if granted.is_empty() {
+    if granted.is_empty() && !inbox_wait {
         return;
     }
 
     if !facts.has_webhook {
+        if inbox_wait {
+            return;
+        }
         r.error(
             "V42",
             Some(node_id),
@@ -241,11 +252,16 @@ fn check_inbox_binding(
             .map(String::as_str)
             .collect();
         if !missing.is_empty() {
+            let what = if inbox_wait {
+                "reads the inbox"
+            } else {
+                "grants inbox functions"
+            };
             r.error(
                 "V43",
                 Some(node_id),
                 format!(
-                    "{label} grants inbox functions of connector `{}` on account `{account}`, whose webhook block references account field(s) {} that the account does not define, so a delivery could not be verified",
+                    "{label} {what} of connector `{}` on account `{account}`, whose webhook block references account field(s) {} that the account does not define, so a delivery could not be verified",
                     b.name,
                     missing.join(", ")
                 ),
@@ -260,13 +276,13 @@ fn check_inbox_binding(
 /// message (`accounts` or `functions`).
 pub(crate) fn check_connector_list(
     node_id: &str,
+    label: &str,
     connector: &str,
     field: &str,
     items: &[String],
     r: &mut ValidationReport,
     validate: impl Fn(&str) -> Result<(), String>,
 ) {
-    let label = crate::connector::sites::site_label(node_id);
     let mut seen = HashSet::new();
     for item in items {
         if item.is_empty() {

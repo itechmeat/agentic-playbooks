@@ -570,10 +570,17 @@ impl RunCx<'_> {
                 node: Some(node.to_string()),
                 ..ActionTarget::default()
             },
-            if webhook {
-                format!("node `{node}` waits for its webhook signal")
-            } else {
-                format!("node `{node}` waits for its timer")
+            match &wait_for {
+                apb_core::schema::WaitFor::Webhook { .. } => {
+                    format!("node `{node}` waits for its webhook signal")
+                }
+                apb_core::schema::WaitFor::Inbox(w) => {
+                    format!(
+                        "node `{node}` waits for an inbox event of `{}`",
+                        w.connector
+                    )
+                }
+                _ => format!("node `{node}` waits for its timer"),
             },
         );
         a.principals = everyone();
@@ -644,10 +651,10 @@ impl RunCx<'_> {
                 !crate::waker::Lease::held(&self.run.run_dir, crate::waker::WakerFor::Pause(seq))
             });
         Some(if lost {
-            format!("the wait on timer `{node}` was due at {at} and no waker resumed it; resume it")
+            format!("the wait at `{node}` was due at {at} and no waker resumed it; resume it")
         } else {
             format!(
-                "waiting on timer `{node}` until {at}; a waker resumes it then (a resume before then only parks it again)"
+                "waiting at `{node}` until {at} at the latest; a waker resumes it (a resume before then parks it again unless the wait can end)"
             )
         })
     }

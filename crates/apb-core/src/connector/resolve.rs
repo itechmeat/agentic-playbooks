@@ -90,8 +90,8 @@ pub fn resolve_playbook(root: &Path, playbook: &Playbook) -> Result<ResolutionOu
     let mut failed: BTreeSet<String> = BTreeSet::new();
 
     let mut names: BTreeSet<String> = BTreeSet::new();
-    for (_, bindings) in playbook.connector_sites() {
-        for binding in bindings.iter() {
+    for site in playbook.connector_sites() {
+        for binding in site.bindings.iter() {
             names.insert(binding.name.clone());
         }
     }
@@ -109,8 +109,9 @@ pub fn resolve_playbook(root: &Path, playbook: &Playbook) -> Result<ResolutionOu
     }
 
     let mut grants: BTreeMap<String, Vec<ResolvedGrant>> = BTreeMap::new();
-    for (site, bindings) in playbook.connector_sites() {
-        let site: &str = &site;
+    for site in playbook.connector_sites() {
+        let site_id: &str = site.id.as_ref();
+        let bindings = site.bindings.as_ref();
         if bindings.is_empty() {
             continue;
         }
@@ -127,18 +128,19 @@ pub fn resolve_playbook(root: &Path, playbook: &Playbook) -> Result<ResolutionOu
                 // into `names` above, so it is either in `connectors` or
                 // `failed`. Kept as a defensive error rather than a panic.
                 errors.push(format!(
-                    "node `{site}`: connector `{}` was not resolved",
+                    "{}: connector `{}` was not resolved",
+                    crate::connector::sites::site_label(&site),
                     binding.name
                 ));
                 continue;
             };
 
-            match expand_grant(site, binding, resolved, &mut warnings) {
+            match expand_grant(&site, binding, resolved, &mut warnings) {
                 Ok(grant) => node_grants.push(grant),
                 Err(mut errs) => errors.append(&mut errs),
             }
         }
-        grants.insert(site.to_string(), node_grants);
+        grants.insert(site_id.to_string(), node_grants);
     }
 
     if secrets::gitignore_gap(root) {
@@ -196,12 +198,15 @@ fn resolve_connector(root: &Path, name: &str) -> Result<ResolvedConnector, Vec<S
 /// deprecated function that ends up in the grant. Collects every issue
 /// found in this one binding rather than stopping at the first.
 fn expand_grant(
-    node_id: &str,
+    site: &crate::connector::sites::Site<'_>,
     binding: &crate::schema::ConnectorBinding,
     resolved: &ResolvedConnector,
     warnings: &mut Vec<String>,
 ) -> Result<ResolvedGrant, Vec<String>> {
     let mut errors = Vec::new();
+    // The label names what owns the site: the node itself, the owner of a
+    // derived site, or the engine's own name for a reserved site.
+    let label = crate::connector::sites::site_label(site);
 
     let accounts: Vec<Account> = match &binding.accounts {
         None => resolved.accounts.clone(),
@@ -211,7 +216,7 @@ fn expand_grant(
                 match resolved.accounts.iter().find(|a| &a.name == account_name) {
                     Some(a) => out.push(a.clone()),
                     None => errors.push(format!(
-                        "node `{node_id}`: connector `{}` account `{account_name}` not configured",
+                        "{label}: connector `{}` account `{account_name}` not configured",
                         binding.name
                     )),
                 }
@@ -232,7 +237,7 @@ fn expand_grant(
             let read_only = resolved.loaded.doc.read_only_functions();
             if read_only.is_empty() {
                 errors.push(format!(
-                    "node `{node_id}`: connector `{}` functions: read_only has zero read-only functions",
+                    "{label}: connector `{}` functions: read_only has zero read-only functions",
                     binding.name
                 ));
             }
@@ -245,7 +250,7 @@ fn expand_grant(
                     out.push(fname.clone());
                 } else {
                     errors.push(format!(
-                        "node `{node_id}`: connector `{}` function `{fname}` is not declared",
+                        "{label}: connector `{}` function `{fname}` is not declared",
                         binding.name
                     ));
                 }
@@ -254,7 +259,9 @@ fn expand_grant(
         }
     };
 
-    if node_id == crate::baseline::BASELINE_SITE {
+    if matches!(site.kind, crate::connector::sites::SiteKind::Engine)
+        && site.id.as_ref() == crate::baseline::BASELINE_SITE
+    {
         errors.extend(baseline_refusals(binding, resolved, &functions));
     }
 
@@ -267,7 +274,7 @@ fn expand_grant(
             && let Some(reason) = &f.deprecated
         {
             warnings.push(format!(
-                "node `{node_id}`: connector `{}` function `{fname}` is deprecated: {reason}",
+                "{label}: connector `{}` function `{fname}` is deprecated: {reason}",
                 binding.name
             ));
         }
@@ -416,6 +423,11 @@ pub struct ConnectorFacts {
     /// Whether the manifest carries a `webhook:` block, which is what makes
     /// the connector able to receive anything at all.
     pub has_webhook: bool,
+    /// Whether that block names the event's type (a path or a header,
+    /// `WebhookSpec::names_event_type`), which a stored event's
+    /// `event_type` is cleaned from. An inbox wait that sets `types` can
+    /// only ever match on a connector that names one (V286).
+    pub names_event_type: bool,
     /// Names of all its functions, in manifest order (V63 names a baseline
     /// function the connector does not declare).
     pub functions: Vec<String>,
@@ -491,6 +503,7 @@ impl ConnectorFacts {
         };
         Self {
             has_webhook: doc.webhook.is_some(),
+            names_event_type: doc.webhook.as_ref().is_some_and(|w| w.names_event_type()),
             functions: names(&|_| true),
             inbox_functions: doc.inbox_functions(),
             irreversible_functions: doc.irreversible_functions(),

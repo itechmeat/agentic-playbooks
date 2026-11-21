@@ -15,7 +15,9 @@ pub(crate) enum ControlScan {
     /// Nothing terminal: execute the current node.
     Proceed,
     /// A patch migrated the run; restart the iteration on the new playbook.
-    Migrated,
+    /// `definition` says what the patch did to the definition the drive
+    /// executes.
+    Migrated { definition: Definition },
     /// The run ends here with this outcome.
     Terminal(RunStatus),
 }
@@ -32,17 +34,25 @@ fn discard_park(
     write_control_cursor(run_dir, entry.seq)
 }
 
-/// The `(timer seconds, timeout seconds)` of the node's open timer wait, for
-/// the due time the scan computes again (design D6 rule 3.1). `None` when
-/// the node is not a timer wait.
-fn wait_timer_of(playbook: &Playbook, node: &str) -> Option<(u64, u64)> {
+/// The `(park seconds, timeout seconds)` of the node's open wait, for the
+/// due time the scan computes again (design D6 rule 3.1, inbox-waits D4
+/// "Parking" item 2): a timer or an inbox wait parks, a webhook wait never
+/// does.
+fn park_wait_of(playbook: &Playbook, node: &str) -> Option<(u64, u64)> {
     let node = playbook.node(node)?;
     match &node.kind {
         apb_core::schema::NodeKind::Wait {
-            wait_for: apb_core::schema::WaitFor::Timer { seconds },
+            wait_for: apb_core::schema::WaitFor::Webhook { .. },
+            ..
+        } => None,
+        apb_core::schema::NodeKind::Wait {
+            wait_for,
             timeout_seconds,
             ..
-        } => Some((*seconds, *timeout_seconds)),
+        } => Some((
+            crate::scheduler::wait_park::park_seconds(wait_for, *timeout_seconds),
+            *timeout_seconds,
+        )),
         _ => None,
     }
 }
@@ -84,6 +94,8 @@ pub(crate) fn scan_control(
     // was exactly the Phase 4a bug: the cursor advanced past ANY entry, including
     // Retry/ContinueFrom, silently losing them.
     let mut patch_applied = false;
+    // What the patch did to the definition the drive executes.
+    let mut definition = Definition::Current;
     // Set to the node named by a Retry/ContinueFrom the scan stopped at
     // without consuming it: everything queued BEHIND that entry - including
     // a pending Abort - is unreachable for this scan. See the cancel check
@@ -160,7 +172,7 @@ pub(crate) fn scan_control(
                     // park was posted moved it; a past or stale park never
                     // equals it.
                     let due_again =
-                        wait_timer_of(playbook, current).and_then(|(seconds, timeout)| {
+                        park_wait_of(playbook, current).and_then(|(seconds, timeout)| {
                             let events = read_all(run_dir).ok()?;
                             let now = apb_core::clock::now_ms();
                             crate::scheduler::wait_park::due_at_ms(
@@ -227,6 +239,7 @@ pub(crate) fn scan_control(
                 consumed = true;
                 match result {
                     PatchResult::Applied(applied) => {
+                        definition = applied.definition;
                         *last_applied_patch = Some(*applied);
                         patch_applied = true;
                         break;
@@ -382,7 +395,7 @@ pub(crate) fn scan_control(
     if patch_applied {
         // A migration - linear continuation from continue_from; the caller
         // drops the previous parallel branches and restarts the iteration.
-        return Ok(ControlScan::Migrated);
+        return Ok(ControlScan::Migrated { definition });
     }
     Ok(ControlScan::Proceed)
 }
@@ -528,6 +541,181 @@ edges:
                 .unwrap()
                 .is_empty(),
             "nothing left pending"
+        );
+    }
+
+    const INBOX_PLAYBOOK: &str = r#"
+schema: 1
+id: w
+name: W
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: pause
+    type: wait
+    wait_for:
+      type: inbox
+      connector: echo-hooks
+      account: main
+    timeout_seconds: 120
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: pause }
+  - { from: pause, to: done }
+"#;
+
+    const WEBHOOK_PLAYBOOK: &str = r#"
+schema: 1
+id: w
+name: W
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: pause, type: wait, wait_for: { type: webhook, key: ci }, timeout_seconds: 60 }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: pause }
+  - { from: pause, to: done }
+"#;
+
+    /// The scan re-decides an inbox park with the wait's timeout (D4
+    /// "Parking" item 2): `park_wait_of` gives `Some((timeout, timeout))`
+    /// for an inbox wait and `None` for a webhook wait, and a park the
+    /// drive posted over the inbox wait's timeout is applied (its until
+    /// recomputes to the same value), while one over a webhook wait is
+    /// discarded.
+    #[test]
+    fn an_inbox_park_is_re_decided_with_its_timeout() {
+        // The shapes of `park_wait_of`.
+        let inbox = Playbook::from_yaml(INBOX_PLAYBOOK).unwrap();
+        assert_eq!(
+            park_wait_of(&inbox, "pause"),
+            Some((120, 120)),
+            "an inbox wait parks for its timeout"
+        );
+        let webhook = Playbook::from_yaml(WEBHOOK_PLAYBOOK).unwrap();
+        assert_eq!(
+            park_wait_of(&webhook, "pause"),
+            None,
+            "a webhook never parks"
+        );
+
+        // The scan's re-decision path over a journaled inbox wait_started:
+        // a park carrying the timeout's due time is applied with it.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run_dir = root.join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let mut log = EventLog::create(&run_dir).unwrap();
+        log.append(EventPayload::WaitStarted {
+            node: "pause".into(),
+            kind: "inbox".into(),
+        })
+        .unwrap();
+        let events = read_all(&run_dir).unwrap();
+        let due = crate::scheduler::wait_park::due_at_ms(
+            &events,
+            "pause",
+            120,
+            120,
+            apb_core::clock::now_ms(),
+        )
+        .unwrap();
+        crate::control::post_control(
+            &run_dir,
+            Control::Pause(crate::pause::PauseRequest {
+                reason: Some(crate::pause::cause::wait_reason("pause")),
+                by: Some(crate::pause::PauseBy::Engine),
+                mode: crate::pause::PauseMode::Drain,
+                until: Some(due),
+                keep_lock: false,
+            }),
+        )
+        .unwrap();
+        let mut playbook = Playbook::from_yaml(INBOX_PLAYBOOK).unwrap();
+        let mut current = "pause".to_string();
+        let mut cursor = None;
+        let mut last = None;
+        let scan = scan_control(
+            root,
+            &run_dir,
+            &mut log,
+            &RunConfig::default(),
+            &mut playbook,
+            &mut current,
+            &mut cursor,
+            &mut last,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(matches!(scan, ControlScan::Terminal(RunStatus::Paused)));
+        let applied = read_all(&run_dir).unwrap();
+        assert!(
+            applied.iter().any(|e| matches!(
+                &e.payload,
+                EventPayload::RunPaused {
+                    until: Some(u),
+                    ..
+                } if *u == due
+            )),
+            "the park is applied with the recomputed timeout due time"
+        );
+
+        // The same park over a webhook wait: `park_wait_of` is `None`, so
+        // the recomputed due time never equals the posted one and the scan
+        // discards the park, journaling nothing.
+        let run_dir = root.join("run-wh");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let mut log = EventLog::create(&run_dir).unwrap();
+        log.append(EventPayload::WaitStarted {
+            node: "pause".into(),
+            kind: "webhook".into(),
+        })
+        .unwrap();
+        let before = read_all(&run_dir).unwrap().len();
+        // Two parks, so the cursor's expected place is not the first
+        // command's number, which every run's first command shares.
+        let park = || {
+            crate::control::post_control(
+                &run_dir,
+                Control::Pause(crate::pause::PauseRequest {
+                    reason: Some(crate::pause::cause::wait_reason("pause")),
+                    by: Some(crate::pause::PauseBy::Engine),
+                    mode: crate::pause::PauseMode::Drain,
+                    until: Some(due),
+                    keep_lock: false,
+                }),
+            )
+            .unwrap()
+        };
+        let first = park();
+        let n = park();
+        assert_ne!(first, n, "the second park has its own number");
+        let mut playbook = Playbook::from_yaml(WEBHOOK_PLAYBOOK).unwrap();
+        let mut current = "pause".to_string();
+        let mut cursor = None;
+        let mut last = None;
+        let scan = scan_control(
+            root,
+            &run_dir,
+            &mut log,
+            &RunConfig::default(),
+            &mut playbook,
+            &mut current,
+            &mut cursor,
+            &mut last,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(
+            matches!(scan, ControlScan::Proceed),
+            "the park is discarded"
+        );
+        assert_eq!(cursor, Some(n), "the cursor moved past the park");
+        assert_eq!(
+            read_all(&run_dir).unwrap().len(),
+            before,
+            "nothing journaled"
         );
     }
 }

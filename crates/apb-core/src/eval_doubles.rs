@@ -132,8 +132,8 @@ pub fn bound_functions(
             problems.push(p);
         }
     };
-    for (_, bindings) in playbook.connector_sites() {
-        for b in bindings.iter() {
+    for site in playbook.connector_sites() {
+        for b in site.bindings.iter() {
             let Some(f) = facts.get(&b.name) else {
                 report(format!(
                     "connector `{}` is not installed, so its doubles cannot be checked without the installed connectors",

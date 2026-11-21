@@ -22,6 +22,7 @@ mod forks;
 mod graph;
 pub mod guarded;
 mod health;
+mod inbox_wait;
 mod isolation;
 mod judge;
 mod known_problems;
@@ -468,6 +469,8 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     review_form::check_review_form(playbook, &mut r); // V243-V247
     pilot::check_pilot(playbook, &mut r); // V240-V242
     readiness::check_readiness(playbook, &mut r); // V249, V250
+    inbox_wait::check_inbox_waits(playbook, ctx, &mut r); // V284-V286
+    inbox_wait::check_site_ids(playbook, &mut r); // V287
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10

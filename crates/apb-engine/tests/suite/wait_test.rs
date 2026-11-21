@@ -415,9 +415,12 @@ fn a_long_timer_wait_parks_and_wakes_when_due() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     // The run's origin stamp: the waker's engine resume verifies it.
+    let _env = common::env_lock();
+    // The origin key is read (and created) under the stable config
+    // dir the lock holds, not under a concurrent test's tempdir.
     apb_core::run_origin::ensure_key().unwrap();
     seed_scripts(root, WP_WRITE, &[("go.sh", GO_SH)]);
-    let _env = common::env_lock();
+
     let _release = EnvVar::set("APB_RELEASE_AFTER_MS", "300");
     let _poll = EnvVar::set("APB_WAKER_POLL_MS", "50");
 
@@ -538,9 +541,12 @@ fn a_long_timer_wait_parks_and_wakes_when_due() {
 fn a_pilot_list_before_the_wait_parks_like_any_run() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
+    let _env = common::env_lock();
+    // The origin key is read (and created) under the stable config
+    // dir the lock holds, not under a concurrent test's tempdir.
     apb_core::run_origin::ensure_key().unwrap();
     seed_scripts(root, WP_PILOT, &[("go.sh", GO_SH)]);
-    let _env = common::env_lock();
+
     let _release = EnvVar::set("APB_RELEASE_AFTER_MS", "300");
 
     let rx = spawn_wp(root, RunOptions::default());
@@ -722,9 +728,12 @@ fn a_pause_during_the_park_freezes_the_wait() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     // The run's origin stamp: the waker's engine resume verifies it.
+    let _env = common::env_lock();
+    // The origin key is read (and created) under the stable config
+    // dir the lock holds, not under a concurrent test's tempdir.
     apb_core::run_origin::ensure_key().unwrap();
     seed_scripts(root, WP_WRITE, &[("go.sh", GO_SH)]);
-    let _env = common::env_lock();
+
     let _release = EnvVar::set("APB_RELEASE_AFTER_MS", "300");
     let _poll = EnvVar::set("APB_WAKER_POLL_MS", "50");
     let rx = spawn_wp(root, RunOptions::default());
@@ -793,9 +802,12 @@ fn a_read_only_wait_parks_without_the_lock() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     // The run's origin stamp: the waker's engine resume verifies it.
+    let _env = common::env_lock();
+    // The origin key is read (and created) under the stable config
+    // dir the lock holds, not under a concurrent test's tempdir.
     apb_core::run_origin::ensure_key().unwrap();
     seed_scripts(root, WP_RO, &[]);
-    let _env = common::env_lock();
+
     let _release = EnvVar::set("APB_RELEASE_AFTER_MS", "300");
     let _poll = EnvVar::set("APB_WAKER_POLL_MS", "50");
     let rx = spawn_wp(root, RunOptions::default());
@@ -834,9 +846,12 @@ fn a_shared_workdir_wait_parks_without_the_lock() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     // The run's origin stamp: the waker's engine resume verifies it.
+    let _env = common::env_lock();
+    // The origin key is read (and created) under the stable config
+    // dir the lock holds, not under a concurrent test's tempdir.
     apb_core::run_origin::ensure_key().unwrap();
     seed_scripts(root, WP_WRITE, &[("go.sh", GO_SH)]);
-    let _env = common::env_lock();
+
     let _release = EnvVar::set("APB_RELEASE_AFTER_MS", "300");
     let _poll = EnvVar::set("APB_WAKER_POLL_MS", "50");
     let rx = spawn_wp(
@@ -982,6 +997,9 @@ fn seed_waiting(root: &Path, run_id: &str) -> PathBuf {
         log.append(payload).unwrap();
     }
     drop(log);
+    // The caller holds the env lock: the origin key is read (and created)
+    // under the stable config dir the lock holds, never under a
+    // concurrent test's tempdir.
     apb_core::run_origin::ensure_key().unwrap();
     apb_core::run_origin::stamp(&run_dir, run_id).unwrap();
     fs::write(run_dir.join("driver.pid"), dead_pid().to_string()).unwrap();
@@ -1212,9 +1230,12 @@ fn a_control_posted_in_the_exit_window_wakes_the_run_at_once() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     // The run's origin stamp: the waker's engine resume verifies it.
+    let _env = common::env_lock();
+    // The origin key is read (and created) under the stable config
+    // dir the lock holds, not under a concurrent test's tempdir.
     apb_core::run_origin::ensure_key().unwrap();
     seed_scripts(root, WP_WRITE, &[("go.sh", GO_SH)]);
-    let _env = common::env_lock();
+
     let _release = EnvVar::set("APB_RELEASE_AFTER_MS", "300");
     let _poll = EnvVar::set("APB_WAKER_POLL_MS", "50");
     // A 30 s timer: the park's `until` is far ahead.
@@ -1295,10 +1316,13 @@ fn a_half_written_control_line_does_not_end_the_waker() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     // The run's origin stamp: the waker's engine resume verifies it.
+    let _env = common::env_lock();
+    // The origin key is read (and created) under the stable config
+    // dir the lock holds, not under a concurrent test's tempdir.
     apb_core::run_origin::ensure_key().unwrap();
     let yaml = WP_WRITE.replace("seconds: 3", "seconds: 30");
     seed_scripts(root, &yaml, &[("go.sh", GO_SH)]);
-    let _env = common::env_lock();
+
     let _release = EnvVar::set("APB_RELEASE_AFTER_MS", "300");
     let _poll = EnvVar::set("APB_WAKER_POLL_MS", "50");
     let rx = spawn_wp(root, RunOptions::default());
@@ -1355,10 +1379,13 @@ fn a_note_posted_after_the_waker_settled_reaches_the_run() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     // The run's origin stamp: the waker's engine resume verifies it.
+    let _env = common::env_lock();
+    // The origin key is read (and created) under the stable config
+    // dir the lock holds, not under a concurrent test's tempdir.
     apb_core::run_origin::ensure_key().unwrap();
     let yaml = WP_WRITE.replace("seconds: 3", "seconds: 30");
     seed_scripts(root, &yaml, &[("go.sh", GO_SH)]);
-    let _env = common::env_lock();
+
     let _release = EnvVar::set("APB_RELEASE_AFTER_MS", "300");
     let _poll = EnvVar::set("APB_WAKER_POLL_MS", "50");
     let rx = spawn_wp(root, RunOptions::default());
@@ -1734,4 +1761,155 @@ fn a_parked_run_leaves_its_scripts_writable() {
         );
     }
     apb_engine::stop::stop_run(root, &run_id_of(&run_dir)).ok();
+}
+
+// --------------------------------------------- an ended visit waits again
+
+use apb_engine::deadline_hooks;
+
+/// A run whose journal ends on a wait's end event (no `node_finished`): the
+/// drive stopped between the end event and the shared tail's `node_finished`
+/// (the barrier fired and the drive thread died). The `fired` flag says the
+/// barrier ran.
+fn seed_ended_before_node_finished(
+    root: &Path,
+    ended: &dyn Fn(&EventPayload) -> bool,
+) -> (PathBuf, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&fired);
+    deadline_hooks::set(
+        deadline_hooks::Hook::WaitBeforeNodeFinished,
+        root,
+        move |_| {
+            if !flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                panic!("the drive died after the wait's end event");
+            }
+        },
+    );
+    let rx = spawn_wp(root, RunOptions::default());
+    let run_dir = poll_until("the wait's end event", || {
+        let rd = latest_run(root);
+        let events = read_all(&rd).ok()?;
+        events.iter().any(|e| ended(&e.payload)).then_some(rd)
+    });
+    // The barrier panics the drive before the tail's `node_finished`: the
+    // run is open, the wait ended, the node never finished.
+    poll_until("the barrier fired", || {
+        fired
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .then_some(())
+    });
+    assert!(
+        !read_all(&run_dir).unwrap().iter().any(
+            |e| matches!(&e.payload, EventPayload::NodeFinished { node, .. } if node == "wait")
+        ),
+        "the drive stopped before the wait's node_finished",
+    );
+    deadline_hooks::clear(root);
+    // The drive thread panicked at the barrier: wait until it has unwound
+    // (its sender is dropped), so its locks are released before a resume.
+    match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Err(mpsc::RecvTimeoutError::Disconnected) => {}
+        other => panic!("the drive thread did not end at the barrier: {other:?}"),
+    }
+    (run_dir, fired)
+}
+
+/// The wait node's journal count of an event its payloads match.
+fn wait_node_count(events: &[Event], pred: impl Fn(&EventPayload) -> bool) -> usize {
+    events.iter().filter(|e| pred(&e.payload)).count()
+}
+
+/// A timer wait that ended (`wait_signalled`) before its `node_finished`
+/// waits again on resume, exactly as main writes the sequence: a second
+/// `node_started` and `wait_started`, then the second end (inbox-waits D4
+/// "An ended visit": the positional rule decides inbox waits only).
+#[test]
+fn a_timer_wait_ended_before_node_finished_waits_again_as_on_main() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, WF_TIMER);
+    let _env = common::env_lock();
+    let (run_dir, _) =
+        seed_ended_before_node_finished(root, &|p| matches!(p, EventPayload::WaitSignalled { .. }));
+
+    let run_id = run_id_of(&run_dir);
+    let resumed = resume(root, &run_id, None).unwrap();
+    assert_eq!(resumed.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        wait_node_count(
+            &events,
+            |p| matches!(p, EventPayload::NodeStarted { node, .. } if node == "wait")
+        ),
+        2,
+        "a second node_started"
+    );
+    assert_eq!(
+        wait_node_count(
+            &events,
+            |p| matches!(p, EventPayload::WaitStarted { node, .. } if node == "wait")
+        ),
+        2,
+        "a second wait_started"
+    );
+    assert_eq!(
+        wait_node_count(
+            &events,
+            |p| matches!(p, EventPayload::WaitSignalled { node } if node == "wait")
+        ),
+        2,
+        "the second visit signals again at once"
+    );
+    assert_eq!(
+        wait_node_count(
+            &events,
+            |p| matches!(p, EventPayload::NodeFinished { node, .. } if node == "wait")
+        ),
+        1,
+        "main's sequence: the first visit's end is never finished, the \
+         second visit's is the node's one node_finished"
+    );
+}
+
+/// A webhook wait that ended (`wait_timeout`, no signal, `timeout_seconds`
+/// 0) before its `node_finished` waits again on resume, as main writes it:
+/// a second `node_started` and `wait_started`, then the second timeout.
+#[test]
+fn a_webhook_wait_ended_before_node_finished_waits_again_as_on_main() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root, WF_TIMEOUT);
+    let _env = common::env_lock();
+    let (run_dir, _) =
+        seed_ended_before_node_finished(root, &|p| matches!(p, EventPayload::WaitTimeout { .. }));
+
+    let run_id = run_id_of(&run_dir);
+    let resumed = resume(root, &run_id, None).unwrap();
+    assert_eq!(resumed.outcome, RunStatus::Failed);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        wait_node_count(
+            &events,
+            |p| matches!(p, EventPayload::NodeStarted { node, .. } if node == "wait")
+        ),
+        2,
+        "a second node_started"
+    );
+    assert_eq!(
+        wait_node_count(
+            &events,
+            |p| matches!(p, EventPayload::WaitStarted { node, .. } if node == "wait")
+        ),
+        2,
+        "a second wait_started"
+    );
+    assert_eq!(
+        wait_node_count(
+            &events,
+            |p| matches!(p, EventPayload::WaitTimeout { node } if node == "wait")
+        ),
+        2,
+        "the second visit times out again at once"
+    );
 }

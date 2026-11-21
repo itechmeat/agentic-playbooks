@@ -85,6 +85,8 @@ const OUTWARD_EFFECTS: [Effect; 3] = [Effect::Network, Effect::External, Effect:
 /// Whether the node's own output carries text taint can flow through. A
 /// review gate with typed fields outputs them (people-in-the-loop D3): a
 /// default over untrusted text taints the gate's output for its readers.
+/// An inbox wait's output is the matching event's stored values (inbox-waits
+/// D4 "Untrusted text"): outside text whatever else the definition says.
 fn carries_text(kind: &NodeKind) -> bool {
     matches!(
         kind,
@@ -99,6 +101,13 @@ fn carries_text(kind: &NodeKind) -> bool {
             ..
         }
     ) || matches!(kind, NodeKind::HumanReview { fields, .. } if !fields.is_empty())
+        || matches!(
+            kind,
+            NodeKind::Wait {
+                wait_for: crate::schema::WaitFor::Inbox(_),
+                ..
+            }
+        )
 }
 
 /// Whether the node reads instructions (an agent that could follow them).
@@ -155,6 +164,24 @@ pub fn analyze(playbook: &Playbook) -> Analysis {
                         connector: b.name.clone(),
                     });
                 }
+            }
+            // Rule 2 beside: an inbox wait's output is outside text
+            // (inbox-waits D4 "Untrusted text") - the inbox holds whatever
+            // the callback URL's caller sent - so the wait is an entry
+            // point of its own. Inserted inside the loop, never seeded
+            // into `tainted` before it: the loop takes another pass only
+            // when a node's source count grows, and a seed present from
+            // the start would never grow it, so a follower placed before
+            // the wait in node order would be missed.
+            if let NodeKind::Wait {
+                wait_for: crate::schema::WaitFor::Inbox(w),
+                ..
+            } = &node.kind
+            {
+                sources.insert(Source::Connector {
+                    node: node.id.clone(),
+                    connector: w.connector.clone(),
+                });
             }
             // Rules 3 and 8: what the node's templates and its
             // template-form `writes` read.
@@ -656,6 +683,60 @@ mod tests {
             }
             .label(),
             "earlier run's output of draft"
+        );
+    }
+
+    /// An inbox wait's output is outside text (inbox-waits D4 "Untrusted
+    /// text"), whatever else its definition says: the wait is tainted, and
+    /// a node that renders its output is a follower with that source.
+    #[test]
+    fn an_inbox_wait_output_taints_its_reader() {
+        let a = analyze(&playbook(
+            "  - { id: w, type: wait, wait_for: { type: inbox, connector: echo, account: main }, timeout_seconds: 30 }\n  - { id: r, type: agent_task, prompt: \"{{nodes.w.output}}\" }\n",
+            "",
+        ));
+        let source = Source::Connector {
+            node: "w".into(),
+            connector: "echo".into(),
+        };
+        assert!(
+            a.tainted["w"].contains(&source),
+            "the wait itself is tainted: {:?}",
+            a.tainted["w"]
+        );
+        assert!(a.tainted["r"].contains(&source), "{:?}", a.tainted["r"]);
+        let follower = a.followers.iter().find(|f| f.node == "r").unwrap();
+        assert_eq!(follower.sources.len(), 1);
+    }
+
+    /// The wait's source is inserted inside the fixed-point loop, never
+    /// seeded before it, so a reader declared before the wait in node
+    /// order is reached too, and V179 names that agent.
+    #[test]
+    fn an_inbox_wait_output_taints_a_reader_declared_before_it() {
+        let a = analyze(&playbook(
+            "  - { id: r, type: agent_task, prompt: \"{{nodes.w.output}}\" }\n  - { id: w, type: wait, wait_for: { type: inbox, connector: echo, account: main }, timeout_seconds: 30 }\n",
+            "",
+        ));
+        assert!(
+            a.tainted["r"].contains(&Source::Connector {
+                node: "w".into(),
+                connector: "echo".into()
+            }),
+            "{:?}",
+            a.tainted["r"]
+        );
+        // V179 still names the follower, with the wait as its source.
+        let yaml = "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: dev }\nnodes:\n  - { id: start, type: start }\n  - { id: r, type: agent_task, prompt: \"{{nodes.w.output}}\" }\n  - { id: w, type: wait, wait_for: { type: inbox, connector: echo, account: main }, timeout_seconds: 30 }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: r }\n  - { from: r, to: w }\n  - { from: w, to: done }\n";
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        let got = crate::validate::validate(&pb, &crate::validate::ValidationContext::default());
+        let v179: Vec<_> = got.issues.iter().filter(|i| i.code == "V179").collect();
+        assert_eq!(v179.len(), 1, "{:?}", got.issues);
+        assert_eq!(v179[0].node.as_deref(), Some("r"));
+        assert!(
+            v179[0].message.contains("connector echo on w"),
+            "{}",
+            v179[0].message
         );
     }
 }
