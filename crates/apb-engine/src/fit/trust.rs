@@ -94,6 +94,23 @@ pub(super) fn connector_items(scan: &ConnectorScan) -> Vec<TrustItem> {
         let approved = !scan.unapproved_accounts.contains(id);
         item("connector_account", id, Some(digest), approved, false)
     }));
+    // One row per granted MCP tool nobody approved for its account
+    // (`c/a/t`); only a person approves it at a terminal.
+    out.extend(
+        scan.unpinned_mcp_tools
+            .iter()
+            .map(|entry| item("mcp_tools", entry, None, false, false)),
+    );
+    // A pin store that does not read approves no tool: one row naming it.
+    if let Some(store) = &scan.mcp_pin_store_unreadable {
+        out.push(item(
+            "mcp_tools",
+            &format!("pin store {store} does not read"),
+            None,
+            false,
+            false,
+        ));
+    }
     out
 }
 
@@ -152,6 +169,23 @@ pub(super) fn refusal_items(refusal: &Value) -> Option<Vec<TrustItem>> {
                 .map(|n| item("connector_account", n, None, false, false))
                 .collect(),
         ),
+        // A pin store that does not read lists no tool: the same row
+        // naming the store as the playbook's own (`connector_items`).
+        "mcp_tools_unpinned" => match refusal["store_unreadable"].as_str() {
+            Some(store) => Some(vec![item(
+                "mcp_tools",
+                &format!("pin store {store} does not read"),
+                None,
+                false,
+                false,
+            )]),
+            None => Some(
+                names("tools")
+                    .iter()
+                    .map(|n| item("mcp_tools", n, None, false, false))
+                    .collect(),
+            ),
+        },
         "imported_scripts_require_approval" => Some(vec![item(
             "imported_scripts",
             refusal["id"].as_str().unwrap_or_default(),
@@ -167,4 +201,37 @@ pub(super) fn refusal_items(refusal: &Value) -> Option<Vec<TrustItem>> {
 /// included: a fit looks at every way the playbook can run).
 pub(super) fn refs_of(playbook: &Playbook) -> Vec<QualifiedProfileRef> {
     crate::gate::collect_profile_refs(playbook, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A child's refusal over a pin store that does not read names the
+    /// store, so fit never reports the run trusted.
+    #[test]
+    fn an_unreadable_pin_store_of_a_child_is_a_row() {
+        let rows = refusal_items(&json!({
+            "policy": "mcp_tools_unpinned",
+            "tools": [],
+            "store_unreadable": "/cfg/mcp-tools.json",
+        }))
+        .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].kind, "mcp_tools");
+        assert_eq!(
+            rows[0].subject,
+            "pin store /cfg/mcp-tools.json does not read"
+        );
+        assert!(!rows[0].approved);
+        // An ordinary pin refusal keeps one row per tool.
+        let rows = refusal_items(&json!({
+            "policy": "mcp_tools_unpinned",
+            "tools": ["tracker/work: search"],
+        }))
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].subject, "tracker/work: search");
+    }
 }

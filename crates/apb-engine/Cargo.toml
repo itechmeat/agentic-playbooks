@@ -10,6 +10,8 @@ globset.workspace = true
 apb-core = { path = "../apb-core" }
 # Decision models (issue #165): the provider client the decision runner asks.
 apb-decide = { path = "../apb-decide" }
+# MCP tool connectors: the blocking stdio client sessions.
+apb-mcp-client = { path = "../apb-mcp-client" }
 # The decision runner's redaction patterns (token shapes, e-mail, paths).
 regex.workspace = true
 serde.workspace = true
@@ -68,6 +70,8 @@ apb-core = { path = "../apb-core", features = ["testing"] }
 tempfile = "3.27.0"
 # The multi-response HTTP stub the decision tests point a provider at.
 apb-decide = { path = "../apb-decide", features = ["testing"] }
+# The scripted stdio MCP server the connector tests start.
+apb-mcp-client = { path = "../apb-mcp-client", features = ["testing"] }
 # Decodes the recorded XOAUTH2 SASL payload in the imap listener tests.
 base64 = "0.23"
 # Reads the fixture ZCode desktop task index in the zcode ui_sync tests.

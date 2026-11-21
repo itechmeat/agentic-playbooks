@@ -66,6 +66,10 @@ pub(super) enum SendGate {
     Send(Box<Tracked>),
     /// Do not send: it already went out.
     Answer(CallOk),
+    /// Only from a gate that may not record (a live mcp call whose server
+    /// is not started yet): the call would go out, and nothing was
+    /// recorded. The caller starts and checks the server, then asks again.
+    NeedsStart,
 }
 
 /// A send under way, as its call path needs it.
@@ -97,24 +101,59 @@ impl Tracked {
     }
 }
 
-/// What the decision under the journal lock produced.
-struct Decided {
-    admission: Admission,
-    new: Option<NewIntent>,
-    binding: AttemptBinding,
-    record: Option<IntentRecord>,
+/// What the admission decision of an mcp call answers before any server
+/// of the call starts (design D4 "The order of one call", step 1).
+pub(super) enum Preview {
+    /// A new send, a replay or an untracked call: start the server.
+    GoOn,
+    /// The ledger answers or refuses the call (already sent, in flight,
+    /// unknown, attempt closed, reconcile): `gate` says how, before any
+    /// server of this call starts.
+    ToGate,
 }
 
-/// Decides a call against the ledger, recording its intent when it may go.
-pub(super) fn gate(input: &GateInput<'_>) -> Result<SendGate, CallError> {
+/// The admission decision of an mcp call, read once from the journal
+/// without the lock and without recording anything, and the `max_calls`
+/// budget of a call that would go out. `gate` stays the authority under
+/// the lock.
+pub(super) fn preview(input: &GateInput<'_>) -> Result<Preview, CallError> {
+    let events = attempt::journal(input.req.run_dir);
+    let Some((idem, mode, key)) = send_key(input)? else {
+        (input.budget)(&events)?;
+        return Ok(Preview::GoOn);
+    };
+    let binding = attempt::bind(&events, input.req.node_id, &input.ctx.claim);
+    let query = AdmitQuery {
+        key: &key,
+        mode,
+        window_sec: idem.window_sec(),
+        timeout_sec: input.function.timeout_sec,
+        on_unknown: input.on_unknown,
+        attempt_open: binding.may_send,
+        now_ms: apb_core::clock::now_ms_u64(),
+    };
+    match ledger::admit(&events, &query) {
+        Admission::New { .. } | Admission::Replay { .. } => {
+            (input.budget)(&events)?;
+            Ok(Preview::GoOn)
+        }
+        _ => Ok(Preview::ToGate),
+    }
+}
+
+/// The declaration, mode and intent key of a tracked send; `None` for a
+/// call that is not one (no declaration, a dry-run, apb's own read).
+fn send_key<'f>(
+    input: &GateInput<'f>,
+) -> Result<Option<(&'f Idempotency, IdempotencyMode, IntentKey)>, CallError> {
     let GateInput {
         req, ctx, function, ..
     } = input;
     let Some((idem, mode)) = function.send_once().and_then(|i| Some((i, i.mode()?))) else {
-        return Ok(SendGate::Untracked);
+        return Ok(None);
     };
     if req.dry_run || !ctx.origin.tracks_sends() {
-        return Ok(SendGate::Untracked);
+        return Ok(None);
     }
     // Invalid args must not leave a pending intent behind.
     if let Some(schema) = &function.args_schema {
@@ -137,8 +176,30 @@ pub(super) fn gate(input: &GateInput<'_>) -> Result<SendGate, CallError> {
         label,
         item: ctx.claim.item.clone(),
     };
-    let decided = decide(input, idem, mode, &key)?;
+    Ok(Some((idem, mode, key)))
+}
+
+/// What the decision under the journal lock produced.
+struct Decided {
+    admission: Admission,
+    new: Option<NewIntent>,
+    binding: AttemptBinding,
+    record: Option<IntentRecord>,
+}
+
+/// Decides a call against the ledger, recording its intent when it may go.
+/// With `may_record` false a call that would go out records nothing and is
+/// answered `NeedsStart` (design D4 "The order of one call": a live mcp
+/// call records its intent only after its server started and its pins
+/// were checked).
+pub(super) fn gate(input: &GateInput<'_>, may_record: bool) -> Result<SendGate, CallError> {
+    let req = input.req;
+    let Some((idem, mode, key)) = send_key(input)? else {
+        return Ok(SendGate::Untracked);
+    };
+    let decided = decide(input, idem, mode, &key, may_record)?;
     match decided.admission {
+        Admission::New { .. } | Admission::Replay { .. } if !may_record => Ok(SendGate::NeedsStart),
         Admission::New { .. } | Admission::Replay { .. } => {
             let new = decided
                 .new
@@ -189,6 +250,7 @@ fn decide(
     idem: &Idempotency,
     mode: IdempotencyMode,
     key: &IntentKey,
+    may_record: bool,
 ) -> Result<Decided, CallError> {
     let req = input.req;
     let mut decided: Option<Decided> = None;
@@ -227,6 +289,19 @@ fn decide(
             && let Err(e) = (input.budget)(events)
         {
             over_budget = Some(e);
+            return None;
+        }
+        // Only after the reminder and budget checks above: a spent budget
+        // refuses before any secret helper or server of the call starts.
+        if !may_record && matches!(admission, Admission::New { .. } | Admission::Replay { .. }) {
+            // Nothing is recorded; the gate is asked again once the
+            // server started.
+            decided = Some(Decided {
+                admission,
+                new: None,
+                binding,
+                record: None,
+            });
             return None;
         }
         let draft = IntentDraft {
@@ -599,4 +674,157 @@ pub(super) fn attempt_closed(req: &CallRequest) -> CallError {
             req.connector, req.function
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connector::call::AttemptClaim;
+
+    const YAML: &str = r#"name: tracker
+version: 0.1.0
+mcp: { transport: stdio, command: tracker-mcp-server, protocol: modern }
+functions:
+  - name: create_comment
+    description: Add a comment
+    mcp: { tool: create_comment }
+    idempotency: { mode: none }
+"#;
+
+    fn recorded(run_dir: &Path) -> usize {
+        crate::event::read_all_lossy_tail(run_dir)
+            .unwrap_or_default()
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.payload,
+                    crate::event::EventPayload::SendIntentRecorded { .. }
+                )
+            })
+            .count()
+    }
+
+    /// Design D4 "The order of one call": a live mcp call whose server is
+    /// not started yet asks the gate with `may_record` false; a call that
+    /// would go out records nothing then and is answered `NeedsStart`, so
+    /// an intent is recorded only once its server started and its pins
+    /// were checked.
+    #[test]
+    fn a_gate_that_may_not_record_records_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let doc = ConnectorDoc::from_yaml(YAML, "tracker").unwrap();
+        let function = doc.function("create_comment").unwrap().clone();
+        let req = CallRequest {
+            run_dir: &run_dir,
+            root: tmp.path(),
+            node_id: "n",
+            connector: "tracker",
+            function: "create_comment",
+            account: None,
+            args: json!({ "body": "hi" }),
+            dry_run: false,
+            full: false,
+        };
+        let ctx = CallContext::node(None, AttemptClaim::default());
+        let read = |_: CallRequest, _: CallContext| (Value::Null, false);
+        let budget = |_: &[Event]| Ok(());
+        let input = GateInput {
+            req: &req,
+            ctx: &ctx,
+            on_unknown: OnUnknown::default(),
+            doc: &doc,
+            function: &function,
+            account: "work",
+            read: &read,
+            budget: &budget,
+        };
+        assert!(matches!(gate(&input, false), Ok(SendGate::NeedsStart)));
+        assert_eq!(recorded(&run_dir), 0, "nothing was recorded");
+        assert!(matches!(gate(&input, true), Ok(SendGate::Send(_))));
+        assert_eq!(recorded(&run_dir), 1);
+    }
+
+    /// The interleaving of two calls under `max_calls: 1` (design D4 "The
+    /// order of one call"): B's unlocked preview sees A in flight and
+    /// sends B to the gate without starting anything; A then settles
+    /// `not_sent` and spends the budget; B's locked gate, asked before any
+    /// server of B started, refuses on the spent budget instead of
+    /// answering `NeedsStart`. `start` stands for B's start (its secret
+    /// helper writes the marker); the caller runs it only on `NeedsStart`,
+    /// as `call::prepare` does.
+    #[test]
+    fn a_spent_budget_refuses_before_needs_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let marker = tmp.path().join("helper-ran");
+        let doc = ConnectorDoc::from_yaml(YAML, "tracker").unwrap();
+        let function = doc.function("create_comment").unwrap().clone();
+        let req = CallRequest {
+            run_dir: &run_dir,
+            root: tmp.path(),
+            node_id: "n",
+            connector: "tracker",
+            function: "create_comment",
+            account: None,
+            args: json!({ "body": "hi" }),
+            dry_run: false,
+            full: false,
+        };
+        let ctx = CallContext::node(None, AttemptClaim::default());
+        let read = |_: CallRequest, _: CallContext| (Value::Null, false);
+        // `max_calls: 1`: a settled call spends it.
+        let budget = |events: &[Event]| {
+            let spent = events.iter().any(|e| {
+                matches!(
+                    e.payload,
+                    crate::event::EventPayload::SendIntentSettled { .. }
+                )
+            });
+            if spent {
+                Err(CallError::new(CallErrorCode::Permission, "max_calls spent"))
+            } else {
+                Ok(())
+            }
+        };
+        let input = GateInput {
+            req: &req,
+            ctx: &ctx,
+            on_unknown: OnUnknown::default(),
+            doc: &doc,
+            function: &function,
+            account: "work",
+            read: &read,
+            budget: &budget,
+        };
+        let start = |gate: &Result<SendGate, CallError>| {
+            if matches!(gate, Ok(SendGate::NeedsStart)) {
+                std::fs::write(&marker, "ran").unwrap();
+            }
+        };
+        // A is admitted and recorded; it is in flight.
+        let Ok(SendGate::Send(a)) = gate(&input, true) else {
+            panic!("A goes out");
+        };
+        // B's preview: A in flight, so B goes to the gate, nothing starts.
+        assert!(matches!(preview(&input), Ok(Preview::ToGate)));
+        // A fails before its request left: settled not_sent, the budget
+        // spent.
+        settle_unsent(
+            &run_dir,
+            &a,
+            &CallError::new(CallErrorCode::Network, "unreachable"),
+        );
+        // B's locked gate, before any server of B started.
+        let b = gate(&input, false);
+        start(&b);
+        match &b {
+            Err(e) => assert_eq!(e.code, CallErrorCode::Permission, "{e:?}"),
+            Ok(_) => panic!("B is admitted past a spent budget"),
+        }
+        assert!(!marker.exists(), "B's secret helper ran");
+        assert_eq!(recorded(&run_dir), 1, "B recorded nothing");
+    }
 }

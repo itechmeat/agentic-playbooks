@@ -526,6 +526,16 @@ pub(crate) async fn approve_connector_handler(
         Ok(l) => l,
         Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     };
+    // An MCP connector's tree and accounts are a person's approval at a
+    // terminal, which shows the program and the tools it pins: never the
+    // dashboard's, and never a pin record.
+    if loaded.doc.mcp.is_some() {
+        return (
+            StatusCode::FORBIDDEN,
+            "mcp_approve_needs_a_person: approving an MCP connector or its tools is a person's act at a terminal (docs/CONNECTORS.md, MCP servers)",
+        )
+            .into_response();
+    }
     let mut trust = TrustStore::load();
     match body.account.as_deref() {
         // The connector's own digest is machine-wide: no project involved.

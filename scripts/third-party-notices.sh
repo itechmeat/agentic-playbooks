@@ -30,6 +30,14 @@ esac
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+# Trailing whitespace stripped and runs of blank lines squeezed to one, in
+# one awk pass. Not `cat -s`: some cat implementations (uutils coreutils
+# 0.10) drop a single blank line where a pipe read happens to split, so
+# the output changed between runs and machines.
+squeeze() {
+  LC_ALL=C awk '{ sub(/[[:space:]]+$/, ""); if ($0 == "") { if (!blank) print; blank = 1 } else { print; blank = 0 } }'
+}
+
 cd "$root"
 cargo fetch --locked --quiet
 cargo about generate --frozen \
@@ -75,7 +83,7 @@ PART 2. WEB DASHBOARD (NPM PACKAGES)
 
 EOF
   cat "$work/web.txt"
-} | sed -e 's/[[:space:]]*$//' | cat -s >"$work/notices.txt"
+} | squeeze >"$work/notices.txt"
 
 # Never ship a local path (a cargo registry or node_modules location).
 if grep -nE '/(home|Users)/|/\.cargo/registry|node_modules/' "$work/notices.txt" >&2; then

@@ -655,6 +655,40 @@ and each account are digest-pinned separately and must be approved before a run.
 Installing connectors, configuring accounts, secrets, trust, sending once and
 the `apb connector` CLI are covered in CONNECTORS.md.
 
+A connector may also map the tools of an MCP server over stdio (an `mcp:`
+block in its `connector.yaml`, CONNECTORS.md "MCP servers"). The binding is
+the same, and apb, not the agent, starts the server and calls the tool, one
+server process per call. A person approves the server's program and tools at
+a terminal (`apb connector approve <c> --account <a>`) before a run can
+start (`mcp_tools_unpinned` otherwise). Name the functions a node needs, and
+mark the binding `untrusted: true`, since a server writes every byte of its
+answers:
+
+```yaml
+nodes:
+  - id: review
+    type: agent_task
+    profile: reviewer
+    connectors:
+      - { name: code-search, functions: [search, read_file], untrusted: true, max_calls: 40 }
+```
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| V300 | warning | a binding of an MCP connector names no `functions` list, so it grants every tool the manifest maps (`functions: read_only` counts as a list) |
+| V301 | warning | the connector's stdio `command` is an interpreter or a launcher (`node`, `python3`, `sh`, `npx`, `uvx`, `docker` and the like, a versioned name such as `python3.12` included): its approval covers that program file only, not the script or package it runs; point `command` at the installed server program |
+| V302 | error | an MCP connector at an engine site (the baseline check, the follow-up check or a list item check): those reads run from the drive or a waker, where this version starts no MCP server |
+
+An MCP connector on a node with `isolation` is refused by V113, as every
+connector is.
+
+One rule applies when the connector is installed, not at validation: an
+`mcp.env` name that changes what code a process loads (every `LD_` and
+`DYLD_` name, `NODE_OPTIONS`, `PYTHONPATH`, `BASH_ENV` and the rest of
+the list in CONNECTORS.md "MCP servers") is refused with
+`mcp_env_loads_code`, since the approval of the server's program does not
+cover the code such a variable pulls in.
+
 ## Success checks
 
 An `agent_task` node may carry an optional `success_check` that gates the

@@ -458,6 +458,11 @@ pub struct ConnectorFacts {
     /// Names of its functions flagged `untrusted_output: true`, in manifest
     /// order (V187 suggests marking a binding that grants one).
     pub untrusted_output_functions: Vec<String>,
+    /// The transport name (`Some("stdio")` in this version) for a connector
+    /// with an `mcp:` block; `None` otherwise (V300 to V302, V113).
+    pub mcp_transport: Option<String>,
+    /// `mcp::launcher_name` of the stdio `command`, for V301.
+    pub mcp_launcher: Option<String>,
     /// Set when the connector is installed on disk but its manifest no longer
     /// loads (`ConnectorDoc::from_yaml` rejected it). The other fields are then
     /// empty defaults: nothing could be extracted. The real case this catches
@@ -513,7 +518,14 @@ impl ConnectorFacts {
                 .then(|| doc.identity.as_ref().map(|i| i.function.clone()))
                 .flatten(),
             repeatable_functions: names(&|f| f.is_repeatable()),
-            untrusted_output_functions: names(&|f| f.untrusted_output),
+            untrusted_output_functions: names(&|f| f.is_untrusted_output()),
+            mcp_transport: doc.mcp.as_ref().map(|m| m.transport.as_str().to_string()),
+            mcp_launcher: doc
+                .mcp
+                .as_ref()
+                .and_then(|m| m.command.as_deref())
+                .and_then(super::mcp::launcher_name)
+                .map(str::to_string),
             ..Self::default()
         }
     }

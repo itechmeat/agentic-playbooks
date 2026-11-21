@@ -38,6 +38,11 @@ pub enum CallErrorCode {
     AttemptClosed,
     /// An eval run's call no double answers: nothing was sent.
     DoubleUnmatched,
+    /// An MCP call whose effect is not known: the tool reported an error
+    /// (`isError`), answered with a task or `input_required`, or the
+    /// server answered a write with a JSON-RPC error of any code; for a
+    /// read, a JSON-RPC error with no request-error code.
+    ToolError,
 }
 
 impl CallErrorCode {
@@ -58,6 +63,7 @@ impl CallErrorCode {
             CallErrorCode::InFlight => "in_flight",
             CallErrorCode::AttemptClosed => "attempt_closed",
             CallErrorCode::DoubleUnmatched => "double_unmatched",
+            CallErrorCode::ToolError => "tool_error",
         }
     }
 }
@@ -179,6 +185,19 @@ pub enum CallOk {
         /// shape (no `gap` key).
         gap: Option<InboxGap>,
     },
+    /// An MCP tool's answer (`connector::mcp::map`).
+    Mcp {
+        /// `structuredContent` when present; else the text blocks, joined
+        /// with a newline, parsed as JSON when they parse; else
+        /// `{"text": <joined text>}`.
+        body: Value,
+        /// Set when the serialized body passed `BODY_CAP`.
+        incomplete: Option<BodyIncomplete>,
+        picked: bool,
+        /// Non-text content blocks (image, audio, resource, resource link)
+        /// left out of `body`, by count.
+        dropped: u32,
+    },
     /// The intent was already sent and confirmed: nothing went out again.
     AlreadySent {
         intent: String,
@@ -231,6 +250,21 @@ impl CallOk {
                 value
             }
             CallOk::Smtp { body } => json!({ "ok": true, "body": body }),
+            CallOk::Mcp {
+                body,
+                picked,
+                dropped,
+                ..
+            } => {
+                let mut value = json!({ "ok": true, "body": body });
+                if *picked {
+                    value["picked"] = json!(true);
+                }
+                if *dropped > 0 {
+                    value["dropped_content"] = json!(dropped);
+                }
+                value
+            }
             CallOk::Inbox { body, picked, .. } => {
                 let mut value = json!({ "ok": true, "body": body });
                 if *picked {
@@ -260,7 +294,9 @@ impl CallOk {
     /// What this success did not deliver whole, if anything.
     fn incompleteness(&self) -> Option<Incompleteness<'_>> {
         match self {
-            CallOk::Http { incomplete, .. } => incomplete.as_ref().map(Incompleteness::Body),
+            CallOk::Http { incomplete, .. } | CallOk::Mcp { incomplete, .. } => {
+                incomplete.as_ref().map(Incompleteness::Body)
+            }
             CallOk::Inbox { gap, .. } => gap.as_ref().map(Incompleteness::InboxGap),
             CallOk::Smtp { .. } | CallOk::AlreadySent { .. } => None,
         }
@@ -271,7 +307,10 @@ impl CallOk {
     pub fn body(&self) -> &Value {
         static NONE: Value = Value::Null;
         match self {
-            CallOk::Http { body, .. } | CallOk::Smtp { body } | CallOk::Inbox { body, .. } => body,
+            CallOk::Http { body, .. }
+            | CallOk::Smtp { body }
+            | CallOk::Inbox { body, .. }
+            | CallOk::Mcp { body, .. } => body,
             CallOk::AlreadySent { .. } => &NONE,
         }
     }
@@ -282,7 +321,9 @@ impl CallOk {
     /// its call kind, not by the result).
     pub(crate) fn response_complete(&self) -> Option<bool> {
         match self {
-            CallOk::Http { incomplete, .. } => Some(incomplete.is_none()),
+            CallOk::Http { incomplete, .. } | CallOk::Mcp { incomplete, .. } => {
+                Some(incomplete.is_none())
+            }
             CallOk::Smtp { .. } | CallOk::Inbox { .. } | CallOk::AlreadySent { .. } => None,
         }
     }

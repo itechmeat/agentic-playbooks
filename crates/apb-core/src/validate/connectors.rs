@@ -355,3 +355,46 @@ pub(crate) fn check_untrusted_output(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connector::def::ConnectorDoc;
+    use crate::connector::resolve::ConnectorFacts;
+
+    #[test]
+    fn v187_warns_for_an_unmarked_mcp_grant() {
+        // Nobody marked the function `untrusted_output`: being an mcp
+        // function is enough.
+        let doc = ConnectorDoc::from_yaml(
+            "name: tracker\nversion: 0.1.0\nmcp: { transport: stdio, command: tracker-mcp-server }\nfunctions:\n  - name: search_issues\n    description: Search issues\n    read_only: true\n    mcp: { tool: search_issues }\n",
+            "tracker",
+        )
+        .unwrap();
+        let mut ctx = ValidationContext::default();
+        ctx.connectors
+            .insert("tracker".to_string(), ConnectorFacts::of_manifest(&doc));
+        let yaml = |binding: &str| {
+            format!(
+                "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - {{ id: start, type: start }}\n  - {{ id: a, type: agent_task, prompt: hi, profile: x, connectors: [{binding}] }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: a }}\n  - {{ from: a, to: done }}\n"
+            )
+        };
+        let v187 = |binding: &str| {
+            let p = Playbook::from_yaml(&yaml(binding)).unwrap();
+            let mut r = ValidationReport::default();
+            check_untrusted_output(&p, &ctx, &mut r);
+            r.issues
+                .into_iter()
+                .filter(|i| i.code == "V187")
+                .collect::<Vec<_>>()
+        };
+        let found = v187("{ name: tracker, functions: [search_issues] }");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].message.contains("tracker.search_issues"),
+            "{found:?}"
+        );
+        let marked = v187("{ name: tracker, functions: [search_issues], untrusted: true }");
+        assert!(marked.is_empty(), "{marked:?}");
+    }
+}

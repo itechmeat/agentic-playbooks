@@ -768,13 +768,27 @@ pub fn default_config_dir() -> Option<PathBuf> {
     real_home().map(|h| h.join(".config/apb"))
 }
 
+/// The real user's entry in the account database: its name and home.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountEntry {
+    /// `pw_name`.
+    pub name: String,
+    /// `pw_dir`.
+    pub home: PathBuf,
+}
+
+/// The account database entry of the real user id, from one `getpwuid_r`
+/// call that reads `pw_name` and `pw_dir`; never `HOME`, `USER` or
+/// `LOGNAME`, which a caller sets. `None` off unix, when the user has no
+/// entry, or when either field is empty.
 #[cfg(unix)]
-fn real_home() -> Option<PathBuf> {
+pub fn account_entry() -> Option<AccountEntry> {
     use std::ffi::CStr;
     use std::os::unix::ffi::OsStrExt;
     let mut buf = vec![0 as libc::c_char; 16 * 1024];
     // SAFETY: getpwuid_r writes into `pwd` and `buf`, both owned here and
-    // alive for the call; `result` is checked before `pwd` is read.
+    // alive for the call; `result` is checked before `pwd` is read, and
+    // both strings are copied out before `buf` is dropped.
     unsafe {
         let mut pwd: libc::passwd = std::mem::zeroed();
         let mut result: *mut libc::passwd = std::ptr::null_mut();
@@ -785,17 +799,29 @@ fn real_home() -> Option<PathBuf> {
             buf.len(),
             &mut result,
         );
-        if rc != 0 || result.is_null() || pwd.pw_dir.is_null() {
+        if rc != 0 || result.is_null() || pwd.pw_dir.is_null() || pwd.pw_name.is_null() {
             return None;
         }
         let dir = CStr::from_ptr(pwd.pw_dir).to_bytes();
-        (!dir.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(dir)))
+        let name = CStr::from_ptr(pwd.pw_name).to_bytes();
+        if dir.is_empty() || name.is_empty() {
+            return None;
+        }
+        Some(AccountEntry {
+            name: String::from_utf8_lossy(name).into_owned(),
+            home: PathBuf::from(std::ffi::OsStr::from_bytes(dir)),
+        })
     }
 }
 
 #[cfg(not(unix))]
-fn real_home() -> Option<PathBuf> {
+pub fn account_entry() -> Option<AccountEntry> {
     None
+}
+
+/// The real user's home, from [`account_entry`].
+fn real_home() -> Option<PathBuf> {
+    account_entry().map(|e| e.home)
 }
 
 /// Whether [`config_dir`] is not [`default_config_dir`]: a variable
@@ -1425,5 +1451,23 @@ mod isolation_tests {
                 "{bad}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod account_tests {
+    /// One account database entry gives the name and the home the default
+    /// config dir is built from.
+    #[cfg(unix)]
+    #[test]
+    fn account_entry_names_the_real_user() {
+        let entry = super::account_entry().expect("this user has an account entry");
+        assert!(!entry.name.is_empty());
+        assert!(entry.home.is_absolute(), "{}", entry.home.display());
+        assert_eq!(super::real_home(), Some(entry.home.clone()));
+        // The real home's config dir is the one the test isolation forbids
+        // (the isolation exists only with debug assertions).
+        #[cfg(debug_assertions)]
+        assert!(super::test_isolation::forbidden_paths().contains(&entry.home.join(".config/apb")));
     }
 }

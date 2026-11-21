@@ -35,6 +35,13 @@ pub(crate) struct ConnectorScan {
     /// consent-time warning for each.
     pub no_account: Vec<String>,
     pub warnings: Vec<String>,
+    /// `"<connector>/<account>/<tool>"` for every granted mcp function
+    /// whose account has no server record, or whose record has no pin for
+    /// the function's tool.
+    pub unpinned_mcp_tools: Vec<String>,
+    /// The path of the MCP pin store when a granted mcp tool needed it and
+    /// it did not read; `unpinned_mcp_tools` is empty then.
+    pub mcp_pin_store_unreadable: Option<String>,
 }
 
 /// Scans the connectors `playbook` binds. `Err` holds the resolution errors
@@ -85,7 +92,74 @@ pub(crate) fn scan_connectors(
             scan.accounts.insert(id, adigest);
         }
     }
+    match unpinned_mcp_tools(&resolution) {
+        Ok(tools) => scan.unpinned_mcp_tools = tools,
+        Err(store) => scan.mcp_pin_store_unreadable = Some(store),
+    }
     Ok(scan)
+}
+
+/// The presence of a pin for every granted mcp tool (design D2 "The run
+/// gate"): a file read through `ServerPin::compare` with the tree and
+/// account digests the gate already holds. No server starts and no program
+/// file is hashed; the digests are compared on every call.
+/// `Err` holds the store's path when it did not read.
+fn unpinned_mcp_tools(
+    resolution: &apb_core::connector::resolve::ResolutionOutput,
+) -> Result<Vec<String>, String> {
+    use apb_core::connector::mcp::pins::{LiveBinding, PinStore, ProgramFact};
+    let mut out: Vec<String> = Vec::new();
+    let mut store = None;
+    for grants in resolution.grants.values() {
+        for grant in grants {
+            let Some(resolved) = resolution.connectors.get(&grant.connector) else {
+                continue;
+            };
+            if resolved.loaded.doc.mcp.is_none() {
+                continue;
+            }
+            let pins = match store.get_or_insert_with(PinStore::load) {
+                Ok(pins) => pins,
+                Err(_) => {
+                    let path = apb_core::config::config_dir()
+                        .map(|d| d.join(apb_core::connector::mcp::pins::PIN_STORE_FILE))
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "mcp-tools.json".to_string());
+                    return Err(path);
+                }
+            };
+            for function in &grant.functions {
+                let Some(tool) = resolved
+                    .loaded
+                    .doc
+                    .function(function)
+                    .and_then(|f| f.mcp.as_ref())
+                    .map(|m| m.tool.as_str())
+                else {
+                    continue;
+                };
+                for account in &grant.accounts {
+                    let pinned = pins
+                        .server(&grant.connector, &account.name)
+                        .is_some_and(|r| {
+                            r.compare(&LiveBinding {
+                                connector_digest: &resolved.loaded.digest,
+                                account_digest: &account_digest(account),
+                                program: ProgramFact::NotRead,
+                                tool,
+                                tool_digest: None,
+                            })
+                            .is_ok()
+                        });
+                    let entry = format!("{}/{}/{tool}", grant.connector, account.name);
+                    if !pinned && !out.contains(&entry) {
+                        out.push(entry);
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn no_account_warning(

@@ -48,6 +48,7 @@ pub fn classify(call: CallFacts<'_>, read_only: bool) -> CallClass {
         && call.http_status.is_some_and(|s| s >= 500);
     let undetermined = call.outcome == CallErrorCode::Timeout.as_str()
         || call.outcome == CallErrorCode::Network.as_str()
+        || call.outcome == CallErrorCode::ToolError.as_str()
         || server_error;
     let accepted = call.http_status.is_some_and(|s| (200..300).contains(&s));
     let refused = call.http_status.is_some_and(|s| (400..500).contains(&s));
@@ -61,5 +62,31 @@ pub fn classify(call: CallFacts<'_>, read_only: bool) -> CallClass {
         (false, true, false) if refused => CallClass::Failed,
         (false, true, false) => CallClass::WriteUnknown,
         (false, false, false) => CallClass::Failed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_error(read_only: bool) -> CallClass {
+        classify(
+            CallFacts {
+                outcome: CallErrorCode::ToolError.as_str(),
+                http_status: None,
+                response_complete: None,
+            },
+            read_only,
+        )
+    }
+
+    #[test]
+    fn a_tool_error_write_is_unknown() {
+        assert_eq!(tool_error(false), CallClass::WriteUnknown);
+    }
+
+    #[test]
+    fn a_tool_error_read_is_failed() {
+        assert_eq!(tool_error(true), CallClass::Failed);
     }
 }

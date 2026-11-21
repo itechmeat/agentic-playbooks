@@ -942,6 +942,7 @@ fn write_connector_call_event(
         attempt_seq: None,
         intent: None,
         origin: None,
+        tool_digest: None,
     })
     .unwrap();
 }
@@ -1590,4 +1591,167 @@ async fn stats_endpoint_aggregates_without_a_workspace() {
     assert_eq!(json["connector"], "github");
     assert_eq!(json["calls"], serde_json::json!(0));
     assert!(json["by_function"].as_array().is_some_and(|a| a.is_empty()));
+}
+
+// --- MCP connectors ------------------------------------------------------------
+
+const MCP_CONNECTOR: &str = "tracker-mcp";
+const MCP_TOKEN_VAR: &str = "APB_SRV_MCP_TEST_TOKEN";
+
+fn mcp_tools() -> serde_json::Value {
+    serde_json::json!([{ "name": "whoami", "description": "Who", "inputSchema": { "type": "object" } }])
+}
+
+/// An installed MCP connector whose `command` is the stub, its project
+/// account `work`, both approved; answers the stub.
+fn install_mcp(cfg: &Path, root: &Path) -> apb_mcp_client::testing::StubServer {
+    use apb_mcp_client::testing::{StubEra, StubServer};
+    let stub = StubServer::write(&cfg.join("stub"), StubEra::Modern).unwrap();
+    stub.set_tools(&mcp_tools()).unwrap();
+    let program = std::fs::canonicalize(stub.program()).unwrap();
+    let dir = cfg.join("connectors").join(MCP_CONNECTOR);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("connector.yaml"),
+        format!(
+            "name: tracker-mcp\nversion: 0.1.0\nhealthcheck: whoami\nmcp:\n  transport: stdio\n  command: {}\n  env:\n    TRACKER_TOKEN: \"{{{{secret.token}}}}\"\naccount_fields:\n  - {{ name: token, required: true, secret: true }}\nfunctions:\n  - name: whoami\n    description: Who\n    read_only: true\n    mcp: {{ tool: whoami }}\n",
+            // Quoted: a path holding ` #` or `: ` stays one YAML string.
+            serde_json::to_string(&program.to_string_lossy()).unwrap()
+        ),
+    )
+    .unwrap();
+    let path = config::project_config_path(root, MCP_CONNECTOR);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        format!("accounts:\n  - name: work\n    default: true\n    token: \"{{{{env.{MCP_TOKEN_VAR}}}}}\"\n"),
+    )
+    .unwrap();
+    stub
+}
+
+async fn post_raw(app: axum::Router, uri: &str, body: serde_json::Value) -> (StatusCode, String) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
+#[tokio::test]
+async fn the_dashboard_refuses_to_approve_an_mcp_connector() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let stub = install_mcp(cfg.path(), root.path());
+    let trust_before = std::fs::read(cfg.path().join("trust.json")).ok();
+    for account in [serde_json::Value::Null, serde_json::json!("work")] {
+        let (status, text) = post_raw(
+            build_router(AppState::new(root.path().to_path_buf())),
+            "/api/connectors/approve",
+            serde_json::json!({ "name": MCP_CONNECTOR, "account": account }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
+        assert!(text.starts_with("mcp_approve_needs_a_person:"), "{text}");
+        assert!(!text.contains("sha256:"), "{text}");
+    }
+    assert_eq!(
+        std::fs::read(cfg.path().join("trust.json")).ok(),
+        trust_before
+    );
+    assert!(!cfg.path().join("mcp-tools.json").exists());
+    assert!(stub.starts().is_empty());
+}
+
+#[tokio::test]
+async fn the_dashboard_healthcheck_of_an_mcp_connector_checks_the_pins() {
+    use apb_core::connector::mcp::digest::{pin_digest, tool_digest};
+    use apb_core::connector::mcp::pins::{PinStore, ServerPin, ToolPin};
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let _default = set_var("APB_TEST_DEFAULT_CONFIG_DIR", cfg.path());
+    let _token = set_var(MCP_TOKEN_VAR, "srv-mcp-token-881");
+    let stub = install_mcp(cfg.path(), root.path());
+    let tree = apb_core::connector::store::load(MCP_CONNECTOR)
+        .unwrap()
+        .digest;
+    let accounts = config::load_merged(root.path(), MCP_CONNECTOR).unwrap();
+    let account = config::account_digest(&accounts[0]);
+    let mut trust = TrustStore::load();
+    trust
+        .approve_kind(
+            &tree,
+            MCP_CONNECTOR,
+            Kind::Connector,
+            OriginKind::LocallyApproved,
+        )
+        .unwrap();
+    trust
+        .approve_kind(
+            &account,
+            &account_trust_id(MCP_CONNECTOR, "work"),
+            Kind::ConnectorAccount,
+            OriginKind::LocallyApproved,
+        )
+        .unwrap();
+    let program = std::fs::canonicalize(stub.program()).unwrap();
+    let program_s = program.to_string_lossy().to_string();
+    let program_digest = apb_core::content::sha256_hex(&std::fs::read(&program).unwrap());
+    let digest = tool_digest(&mcp_tools()[0]);
+    let tools = std::collections::BTreeMap::from([("whoami".to_string(), digest.clone())]);
+    PinStore::record(
+        MCP_CONNECTOR,
+        "work",
+        ServerPin {
+            pin_digest: pin_digest(&tree, &account, &program_s, &program_digest, &tools),
+            connector_digest: tree,
+            account_digest: account,
+            command: program_s.clone(),
+            program: program_s,
+            program_digest,
+            tools: std::collections::BTreeMap::from([(
+                "whoami".to_string(),
+                ToolPin {
+                    digest,
+                    description: String::new(),
+                    members: std::collections::BTreeMap::new(),
+                },
+            )]),
+            approved_at_ms: 1,
+        },
+    )
+    .unwrap();
+    let (status, json) = post_json(
+        build_router(AppState::new(root.path().to_path_buf())),
+        &format!("/api/connectors/{MCP_CONNECTOR}/healthcheck/work"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["ok"], serde_json::json!(true), "healthcheck: {json}");
+    assert_eq!(json["mcp"]["tools_checked"], serde_json::json!(1), "{json}");
+    assert!(stub.calls().is_empty(), "no tools/call");
+    assert!(stub.methods().iter().any(|m| m == "tools/list"));
+    // The same tool with another description no longer matches its pin.
+    stub.set_tools(&serde_json::json!([{ "name": "whoami", "description": "Who else", "inputSchema": { "type": "object" } }]))
+        .unwrap();
+    let (status, json) = post_json(
+        build_router(AppState::new(root.path().to_path_buf())),
+        &format!("/api/connectors/{MCP_CONNECTOR}/healthcheck/work"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["ok"], serde_json::json!(false), "healthcheck: {json}");
+    assert!(json.to_string().contains("mcp_tool_changed"), "{json}");
+    assert!(stub.calls().is_empty(), "still no tools/call");
 }

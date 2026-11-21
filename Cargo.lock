@@ -110,6 +110,7 @@ dependencies = [
  "apb-core",
  "apb-engine",
  "apb-mcp",
+ "apb-mcp-client",
  "apb-server",
  "assert_cmd",
  "axoupdater",
@@ -173,6 +174,7 @@ dependencies = [
  "apb-core",
  "apb-decide",
  "apb-engine",
+ "apb-mcp-client",
  "base64 0.23.1",
  "ciborium",
  "ed25519-dalek",
@@ -222,12 +224,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "apb-mcp-client"
+version = "1.0.0-beta.7"
+dependencies = [
+ "apb-core",
+ "apb-mcp-client",
+ "libc",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "apb-server"
 version = "1.0.0-beta.7"
 dependencies = [
  "apb-core",
  "apb-engine",
  "apb-mcp",
+ "apb-mcp-client",
  "axum",
  "base64 0.23.1",
  "ciborium",
@@ -2946,6 +2965,7 @@ dependencies = [
  "sha2 0.11.1",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tracing",
  "uuid",
@@ -3724,6 +3744,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
  "rustls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-stream"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3d06f0b082ba57c26b79407372e57cf2a1e28124f78e9479fe80322cf53420b"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
  "tokio",
 ]
 

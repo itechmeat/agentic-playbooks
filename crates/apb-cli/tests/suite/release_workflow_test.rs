@@ -792,3 +792,60 @@ fn the_tag_check_accepts_only_a_version_tag_that_names_the_built_commit() {
         assert!(!tag_check(bad, BUILT).status.success(), "{bad} is refused");
     }
 }
+
+/// The `testing` features (test seams such as the stub MCP server) never
+/// reach a shipped binary: every workspace crate that defines one refuses a
+/// build without debug assertions, and no crate turns one on outside its
+/// dev-dependencies (feature unification would otherwise compile the seam
+/// into every build of `apb`, release included).
+#[test]
+fn testing_features_stay_in_test_builds() {
+    let root = repo_root();
+    let crates = root.join("crates");
+    let mut manifests: Vec<PathBuf> = std::fs::read_dir(&crates)
+        .expect("crates dir")
+        .map(|e| e.expect("dir entry").path().join("Cargo.toml"))
+        .filter(|p| p.is_file())
+        .collect();
+    manifests.sort();
+    assert!(manifests.len() >= 7, "every workspace crate: {manifests:?}");
+    let mut defining = 0;
+    for manifest in &manifests {
+        let text = std::fs::read_to_string(manifest).expect("read manifest");
+        let mut section = String::new();
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                section = trimmed.to_string();
+                continue;
+            }
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            if section == "[features]" && trimmed.starts_with("testing") {
+                defining += 1;
+                let lib = manifest.parent().expect("crate dir").join("src/lib.rs");
+                let lib = std::fs::read_to_string(&lib).expect("read lib.rs");
+                assert!(
+                    lib.contains(r#"#[cfg(all(feature = "testing", not(debug_assertions)))]"#)
+                        && lib.contains("compile_error!"),
+                    "{} defines a `testing` feature without the compile_error guard",
+                    manifest.display()
+                );
+            }
+            let takes_testing =
+                trimmed.contains("path = \"../apb-") && trimmed.contains("\"testing\"");
+            if takes_testing {
+                assert!(
+                    section.ends_with("dev-dependencies]"),
+                    "{}: `{trimmed}` turns a testing feature on in `{section}`; only dev-dependencies may",
+                    manifest.display()
+                );
+            }
+        }
+    }
+    assert!(
+        defining >= 4,
+        "the crates that define a testing feature were found: {defining}"
+    );
+}

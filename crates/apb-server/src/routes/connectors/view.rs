@@ -92,6 +92,7 @@ pub(crate) fn connector_public(name: &str) -> Option<(ConnectorPublic, InstallSt
                     auth: None,
                     error_when: None,
                     webhook: None,
+                    mcp: None,
                     account_fields: Vec::new(),
                     functions: Vec::new(),
                     identity: None,

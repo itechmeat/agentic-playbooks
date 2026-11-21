@@ -1273,6 +1273,7 @@ mod tests {
                 intent: None,
                 origin: None,
                 item: None,
+                tool_digest: None,
             },
         )
     }

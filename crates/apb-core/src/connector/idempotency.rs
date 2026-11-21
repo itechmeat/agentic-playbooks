@@ -219,6 +219,9 @@ pub enum FunctionKind {
     /// A native imap function: like smtp, it has no key or marker to
     /// reconcile with, so it may declare only `none`.
     Imap,
+    /// A tool of the connector's MCP server: `marker` or `none`, never
+    /// `key` (the protocol has no idempotency key).
+    Mcp,
     Other,
 }
 
@@ -228,7 +231,9 @@ impl FunctionKind {
         match self {
             FunctionKind::Smtp => Some("smtp"),
             FunctionKind::Imap => Some("imap"),
-            FunctionKind::Http | FunctionKind::Mock | FunctionKind::Other => None,
+            FunctionKind::Http | FunctionKind::Mock | FunctionKind::Mcp | FunctionKind::Other => {
+                None
+            }
         }
     }
 }
@@ -317,9 +322,14 @@ pub fn validate(
     if let Some(id) = identity {
         let f = find(functions, &id.function)
             .ok_or_else(|| invalid(format!("identity names unknown function `{}`", id.function)))?;
-        if !f.read_only || !matches!(f.kind, FunctionKind::Http | FunctionKind::Mock) {
+        if !f.read_only
+            || !matches!(
+                f.kind,
+                FunctionKind::Http | FunctionKind::Mock | FunctionKind::Mcp
+            )
+        {
             return Err(invalid(format!(
-                "identity function `{}` must be a read_only HTTP or mock function",
+                "identity function `{}` must be a read_only HTTP, mock or mcp function",
                 id.function
             )));
         }
@@ -366,6 +376,12 @@ fn check_function(
                 "{transport} function `{name}` may only declare idempotency mode `none`"
             )));
         }
+        (FunctionKind::Mcp, Idempotency::Key { .. }) => {
+            return Err(invalid(format!(
+                "mcp function `{name}` cannot declare idempotency mode `key`: the protocol has no idempotency key; use `marker` or `none`"
+            )));
+        }
+        (FunctionKind::Mcp, _) => {}
         (FunctionKind::Other, _) => {
             return Err(invalid(format!(
                 "function `{name}` declares idempotency, which only HTTP, mock, smtp and imap functions support"
@@ -450,7 +466,9 @@ fn check_marker(
             "function `{name}`: marker arg `{arg}` must be a string property of its args_schema"
         )));
     }
-    if !f.body_uses(arg) {
+    // An mcp function's arguments are the tool's arguments: the marker arg
+    // only has to be a string property, checked above.
+    if f.kind != FunctionKind::Mcp && !f.body_uses(arg) {
         return Err(invalid(format!(
             "function `{name}`: marker arg `{arg}` is not used in the body"
         )));
@@ -471,9 +489,16 @@ fn check_marker(
             spec.function
         ))
     })?;
-    if !r.read_only || r.kind != FunctionKind::Http {
+    // A marker send of an mcp function reads back through a read-only mcp
+    // function of the same connector; every other send through HTTP.
+    let (reconcile_kind, kind_name) = if f.kind == FunctionKind::Mcp {
+        (FunctionKind::Mcp, "mcp")
+    } else {
+        (FunctionKind::Http, "HTTP")
+    };
+    if !r.read_only || r.kind != reconcile_kind {
         return Err(invalid(format!(
-            "function `{name}`: reconcile function `{}` must be a read_only HTTP function",
+            "function `{name}`: reconcile function `{}` must be a read_only {kind_name} function",
             spec.function
         )));
     }

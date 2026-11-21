@@ -285,6 +285,13 @@ mod connector_imap;
 mod connector_inbox;
 #[path = "suite/connector_manifest.rs"]
 mod connector_manifest;
+#[cfg(unix)]
+#[path = "suite/connector_mcp.rs"]
+mod connector_mcp;
+#[path = "suite/connector_mcp_gate.rs"]
+mod connector_mcp_gate;
+#[path = "suite/connector_mcp_send.rs"]
+mod connector_mcp_send;
 #[path = "suite/connector_oauth.rs"]
 mod connector_oauth;
 #[path = "suite/connector_paginate.rs"]

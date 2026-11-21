@@ -41,6 +41,8 @@ assert_cmd = "2.2.2"
 predicates = "3.1.4"
 tempfile = "3.27.0"
 jsonschema.workspace = true
+# The scripted stdio MCP server the connector tests start.
+apb-mcp-client = { path = "../apb-mcp-client", features = ["testing"] }
 # Process-group signalling and liveness checks in the detached-driver suite,
 # as syscalls rather than `kill` subprocesses: `kill -9 -<pgid>` is accepted by
 # BSD kill (macOS) and rejected by procps-ng kill (Linux), which silently

@@ -1347,6 +1347,21 @@ fn check_connectors(
             "detail": "approve the account digest via the approve surface; acknowledge_untrusted does not bypass account trust",
         }));
     }
+    if let Some(store) = &scan.mcp_pin_store_unreadable {
+        return Err(json!({
+            "policy": "mcp_tools_unpinned",
+            "tools": [],
+            "store_unreadable": store,
+            "detail": "the MCP pin store does not read; a person moves it aside and approves the MCP tools again at a terminal (docs/CONNECTORS.md, MCP servers)",
+        }));
+    }
+    if !scan.unpinned_mcp_tools.is_empty() {
+        return Err(json!({
+            "policy": "mcp_tools_unpinned",
+            "tools": scan.unpinned_mcp_tools,
+            "detail": "a person approves the MCP tools at a terminal (docs/CONNECTORS.md, MCP servers); acknowledge_untrusted does not bypass tool approval",
+        }));
+    }
     Ok((scan.connectors, scan.accounts, scan.warnings))
 }
 
