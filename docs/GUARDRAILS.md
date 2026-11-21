@@ -275,9 +275,10 @@ binaries on `PATH`.
 
 The run guard names cover `evidence`, a run's `deadline`, a `concurrency:`
 key, a gate's `fields`, `show` or `max_scope`, a list node's
-`pilot` or `stop_when` (`list_pilot`), a timer wait (`wait_park`), a
-doubled eval run (`eval_doubles`) and a list node's `skip` (`list_skip`),
-among the features each change added.
+`pilot` or `stop_when` (`list_pilot`), a timer or inbox wait
+(`wait_park`), a doubled eval run (`eval_doubles`) and a list node's
+`skip` (`list_skip`), among the features each change added.
+
 A guard lists its names in one fixed order, the order the features were
 added (`GuardedFeature::ALL`), so a definition with both a pilot list and
 a timer wait carries `["list_pilot", "wait_park"]`. `eval_doubles` is a

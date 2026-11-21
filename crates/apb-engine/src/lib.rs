@@ -39,8 +39,10 @@ pub mod eval;
 // --- end 0.24.0 eval suites ---
 pub mod evidence;
 pub mod external_data;
+// the inbox wait of `wait_for: { type: inbox }` (inbox-waits D4)
 pub mod failure_class;
 pub mod fit;
+pub mod inbox_wait;
 // fork branch-failure policies and join refusals on the run surfaces (issue #195)
 pub mod fork_view;
 // forward patches (issue #192)

@@ -1,9 +1,9 @@
-//! The wait park (routine operations): whether a long timer wait posts the
-//! engine's own pause instead of holding a driver. The decision is a pure
-//! function of the check below; the drive posts the request it returns
-//! through `control::post_control_unless_busy` (a numbering lock busy past
-//! its bound posts nothing, and the wait decides again at its next poll),
-//! and everything after that (the
+//! The wait park (routine operations): whether a long timer or inbox wait
+//! posts the engine's own pause instead of holding a driver. The decision
+//! is a pure function of the check below; the drive posts the request it
+//! returns through `control::post_control_unless_busy` (a numbering lock
+//! busy past its bound posts nothing, and the wait decides again at its
+//! next poll), and everything after that (the
 //! `run_paused`, the driver's exit, the parked lock, the waker) is the
 //! ordinary engine pause with `until`. No event, lock or waker of its own.
 
@@ -33,6 +33,18 @@ pub(crate) fn due_at_ms(
 ) -> Option<u64> {
     let elapsed = journal::wait_active_ms(events, node, now)?;
     u64::try_from(now + left_ms(seconds, timeout_seconds, elapsed)).ok()
+}
+
+/// The park's own seconds of a wait kind (inbox-waits D4 "Parking" item 2):
+/// the timer's seconds, the inbox wait's `timeout_seconds` (with no match
+/// the timeout is the only end left, so the wake time is a pure function
+/// of the journal), 0 for a webhook wait (which never parks).
+pub(crate) fn park_seconds(wait_for: &apb_core::schema::WaitFor, timeout_seconds: u64) -> u64 {
+    match wait_for {
+        apb_core::schema::WaitFor::Timer { seconds } => *seconds,
+        apb_core::schema::WaitFor::Inbox(_) => timeout_seconds,
+        apb_core::schema::WaitFor::Webhook { .. } => 0,
+    }
 }
 
 /// How long a drive waits before it posts a park again after the scan
@@ -71,8 +83,13 @@ impl ParkRetry {
 /// Whether the drive may post a park. Every field is an observation of the
 /// drive; the decision is pure.
 pub(crate) struct ParkCheck<'a> {
-    /// `wait_for` is a timer.
-    pub timer: bool,
+    /// The wait's kind may park now: true for a timer wait, true for an
+    /// inbox wait whose scan is `caught_up` (its last read succeeded, its
+    /// gap is journaled, no event matched) and whose `Inbox::log_stamp`
+    /// still equals `scan.last_stamp` (nothing stored since its last
+    /// read), false otherwise (a webhook wait, an inbox wait whose last
+    /// read failed or whose gap line is not written).
+    pub parks: bool,
     /// A scenario's scripted wait answers the attempt in-process.
     pub scripted: bool,
     /// A scenario run's wait is due at once (`engine_pause` journals a
@@ -99,7 +116,7 @@ pub(crate) struct ParkCheck<'a> {
 
 /// The park's pause request, when every condition holds.
 pub(crate) fn park_request(check: ParkCheck) -> Option<PauseRequest> {
-    let allowed = check.timer
+    let allowed = check.parks
         && !check.scripted
         && !check.scenario
         && check.alone
@@ -171,10 +188,33 @@ mod tests {
         )
     }
 
+    /// An inbox wait's `wait_for`, for [`park_seconds`].
+    fn inbox_wait() -> apb_core::schema::WaitFor {
+        use apb_core::schema::WaitFor;
+        WaitFor::Inbox(Box::new(apb_core::inbox_wait::InboxWait {
+            connector: "echo-hooks".into(),
+            account: "main".into(),
+            conditions: Vec::new(),
+            types: Vec::new(),
+            take: Vec::new(),
+        }))
+    }
+
+    /// The park's own seconds per wait kind (D4 "Parking" item 2): the
+    /// timer's seconds, the inbox wait's `timeout_seconds` (with no match
+    /// the timeout is the only end left), 0 for a webhook wait.
+    #[test]
+    fn park_seconds_by_kind() {
+        use apb_core::schema::WaitFor;
+        assert_eq!(park_seconds(&WaitFor::Timer { seconds: 30 }, 3600), 30);
+        assert_eq!(park_seconds(&inbox_wait(), 120), 120);
+        assert_eq!(park_seconds(&WaitFor::Webhook { key: "ci".into() }, 60), 0);
+    }
+
     /// The check of the happy case; each refusing test overrides one field.
     fn check() -> ParkCheck<'static> {
         ParkCheck {
-            timer: true,
+            parks: true,
             scripted: false,
             scenario: false,
             alone: true,
@@ -239,8 +279,27 @@ mod tests {
     #[test]
     fn a_webhook_wait_never_parks() {
         let mut c = check();
-        c.timer = false;
+        c.parks = false;
         assert!(park_request(c).is_none());
+    }
+
+    /// An inbox wait parks through the same check as a timer (D4 "Parking"
+    /// item 1): `parks` true (the scan is caught up, nothing stored since
+    /// its last read) gives a request shaped like the timer's; false (a
+    /// webhook wait, a failed read, a gap line not written) gives none.
+    #[test]
+    fn an_inbox_wait_parks_only_caught_up() {
+        let pause = park_request(check()).unwrap();
+        assert_eq!(pause.reason.as_deref(), Some("wait (pause)"));
+        assert_eq!(pause.by, Some(PauseBy::Engine));
+        assert_eq!(pause.mode, PauseMode::Drain);
+        assert_eq!(pause.until, Some(1_000_000));
+        assert!(pause.keep_lock);
+        for why in ["a webhook wait", "a failed read", "a gap not written"] {
+            let mut c = check();
+            c.parks = false;
+            assert!(park_request(c).is_none(), "{why} parked");
+        }
     }
 
     #[test]

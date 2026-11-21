@@ -23,12 +23,12 @@ export function when(ms: number | undefined): string | null {
 }
 
 // Why the engine paused the run, as a label next to the pause word: its
-// budget, a provider quota, or the timer wait it waits out; null for any
-// other pause.
+// budget, a provider quota, or the wait it waits out; null for any other
+// pause.
 export function pauseCauseLabel(pause: PauseInfo | null | undefined): string | null {
   if (pause?.cause === 'budget') return 'by its budget'
   if (pause?.cause === 'quota') return 'by a provider quota'
-  if (pause?.cause === 'wait') return 'on a timer wait'
+  if (pause?.cause === 'wait') return 'on a wait'
   return null
 }
 
@@ -40,17 +40,18 @@ function waitNode(reason: string): string | null {
   return node ? node : null
 }
 
-// The line of a park: "waiting on timer `<node>` until <T>; a waker resumes
-// the run then", with the kept lock named. A park keeps the journal status
-// `paused`; this is what it says instead.
+// The line of a park: "waiting at `<node>` until <T> at the latest; a waker
+// resumes the run", with the kept lock named. One wording for a timer and an
+// inbox park alike: the reason does not tell them apart. A park keeps the
+// journal status `paused`; this is what it says instead.
 function parkLine(pause: PauseInfo): string | null {
   if (pause.cause !== 'wait') return null
   const node = waitNode(pause.reason)
   if (!node) return null
   const until = when(pause.until)
   let line = until
-    ? `waiting on timer \`${node}\` until ${until}; a waker resumes the run then`
-    : `waiting on timer \`${node}\`; a waker resumes the run then`
+    ? `waiting at \`${node}\` until ${until} at the latest; a waker resumes the run`
+    : `waiting at \`${node}\`; a waker resumes the run`
   if (pause.keep_lock) line += ', lock kept'
   return line
 }

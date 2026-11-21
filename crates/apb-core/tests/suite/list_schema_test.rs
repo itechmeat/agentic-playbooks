@@ -500,8 +500,8 @@ fn a_connector_check_is_its_own_site_and_an_eval_refuses_it() {
     let p = Playbook::from_yaml(&yaml).unwrap();
     let site = p
         .connector_sites()
-        .find(|(id, _)| id == "triage#check")
-        .map(|(_, b)| b.into_owned())
+        .find(|site| site.id == "triage#check")
+        .map(|site| site.bindings.into_owned())
         .expect("the item check is a binding site");
     assert_eq!(site[0].name, "imap");
     let case: apb_core::eval::EvalCase =

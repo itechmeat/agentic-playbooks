@@ -76,13 +76,13 @@ pub(crate) fn early_resume_note(root: &Path, run_id: &str) -> Option<String> {
     let p = view.pause()?;
     let until = p.until?;
     (!p.pausing && until > apb_core::clock::now_ms_u64()).then(|| {
-        // A park: resuming early only parks the run again, at the same
-        // wake time.
+        // A park: resuming early parks the run again, at the same wake
+        // time, unless the wait can end now (an inbox event that matches).
         if p.cause == Some(apb_engine::pause::PauseCause::Wait)
             && let Some(node) = apb_engine::pause::cause::parse_wait_reason(&p.reason)
         {
             return format!(
-                "the wait on timer `{node}` is due at {}; the run waits again until then",
+                "the wait at `{node}` is due at {} at the latest; unless the wait can end now, the run waits again until then",
                 apb_core::dismiss::iso_utc(until)
             );
         }
@@ -131,8 +131,10 @@ mod tests {
         .unwrap();
         let note = early_resume_note(dir.path(), "w-r").unwrap();
         assert!(
-            note.starts_with("the wait on timer `pause` is due at ")
-                && note.ends_with("; the run waits again until then"),
+            note.starts_with("the wait at `pause` is due at ")
+                && note.ends_with(
+                    " at the latest; unless the wait can end now, the run waits again until then"
+                ),
             "{note}"
         );
 

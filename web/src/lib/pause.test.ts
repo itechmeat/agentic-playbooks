@@ -34,7 +34,7 @@ describe('pause words', () => {
     expect(pauseLine(p)).toContain('pausing (r, ')
   })
 
-  it('names a timer wait', () => {
+  it('names a wait without its kind', () => {
     const park: PauseInfo = {
       reason: 'wait (pause)',
       by: 'engine',
@@ -44,12 +44,26 @@ describe('pause words', () => {
       cause: 'wait',
     }
     expect(pauseLine(park)).toBe(
-      'waiting on timer `pause` until 2026-10-15T22:00:00Z; a waker resumes the run then, lock kept'.replace(
+      'waiting at `pause` until 2026-10-15T22:00:00Z at the latest; a waker resumes the run, lock kept'.replace(
         ', lock kept',
         '',
       ),
     )
-    expect(pauseCauseLabel(park)).toBe('on a timer wait')
+    expect(pauseCauseLabel(park)).toBe('on a wait')
+  })
+
+  it('reads a park without an until time', () => {
+    const park: PauseInfo = {
+      reason: 'wait (pause)',
+      by: 'engine',
+      mode: 'drain',
+      since: Date.UTC(2026, 9, 15, 20, 0, 0),
+      cause: 'wait',
+    }
+    expect(pauseLine(park)).toBe('waiting at `pause`; a waker resumes the run')
+    expect(pauseLine({ ...park, keep_lock: true })).toBe(
+      'waiting at `pause`; a waker resumes the run, lock kept',
+    )
   })
 
   it('clips a long reason in the list marker', () => {

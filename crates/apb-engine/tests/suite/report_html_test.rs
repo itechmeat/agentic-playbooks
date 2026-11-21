@@ -446,7 +446,7 @@ fn the_report_shows_a_pause_line() {
         "{html}"
     );
 
-    // A parked run: the waiting-on-timer line.
+    // A parked run: the waiting-at line.
     let dir2 = tempfile::tempdir().unwrap();
     let d2 = dir2.path().join(".apb/runs/p-1");
     std::fs::create_dir_all(&d2).unwrap();
@@ -457,10 +457,7 @@ fn the_report_shows_a_pause_line() {
     )
     .unwrap();
     let html = render(dir2.path(), &d2).unwrap();
-    assert!(
-        html.contains("pause: waiting on timer `pause` until "),
-        "{html}"
-    );
+    assert!(html.contains("pause: waiting at `pause` until "), "{html}");
 
     // An ended run: no pause line.
     let dir3 = tempfile::tempdir().unwrap();

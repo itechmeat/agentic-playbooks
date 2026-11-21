@@ -181,6 +181,23 @@ pub(super) fn declared_fields<'a>(
     for n in &playbook.nodes {
         let fields = if n.list().is_some() {
             Some(crate::list::LIST_OUTPUT_FIELDS.map(String::from).to_vec())
+        } else if let crate::schema::NodeKind::Wait {
+            wait_for: crate::schema::WaitFor::Inbox(w),
+            ..
+        } = &n.kind
+        {
+            // An inbox wait's output is the matching event's seq, receive
+            // time and type plus the values its `take` entries declare
+            // (inbox-waits D4 "Schema"). Those are the names
+            // the wait outputs, so an `outputs.fields` block never replaces
+            // them.
+            let mut names = vec![
+                "seq".to_string(),
+                "received_at".to_string(),
+                "type".to_string(),
+            ];
+            names.extend(w.take.iter().map(|t| t.name.clone()));
+            Some(names)
         } else if let Some(f) = n
             .outputs
             .as_ref()
@@ -358,5 +375,68 @@ pub(crate) fn check_cache_key(playbook: &Playbook, r: &mut ValidationReport) {
                 "cache.key reads nothing, so the first stored result replays until the cache is refreshed; read what the result depends on or set a ttl".to_string(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A playbook with an inbox wait `w` and an agent that renders one of
+    /// its output fields, validated whole.
+    fn validated(field: &str) -> Vec<(&'static str, Severity)> {
+        validated_with(field, "")
+    }
+
+    /// `validated` with `extra` lines (indented as node keys) on the wait.
+    fn validated_with(field: &str, extra: &str) -> Vec<(&'static str, Severity)> {
+        let yaml = format!(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: {{ profile: dev }}\nnodes:\n  - id: start\n    type: start\n  - id: w\n    type: wait\n{extra}    timeout_seconds: 60\n    wait_for:\n      type: inbox\n      connector: echo\n      account: main\n      take:\n        - {{ name: action, path: action }}\n  - id: b\n    type: agent_task\n    prompt: \"v: {{{{nodes.w.output.{field}}}}}\"\n  - id: done\n    type: finish\n    outcome: success\nedges:\n  - from: start\n    to: w\n  - from: w\n    to: b\n  - from: b\n    to: done\n"
+        );
+        let pb = Playbook::from_yaml(&yaml).unwrap();
+        let ctx = ValidationContext {
+            profiles: vec!["dev".into()],
+            ..Default::default()
+        };
+        validate(&pb, &ctx)
+            .issues
+            .iter()
+            .map(|i| (i.code, i.severity))
+            .collect()
+    }
+
+    /// An inbox wait declares `seq`, `received_at`, `type` and every take
+    /// name as its output fields (inbox-waits D4 "Schema"), so V46 accepts
+    /// a read of a taken field and refuses one of a field no take entry
+    /// names.
+    #[test]
+    fn an_inbox_wait_declares_its_taken_fields() {
+        let ok = validated("action");
+        assert!(
+            !ok.iter().any(|(c, _)| *c == "V46"),
+            "a taken field is declared: {ok:?}"
+        );
+        let bad = validated("body");
+        assert!(
+            bad.iter()
+                .any(|(c, s)| *c == "V46" && *s == Severity::Warning),
+            "an undeclared field is refused: {bad:?}"
+        );
+    }
+
+    /// An `outputs.fields` block on an inbox wait does not replace the
+    /// names the wait outputs: V46 still accepts a taken field and refuses
+    /// a field only the block names.
+    #[test]
+    fn an_inbox_wait_keeps_its_names_over_an_outputs_block() {
+        let block = "    outputs:\n      fields: [body]\n";
+        let ok = validated_with("action", block);
+        assert!(!ok.iter().any(|(c, _)| *c == "V46"), "{ok:?}");
+        let bad = validated_with("body", block);
+        assert!(
+            bad.iter()
+                .any(|(c, s)| *c == "V46" && *s == Severity::Warning),
+            "{bad:?}"
+        );
     }
 }

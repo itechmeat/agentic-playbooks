@@ -71,6 +71,13 @@ pub enum Hook {
     /// found for a replay) and before this process syncs the run directory.
     /// The argument is the run directory.
     DoubleBeforeCaptureDirSync,
+    /// Between a wait's end (`wait_signalled` or `wait_timeout`) and the
+    /// shared tail's `node_finished`, for every wait kind (inbox-waits D4,
+    /// crash table row 10).
+    WaitBeforeNodeFinished,
+    /// In an inbox wait, after the progress line was appended (if one was)
+    /// and before the park is posted (inbox-waits D4, Parking item 3).
+    InboxWaitBeforePark,
 }
 
 type Action = Arc<dyn Fn(&Path) + Send + Sync>;

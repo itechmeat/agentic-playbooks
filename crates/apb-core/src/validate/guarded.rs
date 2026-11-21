@@ -175,7 +175,7 @@ pub fn guarded_features(playbook: &Playbook) -> Vec<GuardedFeature> {
             used.insert(GuardedFeature::ListSkip);
         }
         if let crate::schema::NodeKind::Wait {
-            wait_for: crate::schema::WaitFor::Timer { .. },
+            wait_for: crate::schema::WaitFor::Timer { .. } | crate::schema::WaitFor::Inbox(_),
             ..
         } = &node.kind
         {
@@ -460,6 +460,16 @@ mod tests {
             GuardedFeature::parse("wait_park"),
             Some(GuardedFeature::WaitPark)
         );
+    }
+
+    /// An inbox wait parks through the same wait park, so it names the
+    /// same guard; a webhook wait still needs none.
+    #[test]
+    fn an_inbox_wait_names_wait_park() {
+        let inbox = playbook(
+            "  - { id: w, type: wait, wait_for: { type: inbox, connector: echo, account: main }, timeout_seconds: 3600 }\n",
+        );
+        assert_eq!(guarded_features(&inbox), vec![GuardedFeature::WaitPark]);
     }
 
     /// A gate with `fields` or `show` names `review_fields`; one with

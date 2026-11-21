@@ -361,6 +361,20 @@ outcome leaves those sends out of the run's own sends; `apb intent list`
 shows them. Like `@baseline`, the site is reserved for the engine: a node may
 not use an id that starts with `@` (V68).
 
+### The inbox wait (the `<node>#inbox` site)
+
+A `wait` node with `wait_for: { type: inbox }` (see the authoring guide,
+"Waiting for an inbox event") reads a connector account's inbox without a
+call. Its site `<node>#inbox` binds the connector and exactly the one
+account and grants no function, so the run gate's trust check, the permit
+and the manifest's connector snapshot cover it like any binding, and no
+caller can call under it. The drive and the park waker check the manifest
+grant, the live connector and account digests and their approval before
+they read; a visit whose end is already in the run journal is finished
+from the journal with no check and no read. A node may not take the name
+of another node's derived site (`a#inbox` beside the inbox wait `a`,
+`a#check` beside the list node `a`, V287).
+
 ## Receiving events (webhooks and the inbox)
 
 Some services never answer a poll: they push. A connector that receives
@@ -478,7 +492,11 @@ dropped before its first read as a gap too, since it never saw them.
 
 An inbound delivery never starts a run. A playbook consumes the inbox by
 polling it, an `inbox_read` call inside a loop or behind a wait node, and
-acknowledging what it processed.
+acknowledging what it processed, or by an inbox wait (`wait_for: { type:
+inbox }`, see the authoring guide's "Waiting for an inbox event"), which
+spends no agent turn, keeps its position in its run's journal and
+acknowledges nothing; the wait journals the values of the fields its
+playbook declares, scrubbed, never a body.
 
 **Inbox content is untrusted.** It is written by whoever can reach the
 callback URL, which is the first apb input not authored by the operator. The
@@ -1153,7 +1171,8 @@ the binding's `on_unknown: resend`). See [Sending once](#sending-once).
   and its message names MCP connectors, whose server would need the
   credentials the sandbox withholds. A broker is future work.
 - An engine site: V302 (error) refuses an MCP connector at the baseline
-  check, the follow-up check and a list item check (`<node>#check`). Those
+  check, the follow-up check, a list item check (`<node>#check`) and an
+  inbox wait (`<node>#inbox`). Those
   reads run from the drive or a detached waker, for which this version
   defines no server environment, working directory or stop path.
 - A notification target: an mcp function never carries notifications, so

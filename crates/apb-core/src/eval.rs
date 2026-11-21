@@ -492,6 +492,18 @@ pub fn refusal(playbook: &Playbook) -> Vec<String> {
                 n.id
             ));
         }
+        if let NodeKind::Wait {
+            wait_for: crate::schema::WaitFor::Inbox(_),
+            ..
+        } = &n.kind
+        {
+            // The wait reads a live inbox the case cannot script; its site
+            // alone would leave nothing for the doubles to cover.
+            why.push(format!(
+                "node `{}` waits for inbox events, which evals do not run",
+                n.id
+            ));
+        }
     }
     why
 }
@@ -501,8 +513,8 @@ pub fn refusal(playbook: &Playbook) -> Vec<String> {
 fn connector_site_reasons(playbook: &Playbook) -> Vec<String> {
     playbook
         .connector_sites()
-        .filter(|(_, bindings)| !bindings.is_empty())
-        .map(|(site, _)| {
+        .filter(|site| !site.bindings.is_empty())
+        .map(|site| {
             format!(
                 "{} binds a connector; eval runs never call real connectors; give the case `connectors:` doubles for every function it binds",
                 crate::connector::sites::site_label(&site)
@@ -537,8 +549,8 @@ pub fn case_refusal(
 fn binding_sites(playbook: &Playbook) -> BTreeSet<String> {
     playbook
         .connector_sites()
-        .filter(|(_, b)| !b.is_empty())
-        .map(|(site, _)| site.into_owned())
+        .filter(|site| !site.bindings.is_empty())
+        .map(|site| site.id.into_owned())
         .collect()
 }
 
@@ -1392,6 +1404,23 @@ mod tests {
                 ..Default::default()
             },
         )])
+    }
+
+    /// An eval case never runs an inbox wait: the wait is refused beside
+    /// the sub-playbook rule (inbox-waits D4 "Evals and scenarios").
+    #[test]
+    fn an_eval_case_refuses_an_inbox_wait() {
+        let inbox = PB.replace(
+            "  - { id: w, type: prompt, prompt: hi }",
+            "  - { id: w, type: wait, wait_for: { type: inbox, connector: echo, account: main }, timeout_seconds: 30 }",
+        );
+        let why = refusal(&pb(&inbox));
+        assert!(
+            why.iter()
+                .any(|r| r == "node `w` waits for inbox events, which evals do not run"),
+            "{why:?}"
+        );
+        assert!(refusal(&pb(PB)).is_empty());
     }
 
     /// `PB` with `w` an agent step that binds `crm` (`functions` as given;

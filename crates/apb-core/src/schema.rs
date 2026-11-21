@@ -2330,11 +2330,66 @@ pub enum NodeKind {
     },
 }
 
+/// `wait_for: { type: inbox, ... }` (see [`crate::inbox_wait`] for the
+/// wait's site, binding and matching).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InboxWait {
+    pub connector: String,
+    pub account: String,
+    /// Conditions the event meets (all of them). Empty: every event.
+    #[serde(default, rename = "match", skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
+    /// Stored event types that match (`InboxEvent.event_type`). Empty:
+    /// every type, typed or not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<String>,
+    /// The fields of the matching event the output keeps. Empty: the
+    /// output holds `seq`, `received_at` and `type` only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub take: Vec<Take>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Condition {
+    /// A dot path into the body (`pull_request.number`); a numeric
+    /// segment indexes an array.
+    pub path: String,
+    /// A template over `params.*` and `nodes.<id>.output[.<field>]`,
+    /// rendered once per visit. The body value matches when its text
+    /// equals the rendering: a string as it is, anything else as compact
+    /// JSON (so `equals: "42"` matches the number 42).
+    pub equals: String,
+}
+
+/// One declared output field read out of the matching event's body.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Take {
+    /// The output key, read later as `nodes.<wait>.output.<name>`.
+    pub name: String,
+    /// A path in the baseline observation grammar
+    /// (`crate::baseline::extract::parse_path`), without a `[]` segment.
+    pub path: String,
+    /// `field` (the default: one string, bool or number) or `number`.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::baseline::ObservationType>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WaitFor {
-    Timer { seconds: u64 },
-    Webhook { key: String },
+    Timer {
+        seconds: u64,
+    },
+    Webhook {
+        key: String,
+    },
+    /// The first matching event stored in a connector account's inbox
+    /// (see [`crate::inbox_wait`]). Boxed: it is much larger than the
+    /// other two.
+    Inbox(Box<InboxWait>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -2748,6 +2803,20 @@ pub fn template_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
             .collect::<Vec<_>>(),
         _ => Vec::new(),
     });
+    // An inbox wait's condition texts are templates over `params.*` and
+    // node outputs, rendered once per visit (inbox-waits D4 "Schema"),
+    // so V13 resolves their references.
+    let inbox_conditions = playbook.nodes.iter().flat_map(|n| match &n.kind {
+        NodeKind::Wait {
+            wait_for: WaitFor::Inbox(w),
+            ..
+        } => w
+            .conditions
+            .iter()
+            .map(|c| (n.id.as_str(), c.equals.as_str()))
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    });
     playbook
         .nodes
         .iter()
@@ -2768,6 +2837,7 @@ pub fn template_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
         })
         .chain(judge_state)
         .chain(field_defaults)
+        .chain(inbox_conditions)
         .collect()
 }
 
@@ -2986,6 +3056,56 @@ mod tests {
         .unwrap();
         let tags: Vec<&str> = pb.nodes.iter().map(|n| n.kind.type_str()).collect();
         assert_eq!(tags, NODE_TYPES);
+    }
+
+    /// An inbox wait parses with its fields (inbox-waits design D4
+    /// "Schema"): connector, account, conditions, types and take entries.
+    #[test]
+    fn an_inbox_wait_parses() {
+        let pb = Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: w, type: wait, wait_for: { type: inbox, connector: echo-hooks, account: main, match: [{ path: from, equals: \"{{params.customer}}\" }], types: [push], take: [{ name: action, path: action, type: field }] }, timeout_seconds: 60 }\nedges: []\n",
+        )
+        .unwrap();
+        let NodeKind::Wait { wait_for, .. } = &pb.node("w").unwrap().kind else {
+            panic!("the node is a wait");
+        };
+        let WaitFor::Inbox(w) = wait_for else {
+            panic!("the wait is an inbox wait: {wait_for:?}");
+        };
+        assert_eq!(w.connector, "echo-hooks");
+        assert_eq!(w.account, "main");
+        assert_eq!(w.conditions.len(), 1);
+        assert_eq!(w.conditions[0].path, "from");
+        assert_eq!(w.conditions[0].equals, "{{params.customer}}");
+        assert_eq!(w.types, ["push"]);
+        assert_eq!(w.take.len(), 1);
+        assert_eq!(w.take[0].name, "action");
+        assert_eq!(w.take[0].path, "action");
+        assert_eq!(
+            w.take[0].kind,
+            Some(crate::baseline::ObservationType::Field)
+        );
+    }
+
+    /// A key the inbox block does not know is refused, never dropped
+    /// (`deny_unknown_fields`).
+    #[test]
+    fn an_inbox_wait_with_an_unknown_key_is_refused() {
+        assert!(Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: w, type: wait, wait_for: { type: inbox, connector: echo, account: main, poll_seconds: 5 }, timeout_seconds: 60 }\nedges: []\n",
+        )
+        .is_err());
+    }
+
+    /// The wait node's `timeout_seconds` is a required field, so a wait
+    /// without one is a parse error before any validator runs (D4
+    /// "Validator" item 1).
+    #[test]
+    fn an_inbox_wait_without_a_timeout_is_a_parse_error() {
+        assert!(Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: w, type: wait, wait_for: { type: inbox, connector: echo, account: main } }\nedges: []\n",
+        )
+        .is_err());
     }
 
     /// The approval and person-only declarations (PR 20b) sit on the node:

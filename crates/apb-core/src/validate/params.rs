@@ -350,6 +350,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_inbox_wait_string_is_checked_for_secret_params() {
+        let pb = Playbook::from_yaml(
+            r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+params:
+  - { name: token, type: text, secret: true }
+nodes:
+  - { id: start, type: start }
+  - id: wait
+    type: wait
+    timeout_seconds: 60
+    wait_for:
+      type: inbox
+      connector: "{{params.token}}"
+      account: "{{params.token}}"
+      match:
+        - { path: "{{params.token}}", equals: "{{params.token}}" }
+      types: ["{{params.token}}"]
+      take:
+        - { name: "{{params.token}}", path: "{{params.token}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: wait }
+  - { from: wait, to: done }
+"#,
+        )
+        .unwrap();
+        let hits = secret_param_refs(&pb, &BTreeSet::new()).unwrap();
+        let fields: BTreeSet<String> = hits.iter().map(|hit| hit.field.clone()).collect();
+        assert_eq!(
+            fields,
+            BTreeSet::from([
+                "wait_for.connector".into(),
+                "wait_for.account".into(),
+                "wait_for.match[0].path".into(),
+                "wait_for.match[0].equals".into(),
+                "wait_for.types[0]".into(),
+                "wait_for.take[0].name".into(),
+                "wait_for.take[0].path".into(),
+            ])
+        );
+        let mut r = ValidationReport::default();
+
+        check_params(&pb, &mut r);
+
+        let found: Vec<_> = r
+            .issues
+            .iter()
+            .filter(|issue| issue.code == "V340")
+            .collect();
+        assert_eq!(found.len(), 7, "{:?}", r.issues);
+        assert!(found.iter().all(|issue| {
+            issue.node.as_deref() == Some("wait") && issue.message.contains("secret param `token`")
+        }));
+    }
+
+    #[test]
     fn a_walk_error_is_v340_on_the_definition() {
         let mut r = ValidationReport::default();
         report_walk(Err(SecretWalkError("broken".into())), &mut r);

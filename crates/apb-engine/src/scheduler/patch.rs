@@ -3,12 +3,28 @@
 
 use super::*;
 
+/// What a patch did to the definition the drive executes. Every path that
+/// applies a patch reports it through this value, and the drive drops its
+/// inbox scans in the one place that receives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Definition {
+    /// The definition the drive executes stands as it was.
+    #[default]
+    Current,
+    /// A patch replaced the definition the drive executes: every inbox scan
+    /// is dropped, so the next poll of an open inbox wait is a first poll
+    /// again.
+    Replaced,
+}
+
 #[derive(Debug)]
 pub(crate) struct AppliedPatch {
     version: String,
     classification: String,
     continue_from: String,
     base: Playbook,
+    /// What the patch did to the definition the drive executes.
+    pub(crate) definition: Definition,
 }
 
 pub(crate) struct PatchCommand {
@@ -276,6 +292,17 @@ pub(crate) fn apply_patch(
     if let Some(guard) = guard.clone() {
         log.append(guard)?;
     }
+    // What the patch does to the definition the drive executes: an actual
+    // replacement, read from the bytes the run executes, not from a
+    // comparison of version strings. A snapshot that cannot be read counts
+    // as a replacement: the drive cannot tell that the definition stands.
+    let replaced = if std::fs::read(run_dir.join("playbook.yaml"))
+        .is_ok_and(|bytes| bytes == loaded.yaml.as_bytes())
+    {
+        Definition::Current
+    } else {
+        Definition::Replaced
+    };
     // Store the definition, replace the snapshot, journal: in this order,
     // so a journaled digest names stored bytes whenever the store worked.
     // The digest is for surfaces only; a resume executes `playbook.yaml`
@@ -314,6 +341,7 @@ pub(crate) fn apply_patch(
         classification,
         continue_from,
         base,
+        definition: replaced,
     })))
 }
 

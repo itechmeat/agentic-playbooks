@@ -142,6 +142,11 @@ pub fn run_waker(root: &Path, run_id: &str, seq: u64) -> Result<WakeOutcome, Eng
     // reads the journal, so a quota pause's re-pause under a new seq is
     // judged by its own cause.
     let mut read_error_logged = false;
+    // What the waker's last read of the parked inbox wait's account log
+    // left behind (inbox-waits D4 "Parking" item 6): a failed read is
+    // never cached, and a successful read of an absent log is cached like
+    // any other. The first poll always reads.
+    let mut inbox_state = crate::inbox_wait::ReadState::NotRead;
     loop {
         if !run_dir.is_dir() {
             return Ok(WakeOutcome::Superseded);
@@ -173,6 +178,23 @@ pub fn run_waker(root: &Path, run_id: &str, seq: u64) -> Result<WakeOutcome, Eng
                 }
             };
             if pending {
+                let woke = resume_while(root, run_id, WakeHold::Pause(seq));
+                drop(lease);
+                return woke;
+            }
+            // A parked inbox wait wakes on a delivery, too (inbox-waits D4
+            // "Parking" item 6): an event of a listed type above the run's
+            // journaled position, or a gap, resumes the run at once,
+            // through the same resume the pending control entry takes. The
+            // check reads and judges; the resumed drive authorizes, reads,
+            // decides, and parks again when nothing matches.
+            if crate::inbox_wait::pending::delivery_pending(
+                root,
+                &run_dir,
+                &events,
+                seq,
+                &mut inbox_state,
+            ) {
                 let woke = resume_while(root, run_id, WakeHold::Pause(seq));
                 drop(lease);
                 return woke;
@@ -502,5 +524,73 @@ mod tests {
             ),
         ];
         assert_eq!(same_pause_until(&resumed, 1), None);
+    }
+
+    /// A parked inbox wait wakes on a delivery before `until` (inbox-waits
+    /// D4 "Parking" item 6): an event stored above the run's journaled
+    /// position makes the waker's next poll resume the run. (The resumed
+    /// drive itself runs in the driving process: a test binary cannot
+    /// re-exec `__drive-run`, so the waker's spawn is a child that exits
+    /// at once; the wake here is the engine's own in-process resume, as in
+    /// the suite's park tests.)
+    #[test]
+    fn an_inbox_park_waker_resumes_on_a_new_event() {
+        crate::inbox_wait::park_fixture::in_child(
+            crate::inbox_wait::park_fixture::WAKER_PREFIX,
+            "an_inbox_park_waker_resumes_on_a_new_event",
+            || {
+                // SAFETY: the fixture runs alone in a plain child process.
+                unsafe { std::env::set_var(POLL_ENV, "50") };
+                let fx = crate::inbox_wait::park_fixture::Fx::parked("", 0);
+                let seq = crate::inbox_wait::park_fixture::pause_seq(&fx);
+                let events = crate::inbox_wait::park_fixture::events(&fx);
+                let until = events
+                    .iter()
+                    .find_map(|e| match &e.payload {
+                        EventPayload::RunPaused { until, .. } => *until,
+                        _ => None,
+                    })
+                    .expect("the fixture parks with an until");
+                // The waker waits for a poll that began after this call.
+                let target = polls::count(&fx.run_dir) + 2;
+                let woke = std::thread::spawn({
+                    let root = fx.root.clone();
+                    let run_id = crate::inbox_wait::park_fixture::RUN.to_string();
+                    move || run_waker(&root, &run_id, seq)
+                });
+                // The waker's first poll finds nothing (the log is empty).
+                // Bounded, and a waker that ended early reports its own
+                // result instead of hiding behind an outer timeout.
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                while polls::count(&fx.run_dir) < target {
+                    if woke.is_finished() {
+                        panic!(
+                            "the waker ended before its polls: {:?}",
+                            woke.join().expect("the waker thread ends")
+                        );
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the waker did not poll twice in 30 s"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                // A delivery lands while the run is parked: the waker
+                // resumes at once, well before `until`.
+                fx.store(serde_json::json!({ "from": "x" }));
+                let outcome = woke
+                    .join()
+                    .expect("the waker thread ends")
+                    .expect("the waker returns");
+                assert!(
+                    matches!(outcome, WakeOutcome::Resumed { .. }),
+                    "the delivery resumed the run: {outcome:?}"
+                );
+                assert!(
+                    apb_core::clock::now_ms() < u128::from(until),
+                    "well before the park's until"
+                );
+            },
+        );
     }
 }

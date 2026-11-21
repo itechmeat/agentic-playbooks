@@ -22,6 +22,59 @@ pub const MAX_TYPES: usize = 20;
 /// At most this many conditions in one filter.
 pub const MAX_CONDITIONS: usize = 10;
 
+/// Whether an event of type `event_type` passes a `types` list: an empty
+/// list passes every event, an untyped event passes only an empty list, and
+/// a typed event passes a list that names its type.
+///
+/// The one type test of a run: an inbox read's filter and an inbox wait's
+/// `types` list mean the same thing by it.
+pub fn type_passes(types: &[String], event_type: Option<&str>) -> bool {
+    match event_type {
+        None => types.is_empty(),
+        Some(t) => types.is_empty() || types.iter().any(|want| want == t),
+    }
+}
+
+/// Whether `ty` is an event type a stored event can carry: it cleans to
+/// itself ([`super::webhook::clean_event_type`]).
+pub fn type_is_storable(ty: &str) -> bool {
+    super::webhook::clean_event_type(ty).as_deref() == Some(ty)
+}
+
+/// The `types` list of one filter or one inbox wait: at most [`MAX_TYPES`]
+/// entries, and every one of them an event type a stored event can carry.
+/// The error names the first problem.
+pub fn check_types(types: &[String]) -> Result<(), String> {
+    if types.len() > MAX_TYPES {
+        return Err(format!(
+            "at most {MAX_TYPES} types in one filter, got {}",
+            types.len()
+        ));
+    }
+    for ty in types {
+        if !type_is_storable(ty) {
+            return Err(format!(
+                "event type `{ty}` must be 1 to {} characters of [A-Za-z0-9._:/-]",
+                super::webhook::EVENT_TYPE_MAX
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The paths of one filter's or one wait's conditions: every one of them a
+/// dot path with non-empty segments. The error names the first problem.
+pub fn check_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+    for path in paths {
+        if path.trim().is_empty() || path.split('.').any(|s| s.trim().is_empty()) {
+            return Err(format!(
+                "condition path `{path}` must be a dot path with non-empty segments"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Which inbox events a reader wants: an event passes when its type is in
 /// `types` (when `types` is not empty) and every condition holds.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -66,33 +119,16 @@ impl EventFilter {
     /// non-empty segments, every `equals` is a scalar or null. The error
     /// names the first problem.
     pub fn check(&self) -> Result<(), String> {
-        if self.types.len() > MAX_TYPES {
-            return Err(format!(
-                "at most {MAX_TYPES} types in one filter, got {}",
-                self.types.len()
-            ));
-        }
+        check_types(&self.types)?;
         if self.conditions.len() > MAX_CONDITIONS {
             return Err(format!(
                 "at most {MAX_CONDITIONS} conditions in one filter, got {}",
                 self.conditions.len()
             ));
         }
-        for ty in &self.types {
-            if super::webhook::clean_event_type(ty).as_deref() != Some(ty.as_str()) {
-                return Err(format!(
-                    "event type `{ty}` must be 1 to {} characters of [A-Za-z0-9._:/-]",
-                    super::webhook::EVENT_TYPE_MAX
-                ));
-            }
-        }
+        check_paths(self.conditions.iter().map(|c| c.path.as_str()))?;
         for condition in &self.conditions {
             let path = &condition.path;
-            if path.trim().is_empty() || path.split('.').any(|s| s.trim().is_empty()) {
-                return Err(format!(
-                    "condition path `{path}` must be a dot path with non-empty segments"
-                ));
-            }
             if !matches!(
                 condition.equals,
                 Value::Null | Value::String(_) | Value::Number(_) | Value::Bool(_)
@@ -114,9 +150,7 @@ impl EventFilter {
             let got = event.event_type.clone();
             out.push(ConditionResult {
                 condition: format!("type in [{}]", self.types.join(", ")),
-                passed: got
-                    .as_ref()
-                    .is_some_and(|t| self.types.iter().any(|want| want == t)),
+                passed: type_passes(&self.types, got.as_deref()),
                 got,
             });
         }
@@ -135,12 +169,7 @@ impl EventFilter {
     /// building them: the type first, then each condition, stopping at the
     /// first that fails.
     pub fn matches(&self, event: &InboxEvent) -> bool {
-        let type_ok = self.types.is_empty()
-            || event
-                .event_type
-                .as_ref()
-                .is_some_and(|t| self.types.iter().any(|want| want == t));
-        type_ok
+        type_passes(&self.types, event.event_type.as_deref())
             && self.conditions.iter().all(|c| {
                 crate::list::items::field_equals(
                     super::common::value_at_path(&event.body, &c.path),

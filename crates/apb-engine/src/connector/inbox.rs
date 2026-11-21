@@ -389,6 +389,67 @@ pub fn depth_envelope(pending: u64) -> Value {
     json!({ "pending": pending })
 }
 
+/// Which earlier `inbox_gap` line already records a gap, so the once-per-gap
+/// check knows the gap is in the journal. [`GapScope::Account`] matches on
+/// connector, account and range, as every connector read journals it
+/// (unchanged from main). [`GapScope::Node`] additionally requires the
+/// line's `node_id` to equal the scope's node, so a range another node
+/// already recorded (a connector read of the same account, another wait) is
+/// still journaled for the wait before its position advances (inbox-waits
+/// D4 "The visit" step 4).
+pub(crate) enum GapScope {
+    /// Any line of the connector and account over the same range.
+    Account,
+    /// A line of this node alone over the same range.
+    Node,
+}
+
+/// Records in the run journal that an inbox read found `gap` (unread events
+/// retention dropped), once per distinct gap under `scope`: later reads that
+/// cross the same gap stay silent, a gap that grew is a new one. Which node
+/// read first is recorded in the line's `node_id`, but under
+/// [`GapScope::Account`] it does not make a gap distinct. The line is synced
+/// before the append lock is released. The caller owns `log` (the drive's
+/// open log, or a foreign one over the run directory).
+///
+/// Returns whether the gap is in the journal (written now or already there).
+/// One rule for every read: a cursor moves past a gap only once this said
+/// `true`. An unfiltered read moves no cursor (its caller acks later, after
+/// this ran), so for it the answer only matters as best effort, like the
+/// `connector_call` event: a journal failure never changes its result. A
+/// filtered read that would ack asks first and keeps the cursor on `false`.
+pub(crate) fn journal_gap_in(
+    log: &mut EventLog,
+    connector: &str,
+    account: &str,
+    node_id: &str,
+    gap: &InboxGap,
+    scope: &GapScope,
+) -> bool {
+    let payload = EventPayload::InboxGap {
+        node_id: node_id.to_string(),
+        connector: connector.to_string(),
+        account: account.to_string(),
+        from: gap.from,
+        through: gap.through,
+    };
+    log.append_decided_synced(|events| {
+        let known = events.iter().any(|e| {
+            matches!(
+                &e.payload,
+                EventPayload::InboxGap { connector: c, account: a, from, through, node_id: n, .. }
+                if c == connector
+                    && a == account
+                    && *from == gap.from
+                    && *through == gap.through
+                    && (matches!(scope, GapScope::Account) || n == node_id)
+            )
+        });
+        (!known).then_some(payload)
+    })
+    .is_ok()
+}
+
 /// Records in the run journal that an inbox read found `gap` (unread events
 /// retention dropped), once per distinct gap of an inbox and account per run:
 /// later reads that cross the same gap stay silent, a gap that grew is a new
@@ -415,22 +476,12 @@ pub(crate) fn journal_gap(
     let Ok(mut log) = EventLog::open_foreign(run_dir) else {
         return false;
     };
-    let payload = EventPayload::InboxGap {
-        node_id: node_id.to_string(),
-        connector: connector.to_string(),
-        account: account.to_string(),
-        from: gap.from,
-        through: gap.through,
-    };
-    log.append_decided_synced(|events| {
-        let known = events.iter().any(|e| {
-            matches!(
-                &e.payload,
-                EventPayload::InboxGap { connector: c, account: a, from, through, .. }
-                    if c == connector && a == account && *from == gap.from && *through == gap.through
-            )
-        });
-        (!known).then_some(payload)
-    })
-    .is_ok()
+    journal_gap_in(
+        &mut log,
+        connector,
+        account,
+        node_id,
+        gap,
+        &GapScope::Account,
+    )
 }

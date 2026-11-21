@@ -713,7 +713,8 @@ impl RunState {
                 | EventPayload::RunGraded { .. } => {}
                 EventPayload::WaitStarted { .. }
                 | EventPayload::WaitSignalled { .. }
-                | EventPayload::WaitTimeout { .. } => {}
+                | EventPayload::WaitTimeout { .. }
+                | EventPayload::InboxWaitRead { .. } => {}
                 // Context compaction is a materialized rendering artifact,
                 // it does not affect run state.
                 EventPayload::ContextCompacted { .. } => {}

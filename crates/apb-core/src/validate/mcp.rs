@@ -12,7 +12,8 @@ use super::*;
 /// connector's stdio `command` is an interpreter or a launcher
 /// (`MCP_LAUNCHERS`), whose approval covers that program file only, not
 /// the script or package it runs. V302 (error): an MCP connector bound at an engine
-/// site (the baseline check, the follow-up check or a list item check).
+/// site (the baseline check, the follow-up check, a list item check or an
+/// inbox wait).
 /// V303 (error): an http MCP connector whose `auth: { kind: header }`
 /// names a header the transport sets itself
 /// (`ConnectorFacts.mcp_reserved_header`), at every binding site.
@@ -22,12 +23,12 @@ pub(super) fn check_mcp_bindings(
     ctx: &ValidationContext,
     r: &mut ValidationReport,
 ) {
-    use crate::connector::sites::{is_engine_site, site_label};
-    for (site, bindings) in playbook.connector_sites() {
-        let site: &str = &site;
-        let label = site_label(site);
+    use crate::connector::sites::{SiteKind, site_label};
+    for site in playbook.connector_sites() {
+        let site_id: &str = site.id.as_ref();
+        let label = site_label(&site);
         let mut seen = HashSet::new();
-        for b in bindings.iter() {
+        for b in site.bindings.iter() {
             let Some(facts) = ctx.connectors.get(&b.name) else {
                 continue;
             };
@@ -38,18 +39,22 @@ pub(super) fn check_mcp_bindings(
             if let Some(header) = &facts.mcp_reserved_header {
                 r.error(
                     "V303",
-                    Some(site),
+                    Some(site_id),
                     format!(
-                        "node `{site}` binds MCP connector `{name}`, whose auth header `{header}` is one the HTTP transport sets itself; name another header"
+                        "node `{site_id}` binds MCP connector `{name}`, whose auth header `{header}` is one the HTTP transport sets itself; name another header"
                     ),
                 );
             }
-            if is_engine_site(site) || crate::list::check_site_node(site).is_some() {
+            // The site walk says what a site is: only a node's own site
+            // may bind an MCP connector. A list item check, an inbox wait
+            // and the engine's own sites run from the drive or a waker,
+            // where no MCP server is started.
+            if !matches!(site.kind, SiteKind::Node) {
                 r.error(
                     "V302",
-                    Some(site),
+                    Some(site_id),
                     format!(
-                        "{label} reads MCP connector `{name}`; an MCP server is started only for a node's own call in this version (the baseline check, the follow-up check and list item checks run from the drive or a waker)"
+                        "{label} reads MCP connector `{name}`; an MCP server is started only for a node's own call in this version (the baseline check, the follow-up check, list item checks and inbox waits run from the drive or a waker)"
                     ),
                 );
                 continue;
@@ -57,18 +62,18 @@ pub(super) fn check_mcp_bindings(
             if b.functions == FunctionsAllow::All {
                 r.warn(
                     "V300",
-                    Some(site),
+                    Some(site_id),
                     format!(
-                        "node `{site}` grants every function of MCP connector `{name}`; name the functions it needs (`functions: [..]` or `functions: read_only`)"
+                        "node `{site_id}` grants every function of MCP connector `{name}`; name the functions it needs (`functions: [..]` or `functions: read_only`)"
                     ),
                 );
             }
             if let Some(launcher) = &facts.mcp_launcher {
                 r.warn(
                     "V301",
-                    Some(site),
+                    Some(site_id),
                     format!(
-                        "node `{site}` binds MCP connector `{name}`, whose command `{launcher}` is an interpreter or a launcher: its approval covers the `{launcher}` program file only, not the script or package it runs; point the command at the installed server program instead"
+                        "node `{site_id}` binds MCP connector `{name}`, whose command `{launcher}` is an interpreter or a launcher: its approval covers the `{launcher}` program file only, not the script or package it runs; point the command at the installed server program instead"
                     ),
                 );
             }
@@ -224,7 +229,7 @@ edges:
         assert_eq!(
             v302[0].message,
             format!(
-                "{label} reads MCP connector `tracker`; an MCP server is started only for a node's own call in this version (the baseline check, the follow-up check and list item checks run from the drive or a waker)"
+                "{label} reads MCP connector `tracker`; an MCP server is started only for a node's own call in this version (the baseline check, the follow-up check, list item checks and inbox waits run from the drive or a waker)"
             )
         );
         // V302 answers alone at an engine site.
@@ -295,6 +300,57 @@ edges:
     }
 
     #[test]
+    fn v302_refuses_an_mcp_inbox_wait() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: wait
+    type: wait
+    timeout_seconds: 60
+    wait_for: { type: inbox, connector: tracker, account: main }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: wait }
+  - { from: wait, to: done }
+"#;
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        let report = crate::validate::validate(&pb, &ctx_with(facts(TRACKER)));
+        let v285: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|issue| issue.code == "V285")
+            .collect();
+        assert_eq!(v285.len(), 1, "{:?}", report.issues);
+        assert_eq!(v285[0].node.as_deref(), Some("wait"));
+        assert!(
+            v285[0]
+                .message
+                .contains("is an MCP connector and cannot declare `webhook:`"),
+            "{}",
+            v285[0].message
+        );
+
+        let v302: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|issue| issue.code == "V302")
+            .collect();
+        assert_eq!(v302.len(), 1, "{:?}", report.issues);
+        assert_eq!(v302[0].node.as_deref(), Some("wait#inbox"));
+        assert!(
+            v302[0]
+                .message
+                .starts_with("the inbox wait of node `wait` reads MCP connector"),
+            "{}",
+            v302[0].message
+        );
+    }
+
+    #[test]
     fn v302_refuses_an_mcp_follow_up() {
         let yaml = r#"
 schema: 2
@@ -329,6 +385,81 @@ edges:
             &ctx_with(facts(TRACKER)),
         );
         assert!(of_code(&found, "V302").is_empty(), "{found:?}");
+    }
+
+    /// A node whose id ends in `#inbox` is an ordinary node: the site walk
+    /// says what a site is, so no kind is inferred from an id. The node
+    /// binds the MCP connector itself and is not refused.
+    #[test]
+    fn v302_is_silent_for_a_node_named_like_a_derived_site() {
+        let id = "fetch#inbox";
+        let yaml = format!(
+            r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - {{ id: start, type: start }}
+  - id: {id}
+    type: agent_task
+    prompt: hi
+    profile: x
+    connectors:
+      - {{ name: tracker, functions: [search_issues] }}
+  - {{ id: done, type: finish, outcome: success }}
+edges:
+  - {{ from: start, to: {id} }}
+  - {{ from: {id}, to: done }}
+"#
+        );
+        let found = issues(&yaml, &ctx_with(facts(TRACKER)));
+        assert!(of_code(&found, "V302").is_empty(), "{id}: {found:?}");
+        // The label names the node, not a derived site.
+        let v300 = of_code(&found, "V300");
+        assert!(v300.is_empty(), "{id}: {found:?}");
+    }
+
+    /// A node named `x#check` is an ordinary node for the site walk, so no
+    /// MCP rule reads a kind into its id. The list rule that reserves every
+    /// `#check` id (V85) refuses it as before: the reservation is main's.
+    #[test]
+    fn v302_is_silent_for_a_node_named_x_check_and_v85_refuses_it() {
+        let id = "x#check";
+        let yaml = format!(
+            r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - {{ id: start, type: start }}
+  - id: {id}
+    type: agent_task
+    prompt: hi
+    profile: x
+    connectors:
+      - {{ name: tracker, functions: [search_issues] }}
+  - {{ id: done, type: finish, outcome: success }}
+edges:
+  - {{ from: start, to: {id} }}
+  - {{ from: {id}, to: done }}
+"#
+        );
+        let found = issues(&yaml, &ctx_with(facts(TRACKER)));
+        assert!(of_code(&found, "V302").is_empty(), "{id}: {found:?}");
+        let v300 = of_code(&found, "V300");
+        assert!(v300.is_empty(), "{id}: {found:?}");
+        // The list rule reserves the id, as main does.
+        let pb = Playbook::from_yaml(&yaml).unwrap();
+        let report = crate::validate::validate(&pb, &ctx_with(facts(TRACKER)));
+        let v85: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|issue| issue.code == "V85")
+            .collect();
+        assert_eq!(v85.len(), 1, "{id}: {:?}", report.issues);
+        assert_eq!(v85[0].node.as_deref(), Some(id));
     }
 
     /// An http MCP connector whose header auth names `header`.

@@ -31,3 +31,4 @@
 {"seq":30,"ts":1790000000030,"type":"list_item_settled","node":"items","item":"a","state":"passed","round":0,"carried":true,"skipped_from":"r0","skip_digest":"sha256:skip"}
 {"seq":31,"ts":1790000000031,"type":"session_handoff","node":"implement","from_node":"assess","warm":true,"mode":"fork"}
 {"seq":32,"ts":1790000000032,"type":"list_started","node":"items","total":1,"filtered_out":0,"items_digest":"","batch_size":1,"parallel":1,"skip_refused":"skip_supervisor_note: a supervisor note is in force, so every item works"}
+{"seq":33,"ts":1790000000033,"type":"inbox_wait_read","node":"wait","through_seq":9,"examined":3}

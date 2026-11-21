@@ -478,7 +478,13 @@ pub(crate) fn live_child_effects(
 /// (connector ...)` for the baseline site, which is not a node). A connector that is
 /// not installed or does not load adds nothing here: the connector trust
 /// gate refuses such a run before it starts.
-fn connector_sources(site: &str, bindings: &[apb_core::schema::ConnectorBinding]) -> Vec<String> {
+///
+/// The label names what owns the site: the node itself, the owner of a
+/// derived site, or the engine's own name for a reserved site.
+fn connector_sources(
+    site: &apb_core::connector::sites::Site<'_>,
+    bindings: &[apb_core::schema::ConnectorBinding],
+) -> Vec<String> {
     let mut out = Vec::new();
     for b in bindings {
         let Ok(loaded) = apb_core::connector::store::load(&b.name) else {
@@ -487,11 +493,7 @@ fn connector_sources(site: &str, bindings: &[apb_core::schema::ConnectorBinding]
         let irreversible = loaded.doc.irreversible_functions();
         let fns = apb_core::validate::granted_functions(b, &irreversible);
         if !fns.is_empty() {
-            let at = if site == apb_core::baseline::BASELINE_SITE {
-                "baseline check".to_string()
-            } else {
-                format!("node {site}")
-            };
+            let at = apb_core::connector::sites::source_label(site);
             out.push(format!(
                 "{at} (connector {}: {})",
                 b.name,
@@ -520,9 +522,8 @@ pub fn consent_sources(
     pins: Option<&std::collections::BTreeMap<String, ChildExpectation>>,
 ) -> Vec<String> {
     let mut out = crate::consent::own_sources(playbook);
-    for (site, bindings) in playbook.connector_sites() {
-        let site: &str = &site;
-        out.extend(connector_sources(site, &bindings));
+    for site in playbook.connector_sites() {
+        out.extend(connector_sources(&site, site.bindings.as_ref()));
     }
     for n in &playbook.nodes {
         if !matches!(n.kind, NodeKind::Playbook { .. }) {
