@@ -32,6 +32,10 @@ pub(crate) fn connect_error(f: apb_mcp_client::Failure, redactions: &[Redaction]
         FailureKind::Unsupported => (CallErrorCode::Config, message),
         FailureKind::TooLarge | FailureKind::Rejected { .. } => (CallErrorCode::Service, message),
         FailureKind::Refused | FailureKind::ProgramChanged => (CallErrorCode::Permission, message),
+        FailureKind::Auth { status } => (
+            CallErrorCode::Auth,
+            format!("the MCP server refused the authorization (HTTP {status})"),
+        ),
     };
     composed(code, message, redactions)
 }
@@ -93,6 +97,24 @@ pub(crate) fn answer(
             }
             _ => Err(lost(f, redactions)),
         },
+        // HTTP 401 or 403 after the hand-over: whether the tool acted is
+        // not known for a write; a read is refused.
+        Err(CallFailure::Lost(apb_mcp_client::Failure {
+            kind: FailureKind::Auth { status },
+            ..
+        })) => {
+            if read_only {
+                Err(composed(
+                    CallErrorCode::Auth,
+                    format!("the MCP server refused the authorization (HTTP {status})"),
+                    redactions,
+                ))
+            } else {
+                tool_error(format!(
+                    "the MCP server answered the call with HTTP {status} after it was handed over; whether the tool acted is not known"
+                ))
+            }
+        }
         Err(CallFailure::Lost(f)) => Err(lost(f, redactions)),
         Err(CallFailure::NotSent(f)) => Err(not_sent(f, redactions)),
     }
@@ -707,5 +729,79 @@ mod tests {
         let shown = ok.to_success_json().to_string();
         assert!(!shown.contains(SECRET), "{shown}");
         assert_eq!(ok.to_success_json()["picked"], json!(true), "{shown}");
+    }
+
+    /// A 401 or 403 after the hand-over: a write's effect is unknown
+    /// (`tool_error`), a read is refused (`auth`).
+    #[test]
+    fn a_lost_auth_is_tool_error_for_a_write_and_auth_for_a_read() {
+        for status in [401u16, 403] {
+            let lost = || {
+                Err(CallFailure::Lost(failure(
+                    FailureKind::Auth { status },
+                    "refused",
+                )))
+            };
+            assert_eq!(
+                row(lost(), false),
+                ("tool_error".into(), CallClass::WriteUnknown),
+                "{status}"
+            );
+            assert_eq!(
+                row(lost(), true),
+                ("auth".into(), CallClass::Failed),
+                "{status}"
+            );
+            let err = super::answer(lost(), false, &[], &[]).unwrap_err();
+            assert!(
+                err.message.contains(&format!("HTTP {status}")),
+                "{}",
+                err.message
+            );
+            assert_eq!(err.http_status, None);
+        }
+    }
+
+    /// Every row of design D7 "Settlement of an HTTP write": through
+    /// `answer` and `classify(.., false)` with no HTTP status, each is
+    /// `WriteUnknown`; none is `Failed`.
+    #[test]
+    fn no_http_failure_of_a_write_classifies_failed() {
+        let lost = |kind| Err(CallFailure::Lost(failure(kind, "x")));
+        let rows: Vec<Result<ToolAnswer, CallFailure>> = vec![
+            lost(FailureKind::Auth { status: 401 }),
+            lost(FailureKind::Auth { status: 403 }),
+            rejected(-32602),
+            lost(FailureKind::Transport),
+            lost(FailureKind::TooLarge),
+            lost(FailureKind::Timeout),
+            complete(true),
+            Ok(ToolAnswer::Task),
+            Ok(ToolAnswer::InputRequired),
+        ];
+        for (n, answer) in rows.into_iter().enumerate() {
+            let (outcome, class) = row(answer, false);
+            assert_eq!(class, CallClass::WriteUnknown, "row {n}: {outcome}");
+        }
+    }
+
+    /// Only a POST apb never started is `not_sent` (`service`, settled
+    /// `not_sent`); a refused connection after the POST started is `Lost`,
+    /// `network`.
+    #[test]
+    fn a_not_sent_http_call_is_not_sent_only_before_the_post() {
+        let not_sent = Err(CallFailure::NotSent(failure(
+            FailureKind::Transport,
+            "sealed",
+        )));
+        assert_eq!(row(not_sent, false), ("service".into(), CallClass::Failed));
+        let refused = Err(CallFailure::Lost(failure(
+            FailureKind::Transport,
+            "the MCP server could not be reached, or the connection broke",
+        )));
+        assert_eq!(
+            row(refused, false),
+            ("network".into(), CallClass::WriteUnknown)
+        );
     }
 }

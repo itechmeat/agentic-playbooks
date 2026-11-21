@@ -4,5 +4,7 @@
 // (`apb_core::config::test_isolation`).
 apb_core::isolate_test_config!(env!("CARGO_TARGET_TMPDIR"));
 
+#[path = "suite/http_test.rs"]
+mod http_test;
 #[path = "suite/stdio_test.rs"]
 mod stdio_test;

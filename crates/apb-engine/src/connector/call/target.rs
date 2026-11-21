@@ -191,10 +191,24 @@ impl LiveTarget {
         account: Option<&str>,
         function: &str,
     ) -> Result<Self, CallError> {
+        Self::load_picking(root, name, account, |_| Ok(function.to_string()))
+    }
+
+    /// [`LiveTarget::load`] with the function picked from the definition
+    /// this one load read (its healthcheck, its first mcp function), so a
+    /// caller decides on the same definition it then executes: the
+    /// connector is read once.
+    pub(crate) fn load_picking(
+        root: &Path,
+        name: &str,
+        account: Option<&str>,
+        pick: impl FnOnce(&ConnectorDoc) -> Result<String, CallError>,
+    ) -> Result<Self, CallError> {
         let loaded = store::load(name).map_err(|e| {
             CallError::new(CallErrorCode::Config, format!("connector `{name}`: {e}"))
         })?;
-        let function = loaded.doc.function(function).cloned().ok_or_else(|| {
+        let function = pick(&loaded.doc)?;
+        let function = loaded.doc.function(&function).cloned().ok_or_else(|| {
             CallError::new(
                 CallErrorCode::Config,
                 format!("connector `{name}` declares no function `{function}`"),
@@ -220,6 +234,21 @@ impl LiveTarget {
 
     pub(crate) fn function(&self) -> &FunctionSpec {
         &self.function
+    }
+
+    /// The connector's name.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The definition this target was loaded from.
+    pub(crate) fn doc(&self) -> &ConnectorDoc {
+        &self.doc
+    }
+
+    /// Whether the loaded definition maps the tools of an MCP server.
+    pub(crate) fn is_mcp(&self) -> bool {
+        self.doc.mcp.is_some()
     }
 
     /// The digests the connector and the account carry now.

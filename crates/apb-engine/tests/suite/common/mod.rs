@@ -375,6 +375,9 @@ pub enum Reply {
         arrived: std::sync::mpsc::Sender<()>,
         release: std::sync::mpsc::Receiver<()>,
     },
+    /// Close the listener, then give this answer: once the client has the
+    /// answer, its next connection is refused, with no timing involved.
+    ThenClose(Box<Reply>),
 }
 
 /// A stub HTTP server on `127.0.0.1:0` that serves one connection per
@@ -441,12 +444,23 @@ pub fn spawn_script(script: Vec<Reply>) -> ScriptedHttpServer {
     // Non-blocking, so the thread can watch `stop` while it waits.
     listener.set_nonblocking(true).unwrap();
     let handle = std::thread::spawn(move || {
+        let mut listener = Some(listener);
         for reply in script {
-            let Some(mut stream) = accept_until_stopped(&listener, &stopped) else {
+            let Some(mut stream) = listener
+                .as_ref()
+                .and_then(|l| accept_until_stopped(l, &stopped))
+            else {
                 return;
             };
             let captured = read_http_request(&mut stream);
             seen.lock().unwrap().push(captured);
+            let reply = match reply {
+                Reply::ThenClose(inner) => {
+                    listener = None;
+                    *inner
+                }
+                other => other,
+            };
             let (status, extra_headers, body) = match reply {
                 Reply::Respond(status, body) => (status, Vec::new(), body),
                 Reply::RespondWith(status, headers, body) => (status, headers, body),
@@ -468,6 +482,7 @@ pub fn spawn_script(script: Vec<Reply>) -> ScriptedHttpServer {
                     let _ = release.recv_timeout(std::time::Duration::from_secs(60));
                     (200, Vec::new(), body)
                 }
+                Reply::ThenClose(_) => unreachable!("unwrapped above"),
             };
             let mut head = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\n", body.len());
             let mut has_ctype = false;

@@ -113,6 +113,18 @@ pub(crate) enum ConnectorAction {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// List the tools an approved MCP connector's server offers to one
+    /// account, with each tool's status against its approval. Starts the
+    /// approved server with the account's secrets; writes nothing.
+    Tools {
+        name: String,
+        /// Explicit account name; omit to use the single or default one
+        #[arg(long)]
+        account: Option<String>,
+        /// Print the listing as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the OAuth consent loop for one connector account: the person
     /// opens the authorization URL in a browser, the provider calls back on
     /// 127.0.0.1, and the printed refresh token is stored by the person. A
@@ -166,6 +178,11 @@ pub(crate) fn connector_cmd(root: &Path, action: ConnectorAction) -> ExitCode {
             force,
         } => install_cmd(name, from_dir, force),
         ConnectorAction::Test { name, dir } => test_cmd(name, dir),
+        ConnectorAction::Tools {
+            name,
+            account,
+            json,
+        } => crate::connector_mcp::tools_cmd(root, &name, account.as_deref(), json),
         ConnectorAction::Oauth {
             name,
             account,
@@ -609,6 +626,8 @@ fn doctor_cmd(root: &Path) -> ExitCode {
         .map(|c| c.ingest)
         .unwrap_or_default();
     let mut any_webhook = false;
+    // The MCP pin store, read once on the first MCP connector.
+    let mut pins: Option<Option<apb_core::connector::mcp::pins::PinStore>> = None;
 
     for name in &names {
         let loaded = match store::load(name) {
@@ -629,6 +648,26 @@ fn doctor_cmd(root: &Path) -> ExitCode {
         });
         if loaded.doc.webhook.is_some() {
             any_webhook = true;
+        }
+        // An MCP connector's transport and the pin store, before the
+        // accounts load: a broken account file never hides either.
+        if let Some(spec) = &loaded.doc.mcp {
+            checks.push(Check {
+                name: format!("connector `{name}`: mcp transport"),
+                status: CheckStatus::Ok,
+                detail: spec.transport.as_str().to_string(),
+            });
+            pins.get_or_insert_with(|| match apb_core::connector::mcp::pins::PinStore::load() {
+                Ok(store) => Some(store),
+                Err(e) => {
+                    checks.push(Check {
+                        name: "mcp tool pins".to_string(),
+                        status: CheckStatus::Fail,
+                        detail: e.to_string(),
+                    });
+                    None
+                }
+            });
         }
 
         let accounts = match config::load_merged(root, name) {
@@ -721,6 +760,11 @@ fn doctor_cmd(root: &Path) -> ExitCode {
             });
         }
 
+        if loaded.doc.mcp.is_some()
+            && let Some(Some(store)) = &pins
+        {
+            push_mcp_pin_checks(&mut checks, store, name, &loaded, &accounts);
+        }
         push_healthcheck_check(&mut checks, name, &loaded);
         push_ingest_checks(&mut checks, &ingest, name, &loaded, &accounts);
     }
@@ -745,6 +789,58 @@ fn doctor_cmd(root: &Path) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// One row per account of an MCP connector: whether every mapped tool's
+/// pin is bound to this definition and account (`ServerPin::compare` with
+/// the program not read). Starts no server, resolves no secret and hashes
+/// no file: reachability is `apb connector tools`'s.
+fn push_mcp_pin_checks(
+    checks: &mut Vec<Check>,
+    store: &apb_core::connector::mcp::pins::PinStore,
+    name: &str,
+    loaded: &LoadedConnector,
+    accounts: &[config::Account],
+) {
+    use apb_core::connector::mcp::pins::{LiveBinding, ProgramFact};
+    for account in accounts {
+        let account_digest = config::account_digest(account);
+        let record = store.server(name, &account.name);
+        let unapproved: Vec<&str> = loaded
+            .doc
+            .functions
+            .iter()
+            .filter_map(|f| f.mcp.as_ref().map(|m| m.tool.as_str()))
+            .filter(|tool| {
+                record.is_none_or(|r| {
+                    r.compare(&LiveBinding {
+                        connector_digest: &loaded.digest,
+                        account_digest: &account_digest,
+                        program: ProgramFact::NotRead,
+                        tool,
+                        tool_digest: None,
+                    })
+                    .is_err()
+                })
+            })
+            .collect();
+        checks.push(Check {
+            name: format!("connector `{name}`: mcp tools ({})", account.name),
+            status: if unapproved.is_empty() {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Warn
+            },
+            detail: if unapproved.is_empty() {
+                "every tool approved for this definition and account".to_string()
+            } else {
+                format!(
+                    "not approved for this definition and account: {}; a person approves them at a terminal (docs/CONNECTORS.md, MCP servers)",
+                    unapproved.join(", ")
+                )
+            },
+        });
     }
 }
 

@@ -87,6 +87,202 @@ const toConnectorFunction = (d: ConnectorFunctionDto): ConnectorFunction => ({
   argsSchema: d.args_schema ?? null,
 })
 
+// --- MCP servers (design mcp-http-and-surfaces D5 "Dashboard") ----------------
+// None of these shapes carries a digest: the server never sends one on a
+// listing surface. Every string a server chose (descriptions, titles, tool
+// names, annotations, input schemas) is shown as text only.
+
+/** One mapped function of an account row: its tool and whether the
+ * account's approval covers it; `description` is the approved one. */
+export interface McpFunctionView {
+  function: string
+  tool: string
+  approved: boolean
+  description: string | null
+}
+
+/** One account of one project. `workspace` and `rootLabel` are empty on a
+ * dashboard bound to one project. */
+export interface McpAccountView {
+  workspace: string
+  rootLabel: string
+  account: string
+  approvedAtMs: number | null
+  functions: McpFunctionView[]
+}
+
+/** The `mcp` block of a connector detail. */
+export interface McpConnectorView {
+  transport: string
+  protocol: string
+  /** stdio: the program as the definition writes it. */
+  command: string | null
+  /** http: the endpoint template as written. */
+  url: string | null
+  /** http: the connector-level auth kind, or `none`. */
+  auth: string | null
+  /** stdio: the names of the variables the server gets. */
+  env: string[]
+  accounts: McpAccountView[]
+  pinsError: string | null
+}
+
+export type McpToolStatus = 'pinned' | 'unpinned' | 'changed' | 'missing'
+
+/** The fields of the server's `RowView`. */
+export interface McpToolRow {
+  function: string
+  tool: string
+  status: McpToolStatus
+  title: string | null
+  description: string | null
+  pinnedDescription: string | null
+  members: string[]
+  annotations: unknown
+  inputSchema: unknown
+}
+
+/** The fields of the server's `ServerView`. */
+export interface McpServerView {
+  command: string
+  program: string
+  launcher: string | null
+  status: string
+}
+
+/** The fields of the server's `ListingView`. */
+export interface McpToolListing {
+  connector: string
+  account: string
+  era: string
+  cleanup: string | null
+  server: McpServerView
+  rows: McpToolRow[]
+  unmapped: string[]
+}
+
+export type McpToolsResult =
+  | { ok: true; listing: McpToolListing }
+  | { ok: false; error: HealthcheckError; warnings: string[] }
+
+interface McpFunctionDto {
+  function: string
+  tool: string
+  approved: boolean
+  description?: string | null
+}
+
+interface McpAccountDto {
+  workspace: string
+  root_label: string
+  account: string
+  approved_at_ms?: number | null
+  functions: McpFunctionDto[]
+}
+
+interface McpConnectorDto {
+  transport: string
+  protocol: string
+  command?: string | null
+  url?: string | null
+  auth?: string | null
+  env?: string[]
+  accounts: McpAccountDto[]
+  pins_error?: string
+}
+
+const toMcpConnector = (d: McpConnectorDto): McpConnectorView => ({
+  transport: d.transport,
+  protocol: d.protocol,
+  command: d.command ?? null,
+  url: d.url ?? null,
+  auth: d.auth ?? null,
+  env: d.env ?? [],
+  accounts: d.accounts.map((a) => ({
+    workspace: a.workspace,
+    rootLabel: a.root_label,
+    account: a.account,
+    approvedAtMs: a.approved_at_ms ?? null,
+    functions: a.functions.map((f) => ({
+      function: f.function,
+      tool: f.tool,
+      approved: f.approved,
+      description: f.description ?? null,
+    })),
+  })),
+  pinsError: d.pins_error ?? null,
+})
+
+interface McpToolRowDto {
+  function: string
+  tool: string
+  status: McpToolStatus
+  title?: string | null
+  description?: string | null
+  pinned_description?: string | null
+  members?: string[]
+  annotations?: unknown
+  input_schema?: unknown
+}
+
+interface McpToolListingDto {
+  connector: string
+  account: string
+  era: string
+  cleanup?: string | null
+  server: McpServerView
+  rows: McpToolRowDto[]
+  unmapped?: string[]
+}
+
+type McpToolsDto =
+  | { ok: true; listing: McpToolListingDto }
+  | { ok: false; error: HealthcheckError; warnings?: string[] }
+
+/** The listing answer as the page reads it. A failed listing keeps its
+ * `warnings`: a rotated refresh token is said even when the listing then
+ * failed. */
+export const toMcpToolsResult = (d: McpToolsDto): McpToolsResult =>
+  d.ok ? { ok: true, listing: toMcpListing(d.listing) } : { ok: false, error: d.error, warnings: d.warnings ?? [] }
+
+const toMcpListing = (d: McpToolListingDto): McpToolListing => ({
+  connector: d.connector,
+  account: d.account,
+  era: d.era,
+  cleanup: d.cleanup ?? null,
+  server: {
+    command: d.server.command,
+    program: d.server.program,
+    launcher: d.server.launcher ?? null,
+    status: d.server.status,
+  },
+  rows: d.rows.map((r) => ({
+    function: r.function,
+    tool: r.tool,
+    status: r.status,
+    title: r.title ?? null,
+    description: r.description ?? null,
+    pinnedDescription: r.pinned_description ?? null,
+    members: r.members ?? [],
+    annotations: r.annotations ?? null,
+    inputSchema: r.input_schema ?? null,
+  })),
+  unmapped: d.unmapped ?? [],
+})
+
+/** POST /api/connectors/{name}/mcp-tools/{account}: the live listing of an
+ * approved account, in the project `workspace` names (left out when empty).
+ * A signed-in session only; the server writes nothing. A refusal of the
+ * listing itself arrives as `ok: false` with HTTP 200. */
+export const listMcpTools = (name: string, account: string, workspace = '') =>
+  requestJson<McpToolsDto>(
+    `${conn(name)}/mcp-tools/${encodeURIComponent(account)}${qs({ workspace })}`,
+    { method: 'POST', headers: jsonHeaders, body: JSON.stringify({}) },
+  ).then(toMcpToolsResult)
+
+/** A connector detail with the `mcp` block of an MCP connector. */
+export type ConnectorDetailWithMcp = ConnectorDetail & { mcp?: McpConnectorView }
+
 interface ConnectorDetailDto {
   name: string
   version: string
@@ -97,11 +293,12 @@ interface ConnectorDetailDto {
   body_md: string
   functions: ConnectorFunctionDto[]
   accounts: ConnectorAccountDto[]
+  mcp?: McpConnectorDto
 }
 
 export const fetchConnector = (name: string, workspace = '') =>
   getJson<ConnectorDetailDto>(`${conn(name)}${qs({ workspace })}`).then(
-    (d): ConnectorDetail => ({
+    (d): ConnectorDetailWithMcp => ({
       name: d.name,
       version: d.version,
       installed: d.installed,
@@ -111,6 +308,7 @@ export const fetchConnector = (name: string, workspace = '') =>
       bodyMd: d.body_md,
       functions: d.functions.map(toConnectorFunction),
       accounts: d.accounts.map(toConnectorAccount),
+      ...(d.mcp ? { mcp: toMcpConnector(d.mcp) } : {}),
     }),
   )
 

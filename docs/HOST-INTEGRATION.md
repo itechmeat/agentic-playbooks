@@ -15,11 +15,60 @@ Confirmed for Claude Code (measured on 2.1.x, July 2026, with controlled headles
 
 Other hosts (opencode, Hermes, Pi) are still unverified; treat tier-0 delivery there as a hypothesis until checked the same way.
 
-The measured delivery contract above is scoped twice over: per host and per MCP spec revision. What is confirmed for Claude Code is the contract of the pre-2026-07-28 revisions, because it was measured through the `instructions` field of the `initialize` response, and MCP spec revision 2026-07-28 moves the protocol to a stateless core in which a client opens with `server/discover` instead. What one `apb mcp` binary (rmcp 3.9.0) serves on each revision is pinned by automated wire tests (`crates/apb-cli/tests/suite/mcp_revision_test.rs`): a client of an older revision (2025-06-18, 2025-11-25) gets `initialize` with tier 0 in `instructions` and a `tools/list` with no `ttlMs`, `cacheScope` or `resultType`; a 2026-07-28 client gets `server/discover` with tier 0 in `instructions`, derived from the same `get_info`, and a `tools/list` with `resultType: complete`, `ttlMs: 0` and `cacheScope: private`, which rmcp fills in for that revision only. The wire tests prove what the server sends, not what a host does with it: the per-host matrix (which hosts speak 2026-07-28, how they consume `server/discover`) and the tier-0 size limit, session-start injection and offer-to-save trigger on 2026-07-28 are not measured yet (issue #57), so the measured contract above stays the pre-2026-07-28 one. The standing block that `apb init` writes into CLAUDE.md and AGENTS.md is protocol-independent and does not travel through the handshake, so it is the fallback channel that survives the transition and stays the guaranteed delivery path across revisions. See the protocol compatibility section in `docs/MCP.md` for the detail and the open host-gated items.
+The measured delivery contract above is scoped twice over: per host and per MCP spec revision. What is confirmed for Claude Code is the contract of the pre-2026-07-28 revisions, because it was measured through the `instructions` field of the `initialize` response, and MCP spec revision 2026-07-28 moves the protocol to a stateless core in which a client opens with `server/discover` instead. What one `apb mcp` binary (rmcp 3.9.0) serves on each revision is pinned by automated wire tests (`crates/apb-cli/tests/suite/mcp_revision_test.rs`): a client of an older revision (2025-06-18, 2025-11-25) gets `initialize` with tier 0 in `instructions` and a `tools/list` with no `ttlMs`, `cacheScope` or `resultType`; a 2026-07-28 client gets `server/discover` with tier 0 in `instructions`, derived from the same `get_info`, and a `tools/list` with `resultType: complete`, `ttlMs: 0` and `cacheScope: private`, which rmcp fills in for that revision only. The wire tests prove what the server sends, not what a host does with it: the per-host matrix (which hosts speak 2026-07-28, how they consume `server/discover`) and the tier-0 size limit, session-start injection and offer-to-save trigger on 2026-07-28 are not measured yet (issue #57; the procedure is in "Host matrix on the 2026-07-28 revision (issue 57)" below), so the measured contract above stays the pre-2026-07-28 one. The standing block that `apb init` writes into CLAUDE.md and AGENTS.md is protocol-independent and does not travel through the handshake, so it is the fallback channel that survives the transition and stays the guaranteed delivery path across revisions. See the protocol compatibility section in `docs/MCP.md` for the detail and the open host-gated items.
 
 ### Opt-in catalog ranking and tier 0
 
 Decision-model catalog ranking (`playbook_catalog` with a `query`, see `docs/DECISIONS.md` "Catalog ranking" and `docs/MCP.md`) adds no tier-0 bytes and never changes the `instructions` text, whether it is enabled or not: the budget above is nearly spent, and a rule the host follows on every task would cost every user for a feature few enable. It is described in the tool's own description and input schema only. Since tool descriptions are deferred on Claude Code, a host passes `query` once it has loaded the tool's schema; without a `query` the catalog behaves exactly as before, so a host that never passes one loses nothing.
+
+## Host matrix on the 2026-07-28 revision (issue 57)
+
+The measurements above are of the pre-2026-07-28 revisions. This is the procedure that measures each host on the 2026-07-28 revision. It needs the real host CLIs and model calls on the owner's login, so nothing in the repository runs it; issue 57 closes when the owner has filled the results table below.
+
+### Hosts
+
+1. Claude Code on its default revision.
+2. Claude Code with `MCP_PROTOCOL_NEGOTIATION=legacy`.
+3. Codex.
+4. opencode.
+5. Hermes.
+
+### What to record per host
+
+1. The negotiated revision: `server/discover` (2026-07-28) or `initialize` (an older revision), read from the host's MCP debug log or from the first request line `apb mcp` logs.
+2. Whether the tier-0 `instructions` text, 1948 bytes as shipped, arrives whole or cut, and where a cut text ends. This tests that one size only: it does not measure a host's limit, so record the size tested, not a limit.
+3. Whether the offer-to-save rule fires on a first-time task that is recurring by nature, with and without the standing block in the project's memory files.
+4. Whether `supervisor_wait_event` long-polls past 60 s without the host cutting the call.
+
+### Starting each host against `apb mcp`
+
+Use a scratch project with nothing of your own in it:
+
+```text
+mkdir -p <scratch> && cd <scratch> && apb init --standing-block no
+```
+
+Register `apb mcp` with the host the way its own documentation says (for a host apb setup knows, `apb setup plan --project <scratch>` prints the step), then start it headless with one prompt and its debug log on:
+
+```text
+<host> <headless flag> --model <model> "<prompt>"
+```
+
+For the "with standing block" column, add the block with `apb init --standing-block yes` and run the first prompt again in a fresh session.
+
+Run three prompts per host: one that names a recurring task once ("every morning I collect the open issues into a note; do it now"), one that asks for the playbook catalog, and one that waits on a supervised run longer than 60 s. Keep the host's version string with the log.
+
+### Results
+
+| Host | Revision negotiated | Tier 0 (1948 bytes) arrives whole, or where it ends | Offer to save fires (without / with standing block) | `supervisor_wait_event` past 60 s | Measured on (date, host version) |
+|---|---|---|---|---|---|
+| Claude Code (default) | | | | | |
+| Claude Code (`MCP_PROTOCOL_NEGOTIATION=legacy`) | | | | | |
+| Codex | | | | | |
+| opencode | | | | | |
+| Hermes | | | | | |
+
+When every row is filled, the measured contract above is extended to the 2026-07-28 revision host by host, and issue 57 closes.
 
 ## Standing instruction in CLAUDE.md / AGENTS.md
 

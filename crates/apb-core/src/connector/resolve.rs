@@ -458,11 +458,15 @@ pub struct ConnectorFacts {
     /// Names of its functions flagged `untrusted_output: true`, in manifest
     /// order (V187 suggests marking a binding that grants one).
     pub untrusted_output_functions: Vec<String>,
-    /// The transport name (`Some("stdio")` in this version) for a connector
+    /// The transport name (`Some("stdio")` or `Some("http")`) for a connector
     /// with an `mcp:` block; `None` otherwise (V300 to V302, V113).
     pub mcp_transport: Option<String>,
     /// `mcp::launcher_name` of the stdio `command`, for V301.
     pub mcp_launcher: Option<String>,
+    /// The `auth: { kind: header }` name of an http MCP connector when it
+    /// is one the transport sets itself (`mcp::reserved_http_header`), for
+    /// V303; `None` otherwise.
+    pub mcp_reserved_header: Option<String>,
     /// Set when the connector is installed on disk but its manifest no longer
     /// loads (`ConnectorDoc::from_yaml` rejected it). The other fields are then
     /// empty defaults: nothing could be extracted. The real case this catches
@@ -526,6 +530,17 @@ impl ConnectorFacts {
                 .and_then(|m| m.command.as_deref())
                 .and_then(super::mcp::launcher_name)
                 .map(str::to_string),
+            mcp_reserved_header: match (&doc.mcp, &doc.auth) {
+                // One `auth` block per connector: a `header` kind never
+                // meets `oauth2_refresh`, so `authorization` is free here.
+                (Some(m), Some(super::def::AuthSpec::Header { header, .. }))
+                    if m.transport == super::mcp::McpTransportKind::Http
+                        && super::mcp::reserved_http_header(header, false) =>
+                {
+                    Some(header.clone())
+                }
+                _ => None,
+            },
             ..Self::default()
         }
     }

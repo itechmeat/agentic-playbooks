@@ -292,8 +292,23 @@ fn close_mcp_into(err: &mut CallError, meta: &mut EventMeta) {
 /// Puts the call's warnings at the top level of the result JSON, ok or
 /// error, when there are any. Warnings are never journaled.
 fn add_warnings(value: &mut Value, warnings: &[String]) {
-    if !warnings.is_empty() {
-        value["warnings"] = json!(warnings);
+    // An error's own warnings (`CallError::warnings`) are already there:
+    // these join them, each once.
+    let mut all: Vec<String> = value["warnings"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|w| w.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    for w in warnings {
+        if !all.contains(w) {
+            all.push(w.clone());
+        }
+    }
+    if !all.is_empty() {
+        value["warnings"] = json!(all);
     }
 }
 
@@ -1317,6 +1332,7 @@ fn build_prepared(
             &secrets,
             &doc.name,
             &account_name,
+            crate::connector::oauth::TokenProxy::Caller,
         )?
     {
         if !function.scopes.is_empty() {
@@ -1332,22 +1348,22 @@ fn build_prepared(
         let minted = source
             .access_token(deadline, &redactions)
             .map_err(CallError::from)?;
-        if minted.rotated {
-            warnings.push(crate::connector::oauth::ROTATION_WARNING.to_string());
-        }
-        redactions.push(Redaction::new(minted.access.clone(), "oauth:access_token"));
-        if let Some(new) = &minted.new_refresh {
-            redactions.push(Redaction::new(new.clone(), "oauth:refresh_token"));
-        }
+        let fresh = crate::connector::oauth::adopt_minted(
+            &minted,
+            &mut |value, label| redactions.push(Redaction::new(value, label)),
+            &mut warnings,
+        );
         if !function.scopes.is_empty()
             && source.declared_scopes().is_none()
             && let Some(granted) = &minted.granted
         {
+            // After the mint: its rotation warning comes with the refusal.
             check_scopes(&function.scopes, granted).map_err(|missing| {
                 scope_error(function, &missing, granted, &doc.name, &account_name)
+                    .carrying(&warnings)
             })?;
         }
-        access = Some(minted.access);
+        access = Some(fresh);
         token_source = Some(source);
     }
 
@@ -1431,16 +1447,70 @@ fn build_prepared(
 /// redaction as a normal call - that live reachability probe is the point of
 /// the dashboard's probe button. Returns the same `{ "ok": bool, ... }` shape
 /// `execute` does; the bool mirrors `execute`'s ok hint.
-pub fn healthcheck(root: &Path, name: &str, account: &str) -> (Value, bool) {
-    if let Some(e) = guard_refusal() {
-        return (e.to_json(), false);
+///
+/// The connector is loaded once, and that definition both selects the
+/// branch and is the one executed. An MCP connector's healthcheck starts
+/// its approved program with the account's secrets, so `channel`, the
+/// caller's own channel, is decided there, on that definition, before any
+/// trust read or secret ([`crate::connector::mcp::pin::refuse_caller`]);
+/// a definition that does not load fails closed.
+pub fn healthcheck(
+    root: &Path,
+    name: &str,
+    account: &str,
+    channel: crate::decision_channel::DecisionChannel,
+) -> (Value, bool) {
+    match healthcheck_outcome(root, name, account, channel) {
+        HealthcheckOutcome::Answer(value, ok) => (value, ok),
+        HealthcheckOutcome::CallerRefused(e) => (e.to_json(), false),
     }
+}
+
+pub use crate::connector::mcp::pin::HealthcheckOutcome;
+
+/// [`healthcheck`] with the caller refusal kept apart.
+pub fn healthcheck_outcome(
+    root: &Path,
+    name: &str,
+    account: &str,
+    channel: crate::decision_channel::DecisionChannel,
+) -> HealthcheckOutcome {
+    let answer = |e: CallError| HealthcheckOutcome::Answer(e.to_json(), false);
+    if let Some(e) = guard_refusal() {
+        return answer(e);
+    }
+    // An MCP connector's caller is decided on the loaded definition before
+    // anything else of it is read: its healthcheck, its accounts.
+    let mut refused = None;
+    let loaded = LiveTarget::load_picking(root, name, Some(account), |doc| {
+        if doc.mcp.is_some()
+            && let Err(e) =
+                crate::connector::mcp::pin::refuse_caller(channel, "an MCP connector's healthcheck")
+        {
+            refused = Some(e.clone());
+            return Err(e);
+        }
+        doc.healthcheck.clone().ok_or_else(|| {
+            CallError::new(
+                CallErrorCode::Config,
+                format!("connector `{name}` declares no healthcheck"),
+            )
+        })
+    });
+    if let Some(e) = refused {
+        return HealthcheckOutcome::CallerRefused(e);
+    }
+    let live = match loaded {
+        Ok(live) => live,
+        Err(e) => return answer(e),
+    };
     // An MCP connector's healthcheck checks the pins without a tool call
     // (design D4 "Live calls outside a run").
-    if store::load(name).is_ok_and(|loaded| loaded.doc.mcp.is_some()) {
-        return crate::connector::mcp::pin::healthcheck(root, name, account);
+    if live.is_mcp() {
+        return crate::connector::mcp::pin::healthcheck(root, live, channel);
     }
-    answer_live(|| prepare_healthcheck(root, name, account))
+    let (value, ok) = answer_live(|| prepare_live(root, live, &json!({}), false, true));
+    HealthcheckOutcome::Answer(value, ok)
 }
 
 /// Prepares and dispatches a live call outside a run (healthcheck,
@@ -1486,29 +1556,6 @@ fn answer_live(prepare: impl FnOnce() -> Result<Prepared, CallError>) -> (Value,
         }
         Err(e) => (e.to_json(), false),
     }
-}
-
-/// Resolves the live connector + account for `healthcheck` and gates +
-/// renders its declared healthcheck function through the shared
-/// `prepare_play_call`, with no arguments (a healthcheck is a reachability
-/// probe, not a data call) and always live (never dry-run).
-fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepared, CallError> {
-    let loaded = store::load(name)
-        .map_err(|e| CallError::new(CallErrorCode::Config, format!("connector `{name}`: {e}")))?;
-    let hc_name = loaded.doc.healthcheck.clone().ok_or_else(|| {
-        CallError::new(
-            CallErrorCode::Config,
-            format!("connector `{name}` declares no healthcheck"),
-        )
-    })?;
-    // A healthcheck is always live (never dry-run) and takes no arguments,
-    // per the healthcheck contract - it is a reachability probe, not a data
-    // call. Delegates account resolution, trust gating, and rendering to
-    // the shared playground preparation path so the two live-call callers
-    // never duplicate that logic. `full: true` keeps the probe's existing
-    // behavior: a reachability check shows the raw body, never a
-    // `response_pick` projection.
-    prepare_play_call(root, name, Some(account), &hc_name, &json!({}), false, true)
 }
 
 /// Live playground call (dashboard slice 6, spec
@@ -1609,6 +1656,20 @@ fn prepare_play_call(
     full: bool,
 ) -> Result<Prepared, CallError> {
     let live = LiveTarget::load(root, name, account, function_name)?;
+    prepare_live(root, live, args, dry_run, full)
+}
+
+/// Gates and renders the function of a loaded live target. A healthcheck
+/// is always live (never dry-run) and takes no arguments, a reachability
+/// probe; `full: true` keeps its raw body, never a `response_pick`
+/// projection.
+fn prepare_live(
+    root: &Path,
+    live: LiveTarget,
+    args: &Value,
+    dry_run: bool,
+    full: bool,
+) -> Result<Prepared, CallError> {
     if !dry_run {
         live.require_trust()?;
     }

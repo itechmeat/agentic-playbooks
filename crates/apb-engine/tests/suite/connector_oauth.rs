@@ -645,6 +645,51 @@ fn a_rotated_refresh_token_warns_and_is_redacted() {
     );
 }
 
+/// A second call in the same process takes the cached access token, and
+/// the cache entry still carries the refresh token its mint rotated: an
+/// answer that echoes it is redacted and the rotation warning comes again,
+/// exactly as on the call that minted (the stored refresh token is still
+/// the stale one). One token request for both calls proves the hit.
+#[test]
+fn a_cached_token_keeps_the_rotated_refresh_redacted_and_warned() {
+    let new_refresh = "rotated-refresh-cached-24680";
+    let echo = || Reply::Respond(200, json!({ "id": "x", "echo": new_refresh }).to_string());
+    let server = spawn_script(vec![
+        Reply::Respond(
+            200,
+            json!({
+                "access_token": ACCESS_A,
+                "expires_in": 3600,
+                "scope": format!("{SCOPE_A} {SCOPE_B}"),
+                "refresh_token": new_refresh,
+            })
+            .to_string(),
+        ),
+        echo(),
+        echo(),
+    ]);
+    let rig = rig(&server.base_url, None);
+    for round in ["minted", "cached"] {
+        let (value, ok) = rig.call("read_thing", json!({}));
+        assert!(ok, "{round}: {value}");
+        assert_eq!(
+            value["body"]["echo"], "[redacted:oauth:refresh_token]",
+            "{round}: {value}"
+        );
+        assert!(!value.to_string().contains(new_refresh), "{round}: {value}");
+        assert!(
+            value["warnings"].to_string().contains("refresh token"),
+            "{round}: {value}"
+        );
+    }
+    let token_requests = server
+        .requests()
+        .iter()
+        .filter(|r| request_path(r) == "/token")
+        .count();
+    assert_eq!(token_requests, 1, "the second call hit the cache");
+}
+
 #[test]
 fn an_echoed_access_token_is_redacted() {
     let server = spawn_script(vec![

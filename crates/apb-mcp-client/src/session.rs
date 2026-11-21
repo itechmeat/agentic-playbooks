@@ -18,6 +18,13 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use std::path::{Path, PathBuf};
 
+use std::sync::{Arc, Mutex};
+
+use rmcp::transport::streamable_http_client::{
+    StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+};
+
+use crate::http::{HttpFault, HttpServer, UreqClient};
 use crate::stdio::{EnvValue, StartFrom, StdioServer};
 use crate::tap::LineTap;
 
@@ -28,6 +35,9 @@ pub const REPLY_CLEANUP_ALLOWANCE: Duration = Duration::from_secs(7);
 
 pub enum Server {
     Stdio(StdioServer),
+    /// Reached over Streamable HTTP in the modern revision only; nothing
+    /// is started.
+    Http(HttpServer),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +98,8 @@ pub enum FailureKind {
     /// bytes that were hashed (or no regular file) right before the spawn;
     /// nothing was started.
     ProgramChanged,
+    /// The server refused the authorization (HTTP 401 or 403).
+    Auth { status: u16 },
 }
 
 /// What the close saw of the server's process group after the server was
@@ -115,7 +127,8 @@ pub enum Ended {
     /// The kill was sent through the handle but `wait` did not return
     /// within its bound; whether the process is gone is not known.
     Unconfirmed,
-    /// No process was started (a spawn failure) or `close` already ran.
+    /// No process was started (a spawn failure, an HTTP server) or `close`
+    /// already ran.
     NotStarted,
 }
 
@@ -211,7 +224,6 @@ impl Session {
         client_version: &str,
         deadline: Instant,
     ) -> Result<Session, Failure> {
-        let Server::Stdio(server) = server;
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (commands, inbox) = unbounded_channel();
         let info = ClientConfig::new(
@@ -398,7 +410,7 @@ fn join_bounded(worker: std::thread::JoinHandle<()>) {
 }
 
 fn run_worker(
-    server: StdioServer,
+    server: Server,
     lifecycle: Lifecycle,
     info: ClientConfig,
     deadline: Instant,
@@ -482,7 +494,20 @@ struct Conn {
     tap: LineTap,
     era: Era,
     workdir: Option<WorkDir>,
+    /// The HTTP client's shared state, for an HTTP session.
+    http: Option<HttpParts>,
 }
+
+/// What the session shares with its HTTP client: the deadline of the
+/// operation in progress and the client's latest fault.
+struct HttpParts {
+    deadline: Arc<Mutex<Instant>>,
+    fault: Arc<Mutex<Option<HttpFault>>>,
+}
+
+/// The refusal of an HTTP server outside the modern revision.
+const HTTP_MODERN_ONLY: &str =
+    "an MCP server over HTTP is reached in the stateless 2026-07-28 revision only";
 
 /// The protocol versions this client speaks, the only strings an `Era`
 /// holds. A server's version is compared with them before anything keeps,
@@ -528,10 +553,81 @@ impl Conn {
             tap: LineTap::new(),
             era: Era::Legacy(SUPPORTED_VERSIONS[1]),
             workdir,
+            http: None,
         }
     }
 
     async fn open(
+        server: Server,
+        lifecycle: Lifecycle,
+        info: ClientConfig,
+        deadline: Instant,
+        tap: LineTap,
+    ) -> Result<Conn, Box<(Failure, Conn)>> {
+        match server {
+            Server::Stdio(server) => Conn::open_stdio(server, lifecycle, info, deadline, tap).await,
+            Server::Http(server) => Conn::open_http(server, lifecycle, info, deadline, tap).await,
+        }
+    }
+
+    /// Reaches an HTTP server: apb's `UreqClient` under rmcp's Streamable
+    /// HTTP worker, in the modern revision only, with the stdio
+    /// handshake's checks. Nothing is started, so the program-start guard
+    /// is not asked.
+    async fn open_http(
+        mut server: HttpServer,
+        lifecycle: Lifecycle,
+        info: ClientConfig,
+        deadline: Instant,
+        tap: LineTap,
+    ) -> Result<Conn, Box<(Failure, Conn)>> {
+        let mut conn = Conn::new(None, None);
+        conn.tap = tap;
+        if lifecycle != Lifecycle::Modern {
+            return Err(Box::new((
+                failure(
+                    FailureKind::Unsupported,
+                    HTTP_MODERN_ONLY,
+                    Ended::NotStarted,
+                ),
+                conn,
+            )));
+        }
+        if Instant::now() >= deadline {
+            return Err(Box::new((
+                failure(
+                    FailureKind::Timeout,
+                    "the deadline passed before the MCP server was reached; nothing was sent",
+                    Ended::NotStarted,
+                ),
+                conn,
+            )));
+        }
+        let parts = HttpParts {
+            deadline: Arc::new(Mutex::new(deadline)),
+            fault: Arc::new(Mutex::new(None)),
+        };
+        let client = UreqClient::new(
+            &mut server,
+            parts.deadline.clone(),
+            conn.tap.clone(),
+            parts.fault.clone(),
+        );
+        conn.http = Some(parts);
+        let config = StreamableHttpClientTransportConfig::with_uri(server.url.as_str())
+            .max_concurrent_requests(1)
+            .reinit_on_expired_session(false);
+        let transport = StreamableHttpClientTransport::with_client(client, config);
+        match conn.handshake(transport, lifecycle, info, deadline).await {
+            Ok(()) => Ok(conn),
+            Err((kind, message)) => {
+                let ended = conn.close().await;
+                Err(Box::new((failure(kind, message, ended), conn)))
+            }
+        }
+    }
+
+    async fn open_stdio(
         server: StdioServer,
         lifecycle: Lifecycle,
         info: ClientConfig,
@@ -570,6 +666,30 @@ impl Conn {
         };
         let tap = conn.tap.clone();
         let transport = (tap.reader(stdout), tap.writer(stdin));
+        match conn.handshake(transport, lifecycle, info, deadline).await {
+            Ok(()) => Ok(conn),
+            Err(refused) => {
+                let ended = conn.close().await;
+                Err(Box::new((failure(refused.0, refused.1, ended), conn)))
+            }
+        }
+    }
+
+    /// The handshake in `lifecycle` over either transport, with the
+    /// version check, the response cache turned off; `Err` with the
+    /// failure's kind and message (the caller closes).
+    async fn handshake<T, E, A>(
+        &mut self,
+        transport: T,
+        lifecycle: Lifecycle,
+        info: ClientConfig,
+        deadline: Instant,
+    ) -> Result<(), (FailureKind, String)>
+    where
+        T: rmcp::transport::IntoTransport<RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let conn = self;
         let (mode, info) = match lifecycle {
             Lifecycle::Auto => (
                 ClientLifecycleMode::Auto {
@@ -617,7 +737,7 @@ impl Conn {
                         } else {
                             Era::Legacy(v)
                         };
-                        return Ok(conn);
+                        return Ok(());
                     }
                     Some(None) => (FailureKind::Unsupported, VERSION_UNSUPPORTED.to_string()),
                     None => (
@@ -635,8 +755,33 @@ impl Conn {
                 ),
             },
         };
-        let ended = conn.close().await;
-        Err(Box::new((failure(refused.0, refused.1, ended), conn)))
+        Err(refused)
+    }
+
+    /// Moves the deadline the HTTP client's next request runs under.
+    fn set_deadline(&self, deadline: Instant) {
+        if let Some(parts) = &self.http
+            && let Ok(mut d) = parts.deadline.lock()
+        {
+            *d = deadline;
+        }
+    }
+
+    /// The HTTP client's latest fault, mapped (design D7 "The client" item
+    /// 5): `Auth` is `Auth`, `TooLarge` is `TooLarge`, every other fault
+    /// `Transport` (an elapsed deadline `Timeout`), its message apb's own.
+    fn http_fault(&self) -> Option<(FailureKind, String)> {
+        let fault = self.http.as_ref()?.fault.lock().ok()?.clone()?;
+        let kind = match &fault {
+            HttpFault::Auth { status } => FailureKind::Auth { status: *status },
+            HttpFault::TooLarge(_) => FailureKind::TooLarge,
+            HttpFault::Timeout => FailureKind::Timeout,
+            HttpFault::NotSent
+            | HttpFault::Transport(_)
+            | HttpFault::Status(_)
+            | HttpFault::Invalid(_) => FailureKind::Transport,
+        };
+        Some((kind, fault.to_string()))
     }
 
     fn handshake_failure(
@@ -677,6 +822,7 @@ impl Conn {
         let Some(service) = self.service.as_ref() else {
             return Err(closed());
         };
+        self.set_deadline(deadline);
         let pages = async {
             let mut tools: Vec<Value> = Vec::new();
             let mut cursor: Option<String> = None;
@@ -783,6 +929,9 @@ impl Conn {
     /// (`TooLarge`) or a line it could not read completely (`Transport`,
     /// `mcp_message_invalid:`; nothing of that line reached rmcp).
     fn read_refused(&self) -> Option<(FailureKind, String)> {
+        if let Some(refused) = self.http_fault() {
+            return Some(refused);
+        }
         if let Some(m) = self.tap.too_large() {
             return Some((FailureKind::TooLarge, m));
         }
@@ -810,6 +959,7 @@ impl Conn {
         let Some(service) = self.service.as_ref() else {
             return Err(CallFailure::NotSent(closed()));
         };
+        self.set_deadline(deadline);
         let handed_before = self.tap.calls_handed();
         let params = CallToolRequestParams::new(name).with_arguments(arguments);
         let answered = tokio::time::timeout_at(
@@ -821,6 +971,11 @@ impl Conn {
             // Seal first, then compare: see the invariant above.
             let handed = self.tap.seal() != handed_before;
             let (kind, message) = match (self.read_refused(), self.tap.refused()) {
+                // A refused authorization keeps its kind; every other
+                // refusal of the reader or the client is a transport
+                // failure naming its text.
+                (Some((k @ FailureKind::Auth { .. }, m)), _) => (k, m),
+                (Some((FailureKind::Timeout, m)), _) => (FailureKind::Timeout, m),
                 (Some((_, m)), _) => (FailureKind::Transport, m),
                 // The writer refused a line it could not classify: none
                 // of it was forwarded, and the seal decides as always.
@@ -883,6 +1038,16 @@ impl Conn {
     /// group to be empty. A reap that does not come in time answers
     /// `Unconfirmed` and leaves the child to `reap_late`.
     async fn close(&mut self) -> Ended {
+        if self.http.is_some() {
+            // No process: the gate is sealed, the service cancelled and
+            // the transport dropped; a POST still on its blocking thread
+            // ends at its own deadline. Nothing claims a server stopped.
+            self.tap.seal();
+            if let Some(service) = self.service.take() {
+                let _ = tokio::time::timeout(EXIT_WAIT, service.cancel()).await;
+            }
+            return Ended::NotStarted;
+        }
         let Some(mut child) = self.child.take() else {
             return Ended::NotStarted;
         };
@@ -1198,7 +1363,7 @@ mod tests {
         drop(answer);
         let (_commands, inbox) = unbounded_channel();
         run_worker(
-            stub_server(&stub),
+            Server::Stdio(stub_server(&stub)),
             Lifecycle::Auto,
             info(),
             Instant::now() + Duration::from_secs(10),

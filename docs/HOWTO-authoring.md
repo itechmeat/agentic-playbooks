@@ -678,6 +678,7 @@ nodes:
 | V300 | warning | a binding of an MCP connector names no `functions` list, so it grants every tool the manifest maps (`functions: read_only` counts as a list) |
 | V301 | warning | the connector's stdio `command` is an interpreter or a launcher (`node`, `python3`, `sh`, `npx`, `uvx`, `docker` and the like, a versioned name such as `python3.12` included): its approval covers that program file only, not the script or package it runs; point `command` at the installed server program |
 | V302 | error | an MCP connector at an engine site (the baseline check, the follow-up check or a list item check): those reads run from the drive or a waker, where this version starts no MCP server |
+| V303 | error | an http MCP connector whose `auth` header names a header the HTTP transport sets itself (`mcp-protocol-version`, `mcp-method`, `mcp-name`, `content-type`, `accept`, `host`, `content-length`, `transfer-encoding`, `mcp-session-id`, `last-event-id`, and `authorization` beside a minted token): name another header |
 
 An MCP connector on a node with `isolation` is refused by V113, as every
 connector is.

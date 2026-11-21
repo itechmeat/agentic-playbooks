@@ -19,6 +19,7 @@ compile_error!(
 apb_core::isolate_test_config!(std::env::temp_dir());
 
 mod frame;
+mod http;
 mod session;
 mod stdio;
 mod tap;
@@ -27,6 +28,7 @@ mod tap;
 pub mod testing;
 
 pub use frame::{ArgumentsRefusal, MAX_ARGUMENT_BYTES, MAX_ARGUMENT_DEPTH, check_arguments};
+pub use http::HttpServer;
 pub use session::{
     CallFailure, Ended, Era, Failure, FailureKind, GroupEnd, Lifecycle, REPLY_CLEANUP_ALLOWANCE,
     SUPPORTED_VERSIONS, Server, Session, ToolAnswer,

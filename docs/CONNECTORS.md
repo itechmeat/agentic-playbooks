@@ -173,7 +173,9 @@ requests.
 Some providers hand out a new refresh token together with a new access
 token and retire the old one soon after. apb stores no tokens, so it
 cannot keep the new one for you: the result carries a `warnings` entry
-when this happens, and the fix is to keep the newest refresh token
+when this happens, again on every later call that reuses the access
+token minted then (the stored refresh token is still the old one), and
+on an error that follows the mint as well; the fix is to keep the newest refresh token
 yourself, usually by making the account's `refresh_token` field a
 `{{cmd:...}}` helper that reads it from your password manager and is
 rotated there. Until the store holds the newest one, the previous value
@@ -205,6 +207,19 @@ the limit is hit. On the `imap` connector the same machinery arrives as
 `auth_method: oauth2`: its account's `oauth_*` fields form the same kind
 of auth block, so a provider that refuses app passwords needs no external
 token helper.
+
+An MCP connector over HTTP uses the same `oauth2_refresh` block and the
+same `apb connector oauth` consent; like any connector it needs a
+`healthcheck` function for the consent to load it. The authorization
+server is the one the definition and the account name (no discovery); an
+author who needs `resource` on the authorization request puts it in
+`authorize_params`. After storing the printed refresh token, a person
+approves the account and its tools again when the secret reference
+changed. Its token request ignores the calling process's proxy variables.
+Every listing of such an account (`apb connector tools`, the dashboard's
+"List tools", the approval's listing) and its healthcheck mint an access
+token; a rotated refresh token is not stored, so listing can invalidate
+the stored one, and each of them carries the rotation warning.
 
 ## Approving trust
 
@@ -513,9 +528,9 @@ instead of HTTP endpoints. apb starts the server and calls its tools itself,
 through `apb connector call`, exactly as it makes an HTTP call: the grant,
 `max_calls`, the trust approvals, secret scrubbing, the `connector_call`
 journal entry and the send ledger all apply. The agent never gets the
-server (below). This version speaks stdio only: `transport: http` is
-refused when the manifest loads ("mcp transport `http` is not supported by
-this apb").
+server (below). A server is a program apb starts (`transport: stdio`) or
+an HTTPS endpoint apb posts to (`transport: http`, Streamable HTTP of the
+2026-07-28 revision; see "A server over HTTP" below).
 
 ### The manifest
 
@@ -538,7 +553,7 @@ functions:
 
 The `mcp:` block:
 
-- `transport`: `stdio`.
+- `transport`: `stdio` (below) or `http` (see "A server over HTTP").
 - `command`: a literal program, an absolute path or a bare name, with no
   placeholder. A bare name is looked up once, when a person approves an
   account (below), never at call time.
@@ -566,8 +581,9 @@ the tool, not to the program. No control character may appear in
 `command`, an `args` entry or an `env` name or value.
 
 A connector with an `mcp:` block holds only `mcp` and `mock` functions, and
-an `mcp:` block exactly when it has an `mcp` function. It sets no `auth`,
-`webhook` or `error_when`. An mcp function takes the fields every function
+an `mcp:` block exactly when it has an `mcp` function. It sets no
+`webhook` or `error_when`, and a stdio one no `auth` ("connector `<c>` has
+a stdio `mcp:` block and must not set `auth`"). An mcp function takes the fields every function
 has (`name`, `description`, `args_schema`, `examples`, `read_only`,
 `irreversible`, `idempotency`, `response_pick`, `timeout_sec`,
 `untrusted_output`) and none of the HTTP fields (`query`, `headers`, `body`,
@@ -635,6 +651,100 @@ functions:
 A retry of `add_note` whose answer was lost finds the note by its marker
 instead of adding a second one. Grant `delete_note` only to a node that
 runs after a `human_review` gate; V73 refuses that gate's `auto_decide`.
+
+### A server over HTTP
+
+A hosted MCP server is reached over Streamable HTTP: one POST per
+message to one endpoint, in the stateless 2026-07-28 revision only. Its
+authorization is the connector-level `auth:` block every HTTP connector
+uses, of kind `header` or `oauth2_refresh`:
+
+```yaml
+name: crm-mcp
+version: 0.1.0
+healthcheck: whoami
+mcp:
+  transport: http
+  url: "https://{{account.server_host}}/mcp"
+  protocol: modern
+auth:
+  kind: header
+  header: X-Api-Key
+  value_template: "{{secret.token}}"
+account_fields:
+  - { name: server_host, required: true }
+  - { name: token, required: true, secret: true }
+identity: { function: whoami, path: id }
+functions:
+  - { name: whoami, description: The user the server acts as, read_only: true, mcp: { tool: whoami } }
+  - name: add_note
+    description: Add a note to a contact
+    mcp: { tool: add_note }
+    args_schema: { type: object, properties: { contact: { type: string }, body: { type: string } }, required: [contact, body] }
+    idempotency: { mode: none }
+```
+
+The rules of an http block:
+
+- `url` is required and `command`, `args` and `env` are refused. Its
+  literal text before the first placeholder starts with `https://`, so
+  the scheme is the definition's and no account field can choose it; the
+  host, port and path may hold `{{account.*}}` placeholders only. A
+  plaintext `http://` endpoint is refused on every host, the loopback and
+  `localhost` included: the endpoint receives a secret on every call, and
+  its peer is authenticated by web PKI on every call (certificate
+  verification is always on). `url: "{{account.server_url}}"` is refused
+  for that reason.
+- `protocol: modern` is required.
+- `auth` takes `header` or `oauth2_refresh` only. `query` and `path`
+  would put the credential in the URL, which the MCP authorization rules
+  forbid; `basic` is not supported yet. A `header` auth may not name a
+  header the transport sets itself (`mcp-protocol-version`, `mcp-method`,
+  `mcp-name`, `content-type`, `accept`, `host`, `content-length`,
+  `transfer-encoding`, `mcp-session-id`, `last-event-id`, and `authorization` beside a minted token): V303.
+
+On every call, listing and approval, apb renders the endpoint (and, for
+`oauth2_refresh`, the token URL) from the account's non-secret fields and
+checks it before any secret is resolved: https only, no userinfo, no query
+and no fragment, no control character or whitespace in what an account
+field put there. A refused endpoint or token URL runs no `{{cmd:...}}`
+helper and sends nothing. The request carries no proxy the calling process
+names and follows no redirect; the token request of an MCP connector
+ignores the caller's proxy variables too. Headers come only from the
+definition and the account, plus the protocol headers the transport sets.
+
+How a pin binds an HTTP server, in plain words: the approval records the
+connector definition, the account, the rendered endpoint and token URL
+(as one endpoint digest) and every tool. A call compares the same four
+before anything leaves; an account that now names another host, or a
+record whose endpoint differs, is refused `mcp_server_changed`. The pin
+covers the URL, not an address: a name that resolves somewhere else gets
+nothing unless that peer holds the name's certificate.
+
+With `oauth2_refresh` the access token is minted after the binding passed
+and sent as `Authorization: Bearer`. A 401 while connecting or listing
+renews the token once and reconnects once with the new token (the old one
+is never sent again); both tokens are scrubbed from everything apb keeps.
+A 401 or 403 on the `tools/call` itself is never retried: for a write
+whether the tool acted is not known, so it settles `unknown`.
+
+Every answer, a JSON body or each event of an event stream, is read whole
+by the same strict reader as a stdio line before anything of it is used:
+one JSON-RPC object, no member named twice, no byte order mark, nothing
+around it. A body or event that is not a frame ends the session; over
+HTTP no line is ever dropped as log text. An event stream is read up to
+the event that answers the request and the connection is then closed. A
+server that answers with a session id, or whose tools carry `x-mcp-header`
+annotations, is refused (header annotations are not supported over HTTP
+yet). Every failure of a write after the call was handed over (a status,
+a broken stream, a refused frame, the deadline) settles `unknown`; only a
+request apb never started is `not_sent`.
+
+Not supported yet: servers on an older revision over HTTP (sessions),
+authorization discovery and the `resource` parameter on the token request,
+dynamic client registration, a proxy or an extra certificate authority or
+certificate pinning, the `basic`, `query` and `path` auth kinds, header
+annotations, and reusing a connection across calls.
 
 ### One server per call
 
@@ -924,6 +1034,42 @@ message starts with the code, while `error.code` stays the coarse class:
 | `mcp_approve_definition_changed`, `mcp_approve_account_changed` | approve, exit 2 | the connector or the account changed after the program confirmation |
 | `mcp_env_loads_code` | install and load | an `mcp.env` name that changes what code a process loads |
 
+### Listing an approved server's tools
+
+```text
+apb connector tools <connector> [--account <a>] [--json]
+```
+
+starts the approved server with the account's secrets, in the
+healthcheck's order (the pins are checked before any secret), lists its
+tools and prints each mapped tool with its status: `pinned` (approved),
+`unpinned` (not approved), `changed` (changed since approval) or `missing`
+(gone from the server). It pins nothing, writes nothing and shows no
+digest. Exit 0 when every row is approved, 3 when any is not, 2 on a
+refusal. It is refused inside a run step. A refusal `mcp_tool_changed`
+names this command.
+
+`apb connector doctor` adds one row per account of an MCP connector,
+`ok` when every tool is approved for the installed definition and the
+account, else `warn` naming the tools; it starts no server. MCP
+`connectors_list` names each mcp function's tool and the accounts that
+approved it. The dashboard's connector page has an "MCP server" section:
+the transport, the command or URL template, the auth kind, one row per
+project and account with each function's approval, and a "List tools"
+button that lists the live rows in that row's project. It approves
+nothing and shows no digest. The listing and the healthcheck of an MCP
+connector start the server with the account's secrets, so the dashboard
+takes them only from a signed-in session: a dashboard without keys and a
+bearer key are refused (403, `mcp_needs_a_person`), the rule a connector
+approval follows. A dashboard without keys offers no "List tools" button
+and says to sign in or run `apb connector tools` at a terminal.
+
+Every listing of an `oauth2_refresh` account mints an access token in a
+fresh process. With a provider that rotates refresh tokens the new one is
+not stored (the listing carries the rotation warning), so listing can
+invalidate the stored refresh token; keep the newest one with a
+`{{cmd:...}}` helper.
+
 ### What an MCP call returns
 
 An MCP call answers `{ "ok": true, "body": ... }` with no HTTP `status`.
@@ -1017,7 +1163,9 @@ the binding's `on_unknown: resend`). See [Sending once](#sending-once).
   `mcp_live_call_unsupported` before any secret is resolved; a `--dry-run`
   still answers, with the pinned program (or the `command` when nothing is
   pinned), the rendered arguments, the `env` names, the tool and the
-  prepared arguments, starting nothing. The dashboard's healthcheck of an
+  prepared arguments, starting nothing; for an http server it answers the
+  checked endpoint and the auth kind instead of the program, sending
+  nothing. The dashboard's healthcheck of an
   MCP connector checks the pins without a tool call: it starts the pinned
   server, lists its tools, compares every mcp function's tool with its pin
   and closes the server, journaling and writing nothing (`{ "ok": true,
@@ -1455,6 +1603,21 @@ does not contain the expected subset, or a differing `error_code` fails
 the case. The same content-type guard the live path applies runs over each
 scripted response too, so a case and a live call refuse the same headers.
 
+An mcp function's case takes the expectation kind `mcp`: the tool the
+function maps and a subset of the arguments its call would send, the
+marker preview included. The case renders through the same path a
+`--dry-run` call takes; no server starts, no secret is resolved and
+nothing is sent.
+
+```yaml
+  - function: add_note
+    args: { contact: "c-17", body: "Called back." }
+    expect:
+      mcp:
+        tool: add_note
+        arguments_contain: { contact: "c-17" }
+```
+
 ## The `apb connector` CLI
 
 ```text
@@ -1463,6 +1626,7 @@ apb connector show <name>       manifest summary and per-account status
 apb connector call <name> <fn>  the agent-facing call channel (--account, --args, --dry-run, --intent)
 apb connector approve <name>    approve a connector or (--account) an account digest; an MCP connector only by a person at a terminal, --account also pins its program and tools
 apb connector oauth <name>      one-time OAuth consent for an account; a person at a terminal; prints the refresh token once
+apb connector tools <name>      an approved MCP server's tools and their status (--account, --json); exit 3 when any is not approved
 apb connector doctor            check every connector: manifest, config, env, trust, healthcheck
 apb connector env [<name>]      unresolved env var names as ready-to-paste KEY= lines
 apb connector init <name>       scaffold a new connector folder from a template

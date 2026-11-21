@@ -1966,21 +1966,13 @@ async fn the_dashboard_refuses_to_approve_an_mcp_connector() {
     assert!(stub.starts().is_empty());
 }
 
-#[tokio::test]
-async fn the_dashboard_healthcheck_of_an_mcp_connector_checks_the_pins() {
-    use apb_core::connector::mcp::digest::{pin_digest, tool_digest};
-    use apb_core::connector::mcp::pins::{PinStore, ServerPin, ToolPin};
-    let _guard = crate::common::env_lock().await;
-    let cfg = tempfile::tempdir().unwrap();
-    let root = tempfile::tempdir().unwrap();
-    let _g = setup(cfg.path(), root.path());
-    let _default = set_var("APB_TEST_DEFAULT_CONFIG_DIR", cfg.path());
-    let _token = set_var(MCP_TOKEN_VAR, "srv-mcp-token-881");
-    let stub = install_mcp(cfg.path(), root.path());
+/// Trusts the MCP connector's tree and the account `work` of `root`'s
+/// project, as a person's approval at a terminal does before any pin.
+fn trust_mcp(root: &Path) {
     let tree = apb_core::connector::store::load(MCP_CONNECTOR)
         .unwrap()
         .digest;
-    let accounts = config::load_merged(root.path(), MCP_CONNECTOR).unwrap();
+    let accounts = config::load_merged(root, MCP_CONNECTOR).unwrap();
     let account = config::account_digest(&accounts[0]);
     let mut trust = TrustStore::load();
     trust
@@ -1999,6 +1991,18 @@ async fn the_dashboard_healthcheck_of_an_mcp_connector_checks_the_pins() {
             OriginKind::LocallyApproved,
         )
         .unwrap();
+}
+
+/// Records the pin of the account `work` of `root`'s project: the stub's
+/// program and its one tool `whoami`, approved at time 1.
+fn pin_mcp(root: &Path, stub: &apb_mcp_client::testing::StubServer) {
+    use apb_core::connector::mcp::digest::{pin_digest, tool_digest};
+    use apb_core::connector::mcp::pins::{PinStore, ServerPin, ToolPin};
+    let tree = apb_core::connector::store::load(MCP_CONNECTOR)
+        .unwrap()
+        .digest;
+    let accounts = config::load_merged(root, MCP_CONNECTOR).unwrap();
+    let account = config::account_digest(&accounts[0]);
     let program = std::fs::canonicalize(stub.program()).unwrap();
     let program_s = program.to_string_lossy().to_string();
     let program_digest = apb_core::content::sha256_hex(&std::fs::read(&program).unwrap());
@@ -2018,7 +2022,7 @@ async fn the_dashboard_healthcheck_of_an_mcp_connector_checks_the_pins() {
                 "whoami".to_string(),
                 ToolPin {
                     digest,
-                    description: String::new(),
+                    description: "Who".to_string(),
                     members: std::collections::BTreeMap::new(),
                 },
             )]),
@@ -2026,13 +2030,73 @@ async fn the_dashboard_healthcheck_of_an_mcp_connector_checks_the_pins() {
         },
     )
     .unwrap();
-    let (status, json) = post_json(
-        build_router(AppState::new(root.path().to_path_buf())),
-        &format!("/api/connectors/{MCP_CONNECTOR}/healthcheck/work"),
-        serde_json::json!({}),
-        None,
-    )
-    .await;
+}
+
+/// The credential a request to the dashboard carries.
+enum Caller<'a> {
+    /// No credential: a dashboard without keys.
+    Keyless,
+    /// `Authorization: Bearer <key>`.
+    Bearer(&'a str),
+    /// A signed-in browser session: the cookie and the CSRF marker.
+    Session(&'a str),
+}
+
+/// A dashboard over `state` with server keys on: its key and the cookie of
+/// a session signed in with it.
+async fn keyed_with_session(state: AppState) -> (axum::Router, String, String) {
+    let (state, key) = keyed(state);
+    let cookie = sign_in(&state, &key).await;
+    (build_router(state), key, cookie)
+}
+
+/// A POST with no body as `caller`: the status and the body as text.
+async fn post_as(app: axum::Router, uri: &str, caller: Caller<'_>) -> (StatusCode, String) {
+    let mut req = Request::builder().method("POST").uri(uri);
+    match caller {
+        Caller::Keyless => {}
+        Caller::Bearer(key) => req = req.header("authorization", format!("Bearer {key}")),
+        Caller::Session(cookie) => {
+            req = req
+                .header("cookie", cookie)
+                .header(apb_server::auth::CSRF_HEADER, apb_server::auth::CSRF_VALUE)
+        }
+    }
+    let res = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
+fn json_of(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("not JSON ({e}): {text}"))
+}
+
+/// No `sha256:` and no run of 16 or more hexadecimal characters.
+fn assert_no_digest(text: &str) {
+    assert!(!text.contains("sha256:"), "{text}");
+    let mut run = 0usize;
+    for c in text.chars() {
+        run = if c.is_ascii_hexdigit() { run + 1 } else { 0 };
+        assert!(run < 16, "a run of hexadecimal characters: {text}");
+    }
+}
+
+#[tokio::test]
+async fn the_dashboard_healthcheck_of_an_mcp_connector_checks_the_pins() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let _default = set_var("APB_TEST_DEFAULT_CONFIG_DIR", cfg.path());
+    let _token = set_var(MCP_TOKEN_VAR, "srv-mcp-token-881");
+    let stub = install_mcp(cfg.path(), root.path());
+    trust_mcp(root.path());
+    pin_mcp(root.path(), &stub);
+    let (app, _key, cookie) = keyed_with_session(AppState::new(root.path().to_path_buf())).await;
+    let uri = format!("/api/connectors/{MCP_CONNECTOR}/healthcheck/work");
+    let (status, text) = post_as(app.clone(), &uri, Caller::Session(&cookie)).await;
+    let json = json_of(&text);
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["ok"], serde_json::json!(true), "healthcheck: {json}");
     assert_eq!(json["mcp"]["tools_checked"], serde_json::json!(1), "{json}");
@@ -2041,15 +2105,389 @@ async fn the_dashboard_healthcheck_of_an_mcp_connector_checks_the_pins() {
     // The same tool with another description no longer matches its pin.
     stub.set_tools(&serde_json::json!([{ "name": "whoami", "description": "Who else", "inputSchema": { "type": "object" } }]))
         .unwrap();
-    let (status, json) = post_json(
-        build_router(AppState::new(root.path().to_path_buf())),
-        &format!("/api/connectors/{MCP_CONNECTOR}/healthcheck/work"),
-        serde_json::json!({}),
-        None,
-    )
-    .await;
+    let (status, text) = post_as(app, &uri, Caller::Session(&cookie)).await;
+    let json = json_of(&text);
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["ok"], serde_json::json!(false), "healthcheck: {json}");
     assert!(json.to_string().contains("mcp_tool_changed"), "{json}");
     assert!(stub.calls().is_empty(), "still no tools/call");
+}
+
+#[tokio::test]
+async fn the_mcp_healthcheck_route_refuses_a_keyless_dashboard_and_a_bearer() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let _default = set_var("APB_TEST_DEFAULT_CONFIG_DIR", cfg.path());
+    let _token = set_var(MCP_TOKEN_VAR, "srv-mcp-token-881");
+    let stub = install_mcp(cfg.path(), root.path());
+    trust_mcp(root.path());
+    pin_mcp(root.path(), &stub);
+    let uri = format!("/api/connectors/{MCP_CONNECTOR}/healthcheck/work");
+    let keyless = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, text) = post_as(keyless, &uri, Caller::Keyless).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "keyless: {text}");
+    assert!(text.contains("sign in to the dashboard"), "{text}");
+    assert_eq!(json_of(&text)["error"], "mcp_needs_a_person", "{text}");
+    let (app, key, _cookie) = keyed_with_session(AppState::new(root.path().to_path_buf())).await;
+    let (status, text) = post_as(app.clone(), &uri, Caller::Bearer(&key)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "bearer: {text}");
+    // The healthcheck takes the same rule from the engine, with the same
+    // answer.
+    let health = format!("/api/connectors/{MCP_CONNECTOR}/healthcheck/work");
+    let keyless = build_router(AppState::new(root.path().to_path_buf()));
+    for (who, app, caller) in [
+        ("keyless", keyless, Caller::Keyless),
+        ("bearer", app, Caller::Bearer(&key)),
+    ] {
+        let (status, text) = post_as(app, &health, caller).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{who}: {text}");
+        assert_eq!(
+            json_of(&text)["error"],
+            "mcp_needs_a_person",
+            "{who}: {text}"
+        );
+    }
+    assert!(stub.starts().is_empty(), "nothing started");
+}
+
+#[tokio::test]
+async fn the_connector_detail_carries_the_mcp_block() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let stub = install_mcp(cfg.path(), root.path());
+    trust_mcp(root.path());
+    pin_mcp(root.path(), &stub);
+    let (status, json) = get_json(
+        build_router(AppState::new(root.path().to_path_buf())),
+        &format!("/api/connectors/{MCP_CONNECTOR}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let mcp = &json["mcp"];
+    assert_eq!(mcp["transport"], "stdio", "{json}");
+    assert_eq!(mcp["protocol"], "auto", "{json}");
+    let program = std::fs::canonicalize(stub.program()).unwrap();
+    assert_eq!(mcp["command"], program.to_string_lossy().as_ref(), "{json}");
+    assert_eq!(mcp["env"], serde_json::json!(["TRACKER_TOKEN"]), "{json}");
+    assert_eq!(
+        mcp["accounts"],
+        serde_json::json!([{
+            "workspace": "",
+            "root_label": "",
+            "account": "work",
+            "approved_at_ms": 1,
+            "functions": [{
+                "function": "whoami",
+                "tool": "whoami",
+                "approved": true,
+                "description": "Who",
+            }],
+        }]),
+        "{json}"
+    );
+    assert!(mcp.get("pins_error").is_none(), "{json}");
+    assert_no_digest(&mcp.to_string());
+    assert!(stub.starts().is_empty(), "the detail starts nothing");
+
+    // A pin store that does not read: fixed words, never the reader's
+    // diagnostic or the store's path.
+    let pins = cfg.path().join("mcp-tools.json");
+    let kept = std::fs::read(&pins).unwrap();
+    std::fs::write(&pins, "{ \"servers\": 7 }").unwrap();
+    let (_, broken) = get_json(
+        build_router(AppState::new(root.path().to_path_buf())),
+        &format!("/api/connectors/{MCP_CONNECTOR}"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        broken["mcp"]["pins_error"],
+        apb_core::connector::mcp::pins::PIN_STORE_UNREADABLE,
+        "{broken}"
+    );
+    std::fs::write(&pins, kept).unwrap();
+
+    // An http connector: the url template as written and the auth kind,
+    // no command and no env.
+    let dir = cfg.path().join("connectors").join("crm-mcp");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("connector.yaml"),
+        "name: crm-mcp\nversion: 0.1.0\nmcp:\n  transport: http\n  url: \"https://{{account.host}}/mcp\"\n  protocol: modern\nauth:\n  kind: header\n  header: X-Api-Key\n  value_template: \"{{secret.token}}\"\naccount_fields:\n  - { name: host, required: true }\n  - { name: token, required: true, secret: true }\nfunctions:\n  - name: search\n    description: Search\n    read_only: true\n    mcp: { tool: search }\n",
+    )
+    .unwrap();
+    let (status, json) = get_json(
+        build_router(AppState::new(root.path().to_path_buf())),
+        "/api/connectors/crm-mcp",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let mcp = &json["mcp"];
+    assert_eq!(mcp["transport"], "http", "{json}");
+    assert_eq!(mcp["protocol"], "modern", "{json}");
+    assert_eq!(mcp["url"], "https://{{account.host}}/mcp", "{json}");
+    assert_eq!(mcp["auth"], "header", "{json}");
+    assert!(mcp["command"].is_null(), "{json}");
+    assert_eq!(mcp["env"], serde_json::json!([]), "{json}");
+    assert_no_digest(&mcp.to_string());
+}
+
+#[tokio::test]
+async fn the_mcp_tools_route_lists_live_rows() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let _default = set_var("APB_TEST_DEFAULT_CONFIG_DIR", cfg.path());
+    let _token = set_var(MCP_TOKEN_VAR, "srv-mcp-token-881");
+    let stub = install_mcp(cfg.path(), root.path());
+    trust_mcp(root.path());
+    pin_mcp(root.path(), &stub);
+    let (app, _key, cookie) = keyed_with_session(AppState::new(root.path().to_path_buf())).await;
+    let (status, text) = post_as(
+        app,
+        &format!("/api/connectors/{MCP_CONNECTOR}/mcp-tools/work"),
+        Caller::Session(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let json = json_of(&text);
+    assert_eq!(json["ok"], true, "{json}");
+    let listing = &json["listing"];
+    assert_eq!(listing["connector"], MCP_CONNECTOR, "{json}");
+    assert_eq!(listing["account"], "work", "{json}");
+    let rows = listing["rows"].as_array().expect("rows");
+    assert_eq!(rows.len(), 1, "{json}");
+    assert_eq!(rows[0]["function"], "whoami", "{json}");
+    assert_eq!(rows[0]["tool"], "whoami", "{json}");
+    assert_eq!(rows[0]["status"], "pinned", "{json}");
+    assert_no_digest(&text);
+    assert_eq!(stub.starts().len(), 1, "one start for the listing");
+    assert!(stub.calls().is_empty(), "no tools/call");
+}
+
+#[tokio::test]
+async fn the_mcp_tools_route_writes_no_pin() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let _default = set_var("APB_TEST_DEFAULT_CONFIG_DIR", cfg.path());
+    let _token = set_var(MCP_TOKEN_VAR, "srv-mcp-token-881");
+    let stub = install_mcp(cfg.path(), root.path());
+    trust_mcp(root.path());
+    pin_mcp(root.path(), &stub);
+    // A tool the record does not hold: a listing that pinned would add it.
+    stub.set_tools(&serde_json::json!([
+        { "name": "whoami", "description": "Who else", "inputSchema": { "type": "object" } },
+        { "name": "extra", "description": "More", "inputSchema": { "type": "object" } },
+    ]))
+    .unwrap();
+    let pins = cfg.path().join("mcp-tools.json");
+    let before = std::fs::read(&pins).unwrap();
+    let (app, _key, cookie) = keyed_with_session(AppState::new(root.path().to_path_buf())).await;
+    let (status, text) = post_as(
+        app,
+        &format!("/api/connectors/{MCP_CONNECTOR}/mcp-tools/work"),
+        Caller::Session(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let json = json_of(&text);
+    assert_eq!(json["ok"], true, "{json}");
+    assert_eq!(json["listing"]["rows"][0]["status"], "changed", "{json}");
+    assert_eq!(
+        std::fs::read(&pins).unwrap(),
+        before,
+        "the pins are as they were"
+    );
+}
+
+#[tokio::test]
+async fn the_mcp_tools_route_refuses_an_unapproved_account() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let _default = set_var("APB_TEST_DEFAULT_CONFIG_DIR", cfg.path());
+    let _token = set_var(MCP_TOKEN_VAR, "srv-mcp-token-881");
+    let stub = install_mcp(cfg.path(), root.path());
+    trust_mcp(root.path());
+    let (app, _key, cookie) = keyed_with_session(AppState::new(root.path().to_path_buf())).await;
+    let (status, text) = post_as(
+        app,
+        &format!("/api/connectors/{MCP_CONNECTOR}/mcp-tools/work"),
+        Caller::Session(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let json = json_of(&text);
+    assert_eq!(json["ok"], false, "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("mcp_server_unpinned")),
+        "{json}"
+    );
+    assert_no_digest(&text);
+    assert!(stub.starts().is_empty(), "nothing started");
+    assert!(!cfg.path().join("mcp-tools.json").exists());
+}
+
+#[tokio::test]
+async fn the_mcp_tools_route_refuses_a_keyless_dashboard_and_a_bearer() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let _default = set_var("APB_TEST_DEFAULT_CONFIG_DIR", cfg.path());
+    let _token = set_var(MCP_TOKEN_VAR, "srv-mcp-token-881");
+    let stub = install_mcp(cfg.path(), root.path());
+    trust_mcp(root.path());
+    pin_mcp(root.path(), &stub);
+    let uri = format!("/api/connectors/{MCP_CONNECTOR}/mcp-tools/work");
+    let keyless = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, text) = post_as(keyless, &uri, Caller::Keyless).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "keyless: {text}");
+    assert!(
+        text.contains("sign in to the dashboard, or run `apb connector tools` at a terminal"),
+        "{text}"
+    );
+    assert_eq!(json_of(&text)["error"], "mcp_needs_a_person", "{text}");
+    let (app, key, _cookie) = keyed_with_session(AppState::new(root.path().to_path_buf())).await;
+    let (status, text) = post_as(app.clone(), &uri, Caller::Bearer(&key)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "bearer: {text}");
+    // The healthcheck takes the same rule from the engine, with the same
+    // answer.
+    let health = format!("/api/connectors/{MCP_CONNECTOR}/healthcheck/work");
+    let keyless = build_router(AppState::new(root.path().to_path_buf()));
+    for (who, app, caller) in [
+        ("keyless", keyless, Caller::Keyless),
+        ("bearer", app, Caller::Bearer(&key)),
+    ] {
+        let (status, text) = post_as(app, &health, caller).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{who}: {text}");
+        assert_eq!(
+            json_of(&text)["error"],
+            "mcp_needs_a_person",
+            "{who}: {text}"
+        );
+    }
+    assert!(stub.starts().is_empty(), "nothing started");
+}
+
+/// Design D5 wrong implementation 9: two registered projects, each with an
+/// account `work` of different fields, only the first's approved. The
+/// machine-wide detail shows both rows with their project; the live listing
+/// runs only in the project its `workspace` names.
+#[tokio::test]
+async fn two_projects_with_the_same_account_name_are_two_rows() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let alpha = tempfile::tempdir().unwrap();
+    let beta = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), alpha.path());
+    let _g2 = setup(cfg.path(), beta.path());
+    let _default = set_var("APB_TEST_DEFAULT_CONFIG_DIR", cfg.path());
+    let _token = set_var(MCP_TOKEN_VAR, "alpha-token-118");
+    let _beta_token = set_var("APB_SRV_MCP_TEST_TOKEN_BETA", "beta-token-229");
+    let stub = install_mcp(cfg.path(), alpha.path());
+    // The second project's `work` reads its token from another variable,
+    // so its account digest differs.
+    let path = config::project_config_path(beta.path(), MCP_CONNECTOR);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        "accounts:\n  - name: work\n    default: true\n    token: \"{{env.APB_SRV_MCP_TEST_TOKEN_BETA}}\"\n",
+    )
+    .unwrap();
+    trust_mcp(alpha.path());
+    // The second account is trusted too, so only its missing approval of
+    // the server stops it.
+    trust_mcp(beta.path());
+    pin_mcp(alpha.path(), &stub);
+    let (alpha_id, _reg) = register_workspace(alpha.path());
+    let (beta_id, _reg2) = register_workspace(beta.path());
+    let label = |root: &Path| {
+        apb_core::projects::list_reachable()
+            .into_iter()
+            .find(|e| {
+                e.workspace_id
+                    == std::fs::read_to_string(root.join(".apb/workspace.local"))
+                        .unwrap()
+                        .trim()
+            })
+            .map(|e| e.name)
+            .expect("a registered project")
+    };
+    let (alpha_label, beta_label) = (label(alpha.path()), label(beta.path()));
+
+    let (status, json) = get_json(
+        build_router(AppState::new_global()),
+        &format!("/api/connectors/{MCP_CONNECTOR}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let rows = json["mcp"]["accounts"].as_array().expect("account rows");
+    assert_eq!(rows.len(), 2, "{json}");
+    let row = |id: &str| {
+        rows.iter()
+            .find(|r| r["workspace"] == id)
+            .unwrap_or_else(|| panic!("a row of {id}: {json}"))
+    };
+    let (a, b) = (row(&alpha_id), row(&beta_id));
+    assert_eq!(a["account"], "work");
+    assert_eq!(b["account"], "work");
+    assert_eq!(a["root_label"], alpha_label.as_str(), "{json}");
+    assert_eq!(b["root_label"], beta_label.as_str(), "{json}");
+    assert_eq!(a["functions"][0]["approved"], true, "{json}");
+    assert_eq!(b["functions"][0]["approved"], false, "{json}");
+    assert_eq!(b["approved_at_ms"], serde_json::Value::Null, "{json}");
+
+    let (app, _key, cookie) = keyed_with_session(AppState::new_global()).await;
+    let base = format!("/api/connectors/{MCP_CONNECTOR}/mcp-tools/work");
+    // No project named: 400, nothing starts.
+    let (status, text) = post_as(app.clone(), &base, Caller::Session(&cookie)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+    assert!(text.contains("name the project of the account"), "{text}");
+    assert!(stub.starts().is_empty(), "nothing started");
+    // The second project: its account differs from the approved one.
+    let (status, text) = post_as(
+        app.clone(),
+        &format!("{base}?workspace={beta_id}"),
+        Caller::Session(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let json = json_of(&text);
+    assert_eq!(json["ok"], false, "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("mcp_server_changed")),
+        "{json}"
+    );
+    assert!(stub.starts().is_empty(), "nothing started");
+    // The first project: its server starts with its own account's token.
+    let (status, text) = post_as(
+        app,
+        &format!("{base}?workspace={alpha_id}"),
+        Caller::Session(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let json = json_of(&text);
+    assert_eq!(json["ok"], true, "{json}");
+    assert_eq!(stub.starts().len(), 1, "{json}");
+    assert_eq!(
+        stub.env_value_seen("TRACKER_TOKEN").as_deref(),
+        Some("alpha-token-118")
+    );
 }

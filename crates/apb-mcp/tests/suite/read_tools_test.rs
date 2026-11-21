@@ -641,3 +641,167 @@ mod results {
         assert!(whole.ends_with("a[redacted]"));
     }
 }
+
+/// `connectors_list` of an MCP connector (mcp-http-and-surfaces design D5
+/// "MCP `connectors_list`"): the transport and protocol, each function's
+/// tool and the accounts whose approval covers it, read from the pin store
+/// without starting anything.
+mod mcp_connectors {
+    use apb_core::connector::mcp::pins::{PinStore, ServerPin, ToolPin};
+    use apb_mcp::tools::connectors_list;
+    use serde_json::Value;
+    use std::path::{Path, PathBuf};
+
+    const CONNECTOR: &str = "tracker-mcp";
+
+    struct Fx {
+        _sandbox: crate::common::ConfigSandbox,
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        cfg: PathBuf,
+        marker: PathBuf,
+    }
+
+    /// A connector whose program leaves a marker when it runs, and two
+    /// project accounts; `work` is approved for `whoami` only.
+    fn fixture() -> Fx {
+        let sandbox = crate::common::config_sandbox();
+        let cfg = PathBuf::from(std::env::var_os("APB_CONFIG_DIR").unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let marker = root.join("started");
+        let program = root.join("tracker-mcp.sh");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\necho started >> '{}'\n", marker.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let conn = cfg.join("connectors").join(CONNECTOR);
+        std::fs::create_dir_all(&conn).unwrap();
+        std::fs::write(
+            conn.join("connector.yaml"),
+            format!(
+                "name: tracker-mcp\nversion: 0.1.0\nmcp:\n  transport: stdio\n  command: {}\n  env:\n    TRACKER_TOKEN: \"{{{{secret.token}}}}\"\naccount_fields:\n  - {{ name: workspace, required: true }}\n  - {{ name: token, required: true, secret: true }}\nfunctions:\n  - name: whoami\n    description: Who\n    read_only: true\n    mcp: {{ tool: whoami }}\n  - name: search\n    description: Search\n    read_only: true\n    mcp: {{ tool: search_issues }}\n",
+                serde_json::to_string(&program.to_string_lossy()).unwrap()
+            ),
+        )
+        .unwrap();
+        let accounts = apb_core::connector::config::project_config_path(&root, CONNECTOR);
+        std::fs::create_dir_all(accounts.parent().unwrap()).unwrap();
+        std::fs::write(
+            &accounts,
+            "accounts:\n  - name: work\n    default: true\n    workspace: acme\n    token: \"{{env.TRACKER_TOKEN_A}}\"\n  - name: other\n    workspace: beta\n    token: \"{{env.TRACKER_TOKEN_B}}\"\n",
+        )
+        .unwrap();
+        let tree = apb_core::connector::store::load(CONNECTOR).unwrap().digest;
+        let merged = apb_core::connector::config::load_merged(&root, CONNECTOR).unwrap();
+        let work = merged.iter().find(|a| a.name == "work").unwrap();
+        let digest = |c: char| format!("sha256:{}", c.to_string().repeat(64));
+        PinStore::record(
+            CONNECTOR,
+            "work",
+            ServerPin {
+                connector_digest: tree,
+                account_digest: apb_core::connector::config::account_digest(work),
+                command: program.to_string_lossy().to_string(),
+                program: program.to_string_lossy().to_string(),
+                program_digest: digest('a'),
+                tools: [(
+                    "whoami".to_string(),
+                    ToolPin {
+                        digest: digest('b'),
+                        description: "Who".to_string(),
+                        members: Default::default(),
+                    },
+                )]
+                .into(),
+                pin_digest: digest('c'),
+                approved_at_ms: 1,
+            },
+        )
+        .unwrap();
+        Fx {
+            _sandbox: sandbox,
+            _dir: dir,
+            root,
+            cfg,
+            marker,
+        }
+    }
+
+    fn connector(v: &Value) -> &Value {
+        v["connectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == CONNECTOR)
+            .unwrap()
+    }
+
+    fn function<'a>(c: &'a Value, name: &str) -> &'a Value {
+        c["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == name)
+            .unwrap()
+    }
+
+    fn holds_a_digest(text: &str) -> bool {
+        let mut run = 0;
+        for c in text.chars() {
+            run = if c.is_ascii_hexdigit() { run + 1 } else { 0 };
+            if run >= 16 {
+                return true;
+            }
+        }
+        text.contains("sha256:")
+    }
+
+    fn started(marker: &Path) -> bool {
+        marker.exists()
+    }
+
+    #[test]
+    fn connectors_list_names_mcp_tools_without_starting_a_server() {
+        let fx = fixture();
+        let v = connectors_list(&fx.root).unwrap();
+        assert!(v.get("pins_error").is_none(), "{v}");
+        let c = connector(&v);
+        assert_eq!(
+            c["mcp"],
+            serde_json::json!({ "transport": "stdio", "protocol": "auto" })
+        );
+        let whoami = function(c, "whoami");
+        assert_eq!(whoami["mcp_tool"], "whoami");
+        assert_eq!(whoami["approved_accounts"], serde_json::json!(["work"]));
+        let search = function(c, "search");
+        assert_eq!(search["mcp_tool"], "search_issues");
+        assert_eq!(search["approved_accounts"], serde_json::json!([]));
+        let text = v.to_string();
+        assert!(!holds_a_digest(&text), "{text}");
+        assert!(!started(&fx.marker), "a server was started");
+    }
+
+    #[test]
+    fn connectors_list_reports_a_pin_store_error() {
+        let fx = fixture();
+        std::fs::write(fx.cfg.join("mcp-tools.json"), "not json").unwrap();
+        let v = connectors_list(&fx.root).unwrap();
+        // Fixed words: never the reader's diagnostic or the store's path.
+        assert_eq!(
+            v["pins_error"],
+            apb_core::connector::mcp::pins::PIN_STORE_UNREADABLE,
+            "{v}"
+        );
+        let c = connector(&v);
+        assert_eq!(c["mcp"]["transport"], "stdio");
+        assert_eq!(
+            function(c, "whoami")["approved_accounts"],
+            serde_json::json!([])
+        );
+        assert!(!started(&fx.marker), "a server was started");
+    }
+}

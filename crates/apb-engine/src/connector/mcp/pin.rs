@@ -13,6 +13,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::connector::result::{CallError, CallErrorCode};
+use crate::decision_channel::DecisionChannel;
 
 use super::redact::server_name;
 pub use super::{
@@ -86,6 +87,119 @@ pub struct ToolListing {
     pins: BTreeMap<String, ToolPin>,
 }
 
+/// The public shape of a live listing: what `apb connector tools --json`
+/// prints and the dashboard route answers. Named fields only; it is never
+/// `ToolListing` serialized and filtered.
+#[derive(Debug, Clone, Serialize)]
+pub struct ListingView<'a> {
+    pub connector: &'a str,
+    pub account: &'a str,
+    pub era: &'a str,
+    /// `ToolListing.cleanup`: plain words when the server started for the
+    /// listing could not be shown ended. Shown, because it warns that a
+    /// process may still hold the account's secrets.
+    pub cleanup: Option<&'a str>,
+    pub server: ServerView<'a>,
+    pub rows: Vec<RowView<'a>>,
+    pub unmapped: &'a [String],
+}
+
+/// `ProgramFacts` without `program_digest`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServerView<'a> {
+    pub command: &'a str,
+    /// The program path (stdio) or the endpoint (http).
+    pub program: &'a str,
+    pub launcher: Option<&'a str>,
+    pub status: &'static str,
+}
+
+/// `ToolRow` without `digest`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RowView<'a> {
+    pub function: &'a str,
+    pub tool: &'a str,
+    pub status: &'static str,
+    pub title: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub pinned_description: Option<&'a str>,
+    pub members: &'a [String],
+    pub annotations: Option<&'a Value>,
+    pub input_schema: Option<&'a Value>,
+}
+
+/// Builds the view field by field. Its body starts with an exhaustive
+/// destructuring, without `..`, of `ToolListing` (the private `pins` bound
+/// to `_`), `ProgramFacts` and each `ToolRow`, binding every digest member
+/// to `_`: a field a later change adds to one of those structs is a compile
+/// error here until that change decides whether a person's surface shows it
+/// (and adds it to the view and to the web types) or binds it to `_`.
+/// Digests appear only in the terminal confirmations of an approval.
+pub fn listing_view(listing: &ToolListing) -> ListingView<'_> {
+    let ToolListing {
+        connector,
+        account,
+        connector_digest: _,
+        account_digest: _,
+        era,
+        cleanup,
+        program,
+        rows,
+        unmapped,
+        pin_digest: _,
+        pins: _,
+    } = listing;
+    let ProgramFacts {
+        command,
+        program,
+        program_digest: _,
+        launcher,
+        status,
+    } = program;
+    let rows: Vec<RowView<'_>> = rows
+        .iter()
+        .map(|row| {
+            let ToolRow {
+                function,
+                tool,
+                digest: _,
+                status,
+                title,
+                description,
+                pinned_description,
+                members,
+                annotations,
+                input_schema,
+            } = row;
+            RowView {
+                function,
+                tool,
+                status,
+                title: title.as_deref(),
+                description: description.as_deref(),
+                pinned_description: pinned_description.as_deref(),
+                members,
+                annotations: annotations.as_ref(),
+                input_schema: input_schema.as_ref(),
+            }
+        })
+        .collect();
+    ListingView {
+        connector,
+        account,
+        era,
+        cleanup: cleanup.as_deref(),
+        server: ServerView {
+            command,
+            program,
+            launcher: launcher.as_deref(),
+            status,
+        },
+        rows,
+        unmapped,
+    }
+}
+
 /// Resolves `command` for an approval: an absolute `command` as is, a bare
 /// name through `path` (the approving person's `PATH`, the first entry
 /// whose file exists and is executable), then `std::fs::canonicalize` and
@@ -133,6 +247,37 @@ pub fn resolve_program(
     Ok((canonical.to_string(), digest))
 }
 
+/// The endpoint of an http server and its endpoint digest, for an
+/// approval: rendered from the account's non-secret fields and checked
+/// (`server::http_target`: https only, no query, no userinfo, the token URL
+/// too). Resolves no secret and sends nothing. The http counterpart of
+/// [`resolve_program`].
+pub fn http_program(
+    doc: &apb_core::connector::def::ConnectorDoc,
+    fields: &std::collections::BTreeMap<String, String>,
+) -> Result<(String, String), CallError> {
+    let target = super::server::http_target(doc, fields)?;
+    Ok((target.endpoint, target.digest))
+}
+
+/// The first mcp function of `doc` in manifest order, the function a
+/// listing loads its target with.
+fn first_mcp_function(
+    doc: &apb_core::connector::def::ConnectorDoc,
+    connector: &str,
+) -> Result<String, CallError> {
+    doc.functions
+        .iter()
+        .find(|f| f.is_mcp())
+        .map(|f| f.name.clone())
+        .ok_or_else(|| {
+            CallError::new(
+                CallErrorCode::Config,
+                format!("connector `{connector}` maps no MCP tool"),
+            )
+        })
+}
+
 /// What the first confirmation of an approval showed and the person
 /// confirmed.
 pub struct ConfirmedProgram {
@@ -159,25 +304,9 @@ pub fn list_live(
 ) -> Result<ToolListing, CallError> {
     use crate::connector::call::auth::{non_secret_fields, resolve_secrets};
     use crate::connector::call::target::LiveTarget;
-    let loaded = apb_core::connector::store::load(connector).map_err(|e| {
-        CallError::new(
-            CallErrorCode::Config,
-            format!("connector `{connector}`: {e}"),
-        )
+    let live = LiveTarget::load_picking(root, connector, Some(account), |doc| {
+        first_mcp_function(doc, connector)
     })?;
-    let first = loaded
-        .doc
-        .functions
-        .iter()
-        .find(|f| f.is_mcp())
-        .map(|f| f.name.clone())
-        .ok_or_else(|| {
-            CallError::new(
-                CallErrorCode::Config,
-                format!("connector `{connector}` maps no MCP tool"),
-            )
-        })?;
-    let live = LiveTarget::load(root, connector, Some(account), &first)?;
     let pins = live.pins();
     if !apb_core::trust::TrustStore::load().is_approved(&pins.connector) {
         return Err(CallError::new(
@@ -201,72 +330,238 @@ pub fn list_live(
             ),
         ));
     }
-    // The one open of the program file: hashed from its descriptor here,
-    // started from that descriptor (or its path checked again) below.
+    let is_http = live
+        .doc()
+        .mcp
+        .as_ref()
+        .is_some_and(|m| m.transport == apb_core::connector::mcp::McpTransportKind::Http);
+    let what = if is_http {
+        "the server endpoint changed"
+    } else {
+        "the program file changed"
+    };
     let changed = || {
         CallError::new(
             CallErrorCode::Permission,
             format!(
-                "mcp_server_changed: the server of `{connector}` ({}) is not the one confirmed for account `{account}` (the program file changed); nothing was started",
+                "mcp_server_changed: the server of `{connector}` ({}) is not the one confirmed for account `{account}` ({what}); nothing was started",
                 confirmed.program
             ),
         )
     };
-    let program = program_file(Path::new(&confirmed.program))
-        .filter(|p| p.digest() == confirmed.program_digest)
-        .ok_or_else(changed)?;
+    // The one open of the program file: hashed from its descriptor here,
+    // started from that descriptor (or its path checked again) below. An
+    // http server has no program file.
+    let program = if is_http {
+        None
+    } else {
+        Some(
+            program_file(Path::new(&confirmed.program))
+                .filter(|p| p.digest() == confirmed.program_digest)
+                .ok_or_else(changed)?,
+        )
+    };
     let target = live.into_target()?;
     let spec = target
         .doc
         .mcp
         .clone()
         .ok_or_else(|| CallError::new(CallErrorCode::Config, "mcp: no `mcp:` block"))?;
+    let fields = non_secret_fields(&target.maccount);
+    // The http form of the program file check, before any secret: the
+    // endpoint and the token URL rendered from the reloaded account and
+    // their digest compared with the confirmed one.
+    let http = match program {
+        Some(_) => None,
+        None => {
+            let t = super::server::http_target(&target.doc, &fields)?;
+            if t.digest != confirmed.program_digest {
+                return Err(changed());
+            }
+            Some(t)
+        }
+    };
     let home = apb_core::config::account_entry().ok_or_else(super::no_home)?;
     // The record the rows are compared with, read before any secret or
     // start: a store that does not read starts nothing.
     let store = apb_core::connector::mcp::pins::PinStore::load()
         .map_err(|e| CallError::new(CallErrorCode::Config, e.to_string()))?;
     let deadline = Instant::now() + MCP_PIN_CHECK_TIMEOUT;
-    let fields = non_secret_fields(&target.maccount);
-    let (secrets, redactions) = resolve_secrets(root, &target.maccount, deadline)?;
-    let opened = super::open_program(
-        super::Start {
-            program,
-            spec: &spec,
-            account_fields: &fields,
-            home: &home,
-            deadline,
-        },
-        &secrets,
-        &redactions,
-    )
+    let (secrets, mut redactions) = resolve_secrets(root, &target.maccount, deadline)?;
+    let opened = match (program, &http) {
+        (Some(program), _) => super::open_program(
+            super::Start {
+                program,
+                spec: &spec,
+                account_fields: &fields,
+                home: &home,
+                deadline,
+            },
+            &secrets,
+            &redactions,
+        ),
+        (None, Some(t)) => super::open_http(
+            super::HttpStart {
+                target: t,
+                auth: target.doc.auth.as_ref(),
+                account_fields: &fields,
+                connector,
+                account,
+                deadline,
+            },
+            &secrets,
+            &mut redactions,
+        ),
+        (None, None) => Err(super::OpenError::ProgramChanged),
+    }
     .map_err(|e| match e {
         super::OpenError::Call(e) => super::redacted(e, &redactions),
         super::OpenError::ProgramChanged => changed(),
     })?;
     let ended = opened.session.close();
-    let cleanup = cleanup_note(account, &ended);
-    let super::Opened { tools, era, .. } = opened;
-    if tools.iter().any(|t| reflects_secret(t, &redactions)) {
-        return Err(super::with_end(
-            reflected_secret(connector, account),
-            &ended,
-        ));
+    let cleanup = listing_note(account, &ended, &opened.warnings);
+    let super::Opened {
+        tools,
+        era,
+        warnings,
+        ..
+    } = opened;
+    super::Opened::carrying(&warnings, || {
+        if tools.iter().any(|t| reflects_secret(t, &redactions)) {
+            return Err(super::with_end(
+                reflected_secret(connector, account),
+                &ended,
+            ));
+        }
+        let record = store.server(connector, account);
+        Ok(build_listing(
+            Listed {
+                doc: &target.doc,
+                connector,
+                account,
+                confirmed,
+                era,
+                cleanup,
+                tools,
+            },
+            record,
+            &redactions,
+        ))
+    })
+}
+
+/// The live listing of an approved account, for `apb connector tools` and
+/// the dashboard (design D5 "`list_approved`"). The healthcheck's order:
+/// the read-only guard, `LiveTarget::load` with the first mcp function in
+/// manifest order (the single or default account when `account` is
+/// `None`), `require_trust`, then `check_server`: the config dir rule, the
+/// pin store, the record, and `ServerPin::compare` of the tree digest, the
+/// account digest and the program fact with no tool required to be pinned,
+/// all before any secret is resolved or anything starts. Then
+/// `resolve_secrets`, `open`, the raw listing within its limits, the close
+/// (its `Ended` read into `ToolListing.cleanup`), the reflected-secret walk
+/// over every listed tool, and `build_listing` against the record. Closes
+/// the session on every path. Makes no `tools/call`, journals nothing,
+/// writes nothing.
+pub fn list_approved(
+    root: &Path,
+    connector: &str,
+    account: Option<&str>,
+    channel: DecisionChannel,
+    deadline: Instant,
+) -> Result<ToolListing, CallError> {
+    use crate::connector::call::auth::{non_secret_fields, resolve_secrets};
+    use crate::connector::call::target::LiveTarget;
+    // The read-only guard of every connector call: no account is resolved
+    // in a read-only or a scenario process.
+    if let Err(e) = apb_core::process_mode::guard_connector_call() {
+        return Err(CallError::new(CallErrorCode::Permission, e.to_string()));
     }
-    let record = store.server(connector, account);
-    Ok(build_listing(
-        Listed {
-            doc: &target.doc,
-            connector,
-            account,
-            confirmed,
-            era,
-            cleanup,
-            tools,
-        },
-        record,
-        &redactions,
-    ))
+    // One load: the definition whose first mcp function is picked is the
+    // one the caller's channel is decided on and the one listed.
+    let live = LiveTarget::load_picking(root, connector, account, |doc| {
+        first_mcp_function(doc, connector)
+    })?;
+    refuse_caller(channel, "listing an MCP server's tools")?;
+    live.require_trust()?;
+    let pins = live.pins();
+    let target = live.into_target()?;
+    let fields = non_secret_fields(&target.maccount);
+    let tools: Vec<(String, String)> = target
+        .doc
+        .functions
+        .iter()
+        .filter_map(|f| f.mcp.as_ref().map(|m| (f.name.clone(), m.tool.clone())))
+        .collect();
+    let input = super::McpConnectInput {
+        doc: &target.doc,
+        connector_digest: &pins.connector,
+        account_digest: &pins.account,
+        function: &target.function,
+        connector,
+        account_name: &target.account,
+        account_fields: &fields,
+        full: true,
+        deadline,
+    };
+    let mut checked = super::check_server(&input, tools)?;
+    let (secrets, mut redactions) = resolve_secrets(root, &target.maccount, deadline)?;
+    let opened = super::open(&mut checked, &secrets, &mut redactions)
+        .map_err(|e| super::redacted(e, &redactions))?;
+    let ended = opened.session.close();
+    let cleanup = listing_note(&target.account, &ended, &opened.warnings);
+    let super::Opened {
+        tools,
+        era,
+        warnings,
+        ..
+    } = opened;
+    super::Opened::carrying(&warnings, || {
+        if tools.iter().any(|t| reflects_secret(t, &redactions)) {
+            return Err(super::with_end(
+                reflected_secret(connector, &target.account),
+                &ended,
+            ));
+        }
+        // The record passed the server comparison: the program it names is
+        // the one that was started.
+        let record = &checked.record;
+        let confirmed = ConfirmedProgram {
+            connector_digest: record.connector_digest.clone(),
+            account_digest: record.account_digest.clone(),
+            program: record.program.clone(),
+            program_digest: record.program_digest.clone(),
+        };
+        Ok(build_listing(
+            Listed {
+                doc: &target.doc,
+                connector,
+                account: &target.account,
+                confirmed: &confirmed,
+                era,
+                cleanup,
+                tools,
+            },
+            Some(record),
+            &redactions,
+        ))
+    })
+}
+
+/// A listing's note: the cleanup note, then the open's warnings. The
+/// rotation warning of an http server's minted token joins it on every
+/// listing (the approval's and the live one): a rotated refresh token is
+/// never stored.
+fn listing_note(
+    account: &str,
+    ended: &apb_mcp_client::Ended,
+    warnings: &[String],
+) -> Option<String> {
+    let notes: Vec<String> = cleanup_note(account, ended)
+        .into_iter()
+        .chain(warnings.iter().cloned())
+        .collect();
+    (!notes.is_empty()).then(|| notes.join("; "))
 }
 
 /// The plain words a listing shows when its server could not be shown
@@ -529,35 +824,78 @@ pub fn record(listing: &ToolListing) -> Result<(), CallError> {
     .map_err(|e| CallError::new(CallErrorCode::Config, e.to_string()))
 }
 
-/// Starts the pinned server of `connector`/`account`, lists its tools,
-/// compares the whole binding of every mcp function's tool and closes the
-/// session. Makes no `tools/call`, journals nothing, writes nothing. The
-/// same `{ "ok": bool, .. }` shape `healthcheck` returns.
-pub(crate) fn healthcheck(root: &Path, connector: &str, account: &str) -> (Value, bool) {
-    match check_live(root, connector, account) {
-        Ok(value) => (value, true),
-        Err(e) => (e.to_json(), false),
+/// The prefix of the refusal [`refuse_caller`] gives.
+pub const MCP_NEEDS_A_PERSON: &str = "mcp_needs_a_person";
+
+/// The one rule of a surface that starts an approved MCP server with an
+/// account's secrets outside a run (the healthcheck, the live listing;
+/// design D5 "Dashboard" items 2 and 6): only a person's channel takes it,
+/// decided by [`DecisionChannel::person_only_refusal`], the rule a
+/// connector approval follows. A dashboard without keys takes any local
+/// process, a run step's agent included, and a bearer key may be a
+/// script's. Each caller asks it on the definition it then executes,
+/// before any trust read or secret.
+pub(crate) fn refuse_caller(channel: DecisionChannel, what: &str) -> Result<(), CallError> {
+    match channel.person_only_refusal() {
+        None => Ok(()),
+        Some(refusal) => Err(CallError::new(
+            CallErrorCode::Permission,
+            format!(
+                "{MCP_NEEDS_A_PERSON}: {what} starts the server with the account's secrets, which only a person's channel takes ({}); sign in to the dashboard, or run `apb connector tools` at a terminal",
+                refusal.as_str()
+            ),
+        )),
     }
 }
 
-/// The healthcheck's steps (design D4 "The four orders", list 3).
-fn check_live(root: &Path, connector: &str, account: &str) -> Result<Value, CallError> {
-    use crate::connector::call::LiveTarget;
+/// Whether `e` is the refusal of [`refuse_caller`], which an HTTP surface
+/// answers 403.
+pub fn is_caller_refusal(e: &CallError) -> bool {
+    e.code == CallErrorCode::Permission && refusal_text(&e.message)
+}
+
+fn refusal_text(message: &str) -> bool {
+    message
+        .strip_prefix(MCP_NEEDS_A_PERSON)
+        .is_some_and(|rest| rest.starts_with(':'))
+}
+
+/// What a healthcheck answered: the call's JSON with its ok hint, or the
+/// refusal of the caller's channel an MCP connector's healthcheck gives
+/// ([`refuse_caller`]), typed so an HTTP surface answers it 403 without
+/// reading message text.
+pub enum HealthcheckOutcome {
+    Answer(Value, bool),
+    CallerRefused(CallError),
+}
+
+/// Starts the pinned server of a loaded live target, lists its tools,
+/// compares the whole binding of every mcp function's tool and closes the
+/// session. Makes no `tools/call`, journals nothing, writes nothing. The
+/// caller's channel is decided first and its refusal comes back typed, so
+/// an HTTP surface answers 403 on the outcome, never on message text.
+pub(crate) fn healthcheck(
+    root: &Path,
+    live: crate::connector::call::LiveTarget,
+    channel: DecisionChannel,
+) -> HealthcheckOutcome {
+    if let Err(e) = refuse_caller(channel, "an MCP connector's healthcheck") {
+        return HealthcheckOutcome::CallerRefused(e);
+    }
+    match check_live(root, live) {
+        Ok(value) => HealthcheckOutcome::Answer(value, true),
+        Err(e) => HealthcheckOutcome::Answer(e.to_json(), false),
+    }
+}
+
+/// The healthcheck's steps (design D4 "The four orders", list 3), on the
+/// definition `call::healthcheck` loaded once, after the caller's channel
+/// ([`healthcheck`]): the trust gate, the pins, and only then the secrets.
+fn check_live(root: &Path, live: crate::connector::call::LiveTarget) -> Result<Value, CallError> {
     use crate::connector::call::auth::{non_secret_fields, resolve_secrets};
-    let loaded = apb_core::connector::store::load(connector).map_err(|e| {
-        CallError::new(
-            CallErrorCode::Config,
-            format!("connector `{connector}`: {e}"),
-        )
-    })?;
-    let hc = loaded.doc.healthcheck.clone().ok_or_else(|| {
-        CallError::new(
-            CallErrorCode::Config,
-            format!("connector `{connector}` declares no healthcheck"),
-        )
-    })?;
-    let live = LiveTarget::load(root, connector, Some(account), &hc)?;
     live.require_trust()?;
+    let connector = live.name().to_string();
+    let connector = connector.as_str();
     let pins = live.pins();
     let deadline = Instant::now() + Duration::from_secs(live.function().timeout_sec);
     let target = live.into_target()?;
@@ -580,8 +918,8 @@ fn check_live(root: &Path, connector: &str, account: &str) -> Result<Value, Call
         deadline,
     };
     let mut checked = super::check_tools(&input, tools.clone())?;
-    let (secrets, redactions) = resolve_secrets(root, &target.maccount, deadline)?;
-    let opened = super::open(&mut checked, &secrets, &redactions)
+    let (secrets, mut redactions) = resolve_secrets(root, &target.maccount, deadline)?;
+    let opened = super::open(&mut checked, &secrets, &mut redactions)
         .map_err(|e| super::redacted(e, &redactions))?;
     for (function, tool) in &tools {
         if let Err(e) = opened.verify(&checked, function, tool, &redactions) {
@@ -593,8 +931,13 @@ fn check_live(root: &Path, connector: &str, account: &str) -> Result<Value, Call
         "ok": true,
         "mcp": { "era": era, "tools_checked": tools.len() },
     });
-    if let Some(w) = opened.session.close_noted() {
-        value["warnings"] = json!([w]);
+    // The rotation warning of an http server's minted token comes with
+    // the answer, as the listings carry it: a rotated refresh token is
+    // never stored.
+    let mut warnings = opened.warnings.clone();
+    warnings.extend(opened.session.close_noted());
+    if !warnings.is_empty() {
+        value["warnings"] = json!(warnings);
     }
     Ok(value)
 }
@@ -841,6 +1184,200 @@ functions:
 
     fn token_redaction() -> Vec<Redaction> {
         vec![Redaction::new(Secret::new(TOKEN), "token")]
+    }
+
+    /// The member names of every object in `value`, at any depth.
+    fn all_keys(value: &Value, out: &mut std::collections::BTreeSet<String>) {
+        match value {
+            Value::Object(map) => {
+                for (k, v) in map {
+                    out.insert(k.clone());
+                    all_keys(v, out);
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|v| all_keys(v, out)),
+            _ => {}
+        }
+    }
+
+    fn keys_of(value: &Value) -> Vec<String> {
+        value
+            .as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn sorted(names: &[&str]) -> Vec<String> {
+        let mut v: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn listing_view_keeps_out_every_unlisted_field() {
+        child("listing_view_keeps_out_every_unlisted_field", || {
+            let fx = Fx::new();
+            record(&fx.list().unwrap()).unwrap();
+            let mut tools = tools();
+            tools[1]["description"] = json!("Search issues by text, now longer");
+            fx.stub.set_tools(&tools).unwrap();
+            let listing = fx.list().unwrap();
+            let whole = serde_json::to_value(&listing).unwrap();
+            // The listing itself carries every digest member.
+            for member in ["connector_digest", "account_digest", "pin_digest"] {
+                assert!(whole.get(member).is_some(), "{member}");
+            }
+            assert!(whole["program"].get("program_digest").is_some());
+            assert!(whole["rows"][0].get("digest").is_some());
+
+            let view = serde_json::to_value(listing_view(&listing)).unwrap();
+            assert_eq!(
+                keys_of(&view),
+                sorted(&[
+                    "connector",
+                    "account",
+                    "era",
+                    "cleanup",
+                    "server",
+                    "rows",
+                    "unmapped"
+                ])
+            );
+            assert_eq!(
+                keys_of(&view["server"]),
+                sorted(&["command", "program", "launcher", "status"])
+            );
+            let rows = view["rows"].as_array().unwrap();
+            assert_eq!(rows.len(), listing.rows.len());
+            for (shown, row) in rows.iter().zip(&listing.rows) {
+                assert_eq!(
+                    keys_of(shown),
+                    sorted(&[
+                        "function",
+                        "tool",
+                        "status",
+                        "title",
+                        "description",
+                        "pinned_description",
+                        "members",
+                        "annotations",
+                        "input_schema"
+                    ])
+                );
+                assert_eq!(shown["function"], json!(row.function));
+                assert_eq!(shown["status"], json!(row.status));
+            }
+            assert_eq!(view["connector"], json!(CONNECTOR));
+            assert_eq!(view["server"]["program"], json!(listing.program.program));
+            assert_eq!(view["unmapped"], json!(listing.unmapped));
+            let mut keys = std::collections::BTreeSet::new();
+            all_keys(&view, &mut keys);
+            for member in [
+                "connector_digest",
+                "account_digest",
+                "pin_digest",
+                "program_digest",
+                "digest",
+                "pins",
+            ] {
+                assert!(!keys.contains(member), "{member} reached the view");
+            }
+            let text = view.to_string();
+            assert!(!text.contains("sha256:"), "{text}");
+        });
+    }
+
+    /// The account's trust, as an approval records it before the pins.
+    fn approve_account(fx: &Fx) {
+        TrustStore::load()
+            .approve_kind(
+                &config::account_digest(&fx.account()),
+                &apb_core::trust::account_trust_id(CONNECTOR, ACCOUNT),
+                Kind::ConnectorAccount,
+                OriginKind::LocallyApproved,
+            )
+            .unwrap();
+    }
+
+    fn approved(fx: &Fx) -> Result<ToolListing, CallError> {
+        list_approved(
+            &fx.root,
+            CONNECTOR,
+            Some(ACCOUNT),
+            DecisionChannel::Terminal,
+            Instant::now() + MCP_PIN_CHECK_TIMEOUT,
+        )
+    }
+
+    #[test]
+    fn list_approved_marks_each_row() {
+        child("list_approved_marks_each_row", || {
+            let fx = Fx::new();
+            approve_account(&fx);
+            record(&fx.list().unwrap()).unwrap();
+            // The pin of `create_comment` is dropped, `search_issues` gets a
+            // longer description, `list_comments` is not listed.
+            let mut pin = PinStore::load()
+                .unwrap()
+                .server(CONNECTOR, ACCOUNT)
+                .cloned()
+                .unwrap();
+            pin.tools.remove("create_comment");
+            PinStore::record(CONNECTOR, ACCOUNT, pin).unwrap();
+            let mut tools = tools();
+            tools[1]["description"] = json!("Search issues by text, now longer");
+            fx.stub.set_tools(&tools).unwrap();
+            let listing = approved(&fx).unwrap();
+            assert_eq!(row(&listing, "whoami").status, "pinned");
+            let changed = row(&listing, "search_issues");
+            assert_eq!(changed.status, "changed");
+            assert_eq!(changed.members, vec!["description".to_string()]);
+            assert_eq!(
+                changed.pinned_description.as_deref(),
+                Some("Search issues by text")
+            );
+            assert_eq!(row(&listing, "create_comment").status, "unpinned");
+            assert_eq!(row(&listing, "list_comments").status, "missing");
+            assert_eq!(listing.unmapped, vec!["admin_tool".to_string()]);
+            assert_eq!(listing.program.status, "same");
+            assert_eq!(listing.account, ACCOUNT);
+            assert_eq!(listing.cleanup, None);
+            assert_eq!(fx.starts(), 2);
+            assert!(fx.stub.calls().is_empty(), "no tools/call");
+        });
+    }
+
+    #[test]
+    fn list_approved_of_an_unpinned_account_starts_nothing() {
+        child(
+            "list_approved_of_an_unpinned_account_starts_nothing",
+            || {
+                let fx = Fx::new();
+                fx.use_helper();
+                approve_account(&fx);
+                let err = approved(&fx).unwrap_err();
+                assert!(
+                    err.message.starts_with("mcp_server_unpinned:"),
+                    "{}",
+                    err.message
+                );
+                assert_eq!(fx.starts(), 0);
+                assert!(!fx.marker().exists(), "no secret helper ran");
+            },
+        );
+    }
+
+    #[test]
+    fn list_approved_writes_nothing() {
+        child("list_approved_writes_nothing", || {
+            let fx = Fx::new();
+            approve_account(&fx);
+            record(&fx.list().unwrap()).unwrap();
+            let before = fx.config_files();
+            let listing = approved(&fx).unwrap();
+            assert_eq!(row(&listing, "whoami").status, "pinned");
+            assert_eq!(fx.config_files(), before);
+        });
     }
 
     #[test]
@@ -1220,6 +1757,44 @@ functions:
                 );
                 assert!(!fx.marker().exists());
                 assert_eq!(fx.starts(), 0);
+            },
+        );
+    }
+
+    #[test]
+    fn list_live_of_an_http_server_refuses_a_changed_endpoint() {
+        child(
+            "list_live_of_an_http_server_refuses_a_changed_endpoint",
+            || {
+                let http = "name: tracker-mcp\nversion: 0.1.0\nmcp:\n  transport: http\n  url: \"https://{{account.workspace}}/mcp\"\n  protocol: modern\nauth:\n  kind: header\n  header: X-Api-Key\n  value_template: \"{{secret.token}}\"\naccount_fields:\n  - { name: workspace, required: true }\n  - { name: token, required: true, secret: true }\nfunctions:\n  - name: whoami\n    description: The account the server acts as\n    read_only: true\n    mcp: { tool: whoami }\n";
+                let fx = Fx::with(|_| http.to_string());
+                fx.use_helper();
+                fx.write_account(
+                    &format!("{{{{cmd:{}}}}}", fx.base.join("helper.sh").display()),
+                    "crm.example",
+                );
+                let doc = store::load(CONNECTOR).unwrap().doc;
+                let fields = BTreeMap::from([("workspace".to_string(), "crm.example".to_string())]);
+                let (program, program_digest) = http_program(&doc, &fields).unwrap();
+                assert_eq!(program, "https://crm.example/mcp");
+                let confirmed = ConfirmedProgram {
+                    connector_digest: store::load(CONNECTOR).unwrap().digest,
+                    account_digest: config::account_digest(&fx.account()),
+                    program,
+                    program_digest,
+                };
+                // The account now names another https host.
+                fx.write_account(
+                    &format!("{{{{cmd:{}}}}}", fx.base.join("helper.sh").display()),
+                    "other.example",
+                );
+                let err = list_live(&fx.root, CONNECTOR, ACCOUNT, &confirmed).unwrap_err();
+                assert!(
+                    err.message.starts_with("mcp_approve_account_changed:"),
+                    "{}",
+                    err.message
+                );
+                assert!(!fx.marker().exists(), "no secret was resolved");
             },
         );
     }

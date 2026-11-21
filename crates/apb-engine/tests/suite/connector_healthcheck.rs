@@ -17,6 +17,8 @@
 
 use std::path::Path;
 
+use apb_engine::decision_channel::DecisionChannel;
+
 use apb_core::connector::config;
 use apb_core::connector::store;
 use apb_core::trust::{Kind, OriginKind, TrustStore, account_trust_id};
@@ -122,7 +124,7 @@ fn unapproved_connector_is_permission_denied() {
     );
     // Neither the connector nor the account is approved.
 
-    let (value, ok) = healthcheck(root.path(), CONNECTOR, "acct1");
+    let (value, ok) = healthcheck(root.path(), CONNECTOR, "acct1", DecisionChannel::Terminal);
     assert!(!ok, "must refuse an unapproved connector: {value}");
     assert_eq!(value["error"]["code"], serde_json::json!("permission"));
     let msg = value["error"]["message"].as_str().unwrap();
@@ -146,7 +148,7 @@ fn approved_connector_but_unapproved_account_is_permission_denied() {
     approve_connector();
     // The account itself is left unapproved.
 
-    let (value, ok) = healthcheck(root.path(), CONNECTOR, "acct1");
+    let (value, ok) = healthcheck(root.path(), CONNECTOR, "acct1", DecisionChannel::Terminal);
     assert!(!ok, "must refuse an unapproved account: {value}");
     assert_eq!(value["error"]["code"], serde_json::json!("permission"));
     let msg = value["error"]["message"].as_str().unwrap();
@@ -170,7 +172,7 @@ fn mock_healthcheck_needs_no_network() {
     approve_connector();
     approve_account(root.path(), "acct1");
 
-    let (value, ok) = healthcheck(root.path(), CONNECTOR, "acct1");
+    let (value, ok) = healthcheck(root.path(), CONNECTOR, "acct1", DecisionChannel::Terminal);
     assert!(ok, "mock healthcheck should succeed: {value}");
     assert_eq!(value["status"], serde_json::json!(200));
     assert_eq!(value["body"], serde_json::json!({"ok": true}));
@@ -218,7 +220,7 @@ fn http_healthcheck_reaches_the_real_url() {
     approve_connector();
     approve_account(root.path(), "acct1");
 
-    let (value, ok) = healthcheck(root.path(), CONNECTOR, "acct1");
+    let (value, ok) = healthcheck(root.path(), CONNECTOR, "acct1", DecisionChannel::Terminal);
     assert!(ok, "http healthcheck should succeed: {value}");
     assert_eq!(value["status"], serde_json::json!(200));
     assert_eq!(value["body"], serde_json::json!({"status": "up"}));
@@ -245,7 +247,7 @@ fn missing_healthcheck_declaration_is_config_error() {
         "accounts:\n  - name: acct1\n    base_url: https://unused.example\n",
     );
 
-    let (value, ok) = healthcheck(root.path(), CONNECTOR, "acct1");
+    let (value, ok) = healthcheck(root.path(), CONNECTOR, "acct1", DecisionChannel::Terminal);
     assert!(!ok);
     assert_eq!(value["error"]["code"], serde_json::json!("config"));
     let msg = value["error"]["message"].as_str().unwrap();
@@ -264,7 +266,12 @@ fn unknown_account_is_config_error() {
         "accounts:\n  - name: acct1\n    base_url: https://unused.example\n",
     );
 
-    let (value, ok) = healthcheck(root.path(), CONNECTOR, "no-such-account");
+    let (value, ok) = healthcheck(
+        root.path(),
+        CONNECTOR,
+        "no-such-account",
+        DecisionChannel::Terminal,
+    );
     assert!(!ok);
     assert_eq!(value["error"]["code"], serde_json::json!("config"));
     let msg = value["error"]["message"].as_str().unwrap();

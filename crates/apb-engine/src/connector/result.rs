@@ -89,6 +89,11 @@ pub struct CallError {
     /// Set only on an `IncompleteResponse` error: why the body read did not
     /// complete.
     pub incomplete: Option<BodyIncomplete>,
+    /// Warnings of whatever the call opened before it failed (an OAuth
+    /// mint's rotated refresh token): shown beside the error as the
+    /// result's top-level `warnings`, as a success shows them, and never
+    /// journaled.
+    pub warnings: Vec<String>,
 }
 
 impl CallError {
@@ -99,7 +104,18 @@ impl CallError {
             http_status: None,
             retry_after_sec: None,
             incomplete: None,
+            warnings: Vec::new(),
         }
+    }
+
+    /// The error with `warnings` added after its own, each once.
+    pub(crate) fn carrying(mut self, warnings: &[String]) -> Self {
+        for w in warnings {
+            if !self.warnings.contains(w) {
+                self.warnings.push(w.clone());
+            }
+        }
+        self
     }
 
     /// Builds the `incomplete_response` error for a read-only call whose 2xx
@@ -141,7 +157,11 @@ impl CallError {
         if let Some(b) = &self.incomplete {
             b.detail(&mut err);
         }
-        json!({ "ok": false, "error": Value::Object(err) })
+        let mut value = json!({ "ok": false, "error": Value::Object(err) });
+        if !self.warnings.is_empty() {
+            value["warnings"] = json!(self.warnings);
+        }
+        value
     }
 }
 
