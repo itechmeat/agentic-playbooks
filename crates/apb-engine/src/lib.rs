@@ -128,6 +128,7 @@ pub mod step_start;
 pub mod stop;
 pub mod terminal_hook;
 pub mod transcript;
+pub mod trigger;
 pub mod waker;
 pub mod workdir;
 pub mod zcode_ui_sync;

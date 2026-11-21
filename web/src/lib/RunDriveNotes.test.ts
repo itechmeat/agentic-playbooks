@@ -51,6 +51,32 @@ describe('RunDriveNotes untrusted', () => {
   })
 })
 
+describe('RunDriveNotes triggered by', () => {
+  it('names the rule that started the run', () => {
+    const { body } = render(RunDriveNotes, {
+      props: {
+        triggeredBy: {
+          rule: 'triage-new-issues',
+          incarnation: 'abc123',
+          source: 'inbox',
+          connector: 'github',
+          account: 'main',
+          event_seq: 42,
+        },
+      },
+    })
+    expect(body).toContain('data-testid="run-triggered-by"')
+    expect(body).toContain('started by rule')
+    expect(body).toContain('triage-new-issues')
+    expect(body).toContain('event 42')
+  })
+
+  it('shows nothing for a run no rule started', () => {
+    const { body } = render(RunDriveNotes, { props: {} })
+    expect(body).not.toContain('run-triggered-by')
+  })
+})
+
 describe('RunDriveNotes external data', () => {
   it('says a run that processes external data keeps nothing for learning', () => {
     const { body } = render(RunDriveNotes, { props: { externalData: true } })

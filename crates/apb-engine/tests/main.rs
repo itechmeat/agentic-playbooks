@@ -669,6 +669,8 @@ mod transcript_read_test;
 #[cfg(unix)]
 #[path = "suite/transcript_test.rs"]
 mod transcript_test;
+#[path = "suite/trigger_test.rs"]
+mod trigger_test;
 #[cfg(unix)]
 #[path = "suite/unattended_test.rs"]
 mod unattended_test;

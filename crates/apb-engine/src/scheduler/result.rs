@@ -689,7 +689,7 @@ fn file(
         Ok(CappedRead::Refused(why)) => {
             let reason = match why {
                 ReadRefusal::Missing => OmissionReason::NotFound,
-                ReadRefusal::Link => OmissionReason::Link,
+                ReadRefusal::Link | ReadRefusal::LinkAt { .. } => OmissionReason::Link,
                 ReadRefusal::NotRegular => OmissionReason::NotRegularFile,
                 ReadRefusal::HardLink => OmissionReason::HardLink,
                 ReadRefusal::TooLarge { size } if size > store::MAX_FILE_BYTES => {

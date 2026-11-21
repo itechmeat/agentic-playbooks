@@ -499,6 +499,10 @@ pub async fn run_ingest_server(bind: IpAddr, port: u16) -> Result<(), std::io::E
     // a slowloris client on a directly exposed ingest bind cannot hold sockets
     // open forever. This listener never shuts down on its own, so it passes a
     // pending shutdown future.
+    // The trigger sweep (start rules) is hosted by this listener too: spawned
+    // once per process, it evaluates every enabled rule of every registered
+    // project, woken early by a stored delivery (`post_hook_handler`).
+    crate::trigger_sweep::spawn();
     crate::httpserve::serve_with_header_timeout(
         listener,
         app,
@@ -787,7 +791,14 @@ async fn post_hook_handler(
     }
 
     match store.append_typed(&id, event_type.as_deref(), &parsed) {
-        Ok(Appended::Stored(_)) | Ok(Appended::Duplicate) => flat(StatusCode::OK),
+        Ok(Appended::Stored(_)) => {
+            // A stored delivery may match a rule (start rules): wake the
+            // sweep task now, so its run starts without waiting out the
+            // period. A no-op until this process hosted the sweep.
+            crate::trigger_sweep::nudge();
+            flat(StatusCode::OK)
+        }
+        Ok(Appended::Duplicate) => flat(StatusCode::OK),
         Err(e) => {
             // The error text names paths and io failures, never a body.
             eprintln!("apb ingest_store_error connector={connector} account={account}: {e}");
@@ -821,7 +832,10 @@ fn resolve_target(connector: &str, account: &str) -> Option<(ConnectorDoc, Accou
         }
         apb_core::profile::validate_profile_name(segment).ok()?;
     }
-    let doc = load_connector_doc(connector)?;
+    // The manifest without `store::load`'s whole-folder digest (every
+    // delivery reaches this, including ones the accept cap is about to
+    // drop), with its symlink containment restored.
+    let doc = store::read_doc_contained(connector)?;
     doc.webhook.as_ref()?;
     // Global accounts only: the hook path carries no workspace segment, so a
     // project-scoped account has no unambiguous project root at delivery
@@ -832,41 +846,6 @@ fn resolve_target(connector: &str, account: &str) -> Option<(ConnectorDoc, Accou
     let file: AccountsFile = yaml_serde::from_str(&raw).ok()?;
     let acct = file.accounts.into_iter().find(|a| a.name == account)?;
     Some((doc, acct))
-}
-
-/// Reads and parses one connector's manifest directly, deliberately skipping
-/// `store::load`'s whole-folder `content::tree_digest`. That digest exists so
-/// the dashboard can tell whether an approved connector's content changed
-/// since it was trusted (`content.rs`, connector approval) - a decision that
-/// belongs to the dashboard's approval flow, never to ingest. The signature
-/// on the request is the authentication here; a trust digest is not read or
-/// checked on this path at all. Every delivery reaches this call, including
-/// ones the accept cap is about to drop (`resolve_target` runs first), so
-/// hashing the whole connector directory - `connector.yaml`, `PUBLIC.md`, and
-/// any other files alongside them - per request would put real, unbounded-by-
-/// account-config CPU work on a path an unauthenticated caller can trigger at
-/// will. `connector` was already validated as a plain `[a-z0-9-]` slug by
-/// `resolve_target`, so joining it into a path here carries no traversal
-/// risk from the name alone - but skipping `store::load` means this function
-/// must restore its symlink-containment check itself (see below), since
-/// nothing else on this path re-adds it.
-fn load_connector_doc(name: &str) -> Option<ConnectorDoc> {
-    let base = store::connectors_dir()?;
-    let cand = base.join(name);
-    let canonical_path = std::fs::canonicalize(&cand).ok()?;
-    // Symlink-containment check, mirroring `store::load`'s defense-in-depth:
-    // even with `name` already validated as a plain `[a-z0-9-]` slug, a
-    // symlink planted inside the connectors root (by an installed connector,
-    // or by anything else with write access to `connectors_dir()`) could
-    // resolve outside it. Every delivery reaches this call, including ones
-    // an unauthenticated caller can trigger at will, so refusing containment
-    // is not optional here.
-    let canonical_root = std::fs::canonicalize(&base).unwrap_or_else(|_| base.clone());
-    if !canonical_path.starts_with(&canonical_root) {
-        return None;
-    }
-    let yaml = std::fs::read_to_string(canonical_path.join("connector.yaml")).ok()?;
-    ConnectorDoc::from_yaml(&yaml, name).ok()
 }
 
 /// Renders one webhook template against the account, resolving only the

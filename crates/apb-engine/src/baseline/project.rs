@@ -521,6 +521,7 @@ fn refusal_why(refusal: ReadRefusal) -> &'static str {
     match refusal {
         ReadRefusal::Missing => "it is gone",
         ReadRefusal::Link => "it goes through a link",
+        ReadRefusal::LinkAt { .. } => "it goes through a link",
         ReadRefusal::NotRegular => "it is not a regular file",
         ReadRefusal::HardLink => "it has more than one link",
         ReadRefusal::TooLarge { .. } => "it is larger than the report cap",

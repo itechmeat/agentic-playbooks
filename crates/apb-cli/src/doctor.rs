@@ -263,6 +263,32 @@ fn doctor_env(root: &Path, mut out: Out) -> ExitCode {
             &sanitize_for_terminal(&detail, SANDBOX_LINE_MAX),
         );
     }
+    // Start rules (docs/TRIGGERS.md): unreadable files, registration, the
+    // sweep, what a crashed remove leaves; then every rule a person still
+    // has to approve (the tools' list fills `needs_approval`).
+    for (status, detail) in apb_engine::trigger::view::doctor_line(root) {
+        out.line(
+            match status {
+                CheckStatus::Ok => OK,
+                CheckStatus::Warn => WARN,
+                CheckStatus::Fail => FAIL,
+            },
+            "triggers",
+            &sanitize_for_terminal(&detail, SANDBOX_LINE_MAX),
+        );
+    }
+    if let Ok(views) = apb_mcp::tools::trigger::list(root) {
+        for view in views {
+            if view.needs_approval {
+                let name = view.name.clone();
+                out.line(
+                    WARN,
+                    "triggers",
+                    &format!("rule `{name}` needs approval: apb trigger approve {name}"),
+                );
+            }
+        }
+    }
     // A concurrency slot file that does not verify refuses its playbook's
     // keyed starts and resumes until a person moves it aside.
     if let Some(detail) = apb_engine::concurrency::doctor_line(root) {

@@ -35,6 +35,49 @@ pub struct Beneath {
     dir: std::os::fd::OwnedFd,
 }
 
+/// The file opened for reading and appending, with the directory it was
+/// opened from: the directory the append syncs, the one that holds the
+/// file, never a path reopened after the walk.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct OpenedAppend {
+    /// The file, opened for reading and appending.
+    pub file: std::fs::File,
+    /// The parent directory, as the walk reached it.
+    dir: std::os::fd::OwnedFd,
+}
+
+#[cfg(unix)]
+impl OpenedAppend {
+    /// Syncs the directory the file was opened from: the one that holds
+    /// it, as the walk reached it. A directory swapped in at that path
+    /// meanwhile is never synced in place of it.
+    pub fn sync_dir(&self) -> io::Result<()> {
+        use std::os::fd::AsFd;
+        sys::fsync(self.dir.as_fd())
+    }
+}
+
+/// The file opened for reading and appending, with the directory it was
+/// opened from: the portable twin of the descriptor-relative
+/// [`OpenedAppend`], which has no directory descriptor to sync.
+#[cfg(not(unix))]
+#[derive(Debug)]
+pub struct OpenedAppend {
+    /// The file, opened for reading and appending.
+    pub file: std::fs::File,
+}
+
+#[cfg(not(unix))]
+impl OpenedAppend {
+    /// Syncs the directory the file was opened from. The platform has no
+    /// directory sync (`fsutil::sync_dir` is a no-op off unix), so this
+    /// answers `Ok`.
+    pub fn sync_dir(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// A bounded read of one regular file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CappedRead {
@@ -53,12 +96,15 @@ pub struct FileStamp {
 }
 
 /// Why a file was not read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadRefusal {
     /// No entry at the path.
     Missing,
-    /// A link at some component.
+    /// A link at the entry itself.
     Link,
+    /// A link at a component of the path, named: the component is not a
+    /// directory, so nothing below it was reached.
+    LinkAt { component: String },
     /// A FIFO, device, socket or directory.
     NotRegular,
     /// A regular file with more than one hard link.
@@ -381,11 +427,14 @@ impl Beneath {
     fn walk(&self, segs: &[&str]) -> Result<std::os::fd::OwnedFd, Walk> {
         use std::os::fd::AsFd;
         let mut cur = self.dir.try_clone().map_err(Walk::Io)?;
+        let mut component = String::new();
         for seg in segs {
             let name = sys::cstr(seg).map_err(Walk::Io)?;
+            component.push_str(seg);
+            component.push('/');
             cur = match sys::open_dir(cur.as_fd(), &name) {
                 Ok(fd) => fd,
-                Err(e) => return Err(Walk::classify(cur.as_fd(), &name, e)),
+                Err(e) => return Err(Walk::classify(cur.as_fd(), &name, e, &component)),
             };
         }
         Ok(cur)
@@ -406,7 +455,10 @@ impl Beneath {
             Err(Walk::Missing | Walk::NotDir) => {
                 return Ok(CappedRead::Refused(ReadRefusal::Missing));
             }
-            Err(Walk::Link) => return Ok(CappedRead::Refused(ReadRefusal::Link)),
+            Err(Walk::Link(component)) => {
+                let component = component.trim_end_matches('/').to_string();
+                return Ok(CappedRead::Refused(ReadRefusal::LinkAt { component }));
+            }
             Err(Walk::Io(e)) => return Err(e),
         };
         let name = sys::cstr(leaf)?;
@@ -496,7 +548,9 @@ impl Beneath {
         let dir = match self.walk(&parents) {
             Ok(fd) => fd,
             Err(Walk::Missing | Walk::NotDir) => return Ok(None),
-            Err(Walk::Link) => return Err(link_error(rel)),
+            Err(Walk::Link(component)) => {
+                return Err(link_error(component.trim_end_matches('/')));
+            }
             Err(Walk::Io(e)) => return Err(e),
         };
         match sys::lstat_at(dir.as_fd(), &sys::cstr(leaf)?) {
@@ -514,7 +568,9 @@ impl Beneath {
         let dir = match self.walk(&parents) {
             Ok(fd) => fd,
             Err(Walk::Missing | Walk::NotDir) => return Ok(None),
-            Err(Walk::Link) => return Err(link_error(rel)),
+            Err(Walk::Link(component)) => {
+                return Err(link_error(component.trim_end_matches('/')));
+            }
             Err(Walk::Io(e)) => return Err(e),
         };
         match sys::lstat_at(dir.as_fd(), &sys::cstr(leaf)?) {
@@ -535,7 +591,9 @@ impl Beneath {
         let dir = match self.walk(&parents) {
             Ok(fd) => fd,
             Err(Walk::Missing | Walk::NotDir) => return Ok(None),
-            Err(Walk::Link) => return Err(link_error(rel)),
+            Err(Walk::Link(component)) => {
+                return Err(link_error(component.trim_end_matches('/')));
+            }
             Err(Walk::Io(e)) => return Err(e),
         };
         match sys::lstat_at(dir.as_fd(), &sys::cstr(leaf)?) {
@@ -567,9 +625,9 @@ impl Beneath {
                         Err(e) => return Err(e),
                     }
                     sys::open_dir(cur.as_fd(), &name)
-                        .map_err(|e| Walk::classify(cur.as_fd(), &name, e).into_io(rel))?
+                        .map_err(|e| Walk::classify(cur.as_fd(), &name, e, seg).into_io(rel))?
                 }
-                Err(e) => return Err(Walk::classify(cur.as_fd(), &name, e).into_io(rel)),
+                Err(e) => return Err(Walk::classify(cur.as_fd(), &name, e, seg).into_io(rel)),
             };
             cur = next;
         }
@@ -605,6 +663,64 @@ impl Beneath {
             return Err(e);
         }
         sys::fsync(dir.as_fd())
+    }
+
+    /// Syncs the directory at `rel` (or the anchor for `""`) through the
+    /// descriptor walk: no link followed at any component, nothing opened
+    /// that is not a directory. A link or a non-directory at a walked
+    /// component is refused, never opened.
+    pub fn sync_dir(&self, rel: &str) -> io::Result<()> {
+        use std::os::fd::AsFd;
+        let segs = segments(rel)?;
+        let dir = self.walk_io(&segs, rel)?;
+        sys::fsync(dir.as_fd())
+    }
+
+    /// Opens the regular file at `rel` for reading and appending, creating
+    /// it 0600 when missing, never following a link at any component on the
+    /// way: the one descriptor a torn tail is repaired through and appended
+    /// to, so the bytes that were read are the bytes that are written. An
+    /// existing entry that is not a regular file with one link is refused,
+    /// as is a link at any directory on the way. The answer carries the
+    /// directory the file was opened from, so the caller syncs that one
+    /// and never a path reopened after the walk.
+    pub fn open_read_append(&self, rel: &str) -> io::Result<OpenedAppend> {
+        use std::os::fd::AsFd;
+        let (parents, leaf) = split_leaf(rel)?;
+        crate::process_mode::guard_write(&self.anchor.join(rel))?;
+        let dir = self.walk_io(&parents, rel)?;
+        let name = sys::cstr(leaf)?;
+        #[cfg(test)]
+        tests::between_steps();
+        let fd = sys::openat(
+            dir.as_fd(),
+            &name,
+            libc::O_RDWR
+                | libc::O_APPEND
+                | libc::O_CREAT
+                | libc::O_NOFOLLOW
+                | libc::O_NONBLOCK
+                | libc::O_CLOEXEC,
+            0o600,
+        )?;
+        let file = std::fs::File::from(fd);
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("`{rel}` is not a regular file"),
+            ));
+        }
+        // A hard link shares its mode with a file elsewhere: writing
+        // through it would write that file too.
+        if sys::nlink(&sys::fstat(file.as_fd())?) > 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("`{rel}` has more than one link"),
+            ));
+        }
+        super::narrow_open(&file);
+        Ok(OpenedAppend { file, dir })
     }
 
     /// Creates `name` in the directory `dir_rel` exclusively (D7): the file
@@ -764,7 +880,8 @@ impl Beneath {
 #[cfg(unix)]
 enum Walk {
     Missing,
-    Link,
+    /// A link at a component of the path, named.
+    Link(String),
     NotDir,
     Io(io::Error),
 }
@@ -773,13 +890,19 @@ enum Walk {
 impl Walk {
     /// The failed open of `name` in `dir`, told apart by looking at the
     /// entry without following it (`ELOOP`, `ENOTDIR` and `EMLINK` mean a
-    /// link on some systems and a file on others).
-    fn classify(dir: std::os::fd::BorrowedFd<'_>, name: &std::ffi::CStr, e: io::Error) -> Walk {
+    /// link on some systems and a file on others). `component` is the path
+    /// of the component that was opened, so the refusal names it.
+    fn classify(
+        dir: std::os::fd::BorrowedFd<'_>,
+        name: &std::ffi::CStr,
+        e: io::Error,
+        component: &str,
+    ) -> Walk {
         if e.kind() == io::ErrorKind::NotFound {
             return Walk::Missing;
         }
         match sys::lstat_at(dir, name) {
-            Ok(st) if sys::kind_of(&st) == EntryKind::Link => Walk::Link,
+            Ok(st) if sys::kind_of(&st) == EntryKind::Link => Walk::Link(component.to_string()),
             Ok(st) if sys::kind_of(&st) != EntryKind::Dir => Walk::NotDir,
             Err(e2) if e2.kind() == io::ErrorKind::NotFound => Walk::Missing,
             _ => Walk::Io(e),
@@ -791,7 +914,7 @@ impl Walk {
             Walk::Missing => {
                 io::Error::new(io::ErrorKind::NotFound, format!("`{rel}` does not exist"))
             }
-            Walk::Link => link_error(rel),
+            Walk::Link(component) => link_error(component.trim_end_matches('/')),
             Walk::NotDir => io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("`{rel}` goes through something that is not a directory"),
@@ -881,10 +1004,35 @@ impl Beneath {
         Ok(cur)
     }
 
+    /// The path of the component of `segs` that is a link, if any: the
+    /// refusal names it, so the remedy can name it too.
+    fn link_component(&self, segs: &[&str]) -> Option<String> {
+        let mut cur = self.anchor.clone();
+        let mut component = String::new();
+        for seg in segs {
+            cur.push(seg);
+            component.push_str(seg);
+            component.push('/');
+            if std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()) {
+                return Some(component);
+            }
+        }
+        None
+    }
+
     /// Reads the regular file at `rel`, at most `cap` bytes.
     pub fn read_regular_capped(&self, rel: &str, cap: u64) -> io::Result<CappedRead> {
         use std::io::Read as _;
         let segs = segments(rel)?;
+        // A link at a parent component is named as that component; a link
+        // at the last component is the entry itself, like the unix twin
+        // answers, so the remedy never calls the file a directory.
+        let (parents, _) = segs.split_at(segs.len().saturating_sub(1));
+        if let Some(component) = self.link_component(parents) {
+            return Ok(CappedRead::Refused(ReadRefusal::LinkAt {
+                component: component.trim_end_matches('/').to_string(),
+            }));
+        }
         let path = match self.checked(&segs, rel) {
             Ok(p) => p,
             Err(_) => return Ok(CappedRead::Refused(ReadRefusal::Link)),
@@ -1008,6 +1156,59 @@ impl Beneath {
             let _ = std::fs::remove_file(&tmp);
         }
         written
+    }
+
+    /// Syncs the directory at `rel` (or the anchor for `""`). The portable
+    /// twin of the descriptor-relative [`Beneath::sync_dir`]: the checked
+    /// path walk refuses a link, and the platform has no directory sync
+    /// (`fsutil::sync_dir` is a no-op off unix), so the walk is all there
+    /// is to do.
+    pub fn sync_dir(&self, rel: &str) -> io::Result<()> {
+        let _ = self.checked(&segments(rel)?, rel)?;
+        Ok(())
+    }
+
+    /// Opens the regular file at `rel` for reading and appending, creating
+    /// it when missing, every component checked not to be a link. A link at
+    /// the leaf, a non-regular entry and (on unix) a second hard link are
+    /// refused. The portable twin of the descriptor-relative unix
+    /// [`Beneath::open_read_append`]: a checked path walk without the
+    /// descriptor guarantees (a link swapped in between the check and the
+    /// open would be followed), like every reader of this half.
+    pub fn open_read_append(&self, rel: &str) -> io::Result<OpenedAppend> {
+        let path = self.checked(&segments(rel)?, rel)?;
+        crate::process_mode::guard_write(&path)?;
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let mut options = std::fs::OpenOptions::new();
+                options.read(true).append(true).create(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                return options.open(&path).map(|file| OpenedAppend { file });
+            }
+            Err(e) => return Err(e),
+        };
+        if meta.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("`{rel}` is a symlink"),
+            ));
+        }
+        if !meta.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("`{rel}` is not a regular file"),
+            ));
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&path)?;
+        Ok(OpenedAppend { file })
     }
 
     /// Creates `name` in the directory `dir_rel` exclusively (D7): the file
@@ -1679,5 +1880,51 @@ pub(crate) mod tests {
             assert!(!t.path().join("results/b").exists());
             assert!(!t.path().join("results/.lock").exists());
         }
+    }
+
+    /// A directory and the anchor itself sync through their descriptors.
+    #[test]
+    fn sync_dir_syncs_a_walked_directory_and_the_anchor() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join("a/b")).unwrap();
+        let b = Beneath::open(t.path()).unwrap();
+        b.sync_dir("a/b").unwrap();
+        b.sync_dir("a").unwrap();
+        b.sync_dir("").unwrap();
+    }
+
+    /// A link at a walked component is refused, never opened: the sync of
+    /// the directory it names does not happen.
+    #[test]
+    fn sync_dir_refuses_a_link_at_a_component() {
+        let t = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join("a/real")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("elsewhere"), t.path().join("a/b")).unwrap();
+        let b = Beneath::open(t.path()).unwrap();
+        assert!(b.sync_dir("a/b").is_err());
+        assert!(b.sync_dir("a/real").is_ok());
+    }
+
+    /// A FIFO at the walked path is refused without ever being opened: a
+    /// sync that opened by path would block until a writer appears.
+    #[test]
+    fn sync_dir_never_opens_a_fifo() {
+        let t = tempfile::tempdir().unwrap();
+        let fifo = t.path().join("pipe");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let path = t.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        // On its own thread, so a blocking open shows as a timeout here.
+        std::thread::spawn(move || {
+            let b = Beneath::open(&path).unwrap();
+            let _ = tx.send(b.sync_dir("pipe"));
+        });
+        let synced = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the sync never opens the FIFO");
+        assert!(synced.is_err());
     }
 }

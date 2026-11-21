@@ -22,6 +22,7 @@ pub mod passkeys;
 mod ratelimit;
 pub mod routes;
 pub mod state;
+mod trigger_sweep;
 pub mod webauthn;
 // Unit tests run with an isolated global config dir, set before any test
 // thread starts (`apb_core::config::test_isolation`).
@@ -247,6 +248,9 @@ pub fn build_router(state: AppState) -> Router {
         .merge(routes::judge::router())
         .merge(routes::scenario::router())
         .merge(routes::corrections::router())
+        // Start rules: the writes behind a signed-in session, the reads and
+        // the dry test on every channel.
+        .merge(routes::triggers::router())
         .route("/api/runs", get(routes::runs::list_runs_handler))
         .route("/api/runs/{id}", get(routes::runs::get_run_handler))
         .route(

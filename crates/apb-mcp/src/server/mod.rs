@@ -35,6 +35,7 @@ pub mod read_only;
 mod run;
 mod scenario;
 mod supervisor;
+mod trigger;
 
 /// A supervisor session: which run it observes and which capabilities were
 /// granted at the moment the token was minted (minted by
@@ -660,6 +661,7 @@ impl WfMcp {
             + Self::judge_router()
             + Self::scenario_router()
             + Self::evidence_router()
+            + Self::trigger_router()
     }
 }
 

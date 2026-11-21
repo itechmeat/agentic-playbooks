@@ -579,6 +579,7 @@ fn drive_supervised_takes_its_consent_only_from_its_parents_handoff() {
                     sources: vec![],
                     billing: None,
                     started_by: None,
+                    triggered_by: None,
                 },
                 binding: HandoffBinding::Nonce { nonce: "x".into() },
                 config_dir: None,
@@ -893,6 +894,71 @@ fn a_step_started_run_and_its_starter_name_each_other() {
     let manifest = fs::read_to_string(root.join(".apb/runs").join(&id).join("manifest.yaml"))
         .unwrap_or_default();
     assert!(!manifest.contains("tok-cli-1"), "the token was stored");
+}
+
+/// The `apb runs <id>` output names the start rule that started the run
+/// (start rules): a run whose manifest launch record carries `triggered_by`
+/// prints the line, and a run no rule started prints none.
+#[test]
+fn the_runs_command_names_its_rule() {
+    let dir = seeded();
+    let root = dir.path();
+    let run = root.join(".apb/runs/rule-1");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(
+        run.join("events.jsonl"),
+        "{\"seq\":1,\"ts\":1,\"type\":\"run_started\",\"playbook\":\"noagent\",\"version\":\"1.0.0\"}\n",
+    )
+    .unwrap();
+    fs::write(run.join("run.yaml"), "params: {}\n").unwrap();
+    let by = apb_core::launch::TriggeredBy {
+        rule: "triage-new-issues".to_string(),
+        incarnation: "inc1".to_string(),
+        source: "inbox".to_string(),
+        connector: Some("github".to_string()),
+        account: Some("main".to_string()),
+        event_seq: Some(42),
+    };
+    apb_engine::manifest::write(
+        &run,
+        &apb_engine::manifest::RunExecutionManifest {
+            launch: Some(apb_core::launch::LaunchRecord {
+                kind: "start".to_string(),
+                initiator: "trigger:triage-new-issues".to_string(),
+                confirmation: None,
+                policy: apb_core::launch::LaunchPolicy::Allow,
+                sources: Vec::new(),
+                billing: None,
+                started_by: None,
+                triggered_by: Some(by),
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let plain = root.join(".apb/runs/plain-1");
+    fs::create_dir_all(&plain).unwrap();
+    fs::write(
+        plain.join("events.jsonl"),
+        "{\"seq\":1,\"ts\":1,\"type\":\"run_started\",\"playbook\":\"noagent\",\"version\":\"1.0.0\"}\n",
+    )
+    .unwrap();
+    fs::write(plain.join("run.yaml"), "params: {}\n").unwrap();
+    let shown = |id: &str| {
+        let out = playbook()
+            .args(["runs", id])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    let text = shown("rule-1");
+    assert!(
+        text.contains("started by rule `triage-new-issues` (inbox github/main, event 42)"),
+        "{text}"
+    );
+    let other = shown("plain-1");
+    assert!(!other.contains("started by rule"), "{other}");
 }
 
 /// An agent of run A (chain 1) starts run B; B's script step starts run C.

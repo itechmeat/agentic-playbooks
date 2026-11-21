@@ -200,6 +200,8 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "playbook_scenarios",
         "playbook_scenario_run",
         "run_scenario_capture",
+        "trigger_list",
+        "trigger_test",
     ];
     for name in expected {
         assert!(

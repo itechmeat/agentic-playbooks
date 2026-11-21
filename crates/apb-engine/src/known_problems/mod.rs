@@ -64,6 +64,9 @@ impl From<apb_core::signed_store::StoreError> for EngineError {
                 "{} does not verify (it was changed outside apb or written by another installation)",
                 path.display()
             )),
+            apb_core::signed_store::StoreError::TooLarge { .. } => {
+                EngineError::Conflict(e.to_string())
+            }
         }
     }
 }

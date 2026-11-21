@@ -40,3 +40,6 @@ apb-mcp-client = { path = ".", features = ["testing"] }
 # `apb_core::process_mode::testing`: guard tests in a read-only child process.
 apb-core = { path = "../apb-core", features = ["testing"] }
 tempfile = "3.27.0"
+# A paused clock for the close's drain tests, so its own bound never cuts
+# them short on a loaded machine. Test builds only.
+tokio = { workspace = true, features = ["test-util"] }

@@ -1062,14 +1062,15 @@ fn a_dropped_line_never_reaches_an_error() {
     assert!(!String::from_utf8_lossy(&all_bytes_under(&fx.run)).contains("LOGSECRET"));
 }
 
-/// A log line the server writes right after its answer, in a write of its
-/// own, is counted too: the count is read once the session closed. On a
+/// A log line the server writes only after the client cancelled the
+/// service (it writes at end of input, when the reader is long gone) is
+/// counted too: the close drains the pipe once the server is reaped. On a
 /// failed call the session closes right after the answer.
 #[test]
 fn a_line_written_after_the_answer_is_counted() {
     let fx = Fx::new();
     fx.pin();
-    fx.stub.set_call_suffix(b"LOGSECRET-4 done").unwrap();
+    fx.stub.set_eof_log(Some("LOGSECRET-4 done")).unwrap();
     fx.set_call(StubCall::Error {
         code: -32000,
         message: "busy".to_string(),

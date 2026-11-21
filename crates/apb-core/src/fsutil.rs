@@ -462,6 +462,20 @@ pub fn open_append_private(path: &Path) -> io::Result<File> {
 /// link (its mode is another file's too); a file an older apb left readable
 /// beyond its owner is narrowed. `name` must be one path segment.
 pub fn open_append_private_in(dir: &Path, name: &str) -> io::Result<File> {
+    open_private_in(dir, name, false)
+}
+
+/// [`open_append_private_in`] with the file also open for reading, so one
+/// descriptor can repair a torn tail ([`repair_line_tail_file`]) and
+/// append: what was read is what is written to, never a file a link
+/// reached.
+pub fn open_read_append_private_in(dir: &Path, name: &str) -> io::Result<File> {
+    open_private_in(dir, name, true)
+}
+
+/// The body of [`open_append_private_in`] and
+/// [`open_read_append_private_in`].
+fn open_private_in(dir: &Path, name: &str, read: bool) -> io::Result<File> {
     if name.is_empty() || name.contains('/') || name == "." || name == ".." {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -481,7 +495,8 @@ pub fn open_append_private_in(dir: &Path, name: &str) -> io::Result<File> {
         unix_tests::between_opens();
         let leaf = std::ffi::CString::new(name)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let flags = libc::O_WRONLY
+        let access = if read { libc::O_RDWR } else { libc::O_WRONLY };
+        let flags = access
             | libc::O_APPEND
             | libc::O_CREAT
             | libc::O_NOFOLLOW
@@ -522,6 +537,7 @@ pub fn open_append_private_in(dir: &Path, name: &str) -> io::Result<File> {
         fs::OpenOptions::new()
             .create(true)
             .append(true)
+            .read(read)
             .open(&path)?
     };
     let meta = file.metadata()?;
@@ -859,6 +875,125 @@ fn hold_lock_within(dir: &Path, lock_name: &str, attempts: u32) -> io::Result<He
             path.display()
         ),
     ))
+}
+
+/// Whether another process holds the lock file `dir/lock_name`, without
+/// creating or changing anything: the file is opened read-only with no
+/// link followed (`O_RDONLY | O_NOFOLLOW`, no `O_CREAT`) and probed with
+/// a non-blocking shared `flock`, released at once. A missing file is
+/// `Ok(false)`, and so is a file unlinked between a listing and this
+/// open; a directory that does not exist is `Ok(false)` too. Nothing on
+/// disk is created or changed, so a caller that only reads (a surface
+/// judging a pending reservation without taking it over) stays read-only.
+/// This probes an `flock` lock ([`try_hold_lock`], [`hold_lock_waiting`]);
+/// a [`lock_dir`] lock is judged by its age through [`lock_held`].
+pub fn flock_held(dir: &Path, lock_name: &str) -> io::Result<bool> {
+    // A direct probe, not `beneath`'s: fsutil must not depend on the
+    // descriptor-relative reader it wraps (content's use of fsutil would
+    // close a module cycle). The one leaf name needs no walk.
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true).write(false).create(false).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = match opts.open(dir.join(lock_name)) {
+        Ok(file) => file,
+        Err(e)
+            if e.kind() == io::ErrorKind::NotFound || e.kind() == io::ErrorKind::NotADirectory =>
+        {
+            return Ok(false);
+        }
+        Err(e) => return Err(e),
+    };
+    match file.try_lock_shared() {
+        Ok(()) => Ok(false),
+        Err(fs::TryLockError::WouldBlock) => Ok(true),
+        Err(fs::TryLockError::Error(e)) => Err(e),
+    }
+}
+
+/// Completes or cuts the unterminated tail a crashed appender left,
+/// before any check: a tail that parses as a whole record through `whole`
+/// keeps it by getting its newline (its writer may already have handed
+/// the record on), a partial one is cut to the last complete line (its
+/// writer never returned success, so no caller was told its record is
+/// there). A missing file, an empty file and a file that ends with a
+/// newline are left alone. Only appenders write, under the lock their
+/// callers hold: the review channel's repair, generalized with the parse
+/// as a parameter.
+pub fn repair_line_tail<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    whole: impl Fn(&str) -> Option<T>,
+) -> io::Result<()> {
+    let Ok(bytes) = fs::read(path) else {
+        return Ok(());
+    };
+    let Some(repair) = tail_repair(&bytes, whole) else {
+        return Ok(());
+    };
+    let mut file = open_append_private(path)?;
+    apply_tail_repair(&mut file, repair)
+}
+
+/// [`repair_line_tail`] through one descriptor opened for reading and
+/// appending ([`open_read_append_private_in`]): the bytes it judges are
+/// the bytes of the file it repairs, never a path looked up again, read
+/// only up to `cap` like the file's reader reads it. A file over the cap
+/// is refused through the descriptor, never read whole. `true` when the
+/// tail was completed or cut.
+pub fn repair_line_tail_file<T: serde::de::DeserializeOwned>(
+    file: &mut File,
+    cap: u64,
+    whole: impl Fn(&str) -> Option<T>,
+) -> io::Result<bool> {
+    use std::io::Seek as _;
+    file.seek(io::SeekFrom::Start(0))?;
+    let (bytes, over) = read_prefix_capped(file, cap)?;
+    if over {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the file is over its {cap} byte read limit; the tail is not repaired"),
+        ));
+    }
+    let Some(repair) = tail_repair(&bytes, whole) else {
+        return Ok(false);
+    };
+    apply_tail_repair(file, repair)?;
+    Ok(true)
+}
+
+/// What a torn tail needs: its newline (it parses whole) or a cut to the
+/// last complete line. `None` for an empty file or one that ends with a
+/// newline.
+enum TailRepair {
+    Complete,
+    Cut(u64),
+}
+
+fn tail_repair<T>(bytes: &[u8], whole: impl Fn(&str) -> Option<T>) -> Option<TailRepair> {
+    if bytes.is_empty() || bytes.ends_with(b"\n") {
+        return None;
+    }
+    let cut = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    let parses = std::str::from_utf8(&bytes[cut..])
+        .ok()
+        .and_then(whole)
+        .is_some();
+    Some(if parses {
+        TailRepair::Complete
+    } else {
+        TailRepair::Cut(cut as u64)
+    })
+}
+
+fn apply_tail_repair(file: &mut File, repair: TailRepair) -> io::Result<()> {
+    match repair {
+        TailRepair::Complete => file.write_all(b"\n")?,
+        TailRepair::Cut(len) => file.set_len(len)?,
+    }
+    file.flush()
 }
 
 /// RAII lock for a state directory (`<dir>/<lock_name>`), tagged with a unique
@@ -1449,5 +1584,94 @@ mod write_new_tests {
         let held = lock_existing_dir(&gone, "l.lock").unwrap();
         drop(held);
         assert!(!gone.join("l.lock").exists());
+    }
+}
+
+/// `lock_held`: the answer without the lock file ever existing, and the
+/// right answer while one is held and after it is free.
+#[cfg(test)]
+mod lock_held_tests {
+    use super::*;
+
+    /// The names in `dir`, sorted, as the probe-leaves-nothing assertion
+    /// reads them.
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A probe of a directory with no lock file answers `Ok(false)` and
+    /// creates nothing (a missing directory included); while a holder
+    /// keeps the lock the probe answers `Ok(true)`, and `Ok(false)` again
+    /// once it lets go.
+    #[test]
+    fn flock_held_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A directory with no lock file: nothing changes.
+        let dir = tmp.path().join("run");
+        fs::create_dir(&dir).unwrap();
+        let before = listing(&dir);
+        assert!(!flock_held(&dir, "l.lock").unwrap());
+        assert_eq!(listing(&dir), before, "the probe must create nothing");
+        // A directory that does not exist: `Ok(false)`, still nothing.
+        let gone = tmp.path().join("gone");
+        assert!(!flock_held(&gone, "l.lock").unwrap());
+        assert!(!gone.exists(), "the probe must not make the directory");
+        // The held answer, and the free one after release.
+        let holder = try_hold_lock(&dir, "l.lock").unwrap();
+        assert!(flock_held(&dir, "l.lock").unwrap());
+        drop(holder);
+        assert!(!flock_held(&dir, "l.lock").unwrap());
+        assert_eq!(listing(&dir), vec!["l.lock".to_string()]);
+    }
+}
+
+/// `repair_line_tail`: the review channel's tail repair, generalized with
+/// the parse as a parameter.
+#[cfg(test)]
+mod repair_line_tail_tests {
+    use super::*;
+
+    /// The parse a JSON-lines appender uses.
+    fn parse(line: &str) -> Option<serde_json::Value> {
+        serde_json::from_str(line).ok()
+    }
+
+    /// A whole unterminated tail gets its newline, a partial one is cut
+    /// to the last complete line, and an empty or newline-terminated file
+    /// (and a missing one) is left alone.
+    #[test]
+    fn repair_line_tail_keeps_a_whole_tail_and_cuts_a_partial_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        // Empty: nothing to do.
+        fs::write(&path, b"").unwrap();
+        repair_line_tail(&path, parse).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"");
+        // Ends with a newline: nothing to do.
+        fs::write(&path, b"{\"a\":1}\n{\"a\":2}\n").unwrap();
+        repair_line_tail(&path, parse).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"{\"a\":1}\n{\"a\":2}\n");
+        // A whole tail keeps it, with its newline added.
+        fs::write(&path, b"{\"a\":1}\n{\"a\":2}").unwrap();
+        repair_line_tail(&path, parse).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"{\"a\":1}\n{\"a\":2}\n");
+        // A partial tail is cut to the last complete line.
+        fs::write(&path, b"{\"a\":1}\n{\"a\":2").unwrap();
+        repair_line_tail(&path, parse).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"{\"a\":1}\n");
+        // A tail the parse refuses is cut too.
+        fs::write(&path, b"{\"a\":1}\ngarbage").unwrap();
+        repair_line_tail(&path, parse).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"{\"a\":1}\n");
+        // A missing file is fine, and none is created.
+        let gone = dir.path().join("gone.jsonl");
+        repair_line_tail(&gone, parse).unwrap();
+        assert!(!gone.exists());
     }
 }

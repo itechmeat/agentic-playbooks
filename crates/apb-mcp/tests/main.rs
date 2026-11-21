@@ -110,5 +110,7 @@ mod supervisor_tools_test;
 mod templates_tool_test;
 #[path = "suite/trial_tools_test.rs"]
 mod trial_tools_test;
+#[path = "suite/trigger_tools_test.rs"]
+mod trigger_tools_test;
 #[path = "suite/write_tools_test.rs"]
 mod write_tools_test;

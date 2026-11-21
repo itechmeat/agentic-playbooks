@@ -1470,3 +1470,26 @@ pub struct PlaybookDiscoverDismissArgs {
     #[serde(default)]
     pub workspace: Option<String>,
 }
+
+// --- start rules (MCP has no write tool: a person writes and approves a
+// rule with `apb trigger` or the dashboard) ---
+
+/// The arguments of `trigger_list`: none; the rules of the current
+/// workspace.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerListArgs {}
+
+/// The arguments of `trigger_test`: the rule and, when named, the event of
+/// that seq (the newest stored event otherwise). The answer carries no
+/// rendered value: a person's terminal shows values with `apb trigger
+/// test`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerTestArgs {
+    /// The rule's name.
+    pub rule: String,
+    /// The stored event to test (the newest when left out).
+    #[serde(default)]
+    pub event_seq: Option<u64>,
+}

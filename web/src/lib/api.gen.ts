@@ -1380,6 +1380,260 @@ verified: boolean,
  */
 chain: number, };
 
+export type TriggeredBy = { 
+/**
+ * The rule's name.
+ */
+rule: string, 
+/**
+ * The rule's incarnation (which creation of that name started the run).
+ */
+incarnation: string, 
+/**
+ * What the rule listens to: "inbox".
+ */
+source: string, connector?: string, account?: string, 
+/**
+ * The inbox seq of the event the run was started for.
+ */
+event_seq?: number, };
+
+export type RuleView = { name: string, enabled: boolean, 
+/**
+ * `inbox github/main [issues]`.
+ */
+source: string, playbook: string, version: string, scope: string, incarnation: string, seen_through: number, starts_last_hour: number, 
+/**
+ * Approved for its current digest; an unapproved rule starts nothing.
+ */
+approved: boolean, last?: LogEntry, 
+/**
+ * Filled by the tools layer's list from `approval_need`.
+ */
+needs_approval: boolean, 
+/**
+ * A journal the reader refuses, as the one sentence a sweep answers
+ * the rule with: the problem once, then the remedy. A rule whose
+ * journal reads carries none.
+ */
+journal_error?: string, 
+/**
+ * `check_rule` now (the playbook or connector may have changed).
+ */
+issues: Array<IssueView>, };
+
+export type LogEntry = { 
+/**
+ * The stable line id: `<incarnation>:<seq>:<verdict>` for an event's
+ * line (`held` lines add `:<code>`, a `binding_changed` line
+ * `:<binding>` after its verdict), `<incarnation>:gap:<a>-<b>` and
+ * `<incarnation>:positioned:<head>` otherwise. A line with an id the
+ * file holds already is never appended again.
+ */
+id: string, 
+/**
+ * When the line was written, in milliseconds since the Unix epoch
+ * (the unit of `run_started.ts` and of every sweep clock).
+ */
+at: number, verdict: TriggerVerdict, seq?: number | null, 
+/**
+ * A gap's range, or a `positioned` line's head twice.
+ */
+range?: [number, number] | null, run_id?: string | null, 
+/**
+ * The reason as a code, never a sentence.
+ */
+code?: string | null, 
+/**
+ * The name the code is about, taken from the rule itself, never from
+ * the event.
+ */
+name?: string | null, 
+/**
+ * A `binding_changed` line's digests: the one resolved and the one the
+ * approval held (digests, no value).
+ */
+binding?: string | null, approved?: string | null, 
+/**
+ * Validator codes (V260 to V266) of a `check_rule` refusal.
+ */
+codes?: Array<string>, 
+/**
+ * Per condition of the filter, in the rule's order: its index and
+ * whether it passed. Never the condition's literal nor the event's
+ * value.
+ */
+conditions?: Array<ConditionMark>, };
+
+export type TriggerVerdict = "skipped" | "held" | "started" | "already_started" | "refused" | "failed" | "gap" | "positioned";
+
+export type ConditionMark = { index: number, passed: boolean, };
+
+export type ConditionResult = { 
+/**
+ * `type in [issues, pull_request]` or `action = "opened"`.
+ */
+condition: string, passed: boolean, got?: string, };
+
+export type BodyCondition = { path: string, equals: string | number | boolean | null, };
+
+export type Rule = { name: string, playbook: RulePlaybook, source: RuleSource, 
+/**
+ * Param name to template (`render.rs`).
+ */
+params?: { [key in string]: string }, limits: RuleLimits, 
+/**
+ * Over the playbook's `budget:` block per field, as a run argument.
+ */
+budget?: BudgetRequest | null, 
+/**
+ * The run's input is outside data.
+ */
+external_data: boolean, 
+/**
+ * Refuse a start whose readiness report does not pass (preparation
+ * checks it for an unattended start, which a rule's start always is).
+ */
+require_ready: boolean, 
+/**
+ * `None`: the machine's default notify subscription; `Some(false)`:
+ * off; `Some(true)`: the machine's target.
+ */
+notify?: boolean | null, };
+
+export type RulePlaybook = { id: string, 
+/**
+ * Always a version: a rule never follows `current` or a candidate.
+ */
+version: string, scope: RuleScope, };
+
+export type RuleScope = "project" | "global";
+
+export type RuleSource = { "inbox": InboxSource };
+
+export type InboxSource = { connector: string, account: string, types?: Array<string>, where?: Array<BodyCondition>, 
+/**
+ * The template of the start key: one run per rendered key while the
+ * key lives (`runs.start_key_days`). An event id gives once per
+ * event, an entity id once per entity.
+ */
+key: string, };
+
+export type RuleLimits = { 
+/**
+ * Starts in any 60 minutes. Runs at once are the playbook's
+ * `concurrency:` block, not a rule limit.
+ */
+max_per_hour: number, };
+
+export type BudgetRequest = { tokens?: number | null, usd?: number | null, on_no_estimate?: OnNoEstimate | null, };
+
+export type TriggerDetail = { rule: Rule, journal: Array<LogEntry>, name: string, enabled: boolean, 
+/**
+ * `inbox github/main [issues]`.
+ */
+source: string, playbook: string, version: string, scope: string, incarnation: string, seen_through: number, starts_last_hour: number, 
+/**
+ * Approved for its current digest; an unapproved rule starts nothing.
+ */
+approved: boolean, last?: LogEntry, 
+/**
+ * Filled by the tools layer's list from `approval_need`.
+ */
+needs_approval: boolean, 
+/**
+ * A journal the reader refuses, as the one sentence a sweep answers
+ * the rule with: the problem once, then the remedy. A rule whose
+ * journal reads carries none.
+ */
+journal_error?: string, 
+/**
+ * `check_rule` now (the playbook or connector may have changed).
+ */
+issues: Array<IssueView>, };
+
+export type ApprovalNeed = { rule: string, 
+/**
+ * `rule_digest` of the entry (D1 "Where rules live" item 1): every
+ * field that changes whether or how the rule fires, and its
+ * incarnation.
+ */
+rule_digest: string, playbook: string, version: string, playbook_digest: string, 
+/**
+ * `permit.permit_digest()` of the gate's `RunPermit` for the target.
+ */
+permit_digest: string, launch_policy: string, launch_sources: Array<string>, 
+/**
+ * The full billing decision for the tree's executors, as
+ * `billing.binding_lines()` (D0 "Who starts the run" item 5).
+ */
+billing: Array<string>, 
+/**
+ * `approval_binding` of the three above: what `approve` stores and
+ * admission compares.
+ */
+binding: string, irreversible_sources?: Array<string>, consent_nonce?: string | null, };
+
+export type TestReport = { rule: string, seq: number, event_type?: string, filter: FilterVerdict, conditions: Array<ConditionResult>, 
+/**
+ * One per param of the rule, in name order.
+ */
+params: Array<ParamCheck>, key: KeyReport, 
+/**
+ * From the no-write peek; `None` when the key did not render.
+ */
+key_use?: KeyUse, 
+/**
+ * Exactly one line per [`CheckId`], in [`CheckId::ORDER`].
+ */
+checks: Array<CheckLine>, 
+/**
+ * Always `["probation", "readiness", "concurrency", "working_tree"]`,
+ * shown as "checked at start"; never run by a test.
+ */
+checked_at_start: string[], };
+
+export type FilterVerdict = { "verdict": "matched" } | { "verdict": "skipped", code: string, name?: string, };
+
+export type ParamCheck = { name: string, 
+/**
+ * The rendered value, `show_values` only.
+ */
+value?: string, 
+/**
+ * Characters of the rendered value; `None` when it did not render.
+ */
+chars?: number, 
+/**
+ * The param's `pattern` against the rendered value; `None` without a
+ * pattern or a rendered value.
+ */
+pattern_ok?: boolean, 
+/**
+ * Why it did not render; `None` when it rendered.
+ */
+failure?: RenderFailure, };
+
+export type KeyReport = { 
+/**
+ * `start_key::key_tag_if_keyed` of the prefixed key; never the key.
+ */
+tag?: string, 
+/**
+ * The rendered key, `show_values` only.
+ */
+value?: string, failure?: RenderFailure, };
+
+export type RenderFailure = { "kind": "missing", path: string, } | { "kind": "not_scalar", path: string, } | { "kind": "too_long" } | { "kind": "invalid" };
+
+export type KeyUse = { "state": "free" } | { "state": "used", run_id: string, conflict: boolean, } | { "state": "busy" };
+
+export type CheckId = "approved" | "render_params" | "start_key" | "unattended" | "execution" | "run_gate" | "binding" | "launch" | "consent" | "param_patterns" | "budget" | "notify";
+
+export type CheckState = { "state": "passed" } | { "state": "refused", code: string, } | { "state": "not_run" };
+
+export type CheckLine = { id: CheckId, } & ({ "state": "passed" } | { "state": "refused", code: string, } | { "state": "not_run" });
+
 export type StartedRunView = { run_id: string, playbook: string, 
 /**
  * `project` or `global`: where its definition came from.
@@ -2563,7 +2817,11 @@ billing?: BillingRecord,
  * The run step this run was started from (`run_step:cli` or
  * `run_step:mcp` initiators). Absent for every other start. Additive.
  */
-started_by?: StartedBy, };
+started_by?: StartedBy, 
+/**
+ * The rule that started this run. Absent for every other start. Additive.
+ */
+triggered_by?: TriggeredBy, };
 
 export type BillingRecord = { 
 /**
@@ -3044,6 +3302,11 @@ start_key?: string,
  * it. Left out for every other run.
  */
 started_by?: StartedBy, 
+/**
+ * The start rule that started this run, from its launch record
+ * (start rules). Left out for a run no rule started.
+ */
+triggered_by?: TriggeredBy, 
 /**
  * The runs a step of this run started in this project, newest first.
  * Left out when there is none.

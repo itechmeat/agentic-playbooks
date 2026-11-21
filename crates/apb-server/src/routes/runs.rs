@@ -251,6 +251,11 @@ pub struct RunDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub started_by: Option<apb_core::launch::StartedBy>,
+    /// The start rule that started this run, from its launch record
+    /// (start rules). Left out for a run no rule started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub triggered_by: Option<apb_core::launch::TriggeredBy>,
     /// The runs a step of this run started in this project, newest first.
     /// Left out when there is none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -631,6 +636,7 @@ pub(crate) async fn get_run_handler(
         deadline: apb_engine::run_view::deadline(&events, apb_core::clock::now_ms()),
         start_key: apb_engine::run_view::start_key(&events),
         started_by: apb_engine::run_view::started_by(&run_dir),
+        triggered_by: apb_engine::trigger::view::triggered_by(&run_dir),
         started_runs: started.runs,
         started_runs_truncated: started.truncated,
         untrusted: apb_engine::run_view::untrusted_nodes(&events),

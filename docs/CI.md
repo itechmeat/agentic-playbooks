@@ -452,9 +452,13 @@ apb runs "$run_id"
 exit $code
 ```
 
-This is also the interim answer to scheduled and event-driven runs: an external
-scheduler starts the playbook, and `apb wait` turns the outcome into an exit
-code the scheduler understands.
+For scheduled runs this is still the way: an external scheduler starts the
+playbook with `--unattended --start-key <slot> --detach`, a key that names
+its slot, and `apb wait` turns the outcome into an exit code the scheduler
+understands.
+Event-driven runs no longer need the scheduler: a start rule a person wrote
+starts a pinned playbook when a connector account receives a matching
+delivery (docs/TRIGGERS.md).
 
 A scheduled routine does not need the scheduler to track its window: the
 playbook reads it from `run.previous_success.started_at` (see the authoring

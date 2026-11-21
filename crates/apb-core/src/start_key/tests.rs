@@ -42,6 +42,50 @@ fn a_key_is_checked_without_repeating_it() {
     assert!(!format!("{:?}", StartKey::parse("secret-ish").unwrap()).contains("secret"));
 }
 
+/// The nonmutating MACs of a read-only surface: without an installation
+/// key they answer `None` and create no key file; with one they answer
+/// what the creating MACs answer and change nothing on disk.
+#[test]
+fn key_tag_if_keyed_creates_no_key() {
+    keyed(|| {
+        let cfg = std::path::PathBuf::from(std::env::var_os("APB_CONFIG_DIR").unwrap());
+        let key_file = cfg.join("run-origin.key");
+        let key = StartKey::parse("digest-2026-11-09").unwrap();
+        let fields = StartRequestFields {
+            v: REQUEST_V,
+            ..Default::default()
+        };
+        // No installation key yet: `None`, and no key file is created.
+        assert_eq!(key_tag_if_keyed(&key), None);
+        assert_eq!(StartRequest::capture_if_keyed(&fields), None);
+        assert!(!key_file.exists(), "the lookup must not create the key");
+        // With the key, the answers match the creating MACs.
+        let created = key_tag(&key).unwrap();
+        let req = StartRequest::capture(&fields).unwrap();
+        assert_eq!(key_tag_if_keyed(&key).as_deref(), Some(created.as_str()));
+        assert_eq!(StartRequest::capture_if_keyed(&fields).as_ref(), Some(&req));
+        // And nothing on disk changed: the key file's bytes and the
+        // config dir's contents are what the creating call left.
+        let key_bytes = std::fs::read(&key_file).unwrap();
+        let mut names: Vec<String> = std::fs::read_dir(&cfg)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(key_tag_if_keyed(&key).as_deref(), Some(created.as_str()));
+        assert_eq!(StartRequest::capture_if_keyed(&fields).as_ref(), Some(&req));
+        assert_eq!(std::fs::read(&key_file).unwrap(), key_bytes);
+        let mut after: Vec<String> = std::fs::read_dir(&cfg)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        after.sort();
+        assert_eq!(after, names, "the keyed lookup must write nothing new");
+    })
+}
+
 #[test]
 fn params_in_any_order_are_one_request() {
     keyed(|| {

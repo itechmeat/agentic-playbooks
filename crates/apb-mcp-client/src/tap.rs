@@ -53,6 +53,15 @@ struct TapState {
     /// Whole lines from the server that did not start a JSON object and
     /// were dropped unread; a count only.
     dropped: usize,
+    /// Whether the reader ended with a line still without its newline: the
+    /// close's drain starts counting after that line's newline.
+    partial_line: bool,
+    /// The bytes the reader read before it was dropped: the session's own
+    /// count, which the close's drain continues from.
+    reader_bytes: usize,
+    /// The bytes the close's drain read from the pipe, toward
+    /// `MAX_SESSION_BYTES`: the last bytes of a session are accounted too.
+    drained_bytes: usize,
     /// The frames an HTTP session read (`read_frame`), toward `MAX_LINES`:
     /// an HTTP session has no `TapReader` whose own counter holds them.
     http_frames: usize,
@@ -362,11 +371,62 @@ impl LineTap {
 
     /// Counts one dropped line; `false` once the count passes
     /// `MAX_DROPPED_LINES`.
-    fn drop_line(&self) -> bool {
+    pub(crate) fn drop_line(&self) -> bool {
         self.state.lock().is_ok_and(|mut s| {
             s.dropped = s.dropped.saturating_add(1);
             s.dropped <= MAX_DROPPED_LINES
         })
+    }
+
+    /// Whether the reader ended with a line still without its newline.
+    pub(crate) fn partial_line(&self) -> bool {
+        self.state.lock().is_ok_and(|s| s.partial_line)
+    }
+
+    /// Counts `n` bytes the close's drain read from the pipe toward
+    /// `MAX_SESSION_BYTES`, together with the bytes the reader read: every
+    /// read, before its lines are classified, the bytes of a dropped
+    /// overlong line included. Answers whether the session is still within
+    /// the limit; past it the drain counts no line any more.
+    pub(crate) fn count_drained(&self, n: usize) -> bool {
+        let Ok(mut s) = self.state.lock() else {
+            return false;
+        };
+        s.drained_bytes = s.drained_bytes.saturating_add(n);
+        s.reader_bytes.saturating_add(s.drained_bytes) <= MAX_SESSION_BYTES
+    }
+
+    /// Classifies what the close's drain read from the pipe, by the reader's
+    /// own rule: with `partial_prefix` (the reader ended with a line still
+    /// without its newline) counting starts after the drained bytes' first
+    /// newline, because those first bytes are that line's continuation and
+    /// never a dropped line; a last piece without a newline is an
+    /// unfinished line, which the reader refuses and never counts; a whole
+    /// line that does not open a JSON object is a dropped line
+    /// (`drop_line`); a whole line over `MAX_LINE_BYTES` is what the reader
+    /// refuses as too large, not what it drops, and is not counted; and
+    /// the bytes were counted toward `MAX_SESSION_BYTES` by
+    /// `count_drained` as they were read.
+    pub(crate) fn drain_bytes(&self, bytes: &[u8], partial_prefix: bool) {
+        let mut rest = bytes;
+        if partial_prefix {
+            let Some(at) = rest.iter().position(|b| *b == b'\n') else {
+                return;
+            };
+            rest = &rest[at + 1..];
+        }
+        for line in rest.split_inclusive(|b| *b == b'\n') {
+            let Some(whole) = line.strip_suffix(b"\n") else {
+                break;
+            };
+            if whole.len() > MAX_LINE_BYTES {
+                continue;
+            }
+            let starts_json = whole.starts_with(frame::UTF8_BOM) || whole.first() == Some(&b'{');
+            if !starts_json {
+                self.drop_line();
+            }
+        }
     }
 
     /// The `mcp_message_invalid:` message once the reader refused a line.
@@ -536,6 +596,19 @@ impl<R: AsyncRead + Unpin> AsyncRead for TapReader<R> {
                 this.failed = Some(e.to_string());
                 return Poll::Ready(Err(e));
             }
+        }
+    }
+}
+
+/// The reader ends only with the service: what it still held of a line
+/// without its newline is recorded on the tap, so the close's drain knows
+/// where counting starts (nothing of that line is a dropped line), and so
+/// is the total it read, which the drain's own bytes count with.
+impl<R> Drop for TapReader<R> {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.tap.state.lock() {
+            s.partial_line = !self.line.is_empty();
+            s.reader_bytes = s.reader_bytes.saturating_add(self.bytes);
         }
     }
 }
@@ -1234,5 +1307,100 @@ mod tests {
             assert!(read <= MAX_SESSION_BYTES, "read past the cap");
         };
         assert!(err.contains(&MAX_SESSION_BYTES.to_string()), "{err}");
+    }
+
+    /// The close's drain counts by the reader's own rule: whole lines that
+    /// do not open a JSON object are dropped lines, JSON lines are not.
+    #[test]
+    fn the_drain_counts_whole_log_lines_and_not_json_lines() {
+        let tap = LineTap::new();
+        tap.drain_bytes(b"boot log\n\n{\"jsonrpc\":\"2.0\"}\n", false);
+        assert_eq!(tap.dropped(), 2);
+    }
+
+    /// The reader died holding a line without its newline: the drain's
+    /// first bytes are that line's continuation, and counting starts after
+    /// its first newline. With no newline at all, nothing is counted.
+    #[test]
+    fn the_drain_starts_counting_after_a_partial_lines_newline() {
+        let tap = LineTap::new();
+        tap.drain_bytes(b"of one long json answer\nlog after it\n", true);
+        assert_eq!(tap.dropped(), 1);
+        let tap = LineTap::new();
+        tap.drain_bytes(b"more of the same long answer", true);
+        assert_eq!(tap.dropped(), 0);
+    }
+
+    /// A last piece without its newline is an unfinished line: the reader
+    /// refuses such a line and never counts it, and neither does the drain.
+    #[test]
+    fn the_drain_never_counts_an_unfinished_last_piece() {
+        let tap = LineTap::new();
+        tap.drain_bytes(b"whole log line\nlog line cut off", false);
+        assert_eq!(tap.dropped(), 1);
+    }
+
+    /// A whole line over `MAX_LINE_BYTES` is what the reader refuses as
+    /// too large, not what it drops: the drain does not count it.
+    #[test]
+    fn the_drain_does_not_count_a_line_over_the_line_cap() {
+        let tap = LineTap::new();
+        let mut bytes = vec![b'x'; MAX_LINE_BYTES + 1];
+        bytes.push(b'\n');
+        bytes.extend_from_slice(b"real log line\n");
+        tap.drain_bytes(&bytes, false);
+        assert_eq!(tap.dropped(), 1);
+    }
+
+    /// The bytes the drain reads count toward the session's byte limit:
+    /// the reader's own total counts with them, so a session that read up
+    /// to the limit takes no drained byte more.
+    #[test]
+    fn the_drains_bytes_count_toward_the_session_byte_limit() {
+        let tap = LineTap::new();
+        let mut reader = tap.reader(tokio::io::empty());
+        // One whole notification per chunk, so neither the line length nor
+        // the line count limit comes first.
+        let head = br#"{"jsonrpc":"2.0","method":"n","params":{"p":""#;
+        let tail = b"\"}}\n";
+        let mut read = 0usize;
+        while read < MAX_SESSION_BYTES {
+            let size = (MAX_SESSION_BYTES - read).min(1024 * 1024);
+            let mut chunk = head.to_vec();
+            chunk.resize(size - tail.len(), b'a');
+            chunk.extend_from_slice(tail);
+            reader.take_in(&chunk).expect("the line is read");
+            reader.ready.clear();
+            read += size;
+        }
+        // The reader is gone: it recorded the total it read, which the
+        // drain continues from.
+        drop(reader);
+        assert!(
+            !tap.count_drained(b"one more log line\n".len()),
+            "a drained byte past the limit is refused"
+        );
+    }
+
+    /// The reader records whether it ended with a line still without its
+    /// newline, so the drain knows where counting starts.
+    #[test]
+    fn the_reader_records_its_partial_line_for_the_drain() {
+        let tap = LineTap::new();
+        {
+            let mut reader = tap.reader(tokio::io::empty());
+            reader
+                .take_in(b"{\"jsonrpc\":\"2.0\",\"method\":\"n\"}")
+                .unwrap();
+        }
+        assert!(tap.partial_line());
+        let tap = LineTap::new();
+        {
+            let mut reader = tap.reader(tokio::io::empty());
+            reader
+                .take_in(b"{\"jsonrpc\":\"2.0\",\"method\":\"n\"}\n")
+                .unwrap();
+        }
+        assert!(!tap.partial_line());
     }
 }

@@ -140,7 +140,8 @@ fn a_repeat_answers_the_existing_run() {
         lookup(root, "project", "pk", &req).unwrap(),
         Lookup::Started {
             run_id: first.run_id.clone(),
-            status: RunStatus::Succeeded
+            status: RunStatus::Succeeded,
+            bound: true
         }
     );
     assert_eq!(runs_of(root, "pk").len(), 1);
@@ -255,7 +256,8 @@ fn another_request_is_a_conflict() {
         assert_eq!(
             lookup(root, "project", "pr", &request("k", f, false)).unwrap(),
             Lookup::Conflict {
-                run_id: first.run_id.clone()
+                run_id: first.run_id.clone(),
+                bound: true
             }
         );
     }
@@ -274,7 +276,8 @@ fn a_failed_run_holds_its_key_until_reuse() {
         lookup(root, "project", "pf", &request("k", fields(), false)).unwrap(),
         Lookup::Started {
             run_id: first.run_id.clone(),
-            status: RunStatus::Failed
+            status: RunStatus::Failed,
+            bound: true
         }
     );
     assert_eq!(already(run(root, "pf", None, keyed("k"))), first.run_id);
@@ -525,7 +528,8 @@ fn a_lookup_during_preparation_answers_the_preparing_run() {
         lookup(root, "project", "pl", &request("k", fields(), false)).unwrap(),
         Lookup::Started {
             run_id: preparing.clone(),
-            status: RunStatus::Running
+            status: RunStatus::Running,
+            bound: false
         }
     );
     assert_eq!(already(run(root, "pl", None, keyed("k"))), preparing);
@@ -586,7 +590,8 @@ fn a_failure_before_provenance_holds_the_key() {
         lookup(root, "project", "pp", &request("k", fields(), false)).unwrap(),
         Lookup::Started {
             run_id: first.clone(),
-            status: RunStatus::Failed
+            status: RunStatus::Failed,
+            bound: true
         }
     );
     assert_eq!(already(run(root, "pp", None, keyed("k"))), first);

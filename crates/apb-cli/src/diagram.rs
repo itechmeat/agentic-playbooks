@@ -369,7 +369,9 @@ fn rebuild_version(beneath: &Beneath, id: &str, version: &str, n: &mut usize) ->
 fn refusal_words(why: ReadRefusal) -> &'static str {
     match why {
         ReadRefusal::Missing => "not found",
-        ReadRefusal::Link => "a link on its path; apb does not follow it",
+        ReadRefusal::Link | ReadRefusal::LinkAt { .. } => {
+            "a link on its path; apb does not follow it"
+        }
         ReadRefusal::NotRegular => "not a regular file",
         ReadRefusal::HardLink => "a file with more than one link",
         ReadRefusal::TooLarge { .. } => "too large",

@@ -472,6 +472,7 @@ fn a_supervised_driver_without_a_valid_handoff_is_the_cli_without_a_terminal() {
                 sources: vec!["declared deny".into()],
                 billing: None,
                 started_by: None,
+                triggered_by: None,
             },
             binding: HandoffBinding::Nonce {
                 nonce: nonce.into(),

@@ -121,6 +121,7 @@ pub mod templates;
 pub mod text;
 pub mod token_shape;
 pub(crate) mod tree_install;
+pub mod trigger;
 pub mod trust;
 pub mod unattended_policy;
 pub mod untrusted;

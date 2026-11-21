@@ -381,6 +381,15 @@ struct Case {
     env: Vec<(&'static str, String)>,
 }
 
+impl Drop for Case {
+    fn drop(&mut self) {
+        // A killed driver's read-only scripts copy stays behind in the
+        // project: its write bits go back before the directory drops, so
+        // the case leaves nothing behind under the target dir.
+        writable_dirs(self.dir.path());
+    }
+}
+
 impl Case {
     fn new(name: &'static str) -> Self {
         // Under cargo's target dir, never /tmp: old binaries write their
@@ -955,8 +964,51 @@ fn last_of<'a>(journal: &'a [Value], kind: &str) -> Option<&'a Value> {
     journal.iter().rev().find(|e| e["type"] == kind)
 }
 
-/// Gives every directory under `path` its owner write bit: a run that may
-/// skip list items holds a read-only scripts copy while it can execute.
+/// The case's temp directory goes away whole, even where a killed driver
+/// left a read-only scripts copy in its project: the write bits are given
+/// back before the drop, so nothing stays behind under the target dir.
+#[test]
+fn a_case_leaves_no_read_only_leftovers_behind() {
+    let path;
+    {
+        let case = Case::new("cleanup row");
+        path = case.dir.path().to_path_buf();
+        let ro = case.root().join(".apb/runs/row/scripts");
+        fs::create_dir_all(&ro).unwrap();
+        fs::write(ro.join("look.sh"), "echo hi").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&ro, fs::Permissions::from_mode(0o555)).unwrap();
+    }
+    assert!(!path.exists(), "the case left {} behind", path.display());
+}
+
+/// The cleanup walk never panics on a directory it cannot list (it runs
+/// inside `Case::drop`, where a panic aborts the whole test process), and
+/// it restores read, write and search for the owner.
+#[cfg(unix)]
+#[test]
+fn the_cleanup_walk_never_panics_on_an_unreadable_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let blind = tmp.path().join("blind");
+    fs::create_dir_all(blind.join("inner")).unwrap();
+    // Write and search, no read: `read_dir` fails on it.
+    fs::set_permissions(&blind, fs::Permissions::from_mode(0o311)).unwrap();
+    writable_dirs(tmp.path());
+    let mode = fs::symlink_metadata(&blind).unwrap().permissions().mode();
+    assert_eq!(
+        mode & 0o700,
+        0o700,
+        "the owner keeps read, write and search: {mode:o}"
+    );
+    fs::set_permissions(&blind, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Gives every directory under `path` its owner read, write and search
+/// bits: a run that may skip list items holds a read-only scripts copy
+/// while it can execute. The walk runs inside `Case::drop` too, so an
+/// error anywhere never panics: a directory it cannot list is left as it
+/// is.
 fn writable_dirs(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let Ok(meta) = fs::symlink_metadata(path) else {
@@ -964,9 +1016,11 @@ fn writable_dirs(path: &Path) {
     };
     if meta.is_dir() {
         let mode = meta.permissions().mode();
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200));
-        for e in fs::read_dir(path).unwrap().flatten() {
-            writable_dirs(&e.path());
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700));
+        if let Ok(entries) = fs::read_dir(path) {
+            for e in entries.flatten() {
+                writable_dirs(&e.path());
+            }
         }
     }
 }

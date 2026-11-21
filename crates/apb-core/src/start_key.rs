@@ -88,6 +88,14 @@ pub fn key_tag(key: &StartKey) -> std::io::Result<String> {
     crate::run_origin::tag(KEY_DOMAIN, key.0.as_bytes())
 }
 
+/// [`key_tag`] without creating the installation key: `None` when this
+/// installation has no key yet (a caller that only reads, a dry run's
+/// report, never writes one). It reads nothing but the key file and
+/// writes nothing.
+pub fn key_tag_if_keyed(key: &StartKey) -> Option<String> {
+    crate::run_origin::tag_if_keyed(KEY_DOMAIN, key.0.as_bytes())
+}
+
 /// Every explicit, execution-affecting argument the caller passed, as the
 /// request a key binds, captured once by the launch surface from the
 /// caller's own arguments, before any gate, candidate choice, prompt or
@@ -151,6 +159,17 @@ impl StartRequest {
         let bytes = serde_json::to_vec(fields).map_err(std::io::Error::other)?;
         Ok(StartRequest {
             tag: crate::run_origin::tag(REQUEST_DOMAIN, &bytes)?,
+        })
+    }
+
+    /// [`StartRequest::capture`] without creating the installation key:
+    /// `None` when this installation has no key yet (a caller that only
+    /// reads, a dry run's report, never writes one). It reads nothing but
+    /// the key file and writes nothing.
+    pub fn capture_if_keyed(fields: &StartRequestFields) -> Option<StartRequest> {
+        let bytes = serde_json::to_vec(fields).ok()?;
+        Some(StartRequest {
+            tag: crate::run_origin::tag_if_keyed(REQUEST_DOMAIN, &bytes)?,
         })
     }
 

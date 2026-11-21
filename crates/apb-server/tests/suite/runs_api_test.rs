@@ -341,6 +341,61 @@ async fn get_run_detail_exposes_pending_review_prompt() {
     );
 }
 
+/// The run detail names the start rule that started the run (start rules):
+/// a run whose manifest launch record carries `triggered_by` shows it, and
+/// a run no rule started leaves the field out.
+#[tokio::test]
+async fn the_run_detail_names_its_rule() {
+    let dir = seed_with_run();
+    let by = apb_core::launch::TriggeredBy {
+        rule: "triage-new-issues".to_string(),
+        incarnation: "inc1".to_string(),
+        source: "inbox".to_string(),
+        connector: Some("github".to_string()),
+        account: Some("main".to_string()),
+        event_seq: Some(42),
+    };
+    seed_gate_run_yaml(dir.path(), "rule-1", GATE, &[]);
+    // The manifest makes the run config expected; without it the redactor
+    // withholds the detail and the field would not show.
+    fs::write(dir.path().join(".apb/runs/rule-1/run.yaml"), "params: {}\n").unwrap();
+    apb_engine::manifest::write(
+        &dir.path().join(".apb/runs/rule-1"),
+        &apb_engine::manifest::RunExecutionManifest {
+            launch: Some(apb_core::launch::LaunchRecord {
+                kind: "start".to_string(),
+                initiator: "engine:trigger".to_string(),
+                confirmation: None,
+                policy: apb_core::launch::LaunchPolicy::Allow,
+                sources: Vec::new(),
+                billing: None,
+                started_by: None,
+                triggered_by: Some(by),
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // A run no rule started: no manifest at all reads as no rule.
+    seed_gate_run_yaml(dir.path(), "plain-1", GATE, &[]);
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+
+    let (status, rule) = get_json(app.clone(), "/api/runs/rule-1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rule["triggered_by"]["rule"], "triage-new-issues", "{rule}");
+    assert_eq!(rule["triggered_by"]["source"], "inbox");
+    assert_eq!(rule["triggered_by"]["connector"], "github");
+    assert_eq!(rule["triggered_by"]["account"], "main");
+    assert_eq!(rule["triggered_by"]["event_seq"], 42);
+
+    let (status, plain) = get_json(app, "/api/runs/plain-1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        plain.get("triggered_by").is_none(),
+        "an untriggered run must leave the field out: {plain}"
+    );
+}
+
 /// #103.1: a decision for a node that is not a `human_review` node of this
 /// run's playbook is 404, not a 200 with a `posted_seq` that reads like
 /// success and a record no drive will ever consume.

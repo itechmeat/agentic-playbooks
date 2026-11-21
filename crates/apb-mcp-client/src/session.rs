@@ -26,11 +26,12 @@ use rmcp::transport::streamable_http_client::{
 
 use crate::http::{HttpFault, HttpServer, UreqClient};
 use crate::stdio::{EnvValue, StartFrom, StdioServer};
-use crate::tap::LineTap;
+use crate::tap::{LineTap, MAX_LINE_BYTES};
 
 /// The cleanup a failure runs inside the worker before it answers (3 s for
-/// the exit after end of input, 2 s to reap after the group kill, 1 s to
-/// see the group empty) plus 1 s for the reply to cross the channel.
+/// the exit after end of input, 2 s for the reap with the close's drain
+/// inside it, 1 s to see the group empty) plus 1 s for the reply to cross
+/// the channel.
 pub const REPLY_CLEANUP_ALLOWANCE: Duration = Duration::from_secs(7);
 
 pub enum Server {
@@ -162,6 +163,10 @@ const EXIT_WAIT: Duration = Duration::from_secs(3);
 const REAP_WAIT: Duration = Duration::from_secs(2);
 /// How long the close waits to see the server's group empty after the reap.
 const GROUP_WAIT: Duration = Duration::from_secs(1);
+/// The most time the close spends counting what the reader never got to:
+/// the drain sits inside the reap wait, so the close's documented length
+/// and the reply wait keep their distance.
+const DRAIN_WAIT: Duration = Duration::from_millis(250);
 /// How long a caller waits for the worker thread to end after it answered.
 const JOIN_WAIT: Duration = Duration::from_secs(1);
 /// The reply wait of `close`: its 6 s bound plus 1 s for the reply.
@@ -356,8 +361,9 @@ impl Session {
     /// Ends the conversation: closes the server's stdin and waits up to
     /// 3 s for the server to exit (without reaping it); then, with the
     /// server still unreaped, kills its whole process group; reaps the
-    /// server within 2 s and looks up to 1 s for its group to be empty.
-    /// Idempotent (a second call answers `NotStarted`).
+    /// server within 2 s, with the drain of the pipe's last lines inside
+    /// that wait (at most 250 ms of it), and looks up to 1 s for its group
+    /// to be empty. Idempotent (a second call answers `NotStarted`).
     pub fn close(&mut self) -> Ended {
         let Some(commands) = self.commands.take() else {
             return Ended::NotStarted;
@@ -496,6 +502,10 @@ struct Conn {
     workdir: Option<WorkDir>,
     /// The HTTP client's shared state, for an HTTP session.
     http: Option<HttpParts>,
+    /// A duplicate of the server's stdout descriptor: the close reads from
+    /// it what the reader, dropped with the service, never got to, and
+    /// counts it. `None` for an HTTP session, which has no reader.
+    stdout_drain: Option<std::fs::File>,
 }
 
 /// What the session shares with its HTTP client: the deadline of the
@@ -554,6 +564,7 @@ impl Conn {
             era: Era::Legacy(SUPPORTED_VERSIONS[1]),
             workdir,
             http: None,
+            stdout_drain: None,
         }
     }
 
@@ -665,6 +676,29 @@ impl Conn {
             )));
         };
         let tap = conn.tap.clone();
+        // The close counts what the reader, dropped with the service,
+        // never got to: the same pipe through a duplicate descriptor. The
+        // duplicate is close-on-exec from its creation (`dup` never sets
+        // the flag), so no process apb spawns while the session lives
+        // inherits the server's output.
+        #[cfg(unix)]
+        {
+            use std::os::fd::{AsFd as _, AsRawFd as _};
+            if let Ok(fd) = stdout.as_fd().try_clone_to_owned() {
+                let file = std::fs::File::from(fd);
+                // The drain reads with nonblocking semantics of its own;
+                // the flag lives on the pipe's open description, which the
+                // reader keeps nonblocking too. Without it, no drain: the
+                // close counts only what the reader got to.
+                let raw = file.as_raw_fd();
+                let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
+                if flags >= 0
+                    && unsafe { libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) } >= 0
+                {
+                    conn.stdout_drain = Some(file);
+                }
+            }
+        }
         let transport = (tap.reader(stdout), tap.writer(stdin));
         match conn.handshake(transport, lifecycle, info, deadline).await {
             Ok(()) => Ok(conn),
@@ -1069,13 +1103,37 @@ impl Conn {
         } else {
             let _ = child.start_kill();
         }
-        match tokio::time::timeout(REAP_WAIT, child.wait()).await {
+        // The drain's bound sits inside the old reap wait, so the close
+        // keeps its documented length and the reply wait its distance.
+        let reap_wait = if self.stdout_drain.is_some() {
+            REAP_WAIT.saturating_sub(DRAIN_WAIT)
+        } else {
+            REAP_WAIT
+        };
+        let reap_until = tokio::time::Instant::now() + reap_wait;
+        match tokio::time::timeout_at(reap_until, child.wait()).await {
             Ok(Ok(_)) => {
                 let group = match pid {
                     Some(pid) => group::wait_empty(pid, GROUP_WAIT).await,
                     None => GroupEnd::NotShownEmpty,
                 };
                 self.workdir = None;
+                // The reader is done: it was dropped with the service, and
+                // the server is reaped, so no writer of its group is left.
+                // Whatever the reader never got to poll is counted from the
+                // pipe itself, so the dropped-line count is final when this
+                // answers (a line written right after the last answer is
+                // in). The drain's own bound keeps a writer outside the
+                // group from stretching the close.
+                if let Some(drain) = self.stdout_drain.take()
+                    && tokio::time::timeout(DRAIN_WAIT, drain_remaining(drain, &self.tap))
+                        .await
+                        .is_err()
+                {
+                    // No end of output in the bound: a process outside the
+                    // group holds the pipe, and the count stays what the
+                    // reader got to.
+                }
                 Ended::Reaped {
                     killed: !exited,
                     group,
@@ -1104,6 +1162,95 @@ impl Conn {
         }
         self.workdir = None;
     }
+}
+
+/// Reads the whole lines the server wrote that its reader never got to:
+/// the pipe's remaining bytes, read once the server is reaped and no
+/// writer of its group is left. Never blocks the runtime: the descriptor
+/// was made nonblocking at its creation, a read answers at once, the
+/// runtime is yielded after every chunk, and the drain's own deadline is
+/// checked on every read, so a writer that keeps the pipe full cannot
+/// stretch the drain past its bound. The counting runs as the bytes
+/// arrive, so a drain the bound cuts short still counts what it read:
+/// every read's bytes count toward the session's byte limit first
+/// (`count_drained`), then whole lines go to the tap's rule (a partial
+/// line's continuation counted from its newline, an unfinished last piece
+/// never, only the line over the cap dropped), and a line still without its newline
+/// when the read ends stays uncounted, like the reader's own unfinished
+/// line.
+async fn drain_remaining(drain: std::fs::File, tap: &LineTap) {
+    use std::io::Read as _;
+    let mut file = drain;
+    let mut buf = [0u8; 16 * 1024];
+    // The bytes of the line still without its newline, and whether its head
+    // is the continuation the reader left behind.
+    let mut carry: Vec<u8> = Vec::new();
+    let mut partial = tap.partial_line();
+    // Whether the line being carried is over the line cap: it cannot be
+    // counted, so its bytes are dropped up to the next newline.
+    let mut overlong = false;
+    // The bound of the drain itself: it holds whether or not bytes flow.
+    let deadline = tokio::time::Instant::now() + DRAIN_WAIT;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                // Every byte read counts toward the session's limit before
+                // its lines are classified, the bytes of a dropped overlong
+                // line included; past the limit nothing more is counted.
+                if !tap.count_drained(n) {
+                    break;
+                }
+                // The newline search covers the bytes just read: the
+                // carried piece is never scanned a second time.
+                let mut chunk = &buf[..n];
+                if overlong {
+                    // Only the line over the cap is dropped: it ends at the
+                    // first newline, and what follows it in the same read
+                    // is new lines. Its bytes are no dropped line.
+                    let Some(at) = chunk.iter().position(|b| *b == b'\n') else {
+                        tokio::task::yield_now().await;
+                        continue;
+                    };
+                    overlong = false;
+                    partial = false;
+                    chunk = &chunk[at + 1..];
+                }
+                if let Some(at) = chunk.iter().rposition(|b| *b == b'\n') {
+                    // The carried piece and the bytes up to the last
+                    // newline are whole lines.
+                    let mut whole = Vec::with_capacity(carry.len() + at + 1);
+                    whole.extend_from_slice(&carry);
+                    whole.extend_from_slice(&chunk[..=at]);
+                    tap.drain_bytes(&whole, partial);
+                    partial = false;
+                    carry.clear();
+                    carry.extend_from_slice(&chunk[at + 1..]);
+                } else {
+                    carry.extend_from_slice(chunk);
+                }
+                // The carried piece is never longer than the line cap: a
+                // longer line cannot be counted, so its bytes are dropped up
+                // to its newline.
+                if carry.len() > MAX_LINE_BYTES + 1 {
+                    carry.clear();
+                    overlong = true;
+                }
+                // The runtime is yielded after every chunk, so a writer
+                // that keeps the pipe full cannot hold it.
+                tokio::task::yield_now().await;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Err(_) => return,
+        }
+    }
+    // Whatever `carry` holds has no newline: an unfinished line, never
+    // counted.
 }
 
 /// The server's process group: the server is its leader (`process_group(0)`
@@ -1332,6 +1479,7 @@ pub(crate) fn spawn(server: StdioServer) -> Result<(Child, WorkDir), Failure> {
 mod tests {
     use super::*;
     use crate::stdio::ProgramFile;
+    use crate::tap::MAX_SESSION_BYTES;
     use crate::testing::{StubEra, StubServer};
 
     fn stub_server(stub: &StubServer) -> StdioServer {
@@ -1348,6 +1496,35 @@ mod tests {
             ClientCapabilities::default(),
             Implementation::new("apb-test", "1.0.0"),
         )
+    }
+
+    /// The orphan the stub left behind while the close ran: its pid is
+    /// recorded, so the close was timed against a writer that really held
+    /// the pipe. Waits a little for the recording, which the orphan writes
+    /// itself once it runs.
+    #[cfg(target_os = "linux")]
+    fn started_orphan(stub: &StubServer) -> u32 {
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(pid) = stub.orphan_pid() {
+                return pid;
+            }
+            assert!(Instant::now() < until, "the orphan never started");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Kills the orphan the stub left behind, so a test leaves no process
+    /// behind. The pid is the one the stub recorded; nothing else is
+    /// touched.
+    #[cfg(target_os = "linux")]
+    fn kill_orphan(stub: &StubServer) {
+        if let Some(pid) = stub.orphan_pid() {
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("kill -9 {pid} 2>/dev/null"))
+                .status();
+        }
     }
 
     /// The caller stopped waiting before the handshake's answer reached it
@@ -1415,5 +1592,288 @@ mod tests {
         ] {
             assert_eq!(supported_version(refused), None, "{refused:?}");
         }
+    }
+
+    /// No process this crate spawns while a session lives inherits the
+    /// server's stdout: the duplicate descriptor the close drains is
+    /// close-on-exec from its creation, so a child started by the same
+    /// process holds no read end of the pipe.
+    ///
+    /// Linux only: the check reads `/proc/self/fd`, which macOS has not.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_child_spawned_while_a_session_lives_holds_no_server_stdout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = StubServer::write(tmp.path(), StubEra::Modern).unwrap();
+        stub.record_stdout_link().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut session = Session::connect(
+            Server::Stdio(stub_server(&stub)),
+            Lifecycle::Auto,
+            "apb-test",
+            "1.0.0",
+            deadline,
+        )
+        .expect("the session connects");
+        // Both ends of a pipe name the same inode: this is the inode a
+        // leaked duplicate would show.
+        let link = stub
+            .stdout_link()
+            .expect("the stub recorded its stdout link");
+        let child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("for f in /proc/self/fd/*; do readlink \"$f\"; done")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .expect("the child runs");
+        let seen = String::from_utf8_lossy(&child.stdout);
+        assert!(
+            !seen.contains(&link),
+            "a child of this process holds the server's stdout: {seen}"
+        );
+        assert_eq!(
+            session.close(),
+            Ended::Reaped {
+                killed: false,
+                group: GroupEnd::Empty,
+            }
+        );
+    }
+
+    /// The close's drain has its own bound: a process outside the server's
+    /// group that keeps the pipe open (no end of output) cannot stretch the
+    /// close past it, and what sat in the pipe is still counted.
+    ///
+    /// Linux only: the stub starts its orphan with `setsid`, which macOS
+    /// has not, and a test without its orphan proves nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_pipe_that_never_ends_its_output_stretches_no_close() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = StubServer::write(tmp.path(), StubEra::Modern).unwrap();
+        stub.set_eof_log(Some("LOGSECRET-5 late log")).unwrap();
+        stub.set_orphan_writer(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut session = Session::connect(
+            Server::Stdio(stub_server(&stub)),
+            Lifecycle::Auto,
+            "apb-test",
+            "1.0.0",
+            deadline,
+        )
+        .expect("the session connects");
+        let started = Instant::now();
+        let ended = session.close();
+        // The quiet orphan sleeps and writes nothing, so the close's end
+        // of the pipe going away does not end it: it still holds the pipe.
+        let orphan = started_orphan(&stub);
+        assert!(StubServer::is_alive(orphan), "the orphan held the pipe");
+        kill_orphan(&stub);
+        assert!(
+            matches!(ended, Ended::Reaped { .. }),
+            "the close answers a reaped server: {ended:?}"
+        );
+        assert_eq!(session.dropped_lines(), 1);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the close stayed well under two seconds: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A writer outside the server's group that keeps the pipe full with
+    /// bytes that carry no newline: the drain reads and reads, and the
+    /// close still answers inside its bound.
+    ///
+    /// Linux only: the stub starts its orphan with `setsid`, which macOS
+    /// has not, and a test without its orphan proves nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_writer_that_keeps_the_pipe_full_stretches_no_close() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = StubServer::write(tmp.path(), StubEra::Modern).unwrap();
+        stub.set_orphan_flow(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut session = Session::connect(
+            Server::Stdio(stub_server(&stub)),
+            Lifecycle::Auto,
+            "apb-test",
+            "1.0.0",
+            deadline,
+        )
+        .expect("the session connects");
+        let started = Instant::now();
+        let ended = session.close();
+        started_orphan(&stub);
+        kill_orphan(&stub);
+        assert!(
+            matches!(ended, Ended::Reaped { .. }),
+            "the close answers a reaped server: {ended:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the close stayed well under two seconds: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The server wrote half a line and left it unfinished, then logged
+    /// one line at end of input: the drain counts exactly one line, the
+    /// log line. The half line the reader held is its continuation, so it
+    /// is no dropped line.
+    #[test]
+    fn a_server_that_dies_mid_line_counts_the_log_line_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = StubServer::write(tmp.path(), StubEra::Modern).unwrap();
+        stub.set_call_half_line(Some("{\"jsonrpc\":\"2.0\",\"id\":1"))
+            .unwrap();
+        // The rest of the line the reader held: one read of the drain is
+        // 16 KiB, so the line ends in the first read and the log line
+        // comes in the second.
+        let mut rest = vec![b'x'; 16 * 1024 - 1];
+        rest.push(b'\n');
+        stub.set_eof_bytes(&rest).unwrap();
+        stub.set_eof_log(Some("LOGSECRET-7 one log line")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut session = Session::connect(
+            Server::Stdio(stub_server(&stub)),
+            Lifecycle::Auto,
+            "apb-test",
+            "1.0.0",
+            deadline,
+        )
+        .expect("the session connects");
+        // A round trip: the reader has read the half line by then. The
+        // pause gives it the moment it needs on a loaded machine.
+        session
+            .call_tool("t", Map::new(), deadline)
+            .expect("an answer");
+        std::thread::sleep(Duration::from_millis(200));
+        let ended = session.close();
+        assert!(
+            matches!(ended, Ended::Reaped { .. }),
+            "the close answers a reaped server: {ended:?}"
+        );
+        assert_eq!(
+            session.dropped_lines(),
+            1,
+            "the log line is counted once, the half line not at all"
+        );
+    }
+
+    /// A log line the server wrote right after its answer, while the
+    /// reader was still alive: the reader counted it, not the drain.
+    #[test]
+    fn a_line_written_after_the_answer_is_counted_by_the_reader() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = StubServer::write(tmp.path(), StubEra::Modern).unwrap();
+        stub.set_call_suffix(b"LOGSECRET-8 after the answer")
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut session = Session::connect(
+            Server::Stdio(stub_server(&stub)),
+            Lifecycle::Auto,
+            "apb-test",
+            "1.0.0",
+            deadline,
+        )
+        .expect("the session connects");
+        session
+            .call_tool("t", Map::new(), deadline)
+            .expect("an answer");
+        // The second round trip: the reader has read the line before the
+        // second answer.
+        session
+            .call_tool("t", Map::new(), deadline)
+            .expect("an answer");
+        assert_eq!(
+            session.dropped_lines(),
+            1,
+            "the reader counted the line it read"
+        );
+        session.close();
+    }
+
+    /// Runs the close's drain over `bytes` as the pipe's remaining bytes,
+    /// on a paused clock so the drain's own bound never cuts the test
+    /// short on a loaded machine.
+    fn drain_over(bytes: &[u8], tap: &LineTap) {
+        use std::io::{Seek as _, Write as _};
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(bytes).unwrap();
+        file.rewind().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        runtime.block_on(drain_remaining(file, tap));
+    }
+
+    /// A tap whose reader read `MAX_SESSION_BYTES - left` bytes of whole
+    /// notifications through its own path, then ended.
+    fn tap_with_reader_left(left: usize) -> LineTap {
+        use tokio::io::AsyncReadExt as _;
+        let head = br#"{"jsonrpc":"2.0","method":"n","params":{"p":""#;
+        let tail = b"\"}}\n";
+        let mut input = Vec::new();
+        let mut read = 0usize;
+        let target = MAX_SESSION_BYTES - left;
+        while read < target {
+            let size = (target - read).min(1024 * 1024);
+            let mut line = head.to_vec();
+            line.resize(size - tail.len(), b'a');
+            line.extend_from_slice(tail);
+            input.extend_from_slice(&line);
+            read += size;
+        }
+        let tap = LineTap::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut reader = tap.reader(std::io::Cursor::new(input));
+            let mut sink = Vec::new();
+            reader.read_to_end(&mut sink).await.expect("the lines read");
+        });
+        tap
+    }
+
+    /// An overlong line, its newline and one log line in the same read:
+    /// only the overlong line is dropped, and the log line after it is
+    /// counted.
+    #[test]
+    fn the_drain_counts_the_log_line_after_an_overlong_line() {
+        let tap = LineTap::new();
+        // Long enough that the drain marks it overlong a few reads before
+        // its newline arrives.
+        let mut bytes = vec![b'x'; MAX_LINE_BYTES + 40_000];
+        bytes.extend_from_slice(b"\nLOGSECRET-9 one log line\n");
+        drain_over(&bytes, &tap);
+        assert_eq!(tap.dropped(), 1, "the log line is counted once");
+    }
+
+    /// Every byte the drain reads counts toward the session's limit, the
+    /// bytes of a discarded overlong line included: with the reader near
+    /// its limit, an overlong line takes the session past it, and the log
+    /// line after it is not counted.
+    #[test]
+    fn the_drains_overlong_bytes_count_toward_the_session_byte_limit() {
+        // Long enough that the drain marks it overlong a few reads before
+        // its newline arrives.
+        let mut bytes = vec![b'x'; MAX_LINE_BYTES + 40_000];
+        bytes.extend_from_slice(b"\nLOGSECRET-10 one log line\n");
+        // The limit is passed only by the last read, the one that carries
+        // the overlong line's newline and the log line: the overlong
+        // line's bytes are what take the session past it.
+        let tap = tap_with_reader_left(bytes.len() - 5);
+        drain_over(&bytes, &tap);
+        assert_eq!(tap.dropped(), 0, "nothing past the limit is counted");
+        // Room for exactly what the drain reads: the log line counts, so the
+        // limit, not the overlong line, is what stopped the count.
+        let tap = tap_with_reader_left(bytes.len());
+        drain_over(&bytes, &tap);
+        assert_eq!(tap.dropped(), 1, "with room left the log line counts");
     }
 }

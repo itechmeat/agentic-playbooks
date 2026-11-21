@@ -490,8 +490,9 @@ not. Events a consumer acknowledged before they were dropped are not a loss
 for that consumer. A consumer that starts reading late sees the events
 dropped before its first read as a gap too, since it never saw them.
 
-An inbound delivery never starts a run. A playbook consumes the inbox by
-polling it, an `inbox_read` call inside a loop or behind a wait node, and
+An inbound delivery starts a run only through a start rule a person wrote
+(docs/TRIGGERS.md). Otherwise a playbook consumes the inbox by polling
+it, an `inbox_read` call inside a loop or behind a wait node, and
 acknowledging what it processed, or by an inbox wait (`wait_for: { type:
 inbox }`, see the authoring guide's "Waiting for an inbox event"), which
 spends no agent turn, keeps its position in its run's journal and

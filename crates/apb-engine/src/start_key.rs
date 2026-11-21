@@ -1,7 +1,8 @@
 //! The start key (routine operations, D1), engine side: the read-only
-//! [`lookup`] every launch surface asks before its gate, and the [`Claim`]
-//! preparation takes before the tree lock and holds until its run is
-//! verifiable.
+//! [`lookup`] every launch surface asks before its gate, the [`peek`]
+//! that answers the same without writing anything (a dry run's check),
+//! and the [`Claim`] preparation takes before the tree lock and holds
+//! until its run is verifiable.
 //!
 //! An entry has an owner while it is not verifiable (`pending`): the
 //! preparation that holds the `flock` lock of its reservation file. A
@@ -45,10 +46,18 @@ const BUSY_STEP: Duration = Duration::from_millis(50);
 pub enum Lookup {
     /// No live entry, or a reuse the run allows: the start goes ahead.
     Free,
-    /// The same request started this run; nothing starts.
-    Started { run_id: String, status: RunStatus },
-    /// The key names another request.
-    Conflict { run_id: String },
+    /// The same request started this run; nothing starts. `bound`: the
+    /// entry is bound to a started run (or its owner is gone and its run
+    /// passes the run check); `false` while its owner is alive and still
+    /// preparing it, so the run may yet never start (a rule's start holds
+    /// the event instead of consuming it).
+    Started {
+        run_id: String,
+        status: RunStatus,
+        bound: bool,
+    },
+    /// The key names another request; `bound` as for `Started`.
+    Conflict { run_id: String, bound: bool },
 }
 
 /// One entry as a reader judges it.
@@ -57,8 +66,12 @@ enum Judged {
     Void,
     /// Its owner is alive and has no run yet.
     Busy,
-    /// Its run, verified (or preparing under a live owner).
-    Run { run_id: String, status: RunStatus },
+    /// Its run, verified (`bound`), or preparing under a live owner.
+    Run {
+        run_id: String,
+        status: RunStatus,
+        bound: bool,
+    },
 }
 
 fn scope_of(label: &str) -> Scope {
@@ -166,6 +179,7 @@ fn judge(root: &Path, scope: Scope, id: &str, e: &StartKeyEntry) -> Judged {
                 Some(run_id) => Judged::Run {
                     run_id: run_id.clone(),
                     status: RunStatus::Running,
+                    bound: false,
                 },
                 None => Judged::Busy,
             };
@@ -176,6 +190,46 @@ fn judge(root: &Path, scope: Scope, id: &str, e: &StartKeyEntry) -> Judged {
             Some(status) => Judged::Run {
                 run_id: run_id.to_string(),
                 status,
+                bound: true,
+            },
+            None => Judged::Void,
+        },
+        None => Judged::Void,
+    }
+}
+
+/// [`judge`] without writing anything: a pending entry's owner is probed
+/// with [`apb_core::fsutil::lock_held`], which opens the reservation's
+/// lock file read-only and creates nothing. Held is the owner alive;
+/// free or missing is judged as `judge` judges it after its probe, and
+/// no probe file is removed or created. Everything else is judged as
+/// `judge` judges it.
+fn judge_peeked(root: &Path, scope: Scope, id: &str, e: &StartKeyEntry) -> Judged {
+    if e.state == EntryState::Pending
+        && let Some(res) = e.reservation.as_deref()
+    {
+        let dir = pending_dir(root, scope, id);
+        if !matches!(
+            apb_core::fsutil::flock_held(&dir, &lock_name(res)),
+            Ok(false)
+        ) {
+            // The owner is alive: its run, preparing, or a moment of busy.
+            return match &e.run_id {
+                Some(run_id) => Judged::Run {
+                    run_id: run_id.clone(),
+                    status: RunStatus::Running,
+                    bound: false,
+                },
+                None => Judged::Busy,
+            };
+        }
+    }
+    match e.run_id.as_deref() {
+        Some(run_id) => match checked_run(root, scope, id, run_id) {
+            Some(status) => Judged::Run {
+                run_id: run_id.to_string(),
+                status,
+                bound: true,
             },
             None => Judged::Void,
         },
@@ -191,10 +245,14 @@ fn answer(
     req: &StartKeyRequest,
     step: &StepCaller,
 ) -> Result<Option<Lookup>, EngineError> {
-    let (run_id, status) = match judged {
+    let (run_id, status, bound) = match judged {
         Judged::Void => return Ok(Some(Lookup::Free)),
         Judged::Busy => return Ok(None),
-        Judged::Run { run_id, status } => (run_id, status),
+        Judged::Run {
+            run_id,
+            status,
+            bound,
+        } => (run_id, status, bound),
     };
     if req.reuse {
         if let Some(why) = step.refusal("reusing a start key") {
@@ -209,9 +267,13 @@ fn answer(
         };
     }
     if e.request == req.request.tag() {
-        Ok(Some(Lookup::Started { run_id, status }))
+        Ok(Some(Lookup::Started {
+            run_id,
+            status,
+            bound,
+        }))
     } else {
-        Ok(Some(Lookup::Conflict { run_id }))
+        Ok(Some(Lookup::Conflict { run_id, bound }))
     }
 }
 
@@ -293,6 +355,58 @@ pub mod testing {
     }
 }
 
+/// The same answer [`lookup`] gives for `req`, judged without writing
+/// anything: the store is read with `signed_store::read` (no lock; a
+/// file that does not verify is the [`UNREADABLE`] error), the live
+/// entry is found with `StartKeysFile::find`, and a pending entry's
+/// owner is judged with [`apb_core::fsutil::lock_held`] through
+/// [`judge_peeked`] (held is busy, answered once, without [`lookup`]'s
+/// wait). Nothing is created, changed or removed: no lock file, no
+/// directory, no installation key (a key that is not there yet is the
+/// `trigger_key_unavailable` refusal, never written). The dry run of
+/// `apb trigger test` asks it before its report.
+pub fn peek(
+    root: &Path,
+    scope_label: &str,
+    id: &str,
+    req: &StartKeyRequest,
+) -> Result<Lookup, EngineError> {
+    let scope = scope_of(scope_label);
+    let key = apb_core::start_key::key_tag_if_keyed(&req.key).ok_or_else(|| {
+        EngineError::Invalid(
+            "trigger_key_unavailable: this installation has no key; the start-key store cannot be read without one"
+                .to_string(),
+        )
+    })?;
+    let days = days(root);
+    let step = StepCaller::from_env();
+    let loaded = signed_store::read::<StartKeysFile>(root, scope, id)
+        .map_err(|e| store_error(root, scope, id, e))?;
+    if !loaded.signed {
+        return Err(store_error(
+            root,
+            scope,
+            id,
+            StoreError::Unverified(signed_store::file::<StartKeysFile>(root, scope, id)),
+        ));
+    }
+    let Some(e) = loaded.file.find(&key, now_ms(), days) else {
+        return Ok(Lookup::Free);
+    };
+    match answer(e, judge_peeked(root, scope, id, e), req, &step)? {
+        Some(looked) => Ok(looked),
+        // Answered at once: a peek never waits out a preparation.
+        None => Err(busy_error()),
+    }
+}
+
+/// The busy answer [`while_busy`] ends with and [`peek`] answers at once.
+fn busy_error() -> EngineError {
+    EngineError::Conflict(format!(
+        "{BUSY}: another start with this key is being prepared; try again"
+    ))
+}
+
 fn key_error(e: &std::io::Error) -> EngineError {
     EngineError::Invalid(format!(
         "{}: the key cannot be checked: {e}",
@@ -369,7 +483,7 @@ pub fn claim(
                         Some(Lookup::Started { run_id, .. }) => {
                             return Err(EngineError::AlreadyStarted(run_id).into());
                         }
-                        Some(Lookup::Conflict { run_id }) => {
+                        Some(Lookup::Conflict { run_id, .. }) => {
                             return Err(EngineError::Conflict(format!(
                                 "{CONFLICT}: the key names run `{run_id}`, started with other params or instruction; use another key"
                             ))
@@ -566,5 +680,252 @@ pub mod test_hooks {
             b.wait();
             b.wait();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    /// APB_CONFIG_DIR is process state: the env-dependent tests serialize
+    /// on this lock.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// One walked path of a snapshot: a directory, or a file's bytes.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Snap {
+        Dir,
+        File(Vec<u8>),
+    }
+
+    /// Every path under `dir`, relative to it, with directories and file
+    /// bytes apart. No link is followed.
+    fn snapshot(dir: &Path) -> BTreeMap<String, Snap> {
+        let mut map = BTreeMap::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in entries.filter_map(Result::ok) {
+                let Ok(ft) = e.file_type() else {
+                    continue;
+                };
+                let rel = e
+                    .path()
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                if ft.is_dir() {
+                    map.insert(rel.clone(), Snap::Dir);
+                    stack.push(e.path());
+                } else if let Ok(bytes) = std::fs::read(e.path()) {
+                    map.insert(rel, Snap::File(bytes));
+                }
+            }
+        }
+        map
+    }
+
+    /// The project and the config dir, snapshotted together.
+    fn both(root: &Path, cfg: &Path) -> (BTreeMap<String, Snap>, BTreeMap<String, Snap>) {
+        (snapshot(root), snapshot(cfg))
+    }
+
+    fn fields() -> apb_core::start_key::StartRequestFields {
+        apb_core::start_key::StartRequestFields {
+            v: apb_core::start_key::REQUEST_V,
+            supervision: "autonomous".into(),
+            cache: "auto".into(),
+            ..Default::default()
+        }
+    }
+
+    fn keyed_request(key: &str) -> StartKeyRequest {
+        StartKeyRequest {
+            key: apb_core::start_key::StartKey::parse(key).unwrap(),
+            reuse: false,
+            request: apb_core::start_key::StartRequest::capture(&fields()).unwrap(),
+        }
+    }
+
+    /// Writes `entry` into the signed file of `id` (as this installation).
+    fn put_entry(root: &Path, id: &str, entry: StartKeyEntry) {
+        signed_store::transact(
+            root,
+            Scope::Project,
+            id,
+            Unsigned::Refuse,
+            |f: &mut StartKeysFile| -> Result<((), bool), StoreError> {
+                f.entries.push(entry);
+                Ok(((), true))
+            },
+        )
+        .unwrap();
+    }
+
+    fn entry_for(
+        req: &StartKeyRequest,
+        reservation: Option<&str>,
+        run_id: Option<&str>,
+        state: EntryState,
+    ) -> StartKeyEntry {
+        StartKeyEntry {
+            key: apb_core::start_key::key_tag(&req.key).unwrap(),
+            request: req.request.tag().to_string(),
+            state,
+            reservation: reservation.map(str::to_string),
+            run_id: run_id.map(str::to_string),
+            at_ms: now_ms(),
+            reused: 0,
+        }
+    }
+
+    /// The busy answer a surface sees, as its message.
+    fn busy_of(r: Result<Lookup, EngineError>) -> String {
+        match r {
+            Err(EngineError::Conflict(m)) => m,
+            other => panic!("not busy: {other:?}"),
+        }
+    }
+
+    /// The peek answers what lookup answers for the same state, and every
+    /// file under the project and the config dir is byte-identical before
+    /// and after it: no store write, no probe file removed, and no lock
+    /// file or directory created where none was.
+    #[test]
+    fn peek_writes_nothing() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg_dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("APB_CONFIG_DIR", cfg_dir.path());
+            std::env::remove_var("APB_RUN_ID");
+            std::env::remove_var("APB_HOST_TASK");
+        }
+        apb_core::run_origin::ensure_key().unwrap();
+
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path();
+        let id = "peekp";
+        let req = keyed_request("peek-event-1");
+        let busy_req = keyed_request("peek-event-2");
+        let dead_req = keyed_request("peek-event-3");
+        let gone_run_req = keyed_request("peek-event-4");
+        let fresh_pending_req = keyed_request("peek-event-5");
+
+        // A fresh key with no store at all: free, and nothing on disk
+        // moved, however little there was.
+        let before = both(root, cfg_dir.path());
+        assert_eq!(peek(root, "project", id, &req).unwrap(), Lookup::Free);
+        assert_eq!(both(root, cfg_dir.path()), before);
+        assert!(!pending_dir(root, Scope::Project, id).exists());
+        assert_eq!(lookup(root, "project", id, &req).unwrap(), Lookup::Free);
+
+        // A pending entry whose owner is alive: busy, answered once, and
+        // the owner's lock file is left exactly as the owner holds it.
+        put_entry(
+            root,
+            id,
+            entry_for(&busy_req, Some("res-1"), None, EntryState::Pending),
+        );
+        let owner = apb_core::fsutil::hold_lock(
+            &pending_dir(root, Scope::Project, id),
+            &lock_name("res-1"),
+        )
+        .unwrap();
+        let before = both(root, cfg_dir.path());
+        let peeked = busy_of(peek(root, "project", id, &busy_req));
+        assert_eq!(both(root, cfg_dir.path()), before);
+        assert!(peeked.starts_with(BUSY), "{peeked}");
+        assert!(
+            pending_dir(root, Scope::Project, id)
+                .join(lock_name("res-1"))
+                .is_file()
+        );
+        // Lookup waits out its window and answers the same message.
+        assert_eq!(busy_of(lookup(root, "project", id, &busy_req)), peeked);
+        drop(owner);
+
+        // A pending entry whose owner is gone and whose run never was:
+        // void, free, nothing written.
+        put_entry(
+            root,
+            id,
+            entry_for(&dead_req, Some("res-gone"), None, EntryState::Pending),
+        );
+        let before = both(root, cfg_dir.path());
+        assert_eq!(peek(root, "project", id, &dead_req).unwrap(), Lookup::Free);
+        assert_eq!(both(root, cfg_dir.path()), before);
+        assert_eq!(
+            lookup(root, "project", id, &dead_req).unwrap(),
+            Lookup::Free
+        );
+
+        // A bound entry whose run directory does not exist: void, free.
+        put_entry(
+            root,
+            id,
+            entry_for(
+                &gone_run_req,
+                None,
+                Some("peekp-gone-run"),
+                EntryState::Bound,
+            ),
+        );
+        let before = both(root, cfg_dir.path());
+        assert_eq!(
+            peek(root, "project", id, &gone_run_req).unwrap(),
+            Lookup::Free
+        );
+        assert_eq!(both(root, cfg_dir.path()), before);
+        assert_eq!(
+            lookup(root, "project", id, &gone_run_req).unwrap(),
+            Lookup::Free
+        );
+
+        // A pending entry of another playbook whose reservation directory
+        // does not exist yet: void, free, and no directory or lock file
+        // is created for it.
+        let other = "peekq";
+        put_entry(
+            root,
+            other,
+            entry_for(&fresh_pending_req, Some("res-5"), None, EntryState::Pending),
+        );
+        assert!(!pending_dir(root, Scope::Project, other).exists());
+        let before = both(root, cfg_dir.path());
+        assert_eq!(
+            peek(root, "project", other, &fresh_pending_req).unwrap(),
+            Lookup::Free
+        );
+        assert_eq!(both(root, cfg_dir.path()), before);
+        assert!(!pending_dir(root, Scope::Project, other).exists());
+        assert_eq!(
+            lookup(root, "project", other, &fresh_pending_req).unwrap(),
+            Lookup::Free
+        );
+
+        // A store that does not verify refuses the peek as it refuses the
+        // lookup, and the file is left as it was.
+        let store = signed_store::file::<StartKeysFile>(root, Scope::Project, id);
+        let bytes = b"not json at all".to_vec();
+        std::fs::write(&store, &bytes).unwrap();
+        let before = both(root, cfg_dir.path());
+        let err = peek(root, "project", id, &req).unwrap_err();
+        assert_eq!(both(root, cfg_dir.path()), before);
+        assert!(
+            matches!(&err, EngineError::Conflict(m) if m.starts_with(UNREADABLE)),
+            "{err:?}"
+        );
+        let looked = lookup(root, "project", id, &req).unwrap_err();
+        assert_eq!(format!("{err}"), format!("{looked}"));
+        assert_eq!(
+            std::fs::read(&store).unwrap(),
+            bytes,
+            "the file was replaced"
+        );
     }
 }
