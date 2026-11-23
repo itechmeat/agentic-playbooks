@@ -11,6 +11,7 @@ mod approval;
 mod baseline;
 mod budget;
 pub mod cloud_models;
+pub mod codes;
 mod concurrency;
 mod connectors;
 mod deadline;
@@ -482,8 +483,10 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
         check_templates(playbook, &mut r); // V13
         check_cross_branch_reads(playbook, &mut r); // V38
         previous_success::check_previous_success(playbook, &mut r); // V176
-        check_refs(playbook, ctx, &mut r); // V14, V15
-        // V16 is retired (isolation is enforced now); its number stays reserved.
+        check_refs(playbook, ctx, &mut r); // V14
+        // V16 is retired (isolation is enforced now); V15 was never emitted.
+        // Both are listed in codes::RETIRED_CODES, which keeps their numbers
+        // from reuse.
         isolation::check_isolation(playbook, ctx, &mut r); // V112-V115
         untrusted::check_untrusted(playbook, &mut r); // V179-V182
         check_trigger(playbook, &mut r); // V17

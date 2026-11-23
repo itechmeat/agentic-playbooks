@@ -1,0 +1,316 @@
+# apb-freeze-document: plain
+profiles:
+- scope: project
+  name: main
+  profile_digest: sha256:5ee95d48bca858067fe71ca1dc6267f6a8940cd82ce2abdeda83562a7cc2b8c1
+  bundle_digest: sha256:d7b6eb47425b91c8e56eb085a4003712c710d6d67993c3fb634d39d97bbdafa9
+  soul: ''
+  soul_requirement: any
+  skills: []
+  chain:
+  - agent_id: claude-code
+    model: haiku
+    spec:
+      argv:
+      - -p
+      - --output-format
+      - json
+      - --model
+      - '{model}'
+      - --
+      - '{prompt}'
+      prompt_via: argv
+      soul: native
+      soul_flag: --append-system-prompt
+      transport: headless
+      autonomous_args:
+      - --permission-mode
+      - bypassPermissions
+      interaction: live
+    soul_delivery: native
+    canonical_executable: /apb-freeze-project/stub-agent.sh
+    executable_fingerprint: 72:1700000000000
+  ephemeral: false
+  hermetic: true
+node_bindings:
+  act: project/main
+connectors: []
+connector_grants: {}
+execution:
+  mode: cli+external
+  source: default
+secret_params:
+- title
+external_data: true
+origin:
+  kind: external_data
+# apb-freeze-document: guarded
+profiles:
+- scope: project
+  name: main
+  profile_digest: sha256:5ee95d48bca858067fe71ca1dc6267f6a8940cd82ce2abdeda83562a7cc2b8c1
+  bundle_digest: sha256:d7b6eb47425b91c8e56eb085a4003712c710d6d67993c3fb634d39d97bbdafa9
+  soul: ''
+  soul_requirement: any
+  skills: []
+  chain:
+  - agent_id: claude-code
+    model: haiku
+    spec:
+      argv:
+      - -p
+      - --output-format
+      - json
+      - --model
+      - '{model}'
+      - --
+      - '{prompt}'
+      prompt_via: argv
+      soul: native
+      soul_flag: --append-system-prompt
+      transport: headless
+      autonomous_args:
+      - --permission-mode
+      - bypassPermissions
+      interaction: live
+    soul_delivery: native
+    canonical_executable: /apb-freeze-project/stub-agent.sh
+    executable_fingerprint: 72:1700000000000
+  ephemeral: false
+  hermetic: true
+node_bindings:
+  act: project/main
+connectors: []
+connector_grants: {}
+secret_params:
+- title
+# apb-freeze-document: unattended
+profiles:
+- scope: project
+  name: main
+  profile_digest: sha256:5ee95d48bca858067fe71ca1dc6267f6a8940cd82ce2abdeda83562a7cc2b8c1
+  bundle_digest: sha256:d7b6eb47425b91c8e56eb085a4003712c710d6d67993c3fb634d39d97bbdafa9
+  soul: ''
+  soul_requirement: any
+  skills: []
+  chain:
+  - agent_id: claude-code
+    model: haiku
+    spec:
+      argv:
+      - -p
+      - --output-format
+      - json
+      - --model
+      - '{model}'
+      - --
+      - '{prompt}'
+      prompt_via: argv
+      soul: native
+      soul_flag: --append-system-prompt
+      transport: headless
+      autonomous_args:
+      - --permission-mode
+      - bypassPermissions
+      interaction: live
+    soul_delivery: native
+    canonical_executable: /apb-freeze-project/stub-agent.sh
+    executable_fingerprint: 72:1700000000000
+  ephemeral: false
+  hermetic: true
+node_bindings:
+  act: project/main
+connectors: []
+connector_grants: {}
+secret_params:
+- title
+unattended: true
+probation_waived: true
+# apb-freeze-document: triggered
+profiles:
+- scope: project
+  name: main
+  profile_digest: sha256:5ee95d48bca858067fe71ca1dc6267f6a8940cd82ce2abdeda83562a7cc2b8c1
+  bundle_digest: sha256:d7b6eb47425b91c8e56eb085a4003712c710d6d67993c3fb634d39d97bbdafa9
+  soul: ''
+  soul_requirement: any
+  skills: []
+  chain:
+  - agent_id: claude-code
+    model: haiku
+    spec:
+      argv:
+      - -p
+      - --output-format
+      - json
+      - --model
+      - '{model}'
+      - --
+      - '{prompt}'
+      prompt_via: argv
+      soul: native
+      soul_flag: --append-system-prompt
+      transport: headless
+      autonomous_args:
+      - --permission-mode
+      - bypassPermissions
+      interaction: live
+    soul_delivery: native
+    canonical_executable: /apb-freeze-project/stub-agent.sh
+    executable_fingerprint: 72:1700000000000
+  ephemeral: false
+  hermetic: true
+node_bindings:
+  act: project/main
+connectors: []
+connector_grants: {}
+secret_params:
+- title
+launch:
+  kind: start
+  initiator: trigger:triage-opened-issues
+  policy: allow
+  sources:
+  - default
+  billing:
+    allowed:
+    - billed
+    - subscription_equivalent
+    - unknown
+    confirmed: []
+    sources:
+    - default
+    - default config dir default
+  triggered_by:
+    rule: triage-opened-issues
+    incarnation: inc-1
+    source: inbox
+    connector: mock-tracker
+    account: main
+    event_seq: 41
+unattended: true
+# apb-freeze-document: child
+profiles:
+- scope: project
+  name: main
+  profile_digest: sha256:5ee95d48bca858067fe71ca1dc6267f6a8940cd82ce2abdeda83562a7cc2b8c1
+  bundle_digest: sha256:d7b6eb47425b91c8e56eb085a4003712c710d6d67993c3fb634d39d97bbdafa9
+  soul: ''
+  soul_requirement: any
+  skills: []
+  chain:
+  - agent_id: claude-code
+    model: haiku
+    spec:
+      argv:
+      - -p
+      - --output-format
+      - json
+      - --model
+      - '{model}'
+      - --
+      - '{prompt}'
+      prompt_via: argv
+      soul: native
+      soul_flag: --append-system-prompt
+      transport: headless
+      autonomous_args:
+      - --permission-mode
+      - bypassPermissions
+      interaction: live
+    soul_delivery: native
+    canonical_executable: /apb-freeze-project/stub-agent.sh
+    executable_fingerprint: 72:1700000000000
+  ephemeral: false
+  hermetic: true
+node_bindings:
+  act: project/main
+connectors: []
+connector_grants: {}
+consent:
+  irreversible: true
+  by: cli_flag
+  inherited_from: plain
+  sources:
+  - playbook
+secret_params:
+- title
+# apb-freeze-document: grants
+profiles:
+- scope: project
+  name: main
+  profile_digest: sha256:5ee95d48bca858067fe71ca1dc6267f6a8940cd82ce2abdeda83562a7cc2b8c1
+  bundle_digest: sha256:d7b6eb47425b91c8e56eb085a4003712c710d6d67993c3fb634d39d97bbdafa9
+  soul: ''
+  soul_requirement: any
+  skills: []
+  chain:
+  - agent_id: claude-code
+    model: haiku
+    spec:
+      argv:
+      - -p
+      - --output-format
+      - json
+      - --model
+      - '{model}'
+      - --
+      - '{prompt}'
+      prompt_via: argv
+      soul: native
+      soul_flag: --append-system-prompt
+      transport: headless
+      autonomous_args:
+      - --permission-mode
+      - bypassPermissions
+      interaction: live
+    soul_delivery: native
+    canonical_executable: /apb-freeze-project/stub-agent.sh
+    executable_fingerprint: 72:1700000000000
+  ephemeral: false
+  hermetic: true
+node_bindings:
+  act: project/main
+connectors:
+- name: mock-tracker
+  digest: sha256:28013f39f9a3f64443c89f31743da06e9d4833622be02de0f3cca29365fad2c9
+  accounts:
+  - name: main
+    default: true
+    fields:
+      base_url: http://127.0.0.1:9
+      token: '{{env.APB_CC_TEST_TOKEN}}'
+    env:
+      token: APB_CC_TEST_TOKEN
+    cmd: {}
+    digest: sha256:a0c8275e582926ae7e88b0e16e5acd6f601c3d8ea0c8da0d5da84293554b740b
+connector_grants:
+  act:
+  - connector: mock-tracker
+    accounts:
+    - main
+    functions:
+    - inbox_read
+    max_calls: null
+  wait#inbox:
+  - connector: mock-tracker
+    accounts:
+    - main
+    functions: []
+    max_calls: null
+secret_params:
+- title
+launch:
+  kind: start
+  initiator: cli_terminal
+  policy: allow
+  sources:
+  - default
+  billing:
+    allowed:
+    - billed
+    - subscription_equivalent
+    - unknown
+    confirmed: []
+    sources:
+    - default

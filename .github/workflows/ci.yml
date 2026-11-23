@@ -175,8 +175,10 @@ jobs:
         run: cargo test --workspace --doc
 
   # The journal corpus (crates/apb-cli/tests/suite/journal_corpus_test.rs):
-  # the released binaries of v1.0.0-beta.1 and v0.25.0 against journals this
-  # build wrote, and this build against theirs. scripts/old-apb.sh builds each
+  # the released binaries of v1.0.0-beta.1, v0.25.0 and the freeze reader
+  # v1.0.0-beta.7 against journals this build wrote, and this build against
+  # theirs. rc.1 and 1.0.0 join as readers with release-1.0.0.
+  # scripts/old-apb.sh builds each
   # from a worktree of its tag; the binaries are cached by tag, toolchain and
   # script, so only a new toolchain or a changed script rebuilds them (a cold
   # build of both takes several minutes). APB_CORPUS_REQUIRED=1 turns a
@@ -185,7 +187,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
-      OLD_APB_TAGS: v0.25.0 v1.0.0-beta.1
+      OLD_APB_TAGS: v0.25.0 v1.0.0-beta.1 v1.0.0-beta.7
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

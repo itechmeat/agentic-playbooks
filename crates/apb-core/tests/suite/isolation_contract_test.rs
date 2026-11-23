@@ -226,3 +226,15 @@ fn publish_only_turns_a_passed_credential_into_a_refusal() {
     assert_eq!(why.code.id(), "credentials_passed");
     assert!(why.to_string().contains("GH_TOKEN"), "{why}");
 }
+
+#[test]
+fn os_unsupported_states_the_one_point_x_position() {
+    let sentence = "The sandbox needs Linux with bubblewrap; apb 1.x has no sandbox on this system, so full refuses and best_effort runs without one.";
+    assert_eq!(ReasonCode::OsUnsupported.text(), sentence);
+    assert_eq!(text("os_unsupported"), Some(sentence));
+    assert_eq!(ReasonCode::OsUnsupported.id(), "os_unsupported");
+    assert_eq!(
+        serde_json::to_string(&ReasonCode::OsUnsupported).unwrap(),
+        "\"os_unsupported\""
+    );
+}

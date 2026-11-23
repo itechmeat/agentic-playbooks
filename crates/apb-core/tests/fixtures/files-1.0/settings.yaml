@@ -1,0 +1,46 @@
+# The settings files the machine and the project keep, frozen with
+# nondefault state: the machine and project `policy.yaml`, the global
+# `config.yaml` and the machine `decisions.yaml`. See
+# `docs/COMPATIBILITY.md` and `openspec/changes/one-point-oh-freeze`
+# (design D1.5 item 3).
+# apb-freeze-document: settings/policy
+notify:
+  finished: [failed, aborted]
+  remind: ["1h"]
+launch:
+  agent: ask
+  playbooks:
+    "global/dependency-security-fix": allow
+billing:
+  billed: ask
+  budget_counts_subscription: true
+runs:
+  start_key_days: 14
+  keep_days: 45
+  keep_last: 30
+  keep_failed_days: 120
+health:
+  playbooks: ["deploy", "global:triage"]
+unattended:
+  after_attended_successes: 3
+  waive_probation: true
+# apb-freeze-document: settings/config
+port: 8080
+agents:
+  claude:
+    program: claude
+runners:
+  ts: [bun, deno]
+registry: false
+# apb-freeze-document: settings/decisions
+version: 1
+mode: shadow
+timeout_ms: 2500
+providers:
+  - { id: sys, kind: systemone, base_url: "https://api.example.test/", model: m-1, api_key: "{{env.EXAMPLE_KEY}}" }
+  - { id: stub, kind: fake, answers: { completion_check: { reply: [ { id: ok, value: { verdict: pass } } ] } } }
+  - { id: near, kind: llm_emulation, via: openai_compatible, catalog: near-ai-cloud, model: "Qwen/Qwen3.8-27B" }
+  - { id: vercel, kind: vercel_evaluate, base_url: "https://eval.example.test/", model: m-2, api_key: "{{env.EXAMPLE_KEY}}", zero_data_retention: true }
+  - { id: openrouter, kind: openrouter_decisions, base_url: "https://openrouter.example.test/api/v1", model: m-3, api_key: "{{env.EXAMPLE_KEY}}" }
+  - { id: cf, kind: cloudflare, base_url: "https://cf.example.test/", model: m-4, api_key: "{{env.EXAMPLE_KEY}}", account_id: abc123def4 }
+budget: { max_requests_per_run: 5, max_usd_per_run: 0.01 }

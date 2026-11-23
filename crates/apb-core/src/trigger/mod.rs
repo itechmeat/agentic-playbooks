@@ -33,4 +33,6 @@ pub use state::{
 };
 #[cfg(any(test, feature = "testing"))]
 pub use state::{journal_reads_count, reset_journal_reads};
-pub use validate::{RuleContext, V260, V261, V262, V263, V264, V265, V266, V267, check_rule};
+pub use validate::{
+    ConnectorFacts, RuleContext, V260, V261, V262, V263, V264, V265, V266, V267, check_rule,
+};

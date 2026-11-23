@@ -1,0 +1,899 @@
+{
+  "bundled/apb-code-review@1.1.3": {
+    "errors": [],
+    "warnings": []
+  },
+  "bundled/apb-feature-delivery@1.2.4": {
+    "errors": [],
+    "warnings": []
+  },
+  "bundled/apb-inbox-digest@1.0.1": {
+    "errors": [],
+    "warnings": [
+      "V180"
+    ]
+  },
+  "bundled/apb-issue-triage@1.0.1": {
+    "errors": [],
+    "warnings": [
+      "V180"
+    ]
+  },
+  "bundled/apb-research@1.0.1": {
+    "errors": [],
+    "warnings": []
+  },
+  "bundled/apb-setup@1.0.1": {
+    "errors": [],
+    "warnings": []
+  },
+  "defaults/context": {
+    "errors": [],
+    "warnings": []
+  },
+  "defaults/host-decisions": {
+    "errors": [],
+    "warnings": []
+  },
+  "defaults/host-decisions-allow": {
+    "errors": [],
+    "warnings": []
+  },
+  "defaults/max-parallel": {
+    "errors": [],
+    "warnings": []
+  },
+  "defaults/max-retries": {
+    "errors": [],
+    "warnings": []
+  },
+  "defaults/on-failure-route": {
+    "errors": [],
+    "warnings": []
+  },
+  "defaults/on-failure-stop": {
+    "errors": [],
+    "warnings": []
+  },
+  "defaults/require-verdict": {
+    "errors": [],
+    "warnings": []
+  },
+  "defaults/retry-advice": {
+    "errors": [],
+    "warnings": []
+  },
+  "defaults/retry-delay": {
+    "errors": [],
+    "warnings": [
+      "V130"
+    ]
+  },
+  "defaults/stall-after": {
+    "errors": [],
+    "warnings": []
+  },
+  "defaults/timeout-seconds": {
+    "errors": [],
+    "warnings": []
+  },
+  "edges/conditions": {
+    "errors": [
+      "V54"
+    ],
+    "warnings": [
+      "V19",
+      "V55",
+      "V56",
+      "V144",
+      "V166"
+    ]
+  },
+  "edges/join-any": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19",
+      "V171"
+    ]
+  },
+  "edges/output-field-comparators": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19",
+      "V40"
+    ]
+  },
+  "edges/output-field-equals": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19",
+      "V40"
+    ]
+  },
+  "edges/output-field-gt": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19",
+      "V40"
+    ]
+  },
+  "edges/output-field-gte": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19",
+      "V40"
+    ]
+  },
+  "edges/status-eq": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19",
+      "V39",
+      "V40"
+    ]
+  },
+  "edges/status-eq-stalled": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19",
+      "V39",
+      "V40"
+    ]
+  },
+  "examples/bulk-reminders.yaml@1.0.0": {
+    "errors": [],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "examples/ci-failure-triage.yaml@1.0.0": {
+    "errors": [],
+    "warnings": []
+  },
+  "examples/crm-cleanup.yaml@1.0.0": {
+    "errors": [],
+    "warnings": []
+  },
+  "examples/dependency-security-fix.yaml@1.0.0": {
+    "errors": [],
+    "warnings": []
+  },
+  "examples/design-doc-check.yaml@1.0.0": {
+    "errors": [],
+    "warnings": []
+  },
+  "examples/document-checklist.yaml@1.0.0": {
+    "errors": [],
+    "warnings": []
+  },
+  "examples/inbox-triage.yaml@1.0.0": {
+    "errors": [],
+    "warnings": [
+      "V93"
+    ]
+  },
+  "examples/release-announce.yaml@1.0.0": {
+    "errors": [],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "examples/release-heartbeat.yaml@1.0.0": {
+    "errors": [],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "examples/review-panel-list.yaml@1.0.0": {
+    "errors": [],
+    "warnings": []
+  },
+  "examples/review-panel.yaml@1.0.0": {
+    "errors": [],
+    "warnings": [
+      "V45"
+    ]
+  },
+  "examples/review-triage.yaml@1.0.0": {
+    "errors": [],
+    "warnings": []
+  },
+  "examples/sentry-triage.yaml@1.0.0": {
+    "errors": [],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "examples/task-check-first.yaml@1.0.0": {
+    "errors": [],
+    "warnings": []
+  },
+  "examples/whatsapp-inbox.yaml@1.0.0": {
+    "errors": [],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "field/agent-launch-allow": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/agent-launch-ask": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/agent-launch-deny": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/baseline-check": {
+    "errors": [
+      "V64"
+    ],
+    "warnings": [
+      "V66"
+    ]
+  },
+  "field/baseline-decrease": {
+    "errors": [],
+    "warnings": [
+      "V66"
+    ]
+  },
+  "field/baseline-expects": {
+    "errors": [
+      "V64"
+    ],
+    "warnings": [
+      "V66"
+    ]
+  },
+  "field/baseline-project-checks": {
+    "errors": [
+      "V62"
+    ],
+    "warnings": [
+      "V66"
+    ]
+  },
+  "field/baseline-script": {
+    "errors": [],
+    "warnings": [
+      "V66"
+    ]
+  },
+  "field/budget-ask": {
+    "errors": [],
+    "warnings": [
+      "V98"
+    ]
+  },
+  "field/budget-continue": {
+    "errors": [],
+    "warnings": [
+      "V98"
+    ]
+  },
+  "field/budget-pause": {
+    "errors": [],
+    "warnings": [
+      "V98"
+    ]
+  },
+  "field/concurrency-queue": {
+    "errors": [
+      "V210"
+    ],
+    "warnings": []
+  },
+  "field/concurrency-refuse": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/concurrency-supersede": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/deadline": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/defaults": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/effects": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/follow-up": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/goal": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/goal-list": {
+    "errors": [
+      "V86"
+    ],
+    "warnings": [
+      "V19",
+      "V93"
+    ]
+  },
+  "field/goal-manual": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/goal-marker": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/health-hold": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/health-notify": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/known-problems": {
+    "errors": [],
+    "warnings": [
+      "V109"
+    ]
+  },
+  "field/known-problems-confirmed": {
+    "errors": [],
+    "warnings": [
+      "V109"
+    ]
+  },
+  "field/known-problems-off": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/outputs": {
+    "errors": [
+      "V132"
+    ],
+    "warnings": []
+  },
+  "field/outputs-all": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/outputs-child": {
+    "errors": [
+      "V07"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "field/outputs-first": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/params": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/params-secret": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/params-untrusted": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/previous-success": {
+    "errors": [
+      "V176"
+    ],
+    "warnings": []
+  },
+  "field/profile-scope-auto": {
+    "errors": [],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "field/profile-scope-global": {
+    "errors": [],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "field/profile-scope-project": {
+    "errors": [
+      "V14"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "field/publish-only": {
+    "errors": [
+      "V06"
+    ],
+    "warnings": [
+      "V19",
+      "V120"
+    ]
+  },
+  "field/quality": {
+    "errors": [
+      "V103",
+      "V104"
+    ],
+    "warnings": []
+  },
+  "field/quality-evidence": {
+    "errors": [
+      "V102"
+    ],
+    "warnings": []
+  },
+  "field/quality-evidence-absence": {
+    "errors": [
+      "V102"
+    ],
+    "warnings": []
+  },
+  "field/quality-rules": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/quality-subject-run": {
+    "errors": [
+      "V102"
+    ],
+    "warnings": []
+  },
+  "field/requires": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/supervisor": {
+    "errors": [],
+    "warnings": [
+      "V74"
+    ]
+  },
+  "field/trigger": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/unattended": {
+    "errors": [],
+    "warnings": []
+  },
+  "field/worktree": {
+    "errors": [
+      "V48"
+    ],
+    "warnings": []
+  },
+  "node-common/agent_task": {
+    "errors": [
+      "V85",
+      "V86",
+      "V141",
+      "V159",
+      "V170",
+      "V173",
+      "V174"
+    ],
+    "warnings": [
+      "V74",
+      "V93"
+    ]
+  },
+  "node-common/agent_task-cache-mode": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/agent_task-completion-auto": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/agent_task-completion-off": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/agent_task-connector-name": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/agent_task-connectors": {
+    "errors": [
+      "V18",
+      "V179"
+    ],
+    "warnings": [
+      "V19",
+      "V180"
+    ]
+  },
+  "node-common/agent_task-connectors-refuse": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/agent_task-continue": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/agent_task-continue-short": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/agent_task-duration-seconds": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": []
+  },
+  "node-common/agent_task-duration-text": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": []
+  },
+  "node-common/agent_task-isolation": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/agent_task-isolation-full": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/agent_task-isolation-none": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/agent_task-on-green-fail": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/agent_task-on-green-fail-explicit": {
+    "errors": [
+      "V173"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/agent_task-route-off": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/agent_task-success-marker": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/approves": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/fork-cancel": {
+    "errors": [
+      "V18",
+      "V77"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/fork-fail-fast": {
+    "errors": [
+      "V18",
+      "V77"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/human_review-unattended-fail": {
+    "errors": [],
+    "warnings": []
+  },
+  "node-common/human_review_gate": {
+    "errors": [
+      "V72",
+      "V156"
+    ],
+    "warnings": [
+      "V74"
+    ]
+  },
+  "node-common/list-check-connector": {
+    "errors": [
+      "V86",
+      "V87"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/list-check-judge": {
+    "errors": [
+      "V86",
+      "V87",
+      "V89"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/list-check-script": {
+    "errors": [
+      "V86"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/list-full": {
+    "errors": [
+      "V85",
+      "V86",
+      "V87"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/list-inline": {
+    "errors": [
+      "V86"
+    ],
+    "warnings": [
+      "V19",
+      "V93"
+    ]
+  },
+  "node-common/list-item-outputs-enum": {
+    "errors": [
+      "V86"
+    ],
+    "warnings": [
+      "V19",
+      "V93"
+    ]
+  },
+  "node-common/list-item-outputs-types": {
+    "errors": [
+      "V86"
+    ],
+    "warnings": [
+      "V19",
+      "V93"
+    ]
+  },
+  "node-common/list-pilot": {
+    "errors": [
+      "V86"
+    ],
+    "warnings": [
+      "V19",
+      "V93",
+      "V242"
+    ]
+  },
+  "node-common/list-pilot-review": {
+    "errors": [
+      "V86"
+    ],
+    "warnings": [
+      "V19",
+      "V93"
+    ]
+  },
+  "node-common/list-state": {
+    "errors": [
+      "V86"
+    ],
+    "warnings": [
+      "V19",
+      "V93"
+    ]
+  },
+  "node-common/read_only": {
+    "errors": [
+      "V18"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/requires_approval": {
+    "errors": [
+      "V158"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node-common/requires_approval-ignore": {
+    "errors": [
+      "V158"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node/agent_task": {
+    "errors": [],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node/condition": {
+    "errors": [],
+    "warnings": []
+  },
+  "node/finish": {
+    "errors": [
+      "V05"
+    ],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node/finish-success": {
+    "errors": [],
+    "warnings": [
+      "V101"
+    ]
+  },
+  "node/human_review": {
+    "errors": [
+      "V13"
+    ],
+    "warnings": []
+  },
+  "node/judge": {
+    "errors": [
+      "V34",
+      "V51",
+      "V52"
+    ],
+    "warnings": [
+      "V19",
+      "V56"
+    ]
+  },
+  "node/judge-list": {
+    "errors": [
+      "V50"
+    ],
+    "warnings": [
+      "V55",
+      "V56",
+      "V61"
+    ]
+  },
+  "node/playbook": {
+    "errors": [],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node/playbook-short": {
+    "errors": [],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node/prompt": {
+    "errors": [],
+    "warnings": []
+  },
+  "node/publish": {
+    "errors": [
+      "V116"
+    ],
+    "warnings": []
+  },
+  "node/script": {
+    "errors": [],
+    "warnings": [
+      "V19"
+    ]
+  },
+  "node/start": {
+    "errors": [],
+    "warnings": []
+  },
+  "node/wait": {
+    "errors": [],
+    "warnings": []
+  },
+  "node/wait-inbox": {
+    "errors": [],
+    "warnings": []
+  },
+  "node/wait-webhook": {
+    "errors": [],
+    "warnings": []
+  },
+  "witness/scenario-playbook": {
+    "errors": [],
+    "warnings": [
+      "V19"
+    ]
+  }
+}

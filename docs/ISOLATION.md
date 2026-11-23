@@ -267,9 +267,10 @@ recorded without a sandbox, with `host_mode` as the reason.
 
 ## macOS and other systems
 
-Not supported. `full` refuses with `os_unsupported`; `best_effort` runs
-without a sandbox and records `no_sandbox` on every attempt. apb does not use
-`sandbox-exec`, which macOS deprecates.
+`full` refuses with `os_unsupported`; `best_effort` runs without a sandbox and
+records `no_sandbox` on every attempt. apb does not use `sandbox-exec`, which
+macOS deprecates. This is the position for the whole 1.x line
+(`docs/COMPATIBILITY.md`).
 
 ## Refusals
 

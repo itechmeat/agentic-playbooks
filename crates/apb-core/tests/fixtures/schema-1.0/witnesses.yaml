@@ -1,0 +1,2696 @@
+# apb-freeze-document: witness/V01
+# apb-witness-kind: playbook
+# apb-witness-expects: V01 error
+schema: 2
+id: w-v01
+name: W V01
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: dup, type: prompt, prompt: a }
+  - { id: dup, type: prompt, prompt: b }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: dup, to: done }
+# apb-freeze-document: witness/V02
+# apb-witness-kind: playbook
+# apb-witness-expects: V02 error
+schema: 2
+id: w-v02
+name: W V02
+version: 1.0.0
+params:
+  - { name: a, type: text }
+  - { name: a, type: text }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V03
+# apb-witness-kind: playbook
+# apb-witness-expects: V03 error
+schema: 2
+id: w-v03
+name: W V03
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: two, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V04
+# apb-witness-kind: playbook
+# apb-witness-expects: V04 error
+schema: 2
+id: w-v04
+name: W V04
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: prompt, prompt: p }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: act, to: start }
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V08
+# apb-witness-kind: playbook
+# apb-witness-expects: V08 warning
+schema: 2
+id: w-v08
+name: W V08
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: prompt, prompt: p }
+edges:
+  - { from: start, to: act }
+# apb-freeze-document: witness/V09
+# apb-witness-kind: playbook
+# apb-witness-expects: V09 error
+schema: 2
+id: w-v09
+name: W V09
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: prompt, prompt: p }
+  - { id: gate, type: condition }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: gate }
+  - { from: gate, to: done, condition: { type: node_status, node: act, equals: success } }
+# apb-freeze-document: witness/V10
+# apb-witness-kind: playbook
+# apb-witness-expects: V10 error
+schema: 2
+id: w-v10
+name: W V10
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: first, type: prompt, prompt: p }
+  - { id: gate, type: condition }
+  - { id: late, type: prompt, prompt: p }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: first }
+  - { from: first, to: gate }
+  - { from: gate, to: late, condition: { type: node_status, node: done, equals: success } }
+  - { from: late, to: done }
+# apb-freeze-document: witness/V11
+# apb-witness-kind: playbook
+# apb-witness-expects: V11 error
+schema: 2
+id: w-v11
+name: W V11
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: prompt, prompt: p }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: act }
+# apb-freeze-document: witness/V12
+# apb-witness-kind: playbook
+# apb-witness-expects: V12 error
+schema: 2
+id: w-v12
+name: W V12
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: script, script: "../outside.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V14
+# apb-witness-kind: playbook
+# apb-witness-expects: V14 error
+schema: 2
+id: w-v14
+name: W V14
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, profile: { name: project-only, scope: project }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V17
+# apb-witness-kind: playbook
+# apb-witness-expects: V17 error
+schema: 2
+id: w-v17
+name: W V17
+version: 1.0.0
+trigger:
+  when: ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"]
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V20
+# apb-witness-kind: playbook
+# apb-witness-expects: V20 error
+schema: 2
+id: w-v20
+name: W V20
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, expected_duration: nonsense }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V21
+# apb-witness-kind: playbook
+# apb-witness-expects: V21 error
+schema: 2
+id: w-v21
+name: W V21
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success, profile: apb-main }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V22
+# apb-witness-kind: playbook
+# apb-witness-expects: V22 error
+schema: 2
+id: w-v22
+name: W V22
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: sub, type: playbook, playbook: { id: "../escape", scope: project } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: sub }
+  - { from: sub, to: done }
+# apb-freeze-document: witness/V23
+# apb-witness-kind: playbook
+# apb-witness-expects: V23 error
+schema: 2
+id: w-v23
+name: W V23
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, connectors: [{ name: BAD-NAME }], expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V24
+# apb-witness-kind: playbook
+# apb-witness-expects: V24 error
+schema: 2
+id: w-v24
+name: W V24
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, connectors: [mock-tracker, mock-tracker], expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V25
+# apb-witness-kind: playbook
+# apb-witness-expects: V25 error
+schema: 2
+id: w-v25
+name: W V25
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, connectors: [{ name: mock-tracker, accounts: [main, main] }], expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V27
+# apb-witness-kind: playbook
+# apb-witness-expects: V27 error
+schema: 2
+id: w-v27
+name: W V27
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: prompt, prompt: p, cache: auto }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V29
+# apb-witness-kind: playbook
+# apb-witness-expects: V29 error
+schema: 2
+id: w-v29
+name: W V29
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, inputs: { files: ["[["] }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V30
+# apb-witness-kind: playbook
+# apb-witness-expects: V30 error
+schema: 2
+id: w-v30
+name: W V30
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: prompt, prompt: p }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done, max_traversals: 0 }
+# apb-freeze-document: witness/V31
+# apb-witness-kind: playbook
+# apb-witness-expects: V31 error
+schema: 2
+id: w-v31
+name: W V31
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, answer_by: supervisor, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V32
+# apb-witness-kind: playbook
+# apb-witness-expects: V32 error
+schema: 2
+id: w-v32
+name: W V32
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, interactive: true, default_answer: skip, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V33
+# apb-witness-kind: playbook
+# apb-witness-expects: V33 error
+schema: 2
+id: w-v33
+name: W V33
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: prompt, prompt: p, success_check: "scripts/c.sh" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V35
+# apb-witness-kind: playbook
+# apb-witness-expects: V35 error
+schema: 2
+id: w-v35
+name: W V35
+version: 1.0.0
+defaults:
+  on_failure: nowhere
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: prompt, prompt: p }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V36
+# apb-witness-kind: playbook
+# apb-witness-expects: V36 error
+schema: 2
+id: w-v36
+name: W V36
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: prompt, prompt: p }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act, join: sometimes }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V37
+# apb-witness-kind: playbook
+# apb-witness-expects: V37 warning
+schema: 2
+id: w-v37
+name: W V37
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: prompt, prompt: a }
+  - { id: b, type: prompt, prompt: b }
+  - { id: join, type: prompt, prompt: j }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: join, join: all }
+  - { from: b, to: join, join: any }
+  - { from: join, to: done }
+# apb-freeze-document: witness/V38
+# apb-witness-kind: playbook
+# apb-witness-expects: V38 warning
+schema: 2
+id: w-v38
+name: W V38
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: src, type: agent_task, prompt: p, outputs: { fields: [known] }, expected_duration: 5m }
+  - { id: act, type: prompt, prompt: "{{nodes.src.output}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: src }
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V41
+# apb-witness-kind: playbook
+# apb-witness-expects: V41 error
+schema: 2
+id: w-v41
+name: W V41
+version: 1.0.0
+goal:
+  statement: ""
+  criteria:
+    - description: d
+      check: { type: manual }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V44
+# apb-witness-kind: playbook
+# apb-witness-expects: V44 error
+schema: 2
+id: w-v44
+name: W V44
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, continue_session: nowhere, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V47
+# apb-witness-kind: playbook
+# apb-witness-expects: V47 error
+schema: 2
+id: w-v47
+name: W V47
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, isolation: full, workdir: "sub", expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V49
+# apb-witness-kind: playbook
+# apb-witness-expects: V49 error
+schema: 2
+id: w-v49
+name: W V49
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, cache: { key: "{{params.x}}" }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V50
+# apb-witness-kind: playbook
+# apb-witness-expects: V50 error
+schema: 2
+id: w-v50
+name: W V50
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - id: act
+    type: judge
+    questions:
+      q0:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q1:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q2:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q3:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q4:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q5:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q6:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q7:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q8:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q9:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q10:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q11:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q12:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q13:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q14:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q15:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q16:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q17:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q18:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q19:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q20:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q21:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q22:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q23:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q24:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q25:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q26:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q27:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q28:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q29:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q30:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q31:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+      q32:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V53
+# apb-witness-kind: playbook
+# apb-witness-expects: V53 error
+schema: 2
+id: w-v53
+name: W V53
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: judge, questions: { q: { type: choice, instructions: i } }, on_unavailable: shrug }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V59
+# apb-witness-kind: playbook
+# apb-witness-expects: V59 error
+schema: 2
+id: w-v59
+name: W V59
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: judge, questions: { q: { type: choice, instructions: i } } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done, condition: { type: judge, question: q, min_p: 0.5 } }
+# apb-freeze-document: witness/V65
+# apb-witness-kind: playbook
+# apb-witness-expects: V65 error
+schema: 2
+id: w-v65
+name: W V65
+version: 1.0.0
+baseline_check:
+  checks:
+    - id: tpl
+      connector:
+        name: mock-tracker
+        account: main
+        function: f
+        args: { q: "{{nodes.act.output}}" }
+      observe:
+        - { id: a, type: number, path: a, expect: { at_least: 1 } }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V68
+# apb-witness-kind: playbook
+# apb-witness-expects: V68 error
+schema: 2
+id: w-v68
+name: W V68
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: "@act", type: prompt, prompt: p }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: "@act" }
+  - { from: "@act", to: done }
+# apb-freeze-document: witness/V70
+# apb-witness-kind: playbook
+# apb-witness-expects: V70 error
+schema: 2
+id: w-v70
+name: W V70
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success, route: auto }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V71
+# apb-witness-kind: playbook
+# apb-witness-expects: V71 error
+schema: 2
+id: w-v71
+name: W V71
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, option_descriptions: { approve: fine }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V75
+# apb-witness-kind: playbook
+# apb-witness-expects: V75 error
+schema: 2
+id: w-v75
+name: W V75
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, protect: ["/abs"], expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V78
+# apb-witness-kind: playbook
+# apb-witness-expects: V78 error
+schema: 2
+id: w-v78
+name: W V78
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: head, type: prompt, prompt: h, fork: { on_branch_failure: fail_fast } }
+  - { id: b1, type: prompt, prompt: b1 }
+  - { id: b2, type: prompt, prompt: b2 }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: head }
+  - { from: head, to: b1 }
+  - { from: head, to: b2 }
+  - { from: b1, to: done }
+  - { from: b2, to: done }
+# apb-freeze-document: witness/V79
+# apb-witness-kind: playbook
+# apb-witness-expects: V79 error
+schema: 2
+id: w-v79
+name: W V79
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: prompt, prompt: a }
+  - { id: join, type: prompt, prompt: j }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: a, to: join, require: all_succeeded }
+  - { from: join, to: done }
+# apb-freeze-document: witness/V82
+# apb-witness-kind: playbook-dir
+# apb-witness-expects: V82 warning
+# apb-witness-file: evals/suite.yaml: {}
+schema: 2
+id: w-v82
+name: W V82
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, interactive: true, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V90
+# apb-witness-kind: playbook
+# apb-witness-expects: V90 warning
+schema: 2
+id: w-v90
+name: W V90
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: deploy_it, type: agent_task, prompt: "kubectl apply -f .", expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: deploy_it }
+  - { from: deploy_it, to: done }
+# apb-freeze-document: witness/V95
+# apb-witness-kind: playbook
+# apb-witness-expects: V95 error
+schema: 2
+id: w-v95
+name: W V95
+version: 1.0.0
+goal:
+  statement: s
+  criteria:
+    - description: d
+      check: { type: list, node: act }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V96
+# apb-witness-kind: playbook
+# apb-witness-expects: V96 error
+schema: 2
+id: w-v96
+name: W V96
+version: 1.0.0
+budget: {}
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V97
+# apb-witness-kind: playbook
+# apb-witness-expects: V97 error
+schema: 2
+id: w-v97
+name: W V97
+version: 1.0.0
+budget:
+  usd: -5.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V99
+# apb-witness-kind: playbook
+# apb-witness-expects: V99 error
+schema: 2
+id: w-v99
+name: W V99
+version: 1.0.0
+params:
+  - { name: token, type: text, secret: true, default: abc }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V100
+# apb-witness-kind: playbook
+# apb-witness-expects: V100 error
+schema: 2
+id: w-v100
+name: W V100
+version: 1.0.0
+params:
+  - { name: token, type: number, secret: true }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V105
+# apb-witness-kind: playbook
+# apb-witness-expects: V105 error
+schema: 2
+id: w-v105
+name: W V105
+version: 1.0.0
+quality:
+  builtins:
+    outcome: { off: "" }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V107
+# apb-witness-kind: playbook
+# apb-witness-expects: V107 error
+schema: 2
+id: w-v107
+name: W V107
+version: 1.0.0
+supervisor:
+  policy:
+    promote_supervisor_patches: { when: quality }
+
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V108
+# apb-witness-kind: playbook
+# apb-witness-expects: V108 error
+schema: 2
+id: w-v108
+name: W V108
+version: 1.0.0
+known_problems:
+  show: nonsense
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V110
+# apb-witness-kind: playbook
+# apb-witness-expects: V110 error
+schema: 2
+id: w-v110
+name: W V110
+version: 1.0.0
+quality:
+  criteria_grader: nonsense
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V111
+# apb-witness-kind: playbook
+# apb-witness-expects: V111 warning
+schema: 2
+id: w-v111
+name: W V111
+version: 1.0.0
+quality:
+  criteria_grader: model
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V112
+# apb-witness-kind: playbook
+# apb-witness-expects: V112 warning
+schema: 2
+id: w-v112
+name: W V112
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, isolation: { level: full }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V117
+# apb-witness-kind: playbook
+# apb-witness-expects: V117 error
+schema: 2
+id: w-v117
+name: W V117
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, isolation: full, expected_duration: 5m }
+  - { id: pub, type: publish, from: act, remote: "bad remote", branch: "HEAD" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: pub }
+  - { from: pub, to: done }
+# apb-freeze-document: witness/V118
+# apb-witness-kind: playbook
+# apb-witness-expects: V118 error
+schema: 2
+id: w-v118
+name: W V118
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, isolation: full, expected_duration: 5m }
+  - { id: pub, type: publish, from: act, remote: origin, cache: auto }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: pub }
+  - { from: pub, to: done }
+# apb-freeze-document: witness/V121
+# apb-witness-kind: playbook
+# apb-witness-expects: V121 error
+schema: 2
+id: w-v121
+name: W V121
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { id: dup, from: start, to: done }
+  - { id: dup, from: start, to: done }
+# apb-freeze-document: witness/V126
+# apb-witness-kind: playbook
+# apb-witness-expects: V126 error
+schema: 2
+id: w-v126
+name: W V126
+version: 1.0.0
+defaults:
+  retry_delay: { initial: nonsense }
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V129
+# apb-witness-kind: playbook
+# apb-witness-expects: V129 error
+schema: 2
+id: w-v129
+name: W V129
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, list: { items: { inline: [a] } }, retry_delay: { initial: 5s }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V131
+# apb-witness-kind: playbook
+# apb-witness-expects: V131 error
+schema: 2
+id: w-v131
+name: W V131
+version: 1.0.0
+outputs:
+  Bad-Name:
+    from: { node: done }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V134
+# apb-witness-kind: playbook
+# apb-witness-expects: V134 error
+schema: 2
+id: w-v134
+name: W V134
+version: 1.0.0
+outputs:
+  one:
+    from: { node: done, item_field: name }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V137
+# apb-witness-kind: playbook
+# apb-witness-expects: V137 error
+schema: 2
+id: w-v137
+name: W V137
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: prompt, prompt: p, read_only: true }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V138
+# apb-witness-kind: playbook
+# apb-witness-expects: V138 error
+schema: 2
+id: w-v138
+name: W V138
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, list: { items: { inline: [a] } }, read_only: true, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V142
+# apb-witness-kind: playbook
+# apb-witness-expects: V142 error
+schema: 2
+id: w-v142
+name: W V142
+version: 1.0.0
+effects: [irreversible]
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - id: gate
+    type: human_review
+    options: [approve]
+    unattended:
+      decide: approve
+  - { id: act, type: agent_task, prompt: "git push origin main", expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V143
+# apb-witness-kind: playbook
+# apb-witness-expects: V143 error
+schema: 2
+id: w-v143
+name: W V143
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - id: gate
+    type: human_review
+    options: [approve]
+    unattended:
+      decide: approve
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: done, max_traversals: 1 }
+# apb-freeze-document: witness/V152
+# apb-witness-kind: playbook
+# apb-witness-expects: V152 error
+schema: 2
+id: w-v152
+name: W V152
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: prompt, prompt: p, results: [{ path: "out/x.md", scope: run, format: records }] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V153
+# apb-witness-kind: playbook
+# apb-witness-expects: V153 error
+schema: 2
+id: w-v153
+name: W V153
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, results: [{ path: "../out", scope: run, format: records }], expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V155
+# apb-witness-kind: playbook
+# apb-witness-expects: V155 error
+schema: 2
+id: w-v155
+name: W V155
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, person_only: true, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V157
+# apb-witness-kind: playbook
+# apb-witness-expects: V157 error
+schema: 2
+id: w-v157
+name: W V157
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - id: gate
+    type: human_review
+    options: [approve]
+    approves:
+      results: [ghost]
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: done }
+# apb-freeze-document: witness/V160
+# apb-witness-kind: playbook
+# apb-witness-expects: V160 error
+schema: 2
+id: w-v160
+name: W V160
+version: 1.0.0
+params:
+  - { name: token, type: text, secret: true, search: true }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V161
+# apb-witness-kind: playbook
+# apb-witness-expects: V161 error
+schema: 2
+id: w-v161
+name: W V161
+version: 1.0.0
+params:
+  - { name: password, type: text, search: true }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V163
+# apb-witness-kind: playbook
+# apb-witness-expects: V163 error
+schema: 2
+id: w-v163
+name: W V163
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, success_check: { script: "scripts/c.sh", scope: ["[["] }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: loop }
+  - { from: loop, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V165
+# apb-witness-kind: playbook
+# apb-witness-expects: V165 error
+schema: 2
+id: w-v165
+name: W V165
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: loop, type: agent_task, prompt: p, expected_duration: 5m }
+  - { id: act, type: agent_task, prompt: "{{nodes.loop.seen.items}}", expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V167
+# apb-witness-kind: playbook
+# apb-witness-expects: V167 error
+schema: 2
+id: w-v167
+name: W V167
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, outputs: { fields: [{ name: bad.name, type: string }] }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V169
+# apb-witness-kind: playbook
+# apb-witness-expects: V169 error
+schema: 2
+id: w-v169
+name: W V169
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, outputs: { fields: [{ name: count, type: number }] }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act, condition: { type: output_field, node: act, field: count, equals: "1", lt: 5 } }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V177
+# apb-witness-kind: playbook
+# apb-witness-expects: V177 error
+schema: 2
+id: w-v177
+name: W V177
+version: 1.0.0
+params:
+  - { name: a, type: number, pattern: "[a-z]+" }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V178
+# apb-witness-kind: playbook
+# apb-witness-expects: V178 error
+schema: 2
+id: w-v178
+name: W V178
+version: 1.0.0
+params:
+  - { name: a, type: text, pattern: "[a-z]+", default: "123" }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V181
+# apb-witness-kind: playbook
+# apb-witness-expects: V181 error
+schema: 2
+id: w-v181
+name: W V181
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: prompt, prompt: p, untrusted: true }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V183
+# apb-witness-kind: playbook
+# apb-witness-expects: V183 error
+schema: 2
+id: w-v183
+name: W V183
+version: 1.0.0
+follow_up:
+  after: 1s
+  check:
+    id: a
+    script: "scripts/o.sh"
+    observe:
+      - { id: a, type: number, path: a, expect: { at_least: 1 } }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V184
+# apb-witness-kind: playbook
+# apb-witness-expects: V184 error
+schema: 2
+id: w-v184
+name: W V184
+version: 1.0.0
+follow_up:
+  after: 30m
+  grace: 1s
+  check:
+    id: a
+    script: "scripts/o.sh"
+    observe:
+      - { id: a, type: number, path: a, expect: { at_least: 1 } }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V185
+# apb-witness-kind: playbook
+# apb-witness-expects: V185 error
+schema: 2
+id: w-v185
+name: W V185
+version: 1.0.0
+follow_up:
+  after: 30m
+  check:
+    id: a
+    project_checks:
+      only: [test]
+      junit: "reports/*.xml"
+    observe:
+      - { id: a, type: number, path: a, expect: { at_least: 1 } }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V186
+# apb-witness-kind: playbook
+# apb-witness-expects: V186 error
+schema: 2
+id: w-v186
+name: W V186
+version: 1.0.0
+follow_up:
+  after: 30m
+  check:
+    id: a
+    script: "scripts/o.sh"
+    observe:
+      - { id: a, type: number, path: a, expect: { change: increase } }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V200
+# apb-witness-kind: playbook
+# apb-witness-expects: V200 error
+schema: 2
+id: w-v200
+name: W V200
+version: 1.0.0
+deadline: 10s
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V212
+# apb-witness-kind: playbook
+# apb-witness-expects: V212 error
+schema: 2
+id: w-v212
+name: W V212
+version: 1.0.0
+health:
+  consecutive_failures: 0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V240
+# apb-witness-kind: playbook
+# apb-witness-expects: V240 error
+schema: 2
+id: w-v240
+name: W V240
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, list: { items: { inline: [a, b] }, pilot: { items: 99 } }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V241
+# apb-witness-kind: playbook
+# apb-witness-expects: V241 error
+schema: 2
+id: w-v241
+name: W V241
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, list: { items: { inline: [a] }, stop_when: {} }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V243
+# apb-witness-kind: playbook
+# apb-witness-expects: V243 error
+schema: 2
+id: w-v243
+name: W V243
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - id: gate
+    type: human_review
+    options: [approve]
+    max_scope: {}
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: done }
+# apb-freeze-document: witness/V244
+# apb-witness-kind: playbook
+# apb-witness-expects: V244 error
+schema: 2
+id: w-v244
+name: W V244
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - id: gate
+    type: human_review
+    options: [approve]
+    fields:
+      - { name: bad.name, type: text }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: done }
+# apb-freeze-document: witness/V245
+# apb-witness-kind: playbook
+# apb-witness-expects: V245 error
+schema: 2
+id: w-v245
+name: W V245
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - id: gate
+    type: human_review
+    options: [approve]
+    show:
+      - { label: "", text: x }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: done }
+# apb-freeze-document: witness/V246
+# apb-witness-kind: playbook
+# apb-witness-expects: V246 error
+schema: 2
+id: w-v246
+name: W V246
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - id: gate
+    type: human_review
+    options: [approve]
+    auto_decide:
+      allow: [approve]
+    fields:
+      - { name: note, type: text, required: true }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: done }
+# apb-freeze-document: witness/V249
+# apb-witness-kind: playbook
+# apb-witness-expects: V249 error
+schema: 2
+id: w-v249
+name: W V249
+version: 1.0.0
+unattended:
+  after_attended_successes: 0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V250
+# apb-witness-kind: playbook
+# apb-witness-expects: V250 warning
+schema: 2
+id: w-v250
+name: W V250
+version: 1.0.0
+unattended:
+  after_attended_successes: 1
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V283
+# apb-witness-kind: playbook
+# apb-witness-expects: V283 error
+schema: 2
+id: w-v283
+name: W V283
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, list: { items: { inline: [a] }, skip: { passed_in: previous_success, unless_changed: [] } }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V288
+# apb-witness-kind: playbook
+# apb-witness-expects: V288 error
+schema: 2
+id: w-v288
+name: W V288
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, isolation: full, list: { items: { inline: [a] }, skip: { passed_in: previous_success } }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V289
+# apb-witness-kind: playbook
+# apb-witness-expects: V289 error
+schema: 2
+id: w-v289
+name: W V289
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: "{{nodes.act.output}}", list: { items: { inline: [a] }, skip: { passed_in: previous_success } }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V340
+# apb-witness-kind: playbook
+# apb-witness-expects: V340 error
+schema: 2
+id: w-v340
+name: W V340
+version: 1.0.0
+params:
+  - { name: token, type: text, secret: true }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: "use {{params.token}}", expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V28
+# apb-witness-kind: playbook
+# apb-witness-expects: V28 warning
+schema: 2
+id: w-v28
+name: W V28
+version: 1.0.0
+defaults:
+  profile: apb-main
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: prompt, prompt: p, cache: { mode: off, ttl: 5m } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V46
+# apb-witness-kind: playbook
+# apb-witness-expects: V46 warning
+schema: 2
+id: w-v46
+name: W V46
+version: 1.0.0
+defaults:
+  profile: apb-main
+nodes:
+  - { id: start, type: start }
+  - { id: src, type: agent_task, prompt: p, outputs: { fields: [known] }, expected_duration: 5m }
+  - { id: act, type: prompt, prompt: "{{nodes.src.output.unknown}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: src }
+  - { from: src, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V57
+# apb-witness-kind: playbook
+# apb-witness-expects: V57 warning
+schema: 2
+id: w-v57
+name: W V57
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - id: act
+    type: judge
+    questions:
+      q:
+        type: score
+        instructions: i
+        levels: ["level 1", "level 2"]
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V58
+# apb-witness-kind: playbook
+# apb-witness-expects: V58 warning
+schema: 2
+id: w-v58
+name: W V58
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: src, type: agent_task, prompt: p, expected_duration: 5m }
+  - id: act
+    type: judge
+    state:
+      context: "{{run.context}}"
+      more: "{{nodes.src.output}}"
+      extra: "{{nodes.src.output}}"
+      pad: "{{nodes.src.output}}"
+      pad2: "{{nodes.src.output}}"
+      pad3: "{{nodes.src.output}}"
+      pad4: "{{nodes.src.output}}"
+      pad5: "{{nodes.src.output}}"
+      pad6: "{{nodes.src.output}}"
+      pad7: "{{nodes.src.output}}"
+      pad8: "{{nodes.src.output}}"
+      pad9: "{{nodes.src.output}}"
+    on_unavailable: emulate
+    questions:
+      q:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: src }
+  - { from: src, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V60
+# apb-witness-kind: playbook
+# apb-witness-expects: V60 warning
+schema: 2
+id: w-v60
+name: W V60
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - id: act
+    type: judge
+    questions:
+      q:
+        type: choice
+        instructions: i
+        criteria: { yes: a, no: b, unclear: c }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: act, to: done, condition: { type: judge, question: q, min_p: 0.5, on_unavailable: true }, max_traversals: 0 }
+  - { from: act, to: done, condition: { type: judge, question: q, min_p: 0.5, on_unavailable: true }, max_traversals: 1 }
+  - { from: act, to: done, condition: { type: judge, question: q, min_p: 0.5, on_unavailable: true }, max_traversals: 2 }
+  - { from: act, to: done, condition: { type: judge, question: q, min_p: 0.5, on_unavailable: true }, max_traversals: 3 }
+  - { from: act, to: done, condition: { type: judge, question: q, min_p: 0.5, on_unavailable: true }, max_traversals: 4 }
+  - { from: act, to: done, condition: { type: judge, question: q, min_p: 0.5, on_unavailable: true }, max_traversals: 5 }
+  - { from: act, to: done, condition: { type: judge, question: q, min_p: 0.5, on_unavailable: true }, max_traversals: 6 }
+  - { from: act, to: done, condition: { type: judge, question: q, min_p: 0.5, on_unavailable: true }, max_traversals: 7 }
+  - { from: act, to: done, condition: { type: judge, question: q, min_p: 0.5, on_unavailable: true }, max_traversals: 8 }
+# apb-freeze-document: witness/V61
+# apb-witness-kind: playbook
+# apb-witness-expects: V61 warning
+schema: 2
+id: w-v61
+name: W V61
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: judge, questions: { q: { type: choice, instructions: i, criteria: { yes: a, no: b } } }, profile: apb-main, on_unavailable: fail }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V67
+# apb-witness-kind: playbook
+# apb-witness-expects: V67 warning
+schema: 2
+id: w-v67
+name: W V67
+version: 1.0.0
+worktree: "trees/{{nodes.act.output}}"
+baseline_check:
+  enforce: true
+  checks:
+    - id: files
+      script: "scripts/observe.sh"
+      observe:
+        - { id: a, type: list, path: a, expect: { contains: main } }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, isolation: full, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V80
+# apb-witness-kind: playbook-dir
+# apb-witness-expects: V80 error
+# apb-witness-file: evals/suite.yaml: cases: { bad: 1 }
+schema: 2
+id: w-v80
+name: W V80
+version: 1.0.0
+defaults:
+  profile: apb-main
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V81
+# apb-witness-kind: playbook-dir
+# apb-witness-expects: V81 error
+# apb-witness-file: evals/suite.yaml: {}
+# apb-witness-file: evals/one.yaml: { schema: 1, id: one, fixture: {} }
+schema: 2
+id: w-v81
+name: W V81
+version: 1.0.0
+defaults:
+  profile: apb-main
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, connectors: [{ name: mock-tracker, functions: [list_items] }] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V83
+# apb-witness-kind: playbook-dir
+# apb-witness-expects: V83 warning
+# apb-witness-file: evals/suite.yaml: {}
+# apb-witness-file: evals/one.yaml: { schema: 1, id: one, fixture: {}, versions: "<0.1.0" }
+schema: 2
+id: w-v83
+name: W V83
+version: 1.0.0
+defaults:
+  profile: apb-main
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V92
+# apb-witness-kind: playbook-dir
+# apb-witness-expects: V92 error
+schema: 2
+id: w-v92
+name: W V92
+version: 1.0.0
+defaults:
+  profile: apb-main
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: script, script: "scripts/missing.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V94
+# apb-witness-kind: playbook
+# apb-witness-expects: V94 warning
+schema: 2
+id: w-v94
+name: W V94
+version: 1.0.0
+defaults:
+  profile: apb-main
+  max_parallel: 2
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, list: { items: { inline: [a] }, batch: { parallel: 4 } }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V113
+# apb-witness-kind: playbook
+# apb-witness-expects: V113 error
+schema: 2
+id: w-v113
+name: W V113
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, isolation: full, connectors: [mock-tracker], expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V114
+# apb-witness-kind: playbook
+# apb-witness-expects: V114 error
+schema: 2
+id: w-v114
+name: W V114
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, isolation: { level: full, read_only: ["../outside"] }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V115
+# apb-witness-kind: playbook
+# apb-witness-expects: V115 error
+schema: 2
+id: w-v115
+name: W V115
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, isolation: { level: none, network: none }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V119
+# apb-witness-kind: playbook
+# apb-witness-expects: V119 warning
+schema: 2
+id: w-v119
+name: W V119
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, expected_duration: 5m }
+  - { id: pub, type: publish, from: act, remote: origin }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: pub }
+  - { from: pub, to: done }
+# apb-freeze-document: witness/V122
+# apb-witness-kind: playbook
+# apb-witness-expects: V122 warning
+schema: 2
+id: w-v122
+name: W V122
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: prompt, prompt: a }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a, max_traversals: 2 }
+  - { from: start, to: a }
+  - { from: a, to: done }
+# apb-freeze-document: witness/V127
+# apb-witness-kind: playbook
+# apb-witness-expects: V127 error
+schema: 2
+id: w-v127
+name: W V127
+version: 1.0.0
+defaults:
+  retry_delay: { initial: 5s, factor: 20.0 }
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V128
+# apb-witness-kind: playbook
+# apb-witness-expects: V128 error
+schema: 2
+id: w-v128
+name: W V128
+version: 1.0.0
+defaults:
+  retry_delay: { initial: 5m, max: 1m }
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V133
+# apb-witness-kind: playbook
+# apb-witness-expects: V133 warning
+schema: 2
+id: w-v133
+name: W V133
+version: 1.0.0
+outputs:
+  answer:
+    from: { node: done, field: ghost }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success, outputs: { fields: [known] } }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V135
+# apb-witness-kind: playbook
+# apb-witness-expects: V135 warning
+schema: 2
+id: w-v135
+name: W V135
+version: 1.0.0
+outputs:
+  one:
+    from: { node: act, item_field: ghost }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, list: { items: { inline: [a] }, item_outputs: [name] }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V139
+# apb-witness-kind: playbook
+# apb-witness-expects: V139 warning
+schema: 2
+id: w-v139
+name: W V139
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, read_only: true, protect: ["*.lock"], expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V140
+# apb-witness-kind: playbook
+# apb-witness-expects: V140 warning
+schema: 2
+id: w-v140
+name: W V140
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, read_only: true, expected_duration: 5m }
+  - { id: pub, type: publish, from: act, remote: origin }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: pub }
+  - { from: pub, to: done }
+# apb-freeze-document: witness/V145
+# apb-witness-kind: playbook
+# apb-witness-expects: V145 warning
+schema: 2
+id: w-v145
+name: W V145
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - id: gate
+    type: human_review
+    options: [approve, reject]
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: done, condition: { type: review_status, equals: approved } }
+# apb-freeze-document: witness/V146
+# apb-witness-kind: playbook-dir
+# apb-witness-expects: V146 error
+# apb-witness-file: evals/scenarios/broken.yaml: this scenario is not: [valid
+schema: 2
+id: w-v146
+name: W V146
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V147
+# apb-witness-kind: scenario
+# apb-witness-expects: V147 error
+schema: 1
+id: witness
+title: visit zero and a doubled visit
+answers:
+  act:
+    - { visit: 1, script: { exit: 0, stdout: ok } }
+    - { visit: 1, script: { exit: 0, stdout: ok } }
+# apb-freeze-document: witness/V149
+# apb-witness-kind: scenario
+# apb-witness-expects: V149 error
+schema: 1
+id: witness
+title: a secret param is set
+params: { secret_one: x }
+# apb-freeze-document: witness/V150
+# apb-witness-kind: scenario
+# apb-witness-expects: V150 error
+schema: 1
+id: witness
+title: expect names a node the playbook does not have
+expect:
+  visits: { ghost: 1 }
+# apb-freeze-document: witness/V151
+# apb-witness-kind: scenario
+# apb-witness-expects: V151 warning
+schema: 1
+id: witness
+title: more attempts than the node retries
+answers:
+  act:
+    - visit: 1
+      attempts:
+        - { timed_out: true }
+        - { timed_out: true }
+        - { timed_out: true }
+        - { timed_out: true }
+# apb-freeze-document: witness/V154
+# apb-witness-kind: playbook
+# apb-witness-expects: V154 error
+schema: 2
+id: w-v154
+name: W V154
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - id: act
+    type: agent_task
+    prompt: p
+    results:
+      - { path: "out/f0.md", scope: run, format: records }
+      - { path: "out/f1.md", scope: run, format: records }
+      - { path: "out/f2.md", scope: run, format: records }
+      - { path: "out/f3.md", scope: run, format: records }
+      - { path: "out/f4.md", scope: run, format: records }
+      - { path: "out/f5.md", scope: run, format: records }
+      - { path: "out/f6.md", scope: run, format: records }
+      - { path: "out/f7.md", scope: run, format: records }
+      - { path: "out/f8.md", scope: run, format: records }
+      - { path: "out/f9.md", scope: run, format: records }
+      - { path: "out/f10.md", scope: run, format: records }
+      - { path: "out/f11.md", scope: run, format: records }
+      - { path: "out/f12.md", scope: run, format: records }
+      - { path: "out/f13.md", scope: run, format: records }
+      - { path: "out/f14.md", scope: run, format: records }
+      - { path: "out/f15.md", scope: run, format: records }
+      - { path: "out/f16.md", scope: run, format: records }
+      - { path: "out/f17.md", scope: run, format: records }
+      - { path: "out/f18.md", scope: run, format: records }
+      - { path: "out/f19.md", scope: run, format: records }
+      - { path: "out/f20.md", scope: run, format: records }
+      - { path: "out/f21.md", scope: run, format: records }
+      - { path: "out/f22.md", scope: run, format: records }
+      - { path: "out/f23.md", scope: run, format: records }
+      - { path: "out/f24.md", scope: run, format: records }
+      - { path: "out/f25.md", scope: run, format: records }
+      - { path: "out/f26.md", scope: run, format: records }
+      - { path: "out/f27.md", scope: run, format: records }
+      - { path: "out/f28.md", scope: run, format: records }
+      - { path: "out/f29.md", scope: run, format: records }
+      - { path: "out/f30.md", scope: run, format: records }
+      - { path: "out/f31.md", scope: run, format: records }
+      - { path: "out/f32.md", scope: run, format: records }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V162
+# apb-witness-kind: playbook
+# apb-witness-expects: V162 error
+schema: 2
+id: w-v162
+name: W V162
+version: 1.0.0
+params:
+  - { name: p0, type: text, search: true }
+  - { name: p1, type: text, search: true }
+  - { name: p2, type: text, search: true }
+  - { name: p3, type: text, search: true }
+  - { name: p4, type: text, search: true }
+  - { name: p5, type: text, search: true }
+  - { name: p6, type: text, search: true }
+  - { name: p7, type: text, search: true }
+  - { name: p8, type: text, search: true }
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V164
+# apb-witness-kind: playbook
+# apb-witness-expects: V164 error
+schema: 2
+id: w-v164
+name: W V164
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: prompt, prompt: p }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act, condition: { type: no_new_items, node: ghost, field: items, rounds: 2 } }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V168
+# apb-witness-kind: playbook
+# apb-witness-expects: V168 warning
+schema: 2
+id: w-v168
+name: W V168
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, outputs: { fields: [{ name: flag, type: bool }] }, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act, condition: { type: output_field, node: act, field: flag, lt: 1 } }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V171
+# apb-witness-kind: playbook
+# apb-witness-expects: V171 warning
+schema: 2
+id: w-v171
+name: W V171
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: agent_task, prompt: a, expected_duration: 5m }
+  - { id: b, type: agent_task, prompt: b, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: done }
+  - { from: b, to: done }
+# apb-freeze-document: witness/V172
+# apb-witness-kind: playbook
+# apb-witness-expects: V172 warning
+schema: 2
+id: w-v172
+name: W V172
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: agent_task, prompt: a, writes: ["out/**"], expected_duration: 5m }
+  - { id: b, type: agent_task, prompt: b, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: done }
+  - { from: b, to: done }
+# apb-freeze-document: witness/V175
+# apb-witness-kind: playbook
+# apb-witness-expects: V175 warning
+schema: 2
+id: w-v175
+name: W V175
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: prompt, prompt: p }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act, condition: { type: node_status, node: act, equals: stalled } }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V182
+# apb-witness-kind: playbook
+# apb-witness-expects: V182 warning
+schema: 2
+id: w-v182
+name: W V182
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, accept_untrusted: true, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V211
+# apb-witness-kind: playbook
+# apb-witness-expects: V211 warning
+schema: 2
+id: w-v211
+name: W V211
+version: 1.0.0
+effects: [irreversible]
+concurrency:
+  on_busy: supersede
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: witness/V247
+# apb-witness-kind: playbook
+# apb-witness-expects: V247 warning
+schema: 2
+id: w-v247
+name: W V247
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, untrusted: true, expected_duration: 5m }
+  - id: gate
+    type: human_review
+    options: [approve]
+    fields:
+      - { name: note, type: text, default: "{{nodes.act.output}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: gate }
+  - { from: gate, to: done }
+# apb-freeze-document: witness/V260
+# apb-witness-kind: trigger-rule
+# apb-witness-expects: V260 error
+name: BAD_NAME
+playbook: { id: deploy, version: 1.0.0 }
+source:
+  inbox:
+    connector: mock-tracker
+    account: main
+    types: [issues]
+    key: "{{event.seq}}"
+# apb-freeze-document: witness/V261
+# apb-witness-kind: trigger-rule
+# apb-witness-expects: V261 error
+name: good-rule
+playbook: { id: no-such-playbook, version: 1.0.0 }
+source:
+  inbox:
+    connector: mock-tracker
+    account: main
+    types: [issues]
+    key: "{{event.seq}}"
+# apb-freeze-document: witness/V262
+# apb-witness-kind: trigger-rule
+# apb-witness-expects: V262 error
+name: good-rule
+playbook: { id: deploy, version: 1.0.0 }
+source:
+  inbox:
+    connector: mock-tracker
+    account: main
+    types: [issues]
+    key: "{{event.seq}}"
+params:
+  title: "{{params.ghost}}"
+# apb-freeze-document: witness/V263
+# apb-witness-kind: trigger-rule
+# apb-witness-expects: V263 error
+name: good-rule
+playbook: { id: deploy, version: 1.0.0 }
+source:
+  inbox:
+    connector: mock-tracker
+    account: main
+    types: [issues]
+    key: "{{event.seq}}"
+# apb-freeze-document: witness/V264
+# apb-witness-kind: trigger-rule
+# apb-witness-expects: V264 error
+name: good-rule
+playbook: { id: deploy, version: 1.0.0 }
+source:
+  inbox:
+    connector: mock-tracker
+    account: main
+    types: [issues]
+    key: "{{event.seq}}"
+limits: { max_per_hour: 0 }
+# apb-freeze-document: witness/V280
+# apb-witness-kind: playbook-dir
+# apb-witness-expects: V280 error
+# apb-witness-file: evals/suite.yaml: {}
+# apb-witness-file: evals/one.yaml: { schema: 1, id: one, fixture: {}, connectors: { act: { "mock-tracker.list_items": [ { answer: { status: 200, body: {} } } ] } } }
+schema: 2
+id: w-v280
+name: W V280
+version: 1.0.0
+defaults:
+  profile: apb-main
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, connectors: [{ name: mock-tracker, functions: [list_items] }] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: witness/V281
+# apb-witness-kind: playbook-dir
+# apb-witness-expects: V281 error
+# apb-witness-file: evals/suite.yaml: {}
+# apb-witness-file: evals/one.yaml: { schema: 1, id: one, fixture: {}, checks: { connector_calls: [ { function: "mock-tracker.list_items" } ] } }
+schema: 2
+id: w-v281
+name: W V281
+version: 1.0.0
+defaults:
+  profile: apb-main
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, connectors: [{ name: mock-tracker, functions: [list_items] }] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }

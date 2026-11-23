@@ -13,7 +13,8 @@ loop, resume, the folds, the run surfaces, the dashboard.
 
 - A new field of a known event is added only with `#[serde(default)]`; a
   structured optional field decodes leniently, so a shape a newer apb wrote
-  reads as absent.
+  reads as absent. The field also carries `skip_serializing_if` for its
+  default, so it adds no member to a frozen line.
 - A new event type is written only where a checkpoint
   (`EventPayload::is_checkpoint`: `node_finished`, `run_paused`,
   `run_finished`, `run_aborted`) always follows it, and the engine's state

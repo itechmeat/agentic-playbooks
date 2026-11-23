@@ -36,7 +36,9 @@ pub fn doctor_line(h: &HostFacts) -> (bool, String) {
     if h.os != Os::Linux {
         return (
             false,
-            "not supported on this system: isolation full refuses, best_effort runs without a sandbox".into(),
+            apb_core::isolation::contract::ReasonCode::OsUnsupported
+                .text()
+                .to_string(),
         );
     }
     let scope = if h.scope_available() {
@@ -243,7 +245,26 @@ mod tests {
         h.bwrap = None;
         assert!(doctor_line(&h).1.starts_with("no bwrap"));
         h.os = Os::MacOs;
-        assert!(doctor_line(&h).1.starts_with("not supported"));
+        assert_eq!(
+            doctor_line(&h).1,
+            apb_core::isolation::contract::ReasonCode::OsUnsupported.text()
+        );
+    }
+
+    #[test]
+    fn the_doctor_line_off_linux_is_the_one_point_x_sentence() {
+        let h = HostFacts {
+            os: Os::MacOs,
+            bwrap: None,
+            landlock_abi: 0,
+            disabled: false,
+        };
+        let (ok, line) = doctor_line(&h);
+        assert!(!ok);
+        assert_eq!(
+            line,
+            apb_core::isolation::contract::ReasonCode::OsUnsupported.text()
+        );
     }
 
     /// The bwrap a spawn uses is checked again: gone or setuid refuses;

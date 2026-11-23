@@ -498,6 +498,8 @@ mod parallel_e2e_test;
 mod param_pattern_test;
 #[path = "suite/passkey_gate_test.rs"]
 mod passkey_gate_test;
+#[path = "suite/persistence_freeze_test.rs"]
+mod persistence_freeze_test;
 #[path = "suite/previous_success_test.rs"]
 mod previous_success_test;
 #[path = "suite/probation_test.rs"]

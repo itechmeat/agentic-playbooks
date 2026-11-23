@@ -5,7 +5,8 @@
 //! The in-binary tests (`apb-engine`'s `journal_compat_test.rs`) check what
 //! this build does with a journal shape; only a released binary can show what
 //! an older apb does with a journal this build wrote, and the other way
-//! round. Two released readers matter: `v1.0.0-beta.1` and `v0.25.0`.
+//! round. Three released readers matter: `v1.0.0-beta.1`, `v0.25.0` and
+//! the freeze reader `v1.0.0-beta.7` (rows F1 and F2).
 //!
 //! The old binaries come from `APB_OLD_BINARIES`, a directory holding
 //! `<tag>/apb`, built by `scripts/old-apb.sh <tag> <dir>`. Without them each
@@ -183,6 +184,10 @@ use crate::common::RunGuard;
 
 const BETA1: &str = "v1.0.0-beta.1";
 const V025: &str = "v0.25.0";
+/// The freeze reader: the newest published release when the freeze was
+/// written. rc.1 and 1.0.0 join as readers with release-1.0.0, after
+/// their tags exist.
+const FREEZE_READER: &str = "v1.0.0-beta.7";
 
 /// The writer playbook and the sub-playbook it calls.
 const PLAYBOOKS: [&str; 2] = ["corpus", "corpus-child"];
@@ -1117,6 +1122,30 @@ fn row2_beta1_writer_new_reader() {
     };
     let run = case.write_waiting_at_review(&beta1);
     case.read_resume_stop(&new_binary(), &run);
+}
+
+/// Row F1: the freeze reader (beta.7) is the writer; the new binary
+/// reads, resumes to the end and stops.
+#[test]
+fn rowf1_freeze_reader_writer_new_reader() {
+    let mut case = Case::new("row F1");
+    let Some(old) = old_binary(FREEZE_READER, &case) else {
+        return;
+    };
+    let run = case.write_waiting_at_review(&old);
+    case.read_resume_stop(&new_binary(), &run);
+}
+
+/// Row F2: the new binary writes a run waiting at review; the freeze
+/// reader reads, resumes to the end and stops.
+#[test]
+fn rowf2_new_writer_freeze_reader() {
+    let mut case = Case::new("row F2");
+    let Some(old) = old_binary(FREEZE_READER, &case) else {
+        return;
+    };
+    let run = case.write_waiting_at_review(&new_binary());
+    case.read_resume_stop(&old, &run);
 }
 
 /// Row 3: the new binary writes a run waiting at review, with its own

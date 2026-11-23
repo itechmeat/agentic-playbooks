@@ -529,6 +529,40 @@ mod tests {
         assert_eq!((out.code, out.message.as_str()), (0, "apb is up to date"));
     }
 
+    /// A beta install of the 1.0 line sees the release candidate: the
+    /// check path reports it, the install path is not driven here.
+    #[test]
+    fn a_beta_install_sees_the_release_candidate() {
+        let _env = env_lock();
+        let api = serve_releases(vec![
+            ("v0.25.0", false),
+            ("v1.0.0-beta.7", true),
+            ("v1.0.0-rc.1", true),
+        ]);
+        let _api = use_api(&api);
+        let dir = tempfile::tempdir().unwrap();
+        write_receipt(dir.path(), "1.0.0-beta.7");
+        let out = self_update_as(true, Some(dir.path()), &v("1.0.0-beta.7"));
+        assert_eq!((out.code, out.message.as_str()), (10, "update available"));
+    }
+
+    /// A stable install never takes a pre-release: the candidate is not
+    /// offered.
+    #[test]
+    fn a_stable_install_does_not_see_the_release_candidate() {
+        let _env = env_lock();
+        let api = serve_releases(vec![
+            ("v0.25.0", false),
+            ("v1.0.0-beta.7", true),
+            ("v1.0.0-rc.1", true),
+        ]);
+        let _api = use_api(&api);
+        let dir = tempfile::tempdir().unwrap();
+        write_receipt(dir.path(), "0.25.0");
+        let out = self_update_as(true, Some(dir.path()), &v("0.25.0"));
+        assert_eq!((out.code, out.message.as_str()), (0, "apb is up to date"));
+    }
+
     /// The stand-in API is reached at all: a stable install below the
     /// newest stable release sees it.
     #[test]

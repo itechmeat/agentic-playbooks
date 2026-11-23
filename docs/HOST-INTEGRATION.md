@@ -2,6 +2,18 @@
 
 APB gives the agent brief behavior rules through the MCP server's `instructions` field (tier 0, spec 4). The host model receives them at session start and learns that it has playbooks, when to offer saving one, and how to apply existing ones. The playbook catalog itself is pulled via the `playbook_catalog` tool rather than baked into the prompt - this keeps free text from the project out of privileged instructions (persistent prompt injection).
 
+## What a host can rely on
+
+A host consumes a fixed set of tools: `playbook_catalog`, `playbook_run`,
+`playbook_capture`, `suggestion_dismiss`, `playbook_interview`,
+`playbook_howto`, `profile_list`, `profile_howto`, `projects_list`,
+`run_wait`, `run_status`, `supervisor_wait_event`, `review_decide`,
+`run_answer`, `run_resume`, `run_task_submit` and `decision_ask`. Their
+arguments and the keys of each documented result variant are frozen: a
+1.0 host keeps calling them unchanged across the whole 1.x line, with the
+bounds of accepted inputs only widening. What this promise covers and
+what it does not is stated in `docs/COMPATIBILITY.md`.
+
 ## Support for server instructions
 
 MCP only guarantees the presence of the optional `instructions` field; how a host uses it, and whether it survives summarization, depends on the host. Tier-0 delivery therefore has to be confirmed per host.

@@ -524,6 +524,15 @@ mod tests {
                         Err(_) => return,
                     }
                 };
+                // On macOS an accepted socket inherits the listener's
+                // non-blocking mode (on Linux it does not), so a read can
+                // stop at WouldBlock before the request body is recorded
+                // while the stub answers anyway. Read the request in
+                // blocking mode with a timeout instead.
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
                 let mut buf = String::new();
                 let mut reader = BufReader::new(&stream);
                 let mut content_length = 0usize;

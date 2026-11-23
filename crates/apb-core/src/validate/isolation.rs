@@ -1,6 +1,6 @@
 //! Rules for a node's `isolation` (`apb_core::isolation`): V112-V115. V16,
-//! the old "declared but not enforced" warning, is retired and its number
-//! stays reserved.
+//! the old "declared but not enforced" warning, is retired and listed in
+//! [`super::codes::RETIRED_CODES`], which keeps its number from reuse.
 
 use super::*;
 use crate::isolation::{IsolationSpec, Level, paths};

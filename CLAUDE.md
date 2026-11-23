@@ -22,7 +22,9 @@ engine, mcp, and core <- mcp-client <- engine. Do not introduce import cycles
 (enforced by code-ranker, see below).
 
 - `apb-core` - domain layer, no async. Playbook schema (`schema.rs`,
-  `Playbook::from_yaml`; a node's `results:` entries are `ResultDecl`), validator (`validate/`, codes V01+, one module per
+  `Playbook::from_yaml`; a node's `results:` entries are `ResultDecl`), validator (`validate/`, codes V01+ with
+  `validate/codes.rs` the registry of every active code (`CODES`, with the severities it may be reported
+  at, and `RETIRED_CODES`, a retired code keeps its number) and its freeze test, one module per
   rule family: `graph`, `nodes`, `connectors`, `templates`, `node_io` for
   `continue_session`, declared output fields, node `workdir`, the run
   `worktree` and `cache.key`, `baseline` for V62-V67, `list` for the list
@@ -1063,6 +1065,15 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
 
 ### Concepts that span files
 
+- **Compatibility freeze** (`docs/COMPATIBILITY.md`): what 1.x keeps
+  stable, the frozen fixtures under `crates/*/tests/fixtures/` that pin it
+  and the freeze tests that guard them (`schema_freeze_test`,
+  `files_freeze_test`, `journal_compat_test`, `persistence_freeze_test`,
+  `freeze_tests` in apb-mcp, `store_freeze_test`). A failing freeze test is
+  a compatibility break to fix, never a fixture to regenerate; a new tool,
+  argument, event type, code or guard name joins the freeze in the change
+  that adds it.
+
 - **Routine operations** (spec
   `docs/superpowers/specs/2026-11-09-routine-operations-design.md`): a
   start key (`--start-key`, MCP and HTTP `start_key`) makes a start happen
@@ -1929,7 +1940,8 @@ merges, delete only paths you created, and stop only processes you started.
   No CJK anywhere in code or prose. Machine-facing fields are English;
   user-facing chat messages are written in the user's chat language.
 - New `EventPayload` fields are added only with `#[serde(default)]`
-  ([decision record 0001](docs/adr/0001-new-events-are-safe-to-skip.md)).
+  ([decision record 0001](docs/adr/0001-new-events-are-safe-to-skip.md)) and with
+  `skip_serializing_if` for its default, so it adds no member to a frozen line.
 - A new `EventPayload` variant must be safe to skip up to the next checkpoint
   (`EventPayload::is_checkpoint`): an older binary skips an event type it does
   not know and counts it, and the engine continues a run only when a

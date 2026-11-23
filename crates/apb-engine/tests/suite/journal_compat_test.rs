@@ -1219,3 +1219,152 @@ fn this_apb_reads_a_follow_up_journal_whole() {
         "{last:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The journal freeze (design D1.2): one line per event type this build
+// knows, each frozen as the value a person checked.
+// ---------------------------------------------------------------------------
+
+/// One line per `EventPayload` variant, each exactly what
+/// `serde_json::to_string(&Event { seq, ts, payload })` writes, `seq` from
+/// 0 upward in file order. Not a coherent run and never read by
+/// `read_all`: it is read line by line.
+const EVERY: &str = include_str!("../fixtures/journal/every_event.jsonl");
+
+/// Every `type` tag of `EventPayload`, as serde lists it in the error for
+/// a tag no variant has.
+fn event_types() -> Vec<String> {
+    let e = serde_json::from_value::<EventPayload>(serde_json::json!({
+        "type": "__apb_freeze_no_such_event__"
+    }))
+    .expect_err("an unknown event type is refused")
+    .to_string();
+    let list = e
+        .split_once("expected one of ")
+        .expect("serde lists the variants")
+        .1;
+    list.split(", ")
+        .map(|s| s.trim().trim_matches('`').to_string())
+        .collect()
+}
+
+/// `#[serde(alias)]` names a variant also answers to, with the reason the
+/// alias is safe. The freeze holds none; an alias joins here with its
+/// reason.
+const ALIASES: &[(&str, &str)] = &[];
+
+/// The types whose frozen line `EventPayload::is_checkpoint()` is true on
+/// the tree the freeze was written from. A type outside this list may
+/// become a checkpoint (safe under the skip rule), so the test never
+/// asserts `false`; a new checkpoint is added here by hand in the change
+/// that makes it one.
+const CHECKPOINTS: &[&str] = &[
+    "node_finished",
+    "run_paused",
+    "run_finished",
+    "run_aborted",
+    "follow_up_observed",
+];
+
+fn frozen_lines() -> Vec<(u64, String, serde_json::Value)> {
+    let mut out = Vec::new();
+    for (index, line) in EVERY.lines().filter(|l| !l.is_empty()).enumerate() {
+        let value: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("the frozen line {} is JSON: {e}", index));
+        let seq = value["seq"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("the frozen line {index} holds a seq"));
+        let kind = value["type"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the frozen line {index} holds a type"))
+            .to_string();
+        out.push((seq, kind, value));
+    }
+    out
+}
+
+/// Every event type this binary knows has a frozen line, in declaration
+/// order.
+#[test]
+fn every_event_type_has_a_frozen_line() {
+    let types = event_types();
+    let frozen: Vec<String> = frozen_lines().into_iter().map(|(_, k, _)| k).collect();
+    let missing: Vec<&String> = types.iter().filter(|t| !frozen.contains(t)).collect();
+    assert!(
+        missing.is_empty(),
+        "the journal freeze lacks the frozen lines of {missing:?}: write each from a construction of the variant (design D1.2)"
+    );
+    for (alias, _) in ALIASES {
+        assert!(
+            frozen.iter().any(|k| k == alias),
+            "the alias {alias} is listed in ALIASES but has no frozen line of its own"
+        );
+    }
+}
+
+/// Each frozen line decodes as an `Event`.
+#[test]
+fn every_frozen_line_is_read() {
+    for (seq, kind, _) in frozen_lines() {
+        let line = EVERY
+            .lines()
+            .find(|l| l.contains(&format!("\"seq\":{seq}")))
+            .unwrap_or_else(|| panic!("the frozen line of seq {seq} is in the file"));
+        match serde_json::from_str::<Event>(line) {
+            Ok(_) => {}
+            Err(e) => panic!("the frozen line of {kind} (seq {seq}) no longer decodes: {e}"),
+        }
+    }
+}
+
+/// Each frozen line's decoded event serializes again to the same JSON
+/// value (compared as parsed values, so the order of members is free). A
+/// member renamed, dropped or added fails here.
+#[test]
+fn every_frozen_line_keeps_its_value() {
+    for (seq, kind, value) in frozen_lines() {
+        let line = EVERY
+            .lines()
+            .find(|l| l.contains(&format!("\"seq\":{seq}")))
+            .unwrap_or_else(|| panic!("the frozen line of seq {seq} is in the file"));
+        let event: Event = serde_json::from_str(line).unwrap_or_else(|e| {
+            panic!("the frozen line of {kind} (seq {seq}) does not decode: {e}")
+        });
+        let now = serde_json::to_value(&event).expect("the decoded event serializes");
+        assert_eq!(
+            now, value,
+            "the frozen line of {kind} (seq {seq}) no longer serializes to its frozen value: a member was renamed, dropped or added (the members that differ are the left and right sides)"
+        );
+    }
+}
+
+/// Each frozen line's type is an event type this build knows.
+#[test]
+fn every_frozen_line_is_a_known_event() {
+    let types = event_types();
+    for (seq, kind, _) in frozen_lines() {
+        assert!(
+            types.contains(&kind),
+            "the frozen line of {kind} (seq {seq}) names an event type this build does not know: a variant was removed"
+        );
+    }
+}
+
+/// Every frozen checkpoint type stays a checkpoint.
+#[test]
+fn frozen_checkpoints_stay_checkpoints() {
+    for (seq, kind, _) in frozen_lines() {
+        if !CHECKPOINTS.contains(&kind.as_str()) {
+            continue;
+        }
+        let line = EVERY
+            .lines()
+            .find(|l| l.contains(&format!("\"seq\":{seq}")))
+            .unwrap_or_else(|| panic!("the frozen line of seq {seq} is in the file"));
+        let event: Event = serde_json::from_str(line).expect("the frozen line decodes");
+        assert!(
+            event.payload.is_checkpoint(),
+            "the frozen checkpoint {kind} no longer is one"
+        );
+    }
+}
