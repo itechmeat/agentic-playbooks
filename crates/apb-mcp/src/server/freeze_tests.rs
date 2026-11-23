@@ -4744,23 +4744,29 @@ use rmcp::handler::server::wrapper::Parameters;
 /// cross-env lock for as long as the guard lives, which is what keeps every
 /// other env-touching test out while the value is changed.
 struct EnvVar {
-    key: &'static str,
+    key: String,
     prior: Option<std::ffi::OsString>,
 }
 
 impl EnvVar {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+    fn set(key: &str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let prior = std::env::var_os(key);
         // SAFETY: under the cross-env lock the producer holds.
         unsafe { std::env::set_var(key, value.as_ref()) };
-        EnvVar { key, prior }
+        EnvVar {
+            key: key.to_string(),
+            prior,
+        }
     }
 
-    fn remove(key: &'static str) -> Self {
+    fn remove(key: &str) -> Self {
         let prior = std::env::var_os(key);
         // SAFETY: under the cross-env lock the producer holds.
         unsafe { std::env::remove_var(key) };
-        EnvVar { key, prior }
+        EnvVar {
+            key: key.to_string(),
+            prior,
+        }
     }
 }
 
@@ -4769,8 +4775,8 @@ impl Drop for EnvVar {
         // SAFETY: under the cross-env lock the producer holds.
         unsafe {
             match &self.prior {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
+                Some(v) => std::env::set_var(&self.key, v),
+                None => std::env::remove_var(&self.key),
             }
         }
     }
@@ -4781,6 +4787,14 @@ impl Drop for EnvVar {
 /// removed, so each producer sees the same empty machine. The installation
 /// key is ensured, so the runs a producer starts are stamped as created
 /// here and the keyed starts work.
+///
+/// The host is controlled too, so the fixture comes out the same on a bare
+/// CI runner and on a machine with agent CLIs and logins: `HOME` is a
+/// scratch directory holding only a claude subscription login, `PATH` holds only
+/// the stub agent programs of [`stub_agent_body`] and links to the system tools
+/// of [`SYSTEM_TOOLS`] (never an agent CLI, never `bwrap`), and every
+/// variable an agent's detection or login reads ([`host_dependent_var`]) is
+/// removed.
 ///
 /// The fields drop in declaration order, so the variables are restored
 /// (newest first, see `Drop`) and the config dir removed before the lock
@@ -4809,7 +4823,28 @@ impl FreezeEnv {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let config = tempfile::tempdir().expect("a temp config dir");
-        let vars = vec![
+        let home = config.path().join("home");
+        let path = controlled_path(config.path());
+        // A claude subscription login as detection and the billing basis
+        // read it (the state file, the plan of the credentials file, no
+        // token), so the stub claude is a logged-in agent on every machine
+        // and the runs the producers start are covered by the default
+        // billing policy instead of held on an unknown basis.
+        fs::create_dir_all(home.join(".claude")).expect("mkdir the scratch home");
+        fs::write(home.join(".claude.json"), "{}").expect("write .claude.json");
+        fs::write(
+            home.join(".claude/.credentials.json"),
+            r#"{"claudeAiOauth":{"subscriptionType":"max"}}"#,
+        )
+        .expect("write .credentials.json");
+        let mut vars: Vec<EnvVar> = std::env::vars_os()
+            .filter_map(|(k, _)| k.into_string().ok())
+            .filter(|k| host_dependent_var(k))
+            .map(|k| EnvVar::remove(&k))
+            .collect();
+        vars.extend([
+            EnvVar::set("HOME", &home),
+            EnvVar::set("PATH", &path),
             EnvVar::set("APB_CONFIG_DIR", config.path()),
             EnvVar::set("APB_DECISIONS_ALLOW_FAKE", "1"),
             EnvVar::remove("APB_DECISIONS"),
@@ -4820,7 +4855,8 @@ impl FreezeEnv {
             EnvVar::remove("APB_NODE_ID"),
             EnvVar::remove("APB_RELEASE_AFTER_MS"),
             EnvVar::remove("APB_WAKER_POLL_MS"),
-        ];
+            EnvVar::remove("APB_TEST_BILLING_DEFAULT"),
+        ]);
         apb_core::run_origin::ensure_key().expect("the installation key");
         FreezeEnv {
             vars,
@@ -4834,6 +4870,90 @@ impl FreezeEnv {
     fn set(&mut self, key: &'static str, value: &str) {
         self.vars.push(EnvVar::set(key, value));
     }
+}
+
+/// The stub agent program of one built-in agent, as every producer's
+/// `PATH` holds it: the version line, and for an agent with a models command
+/// (`HostSetup::models_command`) two model lines, so `agents[].models` is in
+/// the result on every machine. Every built-in agent gets one, from the
+/// agent registry, so the probes see a machine with all of them installed.
+fn stub_agent_body(agent: &dyn apb_core::agents::Agent) -> String {
+    match agent.setup().models_command() {
+        Some((args, _)) => format!(
+            "if [ \"$*\" = '{}' ]; then\n  printf '%s\\n' vendor/model-a vendor/model-b\nelse\n  echo '1.0.0'\nfi",
+            args.join(" ")
+        ),
+        None => "echo '1.0.0'".to_string(),
+    }
+}
+
+/// The system programs a producer may start (the stub agents' shell, git,
+/// the engine's helpers), linked into the controlled `PATH` from where the
+/// machine has them. None is an agent CLI and `bwrap` is left out, so the
+/// sandbox reads as unavailable on every machine.
+const SYSTEM_TOOLS: &[&str] = &[
+    "sh", "bash", "cat", "printf", "echo", "env", "git", "sleep", "true", "false", "ps", "mkfifo",
+    "hostname", "tar", "lsof", "kill", "mkdir", "rm", "ls", "grep", "sed", "head", "tail", "wc",
+    "date", "tr", "cut", "sort", "touch", "cp", "mv", "chmod", "dirname", "basename", "id",
+    "uname", "setsid",
+];
+
+/// Whether variable `key` is one a machine's agent detection, an agent's
+/// login or the config dir resolution reads: the producers run with each
+/// removed.
+fn host_dependent_var(key: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "ANTHROPIC_",
+        "CLAUDE_",
+        "CODEX_",
+        "OPENAI_",
+        "OPENCODE_",
+        "DSH_",
+        "ZCODE_",
+        "AWS_",
+        "AZURE_",
+        "GOOGLE_",
+        "GCLOUD_",
+        "CLOUDSDK_",
+        "CLOUD_ML_",
+        "GEMINI_",
+        "XDG_CONFIG_",
+        "XDG_DATA_",
+        "XDG_STATE_",
+        "XDG_CACHE_",
+    ];
+    const SUFFIXES: &[&str] = &["_API_KEY", "_TOKEN", "_AUTH_TOKEN"];
+    PREFIXES.iter().any(|p| key.starts_with(p)) || SUFFIXES.iter().any(|s| key.ends_with(s))
+}
+
+/// Builds the controlled `PATH` under `root`: `stub-bin` with a stub of
+/// every built-in agent, then `sys-bin` with links to the [`SYSTEM_TOOLS`] found on the
+/// machine's own `PATH` (a tool the machine lacks is left out).
+fn controlled_path(root: &Path) -> std::ffi::OsString {
+    use std::os::unix::fs::PermissionsExt;
+    let stubs = root.join("stub-bin");
+    let sys = root.join("sys-bin");
+    fs::create_dir_all(&stubs).expect("mkdir stub-bin");
+    fs::create_dir_all(&sys).expect("mkdir sys-bin");
+    for agent in apb_core::agents::all() {
+        let body = stub_agent_body(*agent);
+        for name in agent.descriptor().bins {
+            let path = stubs.join(name);
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write a stub agent");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                .expect("chmod a stub agent");
+        }
+    }
+    let machine = std::env::var_os("PATH").unwrap_or_default();
+    for tool in SYSTEM_TOOLS {
+        let found = std::env::split_paths(&machine)
+            .map(|d| d.join(tool))
+            .find(|p| p.is_file());
+        if let Some(found) = found {
+            std::os::unix::fs::symlink(&found, sys.join(tool)).expect("link a system tool");
+        }
+    }
+    std::env::join_paths([stubs, sys]).expect("a PATH")
 }
 
 /// Runs one async handler call to completion on its own current-thread
