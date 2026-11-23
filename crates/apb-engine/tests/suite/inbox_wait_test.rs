@@ -3169,7 +3169,7 @@ fn a_patch_that_changes_the_account_fails_the_wait() {
 }
 
 /// A supervised fork with two deferred agent retries and an open inbox wait
-/// on account A: the retries fail as a batch, the supervisor's patch changes
+/// on account A: the retries, made due together, fail as a batch, the supervisor's patch changes
 /// the wait to account B, which the manifest does not grant, and the run
 /// continues from the wait. The patch replaced the definition the drive
 /// executes, so the wait's scan is dropped: the next poll authorizes against
@@ -3203,9 +3203,31 @@ fn a_batch_supervisor_patch_drops_the_wait_scan() {
     poll_until("the read of account A", || {
         (apb_engine::inbox_wait::account_read_counts(&run_dir, ACCOUNT).reads >= 1).then_some(())
     });
+    // Both first attempts failed and both retries wait out their hour. The
+    // two deferrals are made due in one step, so the drive admits both
+    // retries in the same turn and settles them as one batch: left to their
+    // own delays, a loaded machine makes them due apart, the patch then
+    // lands on the first member's wake alone and the second member's retry
+    // still waits, so its wake never comes.
+    poll_until("the deferrals of both members", || {
+        let events = read_all(&run_dir).ok()?;
+        let deferred = apb_engine::state::RunState::fold(&events).deferred;
+        (deferred.contains_key("a") && deferred.contains_key("b")).then_some(())
+    });
+    let expedited = apb_engine::scheduler::deferred::expedite_live(
+        &run_dir,
+        &run_id,
+        None,
+        apb_engine::scheduler::deferred::ExpediteBy::Operator,
+    )
+    .unwrap();
+    assert_eq!(
+        expedited,
+        Some(vec!["a".to_string(), "b".to_string()]),
+        "the live driver takes both"
+    );
     // The retries fail and the supervisor is asked about the first member
-    // that failed: `a` or `b`, whichever deferred retry ran first, which a
-    // loaded machine does not order.
+    // that failed: `a` or `b`, whichever the batch settled first.
     let first = poll_until("the wake of the first member", || {
         read_all(&run_dir)
             .ok()?
@@ -3295,8 +3317,8 @@ version: 1.0.0
 defaults: {{ profile: main, max_parallel: 4 }}
 nodes:
   - {{ id: start, type: start }}
-  - {{ id: a, type: agent_task, prompt: "FAILS", max_retries: 1, retry_delay: {{ initial: 1s }} }}
-  - {{ id: b, type: agent_task, prompt: "FAILS", max_retries: 1, retry_delay: {{ initial: 1s }} }}
+  - {{ id: a, type: agent_task, prompt: "FAILS", max_retries: 1, retry_delay: {{ initial: 1h }} }}
+  - {{ id: b, type: agent_task, prompt: "FAILS", max_retries: 1, retry_delay: {{ initial: 1h }} }}
   - id: wait
     type: wait
     wait_for:
