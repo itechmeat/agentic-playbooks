@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 /// The block's text.
-pub const PLAYBOOK_BLOCK: &str = include_str!("../../../apb-cli/assets/playbook-instructions.md");
+pub const PLAYBOOK_BLOCK: &str = include_str!("../../embedded/playbook-instructions.md");
 /// The heading whose presence means the block is there.
 pub const PLAYBOOK_MARKER: &str = "## apb playbooks";
 /// The instruction files the block goes into.

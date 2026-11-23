@@ -53,10 +53,11 @@ cargo deny --all-features check
 
 Run one test with `cargo test -p <crate> --test main <module>::<test_name>`
 (each crate has one integration test binary, `main`; the CLI package is
-named `apb`). After changing a Rust type or constant mirrored into
+named `apb`, the six libraries `agentic-playbooks-core`, `-engine`,
+`-server`, `-mcp`, `-mcp-client` and `-decide`). After changing a Rust type or constant mirrored into
 TypeScript, regenerate `web/src/lib/api.gen.ts` and
 `web/src/lib/consts.gen.ts` with
-`APB_WRITE_TS=1 cargo test -p apb-server --lib ts_contract`.
+`APB_WRITE_TS=1 cargo test -p agentic-playbooks-server --lib ts_contract`.
 
 More: [docs/TESTING-GUIDELINES.md](docs/TESTING-GUIDELINES.md) for how tests
 are written here, and

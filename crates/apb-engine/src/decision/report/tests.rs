@@ -453,7 +453,7 @@ fn since_takes_a_date_or_a_duration() {
 }
 
 /// The `--json` shape, pinned. Regenerate with
-/// `APB_WRITE_SNAPSHOTS=1 cargo test -p apb-engine --lib decision::report`.
+/// `APB_WRITE_SNAPSHOTS=1 cargo test -p agentic-playbooks-engine --lib decision::report`.
 #[test]
 fn the_json_report_matches_its_snapshot() {
     let path = concat!(

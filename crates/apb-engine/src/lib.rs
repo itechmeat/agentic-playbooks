@@ -1,3 +1,8 @@
+//! Internal crate of the `apb` command, published only so that
+//! `cargo install agentic-playbooks` can build it. It is not a public API:
+//! any item may change or disappear in any release, patch releases
+//! included. Do not depend on it; use the `apb` command or its MCP server.
+
 // The `testing` feature compiles test seams (the system root of agent files, the diagnostics writer's test hooks) that no person's
 // apb may carry; like apb-core's, it is refused in any build without debug
 // assertions, so a release or dist binary never holds one.

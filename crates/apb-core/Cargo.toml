@@ -1,9 +1,16 @@
 [package]
-name = "apb-core"
+name = "agentic-playbooks-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Internal crate of the apb command (crate agentic-playbooks): playbook schema, validator and stores. Not a public API; it changes in any release."
+include = ["src/**", "assets/**", "embedded/**", "LICENSE"]
+
+[lib]
+name = "apb_core"
 
 [dependencies]
 serde.workspace = true
@@ -57,5 +64,5 @@ testing = []
 # The crate's own `testing` seams for its integration tests (the
 # `isolate_test_config!` its test binary expands), so `cargo test -p
 # apb-core` builds without another crate turning the feature on.
-apb-core = { path = ".", features = ["testing"] }
+apb-core = { package = "agentic-playbooks-core", path = ".", features = ["testing"] }
 tempfile = "3.27.0"

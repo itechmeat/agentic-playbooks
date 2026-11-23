@@ -27,12 +27,13 @@ Homebrew (macOS, Linux x86_64) is equivalent; update with `brew upgrade apb`:
 brew install itechmeat/agentic-playbooks/apb
 ```
 
-The `apb` crate on crates.io is an unrelated project: `cargo install apb` does not install this tool.
+Install with cargo: `cargo install --locked agentic-playbooks` (the binary is `apb`; it needs Rust and a C compiler). The crate named `apb` on crates.io is an unrelated project: `cargo install apb` does not install this tool.
 
 Fall back to a source build only if the installer is not usable in your
 environment (for example, no network access to GitHub Releases). This
-requires Rust (stable) and Bun; the web frontend must be built before the Rust
-binary because it is embedded at compile time via rust-embed.
+requires Rust (stable), a C compiler and linker, and Bun; the web frontend
+must be built before the Rust binary because it is embedded at compile time
+via rust-embed (the build writes `crates/apb-server/dashboard/`).
 
 ```sh
 git clone https://github.com/itechmeat/agentic-playbooks && cd agentic-playbooks
@@ -40,7 +41,7 @@ git clone https://github.com/itechmeat/agentic-playbooks && cd agentic-playbooks
 cargo install --path crates/apb-cli
 ```
 
-`cargo install --git` is not supported: git mode builds in a private cargo cache where `web/dist` cannot be placed. Install from a local clone (`--path`).
+`cargo install --git` is not supported: a git checkout has no built dashboard (`crates/apb-server/dashboard/`), so the build stops. Install from a local clone (`--path`) or the published crate.
 
 Verify the installation:
 

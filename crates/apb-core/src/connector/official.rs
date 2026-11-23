@@ -15,9 +15,10 @@ use super::def::ConnectorDoc;
 
 /// The embedded `connectors/` tree, baked in at build time (release) or read
 /// from the repo folder at run time (debug), exactly like `apb-server`'s
-/// `web/dist` embed.
+/// `dashboard` embed. `embedded/connectors` is a committed link to the root
+/// `connectors/`, which packaging resolves into files.
 #[derive(rust_embed::Embed)]
-#[folder = "../../connectors"]
+#[folder = "embedded/connectors"]
 struct OfficialAssets;
 
 /// One embedded official connector: its folder name, the version parsed from

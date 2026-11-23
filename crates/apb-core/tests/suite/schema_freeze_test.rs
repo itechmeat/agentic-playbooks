@@ -1900,7 +1900,7 @@ fn the_corpus_holds_every_example_and_bundled_playbook() {
     for (name, bytes) in disk_corpus() {
         match frozen.iter().find(|(n, _)| *n == name) {
             None => panic!(
-                "the corpus lacks {name}: run APB_WRITE_FREEZE=1 cargo test -p apb-core --test main schema_freeze_test::write_freeze to freeze {name}"
+                "the corpus lacks {name}: run APB_WRITE_FREEZE=1 cargo test -p agentic-playbooks-core --test main schema_freeze_test::write_freeze to freeze {name}"
             ),
             Some((_, frozen_bytes)) => {
                 assert_eq!(
@@ -1987,7 +1987,7 @@ fn every_known_code_is_frozen() {
     for (code, _, _) in validate::codes::CODES {
         assert!(
             frozen.contains(code),
-            "the active code {code} has no validator-codes.txt line: run APB_WRITE_FREEZE=1 cargo test -p apb-core --test main schema_freeze_test::write_freeze"
+            "the active code {code} has no validator-codes.txt line: run APB_WRITE_FREEZE=1 cargo test -p agentic-playbooks-core --test main schema_freeze_test::write_freeze"
         );
     }
     for (code, _) in validate::codes::RETIRED_CODES {

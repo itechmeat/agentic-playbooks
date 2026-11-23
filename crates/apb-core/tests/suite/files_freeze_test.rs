@@ -533,7 +533,7 @@ fn connectors_yaml_holds_every_official_manifest() {
             .find(|(n, _)| *n == name)
             .unwrap_or_else(|| {
                 panic!(
-                    "connectors.yaml lacks {name}: run APB_WRITE_FREEZE=1 cargo test -p apb-core --test main files_freeze_test::write_freeze"
+                    "connectors.yaml lacks {name}: run APB_WRITE_FREEZE=1 cargo test -p agentic-playbooks-core --test main files_freeze_test::write_freeze"
                 )
             });
         assert_eq!(

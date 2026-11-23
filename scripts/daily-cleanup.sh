@@ -138,7 +138,8 @@ main_wt="$({ git worktree list --porcelain -z 2>/dev/null || true; } | {
 # notes; untracked files (a .env, .apb/policy.yaml) keep it through the
 # status check before this one.
 regenerable_paths=(
-  'target' 'web/dist' '(.*/)?node_modules' '\.zvec-grep' '\.code-ranker'
+  'target' 'web/dist' 'crates/apb-server/dashboard' '(.*/)?node_modules'
+  '\.zvec-grep' '\.code-ranker'
   '(.*/)?\.DS_Store' 'docs/reviews/_date_time_review\.md'
   '\.apb/workspace\.local' '\.apb/runs' '\.apb/scenario-runs'
   '\.apb/cache' '\.apb/locks' '\.apb/workdir\.lock'

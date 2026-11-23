@@ -16,8 +16,9 @@ Prebuilt binaries are published for:
 
 The glibc build is made on Ubuntu 22.04 and needs glibc 2.35 or newer. On an
 older distribution, or on Alpine and other musl systems, download the static
-`musl` archive (Section 4). Windows and Linux on ARM have no prebuilt binary;
-on Linux ARM you can build from source (Section 5). On Windows, use WSL2 with
+`musl` archive (Section 5). Windows and Linux on ARM have no prebuilt binary;
+on Linux ARM you can install with cargo (Section 3) or build from source
+(Section 6). On Windows, use WSL2 with
 the Linux build.
 
 ## Requirements
@@ -30,7 +31,8 @@ the Linux build.
   lists the ones it finds. Playbooks made only of `script` nodes need none.
 - `git`, and `sh` for script nodes. Other runners (`bun`, `deno`,
   `python3`) are needed only by playbooks that use them.
-- No Rust or Bun toolchain, unless you build from source.
+- No Rust or Bun toolchain, unless you install with cargo (Rust and a C
+  compiler and linker, Section 3) or build from source.
 
 ## 1. One-liner install (macOS, Linux)
 
@@ -69,15 +71,55 @@ This taps `itechmeat/homebrew-agentic-playbooks` and installs the `apb`
 formula. The formula covers macOS (Apple silicon and Intel) and Linux x86_64.
 
 Note: the `apb` crate on crates.io is an unrelated project, so
-`cargo install apb` does not install this tool. Use one of the methods on
-this page.
+`cargo install apb` does not install this tool. To install with cargo, see
+Section 3.
 
-## 3. Updating
+## 3. cargo (Rust and a C compiler)
+
+```sh
+cargo install --locked agentic-playbooks
+```
+
+`--locked` builds with the exact dependency versions the release was tested
+with. The crate is named `agentic-playbooks`; the binary it installs is
+`apb`, in `~/.cargo/bin` (or wherever `CARGO_HOME` points).
+
+What it needs:
+
+- Rust 1.99 or newer, the `rust-version` of the release (cargo refuses an
+  older toolchain and names the version it needs). The minimum Rust version
+  is not part of the 1.x promise and may rise in a minor release.
+- A C compiler and linker, the usual build tools: on macOS the Xcode Command
+  Line Tools (`xcode-select --install`), on Debian or Ubuntu the package
+  `build-essential` (`sudo apt install build-essential`). The build compiles
+  bundled SQLite and native crypto code, so the toolchain needs these build
+  tools next to it.
+- No bun: the dashboard is already built into the published package.
+
+A release candidate is never chosen without its version; name it:
+
+```sh
+cargo install --locked agentic-playbooks --version 1.0.0-rc.1
+```
+
+Update by running the same command again. `apb self-update` does not update
+a cargo install: it prints the cargo command instead and exits 2. Uninstall
+with `cargo uninstall agentic-playbooks`.
+
+Remove one install before switching to another channel (for example the
+installer's `apb` from `~/.cargo/bin` before `cargo install`, or the other
+way round): each channel only knows about its own files.
+
+The crate named `apb` on crates.io is an unrelated project:
+`cargo install apb` does not install this tool.
+
+## 4. Updating
 
 - Installer-based installs: `apb self-update` updates the binary in place
   using the install receipt written under `~/.config/apb/`. It only works for
   installs made through the one-liner installer (or another installer-based
-  method); it will not work for a Homebrew install or a source build.
+  method); it will not work for a Homebrew install, a cargo install or a
+  source build.
 - Which releases it takes: a stable install takes stable releases only. A
   pre-release install (such as `1.0.0-beta.2`) also takes a newer
   pre-release of its own line (`1.0.0-beta.3`, `1.0.0-rc.1`) and any newer
@@ -90,10 +132,12 @@ this page.
   available, `2` the check failed (including when there is no install
   receipt to read, in which case it prints guidance instead of updating).
 - Homebrew installs: `brew upgrade apb`.
+- cargo installs: run `cargo install --locked agentic-playbooks` again (add
+  `--version <version>` for a pre-release).
 - Source builds: pull the latest source, rebuild the web assets, and re-run
-  `cargo install --path crates/apb-cli` (see Section 5).
+  `cargo install --path crates/apb-cli` (see Section 6).
 
-## 4. Manual download and verify
+## 5. Manual download and verify
 
 Pick the archive that matches your platform (see
 [Supported platforms](#supported-platforms)) from the
@@ -131,14 +175,16 @@ gh attestation verify apb-aarch64-apple-darwin.tar.xz --repo itechmeat/agentic-p
 Every release artifact (archives, checksums, the shell installer) is attested
 this way, from v0.22.0 on.
 
-## 5. Build from source (contributor path)
+## 6. Build from source (contributor path)
 
 ### Important: the web frontend is embedded in the binary
 
-`apb-server` embeds the built frontend from `web/dist` via rust-embed. The
-`web/dist` directory is not stored in git (gitignored), so when building from
-source you must build it BEFORE `cargo build`, otherwise compilation fails on
-the missing directory.
+`apb-server` embeds the built frontend from `crates/apb-server/dashboard/`
+via rust-embed. The dashboard build writes that directory, which is not
+stored in git (gitignored), so when building from source you must build it
+BEFORE `cargo build`; otherwise the build stops with a message that names the
+build command. A source build needs the same C compiler and linker as a
+cargo install (Section 3).
 
 ```sh
 git clone https://github.com/itechmeat/agentic-playbooks && cd agentic-playbooks
@@ -146,22 +192,22 @@ git clone https://github.com/itechmeat/agentic-playbooks && cd agentic-playbooks
 cargo install --path crates/apb-cli
 ```
 
-`cargo install --git ...` is not supported: git mode builds the package in a
-private cargo cache where the built `web/dist` cannot be placed, and without
-it the `apb-server` build (rust-embed) fails. Install from a local clone
-(`--path`).
+`cargo install --git ...` is not supported: a git checkout has no built
+dashboard, and the `apb-server` build stops with the message above. Install
+from a local clone (`--path`), or the published crate (Section 3).
 
 To update a source install: `git pull`, rebuild `web/`, re-run
 `cargo install --path crates/apb-cli`.
 
-## 6. Uninstall
+## 7. Uninstall
 
 Remove the binary for your install method:
 
 - Installer-based install: `rm ~/.cargo/bin/apb ~/.cargo/bin/apb-update` (or
   wherever `CARGO_HOME` points).
 - Homebrew: `brew uninstall apb`.
-- Source (`cargo install`): `cargo uninstall apb`.
+- cargo install of the published crate: `cargo uninstall agentic-playbooks`.
+- Source (`cargo install --path`): `cargo uninstall apb`.
 
 None of these touch `.apb/` in your projects or `~/.config/apb/`.
 `~/.config/apb/` is apb's global config directory: it holds the install
@@ -182,7 +228,7 @@ removing the binary, `rm -rf ~/.config/apb/` wipes the global config
 each project wipes that project's playbooks and run history. Neither is
 needed for a normal uninstall.
 
-## 7. After install: `apb init`
+## 8. After install: `apb init`
 
 Run `apb init` in a project to set up its `.apb/` structure. In an
 interactive terminal this now runs a short questionnaire:

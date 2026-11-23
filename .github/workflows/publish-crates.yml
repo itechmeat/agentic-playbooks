@@ -1,0 +1,361 @@
+name: publish-crates
+
+# Publishes apb's seven crates on crates.io (`cargo install --locked
+# agentic-playbooks`), on releases and pre-releases alike. Like
+# release-notes.yml it follows every completed run of the Release workflow and
+# acts only on a successful tag push of this repository whose tag points at
+# the commit that run built, whose commit is on main, and whose GitHub release
+# exists and is not a draft. `workflow_run` workflows run from the default
+# branch, so every script and condition here is main's text.
+#
+# The rule: code from the tagged checkout never executes in a job that holds
+# a credential or can request one. Three jobs on fresh runners:
+#   prepare    no credential: builds the dashboard, runs scripts/crates.sh
+#              check and preflight, hands the verified packages over
+#   publish    the crates-io environment and its CARGO_REGISTRY_TOKEN:
+#              checks what it was handed inline, repacks without building,
+#              then publishes; from the tagged checkout it runs only
+#              crates.sh repack and publish, read from its own checkout
+#   installed  no credential: installs the published version from crates.io
+# No job restores or saves an actions cache, and no job requests an identity
+# token: crates.io does not accept trusted publishing from a `workflow_run`
+# workflow, so publication uses the environment's token.
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: publish-crates
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      nothing_to_publish: ${{ steps.plan.outputs.nothing_to_publish }}
+    env:
+      TAG: ${{ github.event.workflow_run.head_branch }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Verify the tag of the Release run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::not a version tag: ${TAG}"
+            exit 1
+          fi
+          # A missing tag is a 404, and `gh api` failing stops the step.
+          object=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" \
+            --jq '.object.type + " " + .object.sha')
+          read -r type sha <<<"${object}"
+          while [[ "${type}" == "tag" ]]; do
+            object=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${sha}" \
+              --jq '.object.type + " " + .object.sha')
+            read -r type sha <<<"${object}"
+          done
+          if [[ "${type}" != "commit" || "${sha}" != "${HEAD_SHA}" ]]; then
+            echo "::error::tag ${TAG} points at ${type} ${sha}, the Release run built ${HEAD_SHA}"
+            exit 1
+          fi
+      # `behind` or `identical` means the tagged commit is an ancestor of main;
+      # an unknown commit is a 404, which fails `gh api` and the step.
+      - name: The tagged commit is on main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          status=$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${HEAD_SHA}" --jq .status)
+          case "${status}" in
+            behind|identical) ;;
+            *) echo "::error::${HEAD_SHA} is not an ancestor of main (${status})"; exit 1 ;;
+          esac
+      # The Release run creates the release only after its test gate passed.
+      - name: The GitHub release exists and is not a draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          draft=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq .draft)
+          if [[ "${draft}" != "false" ]]; then
+            echo "::error::the release of ${TAG} is missing or a draft (draft: ${draft})"
+            exit 1
+          fi
+      - name: Check out the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Install bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          no-cache: true
+      - name: Build the dashboard
+        run: cd web && bun install --frozen-lockfile && bun run build
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          # Pinned by SHA, so the toolchain comes from this input, not the ref.
+          toolchain: stable
+      # The same command as the pull request gate, on the tagged commit.
+      - name: Package and verify
+        run: scripts/crates.sh check
+      - name: Plan
+        id: plan
+        run: scripts/crates.sh preflight "${TAG#v}" target/package/SHA256SUMS
+      # Uploaded also for an all-skipped plan, as the record of what was
+      # compared.
+      - name: Hand over
+        run: |
+          set -euo pipefail
+          V="${TAG#v}"
+          out="${RUNNER_TEMP}/verified"
+          mkdir -p "${out}"
+          cp target/package/agentic-playbooks*-"${V}".crate "${out}/"
+          cp target/package/SHA256SUMS target/package/publish-plan "${out}/"
+          cp -R crates/apb-server/dashboard "${out}/dashboard"
+      - name: Upload the verified packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-crates
+          path: ${{ runner.temp }}/verified
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    needs: prepare
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      needs.prepare.outputs.nothing_to_publish != 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    environment: crates-io
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ github.event.workflow_run.head_branch }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      # rustup ranks this above a toolchain file of the tree, so a `path`
+      # toolchain the tagged tree names is never used.
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - name: Verify the tag of the Release run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::not a version tag: ${TAG}"
+            exit 1
+          fi
+          # A missing tag is a 404, and `gh api` failing stops the step.
+          object=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" \
+            --jq '.object.type + " " + .object.sha')
+          read -r type sha <<<"${object}"
+          while [[ "${type}" == "tag" ]]; do
+            object=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${sha}" \
+              --jq '.object.type + " " + .object.sha')
+            read -r type sha <<<"${object}"
+          done
+          if [[ "${type}" != "commit" || "${sha}" != "${HEAD_SHA}" ]]; then
+            echo "::error::tag ${TAG} points at ${type} ${sha}, the Release run built ${HEAD_SHA}"
+            exit 1
+          fi
+      - name: The tagged commit is on main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          status=$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${HEAD_SHA}" --jq .status)
+          case "${status}" in
+            behind|identical) ;;
+            *) echo "::error::${HEAD_SHA} is not an ancestor of main (${status})"; exit 1 ;;
+          esac
+      - name: The GitHub release exists and is not a draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          draft=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq .draft)
+          if [[ "${draft}" != "false" ]]; then
+            echo "::error::the release of ${TAG} is missing or a draft (draft: ${draft})"
+            exit 1
+          fi
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          # Pinned by SHA, so the toolchain comes from this input, not the ref.
+          toolchain: stable
+      - name: Download the verified packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: verified-crates
+          path: ${{ runner.temp }}/verified
+      # Main's text, no repository code: the exact file set, every checksum,
+      # each crate's name and version, the plan and a dashboard of plain
+      # files and directories only. Portable to bash 3.2 and BSD tools (its
+      # test runs on macOS too): no mapfile, no GNU find or sha256sum option.
+      - name: Check the handed-over packages
+        run: |
+          set -euo pipefail
+          V="${TAG#v}"
+          names=(agentic-playbooks-decide agentic-playbooks-core agentic-playbooks-mcp-client agentic-playbooks-engine agentic-playbooks-mcp agentic-playbooks-server agentic-playbooks)
+          fail() { echo "::error::$*"; exit 1; }
+          sha256() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | cut -d' ' -f1
+            else
+              shasum -a 256 "$1" | cut -d' ' -f1
+            fi
+          }
+          # `lines_of <file>`: one array element per line, into LINES.
+          lines_of() {
+            LINES=()
+            local line
+            while IFS= read -r line || [[ -n "${line}" ]]; do
+              LINES+=("${line}")
+            done <"$1"
+          }
+          cd "${RUNNER_TEMP}/verified" || fail "no handed-over packages"
+
+          expected=$(for n in "${names[@]}"; do echo "${n}-${V}.crate"; done; printf '%s\n' SHA256SUMS publish-plan dashboard)
+          shopt -s dotglob nullglob
+          present=$(for entry in *; do printf '%s\n' "${entry}"; done)
+          shopt -u dotglob nullglob
+          [[ "$(sort <<<"${expected}")" == "$(sort <<<"${present}")" ]] \
+            || fail "the artifact must hold exactly the seven packages, SHA256SUMS, publish-plan and dashboard"
+          for f in SHA256SUMS publish-plan; do
+            [[ -f "${f}" && ! -L "${f}" ]] || fail "${f} is not a plain file"
+          done
+          [[ -d dashboard && ! -L dashboard ]] || fail "dashboard is not a directory"
+
+          lines_of SHA256SUMS
+          [[ "${#LINES[@]}" == 7 ]] || fail "SHA256SUMS must hold seven lines"
+          for i in "${!names[@]}"; do
+            line="${LINES[$i]}"
+            [[ "${line:0:64}" =~ ^[0-9a-f]{64}$ && "${line:64}" == "  ${names[$i]}-${V}.crate" ]] \
+              || fail "SHA256SUMS line $((i + 1)) must be the checksum of ${names[$i]}-${V}.crate"
+          done
+
+          for i in "${!names[@]}"; do
+            n="${names[$i]}"
+            crate="${n}-${V}.crate"
+            [[ -f "${crate}" && ! -L "${crate}" ]] || fail "${crate} is not a plain file"
+            [[ "$(sha256 "${crate}")" == "${LINES[$i]:0:64}" ]] || fail "${crate} does not match SHA256SUMS"
+            listing=$(tar -tzf "${crate}") || fail "${crate} is not a gzip tar archive"
+            while IFS= read -r entry; do
+              [[ "${entry}" == "${n}-${V}/"* && "/${entry}/" != *"/../"* ]] \
+                || fail "${crate} holds a path outside ${n}-${V}/: ${entry}"
+            done <<<"${listing}"
+            manifest=$(tar -xOzf "${crate}" "${n}-${V}/Cargo.toml") || fail "${crate} has no Cargo.toml"
+            grep -qxF "name = \"${n}\"" <<<"${manifest}" || fail "${crate} does not name ${n}"
+            grep -qxF "version = \"${V}\"" <<<"${manifest}" || fail "${crate} is not version ${V}"
+          done
+
+          lines_of publish-plan
+          [[ "${#LINES[@]}" == 8 && "${LINES[0]}" == "${V}" ]] \
+            || fail "publish-plan must be the version ${V} and seven package lines"
+          for i in "${!names[@]}"; do
+            line="${LINES[$((i + 1))]}"
+            [[ "${line}" == "${names[$i]} publish" || "${line}" == "${names[$i]} skip" ]] \
+              || fail "publish-plan line $((i + 2)) must be '${names[$i]} publish' or '${names[$i]} skip'"
+          done
+
+          [[ -f dashboard/index.html ]] || fail "dashboard/index.html is missing"
+          odd=$(find dashboard ! -type f ! -type d)
+          [[ -z "${odd}" ]] || fail "dashboard holds something other than files and directories: ${odd}"
+          echo "the handed-over packages match their checksums, names and version ${V}"
+      - name: Check out the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      # No checked-in cargo configuration may add a credential provider, an
+      # alias or a build wrapper; the dashboard comes from the hand-over.
+      - name: Prepare the tree
+        run: |
+          set -euo pipefail
+          found=$(find . -path ./.git -prune -o \( -path '*/.cargo/config' -o -path '*/.cargo/config.toml' \) -print)
+          if [[ -n "${found}" ]]; then
+            echo "::error::refusing a checked-in cargo configuration: ${found}"
+            exit 1
+          fi
+          if [[ -e crates/apb-server/dashboard || -L crates/apb-server/dashboard ]]; then
+            echo "::error::crates/apb-server/dashboard already exists in the checkout"
+            exit 1
+          fi
+          mv "${RUNNER_TEMP}/verified/dashboard" crates/apb-server/dashboard
+      # Packs the publishing crates again without building and requires the
+      # recorded checksums, before any credential exists. Code from the
+      # checkout runs here, so it runs without the workflow command files:
+      # it cannot set BASH_ENV, LD_PRELOAD or a PATH entry for the Publish
+      # step through GITHUB_ENV or GITHUB_PATH.
+      - name: Repack and compare
+        run: env -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_OUTPUT -u GITHUB_STATE scripts/crates.sh repack "${TAG#v}" "${RUNNER_TEMP}/verified"
+      # The only step that sees the token. Without it (no secret in the
+      # crates-io environment, or an empty one) the job fails closed before
+      # cargo runs; the secret itself is never printed. The shell is named
+      # by its absolute path, so a PATH entry an earlier step added cannot
+      # pick it; BASH_ENV and ENV are empty, so bash loads no file at start;
+      # PATH is reset before the checkout's script runs.
+      - name: Publish
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          BASH_ENV: ""
+          ENV: ""
+        run: |
+          set -euo pipefail
+          unset BASH_ENV ENV
+          export PATH="${HOME}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "::error::the crates-io environment has no CARGO_REGISTRY_TOKEN secret, or it is empty: add the crates.io token to that environment and run this workflow again"
+            exit 1
+          fi
+          scripts/crates.sh publish "${TAG#v}" "${RUNNER_TEMP}/verified"
+
+  installed:
+    needs: [prepare, publish]
+    if: >-
+      !cancelled() &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      needs.prepare.result == 'success' &&
+      (needs.publish.result == 'success' || (needs.publish.result == 'skipped' &&
+      needs.prepare.outputs.nothing_to_publish == 'true'))
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ github.event.workflow_run.head_branch }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          # Pinned by SHA, so the toolchain comes from this input, not the ref.
+          toolchain: stable
+      # The published version installs from the registry into an empty
+      # directory and reports its version; on a failure the owner yanks it.
+      - name: Install the published version
+        run: scripts/crates.sh installed "${TAG#v}"

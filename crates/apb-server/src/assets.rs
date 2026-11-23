@@ -14,6 +14,11 @@
 //! whenever any bundle file changes (it references them by hash), so the id
 //! changes exactly when the frontend a tab is running is no longer the one the
 //! server ships.
+//!
+//! The frontend is embedded from `crates/apb-server/dashboard/`, which the
+//! dashboard build writes (`(cd web && bun install --frozen-lockfile && bun
+//! run build)` from the repository root) and the published package ships.
+//! `build.rs` stops a build without it.
 
 use std::sync::OnceLock;
 
@@ -23,7 +28,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 
 #[derive(rust_embed::Embed)]
-#[folder = "../../web/dist"]
+#[folder = "dashboard"]
 pub(crate) struct WebAssets;
 
 /// Cache policy of a content-hashed asset.

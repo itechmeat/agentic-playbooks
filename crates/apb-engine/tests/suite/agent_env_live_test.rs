@@ -1,7 +1,7 @@
 //! Live check that each installed agent CLI still answers, and resumes its
 //! session, under `process_env: allowlist`. Ignored by default; run with
-//! `APB_LIVE_TEST_AGENT_ENV=claude,codex,... cargo test -p apb-engine --test
-//! main agent_env_live_test -- --ignored`. Each listed agent needs its CLI on
+//! `APB_LIVE_TEST_AGENT_ENV=claude,codex,... cargo test -p
+//! agentic-playbooks-engine --test main agent_env_live_test -- --ignored`. Each listed agent needs its CLI on
 //! PATH and a working login. Models come from
 //! `APB_LIVE_TEST_AGENT_ENV_MODEL_<AGENT>` (upper case), else a default.
 

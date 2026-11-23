@@ -81,7 +81,7 @@ pub fn playbook_catalog(
 /// Tier 2 (spec 4): playbook authoring details. Pulled only when
 /// creating/reworking one; it does not enter a normal session.
 pub fn playbook_howto() -> Result<Value, ToolError> {
-    Ok(json!({ "howto": include_str!("../../../../docs/HOWTO-authoring.md") }))
+    Ok(json!({ "howto": include_str!("../../embedded/HOWTO-authoring.md") }))
 }
 
 /// Tier 2: the installing agent's procedure, `docs/AGENT-SETUP.md`.
@@ -105,7 +105,7 @@ pub fn setup_plan(root: &Path, project: bool) -> Result<Value, ToolError> {
 /// Tier 2 (spec 2026-08-15): the guided-interview guide. Pulled only when
 /// the user wants a playbook built from a process they describe.
 pub fn playbook_interview() -> Result<Value, ToolError> {
-    Ok(json!({ "guide": include_str!("../../../../docs/HOWTO-interview.md") }))
+    Ok(json!({ "guide": include_str!("../../embedded/HOWTO-interview.md") }))
 }
 
 /// Detail level for [`playbook_get`].

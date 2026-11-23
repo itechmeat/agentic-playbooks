@@ -1,13 +1,20 @@
 [package]
-name = "apb-mcp-client"
+name = "agentic-playbooks-mcp-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Internal crate of the apb command (crate agentic-playbooks): the MCP client of connector calls. Not a public API; it changes in any release."
+include = ["src/**", "LICENSE"]
+
+[lib]
+name = "apb_mcp_client"
 
 [dependencies]
 # `apb_core::secret::Secret` and the program-start guard.
-apb-core = { path = "../apb-core" }
+apb-core.workspace = true
 # The version `apb-mcp` pins. No `transport-child-process`: apb spawns the
 # server itself and hands rmcp the two pipes. The Streamable HTTP worker
 # without reqwest and without `auth`: apb's own client (`src/http.rs`)
@@ -36,9 +43,9 @@ libc = "0.2"
 testing = []
 
 [dev-dependencies]
-apb-mcp-client = { path = ".", features = ["testing"] }
+apb-mcp-client = { package = "agentic-playbooks-mcp-client", path = ".", features = ["testing"] }
 # `apb_core::process_mode::testing`: guard tests in a read-only child process.
-apb-core = { path = "../apb-core", features = ["testing"] }
+apb-core = { package = "agentic-playbooks-core", path = "../apb-core", features = ["testing"] }
 tempfile = "3.27.0"
 # A paused clock for the close's drain tests, so its own bound never cuts
 # them short on a loaded machine. Test builds only.

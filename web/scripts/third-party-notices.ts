@@ -1,10 +1,11 @@
 // Prints the third-party notices for every npm package whose code or assets
-// end up in web/dist, the frontend apb-server embeds into the apb binary.
+// end up in crates/apb-server/dashboard, the frontend apb-server embeds into
+// the apb binary.
 //
 // The package list is what the production build actually emits, not the
 // dependency tree: the script runs the real Vite build (write: false, so
-// web/dist is untouched) with one extra plugin that records the modules
-// rendered into every output chunk. Tree-shaken packages drop out, build
+// the built dashboard is untouched) with one extra plugin that records the
+// modules rendered into every output chunk. Tree-shaken packages drop out, build
 // tools that put nothing into the bundle never appear. CSS pulled in by
 // `@import` in src/**/*.css is compiled inside the Tailwind plugin and never
 // becomes a separate module, so those imports are read from the stylesheets
@@ -23,7 +24,7 @@ process.chdir(webDir)
 
 const LICENSE_FILE = /^(licen[cs]e|copying|notice)(\.(md|txt|markdown))?$/i
 // Vite's LICENSE.md appends the licenses of the dependencies bundled into
-// Vite itself (the build tool), none of which reach web/dist. Keep only the
+// Vite itself (the build tool), none of which reach the dashboard. Keep only the
 // part above that marker.
 const BUNDLED_SECTION = /^#+\s*Licenses of bundled dependencies/im
 

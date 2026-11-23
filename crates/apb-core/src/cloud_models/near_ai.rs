@@ -27,7 +27,7 @@ pub static NEAR_AI: CloudProvider = CloudProvider {
     base_url: "https://cloud-api.near.ai/v1",
     models_url: "https://cloud-api.near.ai/v1/models",
     key_env: "NEARAI_API_KEY",
-    embedded: include_str!("../../../../assets/cloud-models/near-ai-cloud.json"),
+    embedded: include_str!("../../embedded/near-ai-cloud.json"),
     embedded_fetched_at: EMBEDDED_FETCHED_AT,
     parse,
 };

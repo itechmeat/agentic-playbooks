@@ -1,6 +1,6 @@
 /target
 node_modules
-web/dist
+crates/apb-server/dashboard/
 .DS_Store
 # .apb is committed (example playbooks and profiles), local junk is not
 .apb/runs/

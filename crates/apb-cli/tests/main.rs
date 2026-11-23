@@ -70,6 +70,8 @@ mod connector_cli;
 mod connector_mcp_cli_test;
 #[path = "suite/connector_oauth_test.rs"]
 mod connector_oauth_test;
+#[path = "suite/crate_manifests_test.rs"]
+mod crate_manifests_test;
 #[path = "suite/demo_playbooks_test.rs"]
 mod demo_playbooks_test;
 // Unix-only: a shell script stands in for git on PATH.

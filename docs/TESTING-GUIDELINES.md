@@ -275,8 +275,9 @@ binaries with the same script and caches them by tag, toolchain and script.
   iterating; one full run before a task-closing commit. One cargo
   invocation at a time. Details and the reasoning are in
   `docs/BUILD-OPTIMIZATION.md`.
-- To run one module of a suite: `cargo test -p apb-engine --test main
-  <module_name>::` (module path prefixes filter test names).
+- To run one module of a suite: `cargo test -p agentic-playbooks-engine
+  --test main <module_name>::` (module path prefixes filter test names; the
+  library packages are named `agentic-playbooks-*`, the CLI `apb`).
 - `cargo nextest run --workspace` runs the same selection with a per-test
   ceiling (`.config/nextest.toml`), which is what CI uses. Prefer it before
   a PR: it is the only local run that can catch a hang as a named failure.

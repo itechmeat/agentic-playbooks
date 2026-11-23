@@ -25,8 +25,8 @@ permissions:
 # metadata, the tests build full debug code). Measured on the single job,
 # web checks, cargo deny and clippy added 1.5 to 3 minutes to the test run
 # they now run beside. `build-and-test` stays as one job of that name over
-# them and the journal corpus, because the main branch ruleset requires that
-# check.
+# them, the journal corpus, the crates check and the minimum Rust version
+# check, because the main branch ruleset requires that check.
 jobs:
   web:
     runs-on: ubuntu-26.04
@@ -62,8 +62,9 @@ jobs:
       - name: Install bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
-      # Must precede every cargo step: apb-server embeds web/dist through
-      # rust-embed, and web/dist is not checked in.
+      # Must precede every cargo step: apb-server embeds
+      # crates/apb-server/dashboard through rust-embed, and that directory is
+      # not checked in.
       - name: Build web (embedded by apb-server via rust-embed)
         working-directory: web
         run: |
@@ -104,6 +105,105 @@ jobs:
           scripts/install-cargo-about.sh
           scripts/third-party-notices.sh --check
 
+  # The workspace stays publishable to crates.io: scripts/crates.sh check
+  # renames the CLI package as the publication does (two lines, no resolver
+  # run), packs all seven crates and verifies each one by building it from
+  # its packed sources against the other packed crates, checks every file
+  # list, license and size, and restores the manifest and the lockfile. The
+  # verify build compiles the workspace once more and runs beside the other
+  # jobs.
+  crates:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      # The server package ships the built dashboard, so it is built first.
+      - name: Build web (shipped in the server package)
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          # Pinned by SHA, so the toolchain comes from this input, not the ref.
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: The crates package and verify
+        run: scripts/crates.sh check
+
+  # The minimum Rust version a cargo install accepts is checked, not
+  # assumed: this job builds the workspace with exactly the `rust-version`
+  # of `[workspace.package]` in Cargo.toml, read from that file, so raising
+  # or lowering it there is the only change and a dependency or a language
+  # feature that needs a newer Rust fails here first. rust-toolchain.toml
+  # names `stable`, which would win over the installed toolchain, so the
+  # version is exported as RUSTUP_TOOLCHAIN for every later step, the cache
+  # key included.
+  msrv:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          version=$(awk '
+            /^\[/ { section = $0 }
+            section == "[workspace.package]" && $1 == "rust-version" {
+              gsub(/"/, "", $3); print $3
+            }' Cargo.toml)
+          if [ -z "$version" ]; then
+            echo "Cargo.toml has no rust-version in [workspace.package]" >&2
+            exit 1
+          fi
+          echo "rust-version $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "RUSTUP_TOOLCHAIN=$version" >> "$GITHUB_ENV"
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      # Must precede every cargo step: apb-server embeds
+      # crates/apb-server/dashboard through rust-embed, and that directory is
+      # not checked in.
+      - name: Build web (embedded by apb-server via rust-embed)
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          # Pinned by SHA, so the toolchain comes from this input, not the ref.
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Check with the minimum Rust version
+        run: |
+          rustc --version
+          cargo check --workspace --locked
+
   test-linux:
     runs-on: ubuntu-26.04
     # There was no ceiling here, so the default 360 applied: a test that hung
@@ -121,8 +221,9 @@ jobs:
       - name: Install bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
-      # Must precede every cargo step: apb-server embeds web/dist through
-      # rust-embed, and web/dist is not checked in.
+      # Must precede every cargo step: apb-server embeds
+      # crates/apb-server/dashboard through rust-embed, and that directory is
+      # not checked in.
       - name: Build web (embedded by apb-server via rust-embed)
         working-directory: web
         run: |
@@ -198,8 +299,9 @@ jobs:
       - name: Install bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
-      # Must precede every cargo step: apb-server embeds web/dist through
-      # rust-embed, and web/dist is not checked in.
+      # Must precede every cargo step: apb-server embeds
+      # crates/apb-server/dashboard through rust-embed, and that directory is
+      # not checked in.
       - name: Build web (embedded by apb-server via rust-embed)
         working-directory: web
         run: |
@@ -265,7 +367,7 @@ jobs:
   # even when a job it needs failed (`!cancelled()`), so a failure is reported
   # here as a failure rather than as a skipped required check.
   build-and-test:
-    needs: [web, lint, test-linux, journal-corpus]
+    needs: [web, lint, test-linux, journal-corpus, crates, msrv]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 2
@@ -276,10 +378,13 @@ jobs:
           LINT: ${{ needs.lint.result }}
           TEST: ${{ needs.test-linux.result }}
           CORPUS: ${{ needs.journal-corpus.result }}
+          CRATES: ${{ needs.crates.result }}
+          MSRV: ${{ needs.msrv.result }}
         run: |
-          echo "web=$WEB lint=$LINT test-linux=$TEST journal-corpus=$CORPUS"
+          echo "web=$WEB lint=$LINT test-linux=$TEST journal-corpus=$CORPUS crates=$CRATES msrv=$MSRV"
           [ "$WEB" = "success" ] && [ "$LINT" = "success" ] && [ "$TEST" = "success" ] \
-            && [ "$CORPUS" = "success" ]
+            && [ "$CORPUS" = "success" ] && [ "$CRATES" = "success" ] \
+            && [ "$MSRV" = "success" ]
 
   # The release gate (test-gate.yml) runs clippy and the suite on macOS arm
   # and Intel, so a Linux-only assumption in a test (a GNU tool, /proc, the
@@ -303,8 +408,9 @@ jobs:
       - name: Install bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
-      # Must precede every cargo step: apb-server embeds web/dist through
-      # rust-embed, and web/dist is not checked in.
+      # Must precede every cargo step: apb-server embeds
+      # crates/apb-server/dashboard through rust-embed, and that directory is
+      # not checked in.
       - name: Build web (embedded by apb-server via rust-embed)
         working-directory: web
         run: |

@@ -16,6 +16,7 @@ mod actions;
 mod budget;
 mod cache;
 mod candidate;
+mod cargo_install;
 mod connector;
 mod connector_mcp;
 mod connector_oauth;
