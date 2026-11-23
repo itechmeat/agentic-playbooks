@@ -1001,7 +1001,20 @@ fn expect_account_kind(scope: &str, kind: &str) {
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-    assert_eq!(account.fields, want, "{case}: the merged fields");
+    // Compared by name, so a failure names the field and never prints a
+    // field's value.
+    let names: Vec<&String> = account.fields.keys().collect();
+    let want_names: Vec<&String> = want.keys().collect();
+    assert!(
+        names == want_names,
+        "{case}: the merged fields are not the frozen ones"
+    );
+    for (name, value) in &want {
+        assert!(
+            account.fields.get(name) == Some(value),
+            "{case}: the merged field {name} differs from the frozen one"
+        );
+    }
     let errors = apb_core::connector::config::validate_accounts(&doc, &merged);
     assert!(
         errors.is_empty(),
