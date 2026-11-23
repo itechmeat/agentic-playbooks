@@ -22,6 +22,9 @@
 # `preflight` in its job without a credential, `repack` and `publish` in the
 # job that holds one, and `installed` last. CI runs `check` on every pull
 # request.
+#
+# Runs on bash 3.2 (macOS): no associative arrays, no mapfile, no case
+# conversion expansions, and an empty array is expanded as ${a[@]+"${a[@]}"}.
 set -euo pipefail
 
 # The GitHub account that owns the repository; a crate that exists on
@@ -117,8 +120,35 @@ sha256() {
   fi
 }
 
+# tomllib needs Python 3.11; an older python3 (the one macOS ships) reads the
+# version line of the [workspace.package] table instead.
 workspace_version() {
-  py -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["workspace"]["package"]["version"])' "${root}/Cargo.toml"
+  py - "${root}/Cargo.toml" <<'PY'
+import sys
+path = sys.argv[1]
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
+if tomllib is not None:
+    with open(path, "rb") as f:
+        print(tomllib.load(f)["workspace"]["package"]["version"])
+    sys.exit(0)
+table = ""
+with open(path, encoding="utf-8") as f:
+    for raw in f:
+        line = raw.strip()
+        if line.startswith("["):
+            table = line
+            continue
+        key, eq, value = line.partition("=")
+        value = value.strip()
+        if table == "[workspace.package]" and eq and key.strip() == "version" \
+                and len(value) >= 2 and value[0] == value[-1] == '"':
+            print(value[1:-1])
+            sys.exit(0)
+sys.exit(f"{path}: no version in [workspace.package]")
+PY
 }
 
 # `http_get <url> <file>` prints the HTTP status; the body goes to <file>.
@@ -131,7 +161,8 @@ http_get() {
 
 # The sparse index path of a crate name (the index's prefix rules).
 index_url() {
-  local name="${1,,}" prefix
+  local name prefix
+  name="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   case "${#name}" in
     1) prefix="1" ;;
     2) prefix="2" ;;
@@ -165,45 +196,69 @@ for line in open(path, encoding="utf-8"):
 PY
 }
 
-# `sums_of <sums file> <version>`: checks the file holds exactly the seven
-# names at <version>, each with a lowercase SHA-256, and fills SUM_<n>.
-declare -A SUM=()
+# Per-crate values live in indexed arrays in the order of ORDER.
+# `order_index <name>` prints the position of <name> in ORDER.
+order_index() {
+  local i
+  for i in 0 1 2 3 4 5 6; do
+    if [ "${ORDER[$i]}" = "$1" ]; then
+      printf '%s' "${i}"
+      return 0
+    fi
+  done
+  die "internal error: $1 is not one of the seven crates"
+}
+
+# `sum_of <name>` and `action_of <name>`, after read_sums and read_plan.
+SUMS=("" "" "" "" "" "" "")
+ACTIONS=("" "" "" "" "" "" "")
+sum_of() {
+  printf '%s' "${SUMS[$(order_index "$1")]}"
+}
+action_of() {
+  printf '%s' "${ACTIONS[$(order_index "$1")]}"
+}
+
+# `read_sums <sums file> <version>`: checks the file holds exactly the seven
+# names at <version>, each with a lowercase SHA-256, and fills SUMS.
 read_sums() {
-  local file="$1" version="$2" line sum crate count=0 name
+  local file="$1" version="$2" line sum crate count=0 i found
   [ -f "${file}" ] || die "no sums file ${file}"
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "${line}" ]; do
     [[ "${line}" =~ ^([0-9a-f]{64})\ \ (.+)$ ]] || die "not a sums line: ${line}"
     sum="${BASH_REMATCH[1]}"
     crate="${BASH_REMATCH[2]}"
-    local found=""
-    for name in "${ORDER[@]}"; do
-      if [ "${crate}" = "${name}-${version}.crate" ]; then
-        found="${name}"
+    found=""
+    for i in 0 1 2 3 4 5 6; do
+      if [ "${crate}" = "${ORDER[$i]}-${version}.crate" ]; then
+        found="${i}"
       fi
     done
     [ -n "${found}" ] || die "${file} names ${crate}, not one of the seven crates at ${version}"
-    [ -z "${SUM[${found}]:-}" ] || die "${file} names ${found} twice"
-    SUM["${found}"]="${sum}"
+    [ -z "${SUMS[${found}]}" ] || die "${file} names ${ORDER[${found}]} twice"
+    SUMS[${found}]="${sum}"
     count=$((count + 1))
   done <"${file}"
   [ "${count}" = 7 ] || die "${file} holds ${count} lines, not the seven crates at ${version}"
 }
 
 # `read_plan <dir> <version>`: checks publish-plan and SHA256SUMS of <dir>
-# and fills ACTION[<name>].
-declare -A ACTION=()
+# and fills ACTIONS.
 read_plan() {
-  local dir="$1" version="$2" plan="$1/publish-plan" i=0 line
+  local dir="$1" version="$2" plan="$1/publish-plan" i=0 line n=0
   [ -f "${plan}" ] || die "no publish plan in ${dir}"
   local -a lines=()
-  mapfile -t lines <"${plan}"
-  [ "${#lines[@]}" = 8 ] || die "${plan} must hold the version and seven package lines"
+  while IFS= read -r line || [ -n "${line}" ]; do
+    lines[${n}]="${line}"
+    n=$((n + 1))
+  done <"${plan}"
+  [ "${n}" = 8 ] || die "${plan} must hold the version and seven package lines"
   [ "${lines[0]}" = "${version}" ] || die "${plan} names version ${lines[0]}, not ${version}"
   for i in 0 1 2 3 4 5 6; do
     line="${lines[$((i + 1))]}"
     case "${line}" in
-      "${ORDER[$i]} publish") ACTION["${ORDER[$i]}"]=publish ;;
-      "${ORDER[$i]} skip") ACTION["${ORDER[$i]}"]=skip ;;
+      "${ORDER[$i]} publish") ACTIONS[${i}]=publish ;;
+      "${ORDER[$i]} skip") ACTIONS[${i}]=skip ;;
       *) die "${plan} line $((i + 2)) must be '${ORDER[$i]} publish' or '${ORDER[$i]} skip', not '${line}'" ;;
     esac
   done
@@ -213,7 +268,7 @@ read_plan() {
 all_skipped() {
   local name
   for name in "${ORDER[@]}"; do
-    [ "${ACTION[${name}]}" = skip ] || return 1
+    [ "$(action_of "${name}")" = skip ] || return 1
   done
 }
 
@@ -223,7 +278,7 @@ exclude_skipped() {
   local name count=0
   EXCLUDE=()
   for name in "${ORDER[@]}"; do
-    if [ "${ACTION[${name}]}" = skip ]; then
+    if [ "$(action_of "${name}")" = skip ]; then
       EXCLUDE+=(--exclude "${name}")
       count=$((count + 1))
     fi
@@ -414,10 +469,10 @@ cmd_preflight() {
     if [ -z "${cksum}" ]; then
       text+="${name} publish"$'\n'
       all_skip=0
-    elif [ "${cksum}" = "${SUM[${name}]}" ]; then
+    elif [ "${cksum}" = "$(sum_of "${name}")" ]; then
       text+="${name} skip"$'\n'
     else
-      die "${name} ${version} is already on crates.io with checksum ${cksum}, but the verified package has ${SUM[${name}]}; nothing was published"
+      die "${name} ${version} is already on crates.io with checksum ${cksum}, but the verified package has $(sum_of "${name}"); nothing was published"
     fi
   done
   printf '%s' "${text}" >"${plan}"
@@ -445,12 +500,12 @@ cmd_repack() {
   prepare
   [ "${VERSION}" = "${version}" ] || die "version ${version} is not the workspace version ${VERSION}"
   exclude_skipped
-  cargo package --workspace --no-verify --locked --allow-dirty "${EXCLUDE[@]}"
+  cargo package --workspace --no-verify --locked --allow-dirty ${EXCLUDE[@]+"${EXCLUDE[@]}"}
   for name in "${ORDER[@]}"; do
-    [ "${ACTION[${name}]}" = publish ] || continue
+    [ "$(action_of "${name}")" = publish ] || continue
     got="$(sha256 "$(crate_file "${name}" "${version}")")"
-    [ "${got}" = "${SUM[${name}]}" ] \
-      || die "${name}: the package built here has ${got}, the verified one ${SUM[${name}]}; nothing was published"
+    [ "${got}" = "$(sum_of "${name}")" ] \
+      || die "${name}: the package built here has ${got}, the verified one $(sum_of "${name}"); nothing was published"
     echo "${name}-${version}.crate: ${got} equals the verified checksum"
   done
 }
@@ -463,14 +518,14 @@ cmd_publish() {
     prepare
     [ "${VERSION}" = "${version}" ] || die "version ${version} is not the workspace version ${VERSION}"
     for name in "${ORDER[@]}"; do
-      [ "${ACTION[${name}]}" = publish ] || continue
+      [ "$(action_of "${name}")" = publish ] || continue
       cksum="$(index_cksum "${name}" "${version}")"
       [ -z "${cksum}" ] \
         || die "${name} ${version} appeared on crates.io after the plan was made; nothing was published; rerun all jobs"
     done
     exclude_skipped
     # The one program that gets the token, in its own environment only.
-    if ! CARGO_REGISTRY_TOKEN="${REGISTRY_TOKEN}" cargo publish --workspace --no-verify --locked --allow-dirty "${EXCLUDE[@]}"; then
+    if ! CARGO_REGISTRY_TOKEN="${REGISTRY_TOKEN}" cargo publish --workspace --no-verify --locked --allow-dirty ${EXCLUDE[@]+"${EXCLUDE[@]}"}; then
       echo "publishing ${version} stopped; rerun all jobs of the publish-crates run later: crates already published with the verified checksums are skipped" >&2
       exit 1
     fi
@@ -485,8 +540,8 @@ cmd_publish() {
       [ "${tries}" -le 30 ] || die "${name} ${version} is not in the index after 5 minutes"
       sleep 10
     done
-    [ "${cksum}" = "${SUM[${name}]}" ] \
-      || die "${name} ${version} is on crates.io with checksum ${cksum}, but the verified package has ${SUM[${name}]}"
+    [ "${cksum}" = "$(sum_of "${name}")" ] \
+      || die "${name} ${version} is on crates.io with checksum ${cksum}, but the verified package has $(sum_of "${name}")"
     echo "${name} ${version}: the index checksum equals the verified one"
   done
 }
