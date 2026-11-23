@@ -1,0 +1,126 @@
+# The connector account files of both scopes, frozen with nondefault
+# state. Each document holds a global half and a project half, separated
+# by `# apb-freeze-scope:` markers; the test places each half at its path
+# (`<config dir>/connector-config/<connector>.yaml` and
+# `.apb/connector-config/<connector>.yaml`) and reads the merged list
+# through `connector::config::load_merged`. See `docs/COMPATIBILITY.md`
+# and `openspec/changes/one-point-oh-freeze` (design D1.5 item 3).
+# apb-freeze-document: accounts/global-only-with-cmd
+# apb-freeze-scope: global
+accounts:
+  - name: main
+    default: true
+    token: "{{cmd:op read token}}"
+# apb-freeze-document: accounts/project-replaces-global
+# apb-freeze-scope: global
+accounts:
+  - name: main
+    default: true
+    token: global-token
+    api_base: https://global.example.test
+  - name: other
+    token: other-token
+# apb-freeze-scope: project
+accounts:
+  - name: main
+    token: project-token
+# apb-freeze-document: accounts/project-default-clears-global
+# apb-freeze-scope: global
+accounts:
+  - name: global-keep
+    default: true
+    token: keep-token
+# apb-freeze-scope: project
+accounts:
+  - name: main
+    default: true
+    token: main-token
+# apb-freeze-document: accounts/project-cmd-refused
+# apb-freeze-scope: global
+accounts:
+  - name: helper
+    token: helper-token
+# apb-freeze-scope: project
+accounts:
+  - name: main
+    token: "{{cmd:op read token}}"
+# apb-freeze-document: accounts/global-header
+# apb-freeze-scope: global
+accounts:
+  - name: global-header
+    default: true
+    api_base: "https://app.asana.com/api/1.0"
+    token: "{{env.ASANA_TOKEN}}"
+# apb-freeze-document: accounts/global-query
+# apb-freeze-scope: global
+accounts:
+  - name: global-query
+    default: true
+    base_url: "https://query.example.test"
+    token: "{{env.QUERY_TOKEN}}"
+# apb-freeze-document: accounts/global-basic
+# apb-freeze-scope: global
+accounts:
+  - name: global-basic
+    default: true
+    api_base: "https://chat.example.test/api/v1"
+    email: "bot@example.test"
+    api_key: "{{env.ZULIP_KEY}}"
+# apb-freeze-document: accounts/global-path
+# apb-freeze-scope: global
+accounts:
+  - name: global-path
+    default: true
+    api_base: "https://api.telegram.org"
+    token: "{{env.TELEGRAM_TOKEN}}"
+# apb-freeze-document: accounts/global-oauth2_refresh
+# apb-freeze-scope: global
+accounts:
+  - name: global-oauth2-refresh
+    default: true
+    api_base: "https://www.googleapis.com/drive/v3"
+    token_url: "https://oauth2.googleapis.com/token"
+    client_id: "client-123.apps.example.test"
+    client_secret: "{{env.DRIVE_CLIENT_SECRET}}"
+    refresh_token: "{{env.DRIVE_REFRESH_TOKEN}}"
+    granted_scopes: "https://www.googleapis.com/auth/drive.readonly"
+# apb-freeze-document: accounts/project-header
+# apb-freeze-scope: project
+accounts:
+  - name: project-header
+    default: true
+    api_base: "https://app.asana.com/api/1.0"
+    token: "{{env.ASANA_TOKEN}}"
+# apb-freeze-document: accounts/project-query
+# apb-freeze-scope: project
+accounts:
+  - name: project-query
+    default: true
+    base_url: "https://query.example.test"
+    token: "{{env.QUERY_TOKEN}}"
+# apb-freeze-document: accounts/project-basic
+# apb-freeze-scope: project
+accounts:
+  - name: project-basic
+    default: true
+    api_base: "https://chat.example.test/api/v1"
+    email: "bot@example.test"
+    api_key: "{{env.ZULIP_KEY}}"
+# apb-freeze-document: accounts/project-path
+# apb-freeze-scope: project
+accounts:
+  - name: project-path
+    default: true
+    api_base: "https://api.telegram.org"
+    token: "{{env.TELEGRAM_TOKEN}}"
+# apb-freeze-document: accounts/project-oauth2_refresh
+# apb-freeze-scope: project
+accounts:
+  - name: project-oauth2-refresh
+    default: true
+    api_base: "https://www.googleapis.com/drive/v3"
+    token_url: "https://oauth2.googleapis.com/token"
+    client_id: "client-123.apps.example.test"
+    client_secret: "{{env.DRIVE_CLIENT_SECRET}}"
+    refresh_token: "{{env.DRIVE_REFRESH_TOKEN}}"
+    granted_scopes: "https://www.googleapis.com/auth/drive.readonly"

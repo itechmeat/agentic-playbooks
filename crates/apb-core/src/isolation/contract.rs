@@ -243,10 +243,15 @@ impl Code {
 }
 
 /// The sentence of a code id as journaled, `None` for an unknown id. A
-/// `credentials.env_passed:<NAME>` id has its own sentence.
+/// `credentials.env_passed:<NAME>` id has its own sentence. A reason id
+/// (`os_unsupported` and the rest of [`ALL_REASONS`]) answers with its
+/// reason's sentence.
 pub fn text(id: &str) -> Option<&'static str> {
     if id.starts_with(ENV_PASSED_PREFIX) {
         return Some(ENV_PASSED_TEXT);
+    }
+    if let Some(r) = ALL_REASONS.iter().find(|r| r.id() == id) {
+        return Some(r.text());
     }
     ALL_CODES.iter().find(|c| c.id() == id).map(|c| c.text())
 }
@@ -288,7 +293,7 @@ impl ReasonCode {
     pub fn text(self) -> &'static str {
         match self {
             ReasonCode::OsUnsupported => {
-                "The sandbox needs Linux with bubblewrap; this system is not supported."
+                "The sandbox needs Linux with bubblewrap; apb 1.x has no sandbox on this system, so full refuses and best_effort runs without one."
             }
             ReasonCode::BwrapMissing => "Bubblewrap (bwrap) is not installed.",
             ReasonCode::BwrapSetuid => {

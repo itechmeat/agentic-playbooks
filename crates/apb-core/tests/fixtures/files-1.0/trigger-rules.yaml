@@ -1,0 +1,33 @@
+# The start rule documents a person passes to `apb trigger set --file`,
+# frozen with one document per source form and filter shape. Each parses
+# through `trigger::parse_rule_document` and passes `trigger::check_rule`
+# without an error. See `docs/COMPATIBILITY.md` and
+# `openspec/changes/one-point-oh-freeze` (design D1.5 item 3).
+# apb-freeze-document: trigger-rule/inbox
+name: triage-opened-issues
+playbook: { id: dependency-security-fix, version: 1.0.0 }
+source:
+  inbox:
+    connector: github
+    account: acme
+    types: [issues]
+    where:
+      - { path: action, equals: opened }
+    key: "{{body.repository.full_name}}#{{body.issue.number}}"
+params:
+  title: "{{body.issue.title}}"
+limits: { max_per_hour: 5 }
+budget: { tokens: 100000, on_no_estimate: continue }
+# apb-freeze-document: trigger-rule/inbox-unkeyed
+name: digest-new-messages
+playbook: { id: dependency-security-fix, version: 1.0.0 }
+source:
+  inbox:
+    connector: github
+    account: main
+    types: [messages]
+    key: "{{body.id}}"
+params:
+  title: "new message"
+limits: { max_per_hour: 10 }
+budget: { tokens: 100000, on_no_estimate: continue }

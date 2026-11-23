@@ -1,0 +1,138 @@
+# apb-freeze-document: plain
+params:
+  title: t
+instruction: null
+max_patches_per_run: null
+context_max_bytes: null
+context_compact_model: null
+parent_run: null
+continued_from: null
+superseded_by: null
+depth: 0
+expected_connectors: {}
+expected_connector_accounts: {}
+cache: auto
+mode: autonomous
+output_limits:
+  head_bytes: 2097152
+  tail_bytes: 6291456
+  log_file_bytes: 67108864
+  stream_log_bytes: 67108864
+  session_copy_bytes: 67108864
+  stream_line_queue: 1024
+# apb-freeze-document: guarded
+params:
+  title: t
+instruction: null
+max_patches_per_run: null
+context_max_bytes: null
+context_compact_model: null
+parent_run: null
+continued_from: null
+superseded_by: null
+depth: 0
+expected_connectors: {}
+expected_connector_accounts: {}
+cache: auto
+mode: autonomous
+output_limits:
+  head_bytes: 2097152
+  tail_bytes: 6291456
+  log_file_bytes: 67108864
+  stream_log_bytes: 67108864
+  session_copy_bytes: 67108864
+  stream_line_queue: 1024
+# apb-freeze-document: unattended
+params:
+  title: t
+instruction: null
+max_patches_per_run: null
+context_max_bytes: null
+context_compact_model: null
+parent_run: null
+continued_from: null
+superseded_by: null
+depth: 0
+expected_connectors: {}
+expected_connector_accounts: {}
+cache: auto
+mode: autonomous
+output_limits:
+  head_bytes: 2097152
+  tail_bytes: 6291456
+  log_file_bytes: 67108864
+  stream_log_bytes: 67108864
+  session_copy_bytes: 67108864
+  stream_line_queue: 1024
+unattended: true
+# apb-freeze-document: triggered
+params:
+  title: t
+instruction: null
+max_patches_per_run: null
+context_max_bytes: null
+context_compact_model: null
+parent_run: null
+continued_from: null
+superseded_by: null
+depth: 0
+expected_children: {}
+expected_connectors: {}
+expected_connector_accounts: {}
+cache: auto
+mode: autonomous
+output_limits:
+  head_bytes: 2097152
+  tail_bytes: 6291456
+  log_file_bytes: 67108864
+  stream_log_bytes: 67108864
+  session_copy_bytes: 67108864
+  stream_line_queue: 1024
+unattended: true
+# apb-freeze-document: child
+params:
+  title: t
+instruction: null
+max_patches_per_run: null
+context_max_bytes: null
+context_compact_model: null
+parent_run: plain
+continued_from: null
+superseded_by: null
+depth: 0
+expected_connectors: {}
+expected_connector_accounts: {}
+cache: auto
+mode: autonomous
+output_limits:
+  head_bytes: 2097152
+  tail_bytes: 6291456
+  log_file_bytes: 67108864
+  stream_log_bytes: 67108864
+  session_copy_bytes: 67108864
+  stream_line_queue: 1024
+# apb-freeze-document: grants
+params:
+  title: t
+instruction: null
+max_patches_per_run: null
+context_max_bytes: null
+context_compact_model: null
+parent_run: null
+continued_from: null
+superseded_by: null
+depth: 0
+expected_children: {}
+expected_connectors:
+  mock-tracker: sha256:28013f39f9a3f64443c89f31743da06e9d4833622be02de0f3cca29365fad2c9
+expected_connector_accounts:
+  mock-tracker/main: sha256:a0c8275e582926ae7e88b0e16e5acd6f601c3d8ea0c8da0d5da84293554b740b
+cache: auto
+mode: autonomous
+output_limits:
+  head_bytes: 2097152
+  tail_bytes: 6291456
+  log_file_bytes: 67108864
+  stream_log_bytes: 67108864
+  session_copy_bytes: 67108864
+  stream_line_queue: 1024

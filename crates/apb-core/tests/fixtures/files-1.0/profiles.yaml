@@ -1,0 +1,100 @@
+# The profile files a person keeps, frozen with nondefault state. Each
+# document is one `profile.yaml` as `ProfileDoc::from_yaml` reads it; see
+# `docs/COMPATIBILITY.md` and `openspec/changes/one-point-oh-freeze`
+# (design D1.5 item 3).
+# apb-freeze-document: profile/main
+name: main
+description: The routine worker of the freeze
+executor:
+  agent: claude
+  model: opus
+  fallbacks:
+    - agent: claude
+      model: sonnet
+process_env:
+  policy: allowlist
+  allow:
+    - HOME
+    - APB_*
+# apb-freeze-document: profile/reviewer
+name: reviewer
+description: The reviewer of the freeze
+executor:
+  agent: codex
+  model: gpt-5.1-codex
+# apb-freeze-document: profile/agy
+name: agy-worker
+description: The agy worker of the freeze
+executor:
+  agent: agy
+  model: gemini-3-pro
+  fallbacks:
+    - agent: agy
+      model: gemini-3-flash
+soul: native_required
+skills:
+  - review-notes
+  - { name: release-notes, scope: global }
+environment: full
+# apb-freeze-document: profile/opencode
+name: opencode-worker
+description: The opencode worker of the freeze
+executor:
+  agent: opencode
+  model: zai/glm-5.3-flash
+tiers:
+  quick:
+    agent: opencode
+    model: zai/glm-5.3-flash
+    for: small mechanical edits
+  deep:
+    use: executor
+    for: everything else
+# apb-freeze-document: profile/pi
+name: pi-worker
+description: The pi worker of the freeze
+executor:
+  agent: pi
+  model: anthropic/claude-sonnet-5-5
+  fallbacks:
+    - agent: claude
+      model: sonnet
+process_env:
+  policy: inherit
+# apb-freeze-document: profile/hermes
+name: hermes-worker
+description: The hermes worker of the freeze
+executor:
+  agent: hermes
+  model: hermes-5
+# apb-freeze-document: profile/grok
+name: grok-worker
+description: The grok worker of the freeze
+executor:
+  agent: grok
+  model: grok-5
+# apb-freeze-document: profile/cursor
+name: cursor-worker
+description: The cursor worker of the freeze
+executor:
+  agent: cursor
+  model: auto
+# apb-freeze-document: profile/qoder
+name: qoder-worker
+description: The qoder worker of the freeze
+executor:
+  agent: qoder
+  model: auto
+# apb-freeze-document: profile/zcode
+name: zcode-worker
+description: The zcode worker of the freeze
+executor:
+  agent: zcode
+  model: glm-5.3-flash
+zcode_mode: edit
+# apb-freeze-document: profile/dsh
+name: dsh-worker
+description: The dsh worker of the freeze
+executor:
+  agent: dsh
+  model: nearai/zai-org/GLM-5.3@high

@@ -3169,7 +3169,7 @@ fn a_patch_that_changes_the_account_fails_the_wait() {
 }
 
 /// A supervised fork with two deferred agent retries and an open inbox wait
-/// on account A: the retries fail as a batch, the supervisor's patch changes
+/// on account A: the retries, made due together, fail as a batch, the supervisor's patch changes
 /// the wait to account B, which the manifest does not grant, and the run
 /// continues from the wait. The patch replaced the definition the drive
 /// executes, so the wait's scan is dropped: the next poll authorizes against
@@ -3187,7 +3187,7 @@ fn a_batch_supervisor_patch_drops_the_wait_scan() {
     let agent = failing_agent(env.root.path());
     let _cmd = EnvVar::set("APB_AGENT_CMD", &agent);
     common::seed_main(env.root.path());
-    let yaml = batch_wait_yaml(30);
+    let yaml = batch_wait_yaml(600);
     env.seed(&yaml);
     let (connectors, accounts) = env.maps(&yaml);
     let rx = env.spawn_opts(RunOptions {
@@ -3203,9 +3203,31 @@ fn a_batch_supervisor_patch_drops_the_wait_scan() {
     poll_until("the read of account A", || {
         (apb_engine::inbox_wait::account_read_counts(&run_dir, ACCOUNT).reads >= 1).then_some(())
     });
+    // Both first attempts failed and both retries wait out their hour. The
+    // two deferrals are made due in one step, so the drive admits both
+    // retries in the same turn and settles them as one batch: left to their
+    // own delays, a loaded machine makes them due apart, the patch then
+    // lands on the first member's wake alone and the second member's retry
+    // still waits, so its wake never comes.
+    poll_until("the deferrals of both members", || {
+        let events = read_all(&run_dir).ok()?;
+        let deferred = apb_engine::state::RunState::fold(&events).deferred;
+        (deferred.contains_key("a") && deferred.contains_key("b")).then_some(())
+    });
+    let expedited = apb_engine::scheduler::deferred::expedite_live(
+        &run_dir,
+        &run_id,
+        None,
+        apb_engine::scheduler::deferred::ExpediteBy::Operator,
+    )
+    .unwrap();
+    assert_eq!(
+        expedited,
+        Some(vec!["a".to_string(), "b".to_string()]),
+        "the live driver takes both"
+    );
     // The retries fail and the supervisor is asked about the first member
-    // that failed: `a` or `b`, whichever deferred retry ran first, which a
-    // loaded machine does not order.
+    // that failed: `a` or `b`, whichever the batch settled first.
     let first = poll_until("the wake of the first member", || {
         read_all(&run_dir)
             .ok()?
@@ -3223,7 +3245,7 @@ fn a_batch_supervisor_patch_drops_the_wait_scan() {
     store_in("other", serde_json::json!({ "from": "x" }));
     // The supervisor's patch changes the wait's account to one the manifest
     // does not grant, and continues from the wait.
-    let patched = batch_wait_yaml(30).replace("      account: main\n", "      account: other\n");
+    let patched = batch_wait_yaml(600).replace("      account: main\n", "      account: other\n");
     patch_the_wait(env.root.path(), &run_id, &patched);
     // The second member's wake: the run continues from the wait.
     poll_until("the wake of the second member", || {
@@ -3240,21 +3262,24 @@ fn a_batch_supervisor_patch_drops_the_wait_scan() {
     )
     .unwrap();
     // The wait refuses: its scan was dropped, so the poll authorizes against
-    // the patched definition and the other account is never read.
-    let started = Instant::now();
-    let refused = loop {
-        let events = read_all(&run_dir).unwrap();
+    // the patched definition and the other account is never read. A loaded
+    // machine reaches the finish slowly; the read of the other account is
+    // the failure this test waits for, so the deadline is long and checked
+    // beside the finish, not against the wall clock alone.
+    let refused = poll_until("the refusal of the patched wait", || {
+        let events = read_all(&run_dir).ok()?;
         let finished = node_finished(&events, NODE).map(|(_, output)| output.to_string());
         let other = apb_engine::inbox_wait::account_read_counts(&run_dir, "other").reads;
-        if finished.is_some() || other > 0 || started.elapsed() > Duration::from_secs(10) {
-            assert_eq!(
-                other, 0,
-                "the other account was read: the wait's scan survived the patch"
-            );
-            break finished;
+        if other > 0 {
+            Some(None)
+        } else {
+            finished.map(Some)
         }
-        std::thread::sleep(POLL_STEP);
-    };
+    });
+    assert!(
+        refused.is_some(),
+        "the other account was read: the wait's scan survived the patch"
+    );
     let output = refused.expect("the wait did not refuse the patched definition");
     assert!(
         output.starts_with("inbox_wait_unauthorized:"),
@@ -3272,8 +3297,13 @@ fn a_batch_supervisor_patch_drops_the_wait_scan() {
         },
     )
     .ok();
-    let _ = rx.recv_timeout(Duration::from_secs(10));
+    let _ = rx.recv_timeout(AGENT_WAIT_DEADLINE);
 }
+
+/// The deadline of a step that waits on agent processes of this file's
+/// supervised runs: a loaded runner schedules the stub's shell processes
+/// slowly, so the bound is named and longer than a plain poll's.
+const AGENT_WAIT_DEADLINE: Duration = Duration::from_secs(60);
 
 /// A supervised fork: two agent nodes whose retry waits, the inbox wait
 /// beside them, and the finish at the end.
@@ -3287,8 +3317,8 @@ version: 1.0.0
 defaults: {{ profile: main, max_parallel: 4 }}
 nodes:
   - {{ id: start, type: start }}
-  - {{ id: a, type: agent_task, prompt: "FAILS", max_retries: 1, retry_delay: {{ initial: 1s }} }}
-  - {{ id: b, type: agent_task, prompt: "FAILS", max_retries: 1, retry_delay: {{ initial: 1s }} }}
+  - {{ id: a, type: agent_task, prompt: "FAILS", max_retries: 1, retry_delay: {{ initial: 1h }} }}
+  - {{ id: b, type: agent_task, prompt: "FAILS", max_retries: 1, retry_delay: {{ initial: 1h }} }}
   - id: wait
     type: wait
     wait_for:

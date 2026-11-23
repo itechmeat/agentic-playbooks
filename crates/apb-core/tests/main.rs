@@ -56,6 +56,8 @@ mod discover_walk_test;
 mod doctor_test;
 #[path = "suite/edge_address_test.rs"]
 mod edge_address_test;
+#[path = "suite/files_freeze_test.rs"]
+mod files_freeze_test;
 #[path = "suite/fsutil_test.rs"]
 mod fsutil_test;
 #[path = "suite/history_fixture.rs"]
@@ -106,6 +108,8 @@ mod result_store_test;
 mod run_memory_test;
 #[path = "suite/scenario_test.rs"]
 mod scenario_test;
+#[path = "suite/schema_freeze_test.rs"]
+mod schema_freeze_test;
 #[path = "suite/schema_migrate_config_test.rs"]
 mod schema_migrate_config_test;
 #[path = "suite/schema_migrate_test.rs"]
@@ -118,6 +122,8 @@ mod scope_move_test;
 mod send_policy_validate_test;
 #[path = "suite/server_auth_test.rs"]
 mod server_auth_test;
+#[path = "suite/store_freeze_test.rs"]
+mod store_freeze_test;
 #[path = "suite/templates_test.rs"]
 mod templates_test;
 #[path = "suite/validate_approval_test.rs"]

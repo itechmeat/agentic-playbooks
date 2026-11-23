@@ -1,0 +1,1962 @@
+# apb-freeze-document: field/params
+schema: 2
+id: f-params
+name: Field field/params
+version: 1.0.0
+description: carries the param places
+params:
+  - name: title
+    type: text
+    label: The title
+    options: [a, b]
+    default: a
+    search: true
+    pattern: "[a-z]+"
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/params-secret
+schema: 2
+id: f-params-secret
+name: Field field/params-secret
+version: 1.0.0
+params:
+  - name: token
+    type: text
+    secret: true
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/params-untrusted
+schema: 2
+id: f-params-untrusted
+name: Field field/params-untrusted
+version: 1.0.0
+params:
+  - name: note
+    type: text
+    untrusted: true
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/defaults
+schema: 2
+id: f-defaults
+name: Field field/defaults
+version: 1.0.0
+defaults:
+  profile: apb-main
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/supervisor
+schema: 2
+id: f-supervisor
+name: Field field/supervisor
+version: 1.0.0
+supervisor:
+  profile: apb-reviewer
+  policy: review_first
+  pre_triage: enforce
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/trigger
+schema: 2
+id: f-trigger
+name: Field field/trigger
+version: 1.0.0
+trigger:
+  when: ["a pull request opens"]
+  avoid_when: ["draft"]
+  examples: ["open PR"]
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/requires
+schema: 2
+id: f-requires
+name: Field field/requires
+version: 1.0.0
+requires:
+  files: [README.md]
+  commands: [git]
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/goal
+schema: 2
+id: f-goal
+name: Field field/goal
+version: 1.0.0
+goal:
+  statement: the report exists
+  enforce: true
+  criteria:
+    - description: the file is there
+      check: { type: script, path: "scripts/check.sh" }
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/goal-manual
+schema: 2
+id: f-goal-manual
+name: Field field/goal-manual
+version: 1.0.0
+goal:
+  statement: s
+  criteria:
+    - description: d
+      check: { type: manual }
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/goal-marker
+schema: 2
+id: f-goal-marker
+name: Field field/goal-marker
+version: 1.0.0
+goal:
+  statement: s
+  criteria:
+    - description: d
+      check: { type: marker, marker: "DONE" }
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/goal-list
+schema: 2
+id: f-goal-list
+name: Field field/goal-list
+version: 1.0.0
+goal:
+  statement: s
+  criteria:
+    - description: d
+      check: { type: list, node: gather }
+
+nodes:
+  - { id: start, type: start }
+  - { id: gather, type: agent_task, prompt: p, list: { items: { inline: [a] } } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/effects
+schema: 2
+id: f-effects
+name: Field field/effects
+version: 1.0.0
+effects: [fs_read, fs_write, network, external, secrets, irreversible]
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/worktree
+schema: 2
+id: f-worktree
+name: Field field/worktree
+version: 1.0.0
+worktree: "trees/{{run.id}}"
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/budget-ask
+schema: 2
+id: f-budget-ask
+name: Field field/budget-ask
+version: 1.0.0
+budget:
+  tokens: 100000
+  usd: 1.5
+  on_no_estimate: ask
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/budget-pause
+schema: 2
+id: f-budget-pause
+name: Field field/budget-pause
+version: 1.0.0
+budget:
+  tokens: 100000
+  on_no_estimate: pause
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/budget-continue
+schema: 2
+id: f-budget-continue
+name: Field field/budget-continue
+version: 1.0.0
+budget:
+  tokens: 100000
+  on_no_estimate: continue
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/known-problems
+schema: 2
+id: f-known-problems
+name: Field field/known-problems
+version: 1.0.0
+known_problems:
+  show: significant
+  min_runs: 2
+  max_shown: 5
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/known-problems-confirmed
+schema: 2
+id: f-known-problems-confirmed
+name: Field field/known-problems-confirmed
+version: 1.0.0
+known_problems:
+  show: confirmed
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/known-problems-off
+schema: 2
+id: f-known-problems-off
+name: Field field/known-problems-off
+version: 1.0.0
+known_problems:
+  show: off
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/follow-up
+schema: 2
+id: f-follow-up
+name: Field field/follow-up
+version: 1.0.0
+follow_up:
+  after: 30m
+  grace: 10m
+  check:
+    id: unread
+    connector:
+      name: mail
+      account: main
+      function: unread
+    observe:
+      - id: unread
+        type: number
+        path: count
+        expect: { at_most: 0 }
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/deadline
+schema: 2
+id: f-deadline
+name: Field field/deadline
+version: 1.0.0
+deadline: 45m
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/concurrency-queue
+schema: 2
+id: f-concurrency-queue
+name: Field field/concurrency-queue
+version: 1.0.0
+concurrency:
+  key: "{{params.title}}"
+  on_busy: queue_latest
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/concurrency-supersede
+schema: 2
+id: f-concurrency-supersede
+name: Field field/concurrency-supersede
+version: 1.0.0
+concurrency:
+  on_busy: supersede
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/concurrency-refuse
+schema: 2
+id: f-concurrency-refuse
+name: Field field/concurrency-refuse
+version: 1.0.0
+concurrency:
+  on_busy: refuse
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/health-notify
+schema: 2
+id: f-health-notify
+name: Field field/health-notify
+version: 1.0.0
+health:
+  consecutive_failures: 3
+  failure_rate:
+    at_least: 0.5
+    window: 7
+    min_runs: 4
+  overdue: 24h
+  on_trip: notify
+  cooldown: 6h
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/health-hold
+schema: 2
+id: f-health-hold
+name: Field field/health-hold
+version: 1.0.0
+health:
+  consecutive_failures: 3
+  on_trip: hold
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/unattended
+schema: 2
+id: f-unattended
+name: Field field/unattended
+version: 1.0.0
+unattended:
+  after_attended_successes: 2
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/previous-success
+schema: 2
+id: f-previous-success
+name: Field field/previous-success
+version: 1.0.0
+previous_success:
+  when_none:
+    started_at: 24h
+    finished_at: 36h
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/publish-only
+schema: 2
+id: f-publish-only
+name: Field field/publish-only
+version: 1.0.0
+publish_only: true
+
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: script, script: "scripts/s.sh", runner: sh }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/agent-launch-allow
+schema: 2
+id: f-agent-launch-allow
+name: Field field/agent-launch-allow
+version: 1.0.0
+agent_launch: allow
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/agent-launch-ask
+schema: 2
+id: f-agent-launch-ask
+name: Field field/agent-launch-ask
+version: 1.0.0
+agent_launch: ask
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/agent-launch-deny
+schema: 2
+id: f-agent-launch-deny
+name: Field field/agent-launch-deny
+version: 1.0.0
+agent_launch: deny
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/outputs
+schema: 2
+id: f-outputs
+name: Field field/outputs
+version: 1.0.0
+outputs:
+  answer:
+    from: { node: done }
+    pick: first
+  things:
+    from:
+      - { node: act, field: items }
+      - { node: alt, field: items }
+    pick: first
+  one:
+    from: { node: act, field: items, item_field: name }
+    pick: all
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/outputs-all
+schema: 2
+id: f-outputs-all
+name: Field field/outputs-all
+version: 1.0.0
+outputs:
+  answer:
+    from: { node: done }
+    pick: all
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/outputs-child
+schema: 2
+id: f-outputs-child
+name: Field field/outputs-child
+version: 1.0.0
+outputs:
+  answer:
+    from: { node: child }
+    pick: first
+
+nodes:
+  - { id: start, type: start }
+  - { id: child, type: playbook, playbook: { id: f-sub, scope: project }, output: outputs, instruction: "do it" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: defaults/max-retries
+schema: 2
+id: f-max-retries
+name: Field defaults/max-retries
+version: 1.0.0
+defaults:
+  max_retries: 3
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: defaults/timeout-seconds
+schema: 2
+id: f-timeout-seconds
+name: Field defaults/timeout-seconds
+version: 1.0.0
+defaults:
+  timeout_seconds: 600
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: defaults/on-failure-route
+schema: 2
+id: f-on-failure-route
+name: Field defaults/on-failure-route
+version: 1.0.0
+defaults:
+  on_failure: done
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: failure }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: defaults/on-failure-stop
+schema: 2
+id: f-on-failure-stop
+name: Field defaults/on-failure-stop
+version: 1.0.0
+defaults:
+  on_failure: stop
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: defaults/require-verdict
+schema: 2
+id: f-require-verdict
+name: Field defaults/require-verdict
+version: 1.0.0
+defaults:
+  require_verdict: true
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: defaults/max-parallel
+schema: 2
+id: f-max-parallel
+name: Field defaults/max-parallel
+version: 1.0.0
+defaults:
+  max_parallel: 2
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: defaults/context
+schema: 2
+id: f-context
+name: Field defaults/context
+version: 1.0.0
+defaults:
+  context:
+    max_bytes: 10000
+    section_max_bytes: 2000
+    output_max_bytes: 3000
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: defaults/retry-advice
+schema: 2
+id: f-retry-advice
+name: Field defaults/retry-advice
+version: 1.0.0
+defaults:
+  retry_advice: advise
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: defaults/host-decisions
+schema: 2
+id: f-host-decisions
+name: Field defaults/host-decisions
+version: 1.0.0
+defaults:
+  host_decisions: off
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: defaults/host-decisions-allow
+schema: 2
+id: f-host-decisions-allow
+name: Field defaults/host-decisions-allow
+version: 1.0.0
+defaults:
+  host_decisions: allow
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: defaults/retry-delay
+schema: 2
+id: f-retry-delay
+name: Field defaults/retry-delay
+version: 1.0.0
+defaults:
+  retry_delay:
+    initial: 2s
+    factor: 3.0
+    max: 5m
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: defaults/stall-after
+schema: 2
+id: f-stall-after
+name: Field defaults/stall-after
+version: 1.0.0
+defaults:
+  stall_after: 6
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: node/start
+schema: 2
+id: n-start
+name: Node node/start
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: prompt, prompt: say it }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node/prompt
+schema: 2
+id: n-prompt
+name: Node node/prompt
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: prompt, prompt: say it again }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node/agent_task
+schema: 2
+id: n-agent
+name: Node node/agent_task
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: agent_task
+    prompt: do the thing
+    profile: apb-main
+    max_retries: 2
+    retry_delay: { initial: 2s, factor: 3.0, max: 5m }
+    timeout_seconds: 300
+    interactive: true
+    answer_by: supervisor
+    question_timeout_seconds: 60
+    default_answer: skip
+    require_verdict: true
+    protect: ["*.lock"]
+
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node/script
+schema: 2
+id: n-script
+name: Node node/script
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: script, script: "scripts/s.sh", runner: sh, timeout_seconds: 30, workdir: "sub" }
+
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node/condition
+schema: 2
+id: n-cond
+name: Node node/condition
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: condition, max_loops: 3 }
+
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node/human_review
+schema: 2
+id: n-review
+name: Node node/human_review
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: human_review
+    options: [approve, reject]
+    prompt: look it over
+    fields:
+      - { name: note, type: text, required: true, max_len: 200 }
+      - { name: score, type: number }
+      - { name: ok, type: bool, required: true }
+      - { name: size, type: enum, required: [reject], options: [s, m, l], default: "{{nodes.act.output}}" }
+    show:
+      - { label: The diff, text: "{{nodes.act.output}}" }
+    max_scope:
+      files: 3
+      lines: 200
+      writes: 40
+      withhold: [reject]
+
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node/wait
+schema: 2
+id: n-wait
+name: Node node/wait
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: wait, wait_for: { type: timer, seconds: 5 }, timeout_seconds: 60, scope: "run" }
+
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node/wait-webhook
+schema: 2
+id: n-wait
+name: Node node/wait-webhook
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: wait, wait_for: { type: webhook, key: "build-{{run.id}}" }, timeout_seconds: 60 }
+
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node/wait-inbox
+schema: 2
+id: n-wait
+name: Node node/wait-inbox
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: wait, wait_for: { type: inbox, connector: mock-tracker, account: main, match: [{ path: action, equals: opened }], types: [issues], take: [{ name: title, path: issue.title, type: field }] }, timeout_seconds: 60 }
+
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node/finish
+schema: 2
+id: n-fin
+name: Node node/finish
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: finish, outcome: failure, prompt: sum it up, profile: apb-main, audience: people }
+
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node/finish-success
+schema: 2
+id: n-fin-s
+name: Node finish success
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: finish, outcome: success, audience: agents }
+edges:
+  - { from: start, to: mid }
+# apb-freeze-document: node/judge
+schema: 2
+id: n-judge
+name: Node judge
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: judge
+    state:
+      summary: "{{nodes.act.output}}"
+    questions:
+      correct:
+        type: choice
+        instructions: "Was the answer correct?"
+        criteria: { yes: "it was", no: "it was not" }
+      score:
+        type: score
+        instructions: "Rate 0 to 1."
+        levels: [high, partial]
+      flag:
+        type: noul
+        instructions: "Flag it?"
+        criteria: { done: "the text says so" }
+    thresholds:
+      correct: { min_confidence: 0.7, below: as_below }
+      score: { min_confidence: 0.5, yes_at: 0.8, bands: { high: [0.75, 1.0] } }
+    on_unavailable: emulate
+    profile: apb-main
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+  - { id: e-judge, from: mid, to: done, condition: { type: judge, question: correct, min_p: 0.7, on_unavailable: true } }
+# apb-freeze-document: node/playbook
+schema: 2
+id: n-sub
+name: Node node/playbook
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: playbook, playbook: { id: n-sub, scope: project }, instruction: run it, output: outputs }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node/publish
+schema: 2
+id: n-pub
+name: Node publish
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: publish, from: act, remote: origin, branch: "preview/{{run.id}}", timeout_seconds: 600, prompt: "pushes the preview" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task
+schema: 2
+id: nc-agent
+name: Node common agent
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: agent_task
+    prompt: p
+    title: The act
+    effects: [fs_write]
+    expected_duration: 90
+    inputs:
+      files: ["src/**"]
+      extract: "reports/*.json"
+      fields: [head, { name: result, type: string, values: [ok], required: true }]
+    outputs:
+      files: ["out/*.txt"]
+      fields: [result]
+    cache: { mode: auto, ttl: 30m, key: "{{nodes.probe.output.head}}" }
+    success_check:
+      script: "scripts/check.sh"
+      scope: ["out/**"]
+      prove_fails_first: true
+      on_green_before: skip
+    context:
+      max_bytes: 5000
+    completion_check: enforce
+    route: auto
+    auto_decide_ok: true
+    stall_after: 5
+    writes: ["out/**"]
+    max_changed_files: 10
+    untrusted: true
+    accept_untrusted: true
+    fork:
+      on_branch_failure: wait
+      on_failure: done
+    list:
+      items:
+        inline: [a, b]
+      batch:
+        parallel: 2
+        size: 5
+    results:
+      - { path: "out/report.md", scope: run, format: records }
+    evidence:
+      from: [mid]
+      kinds: [records]
+      claims: required
+      on_invalid: fail
+      budget_chars: 4000
+    unattended:
+      decide: approve
+      note: safe
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/read_only
+schema: 2
+id: nc-ro
+name: Node common read only
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: agent_task, prompt: p, read_only: true }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/fork-fail-fast
+schema: 2
+id: nc-fff
+name: Node common fork fail fast
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: agent_task, prompt: p, fork: { on_branch_failure: fail_fast, on_failure: done } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/fork-cancel
+schema: 2
+id: nc-fc
+name: Node common fork cancel
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: agent_task, prompt: p, fork: { on_branch_failure: cancel_siblings } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task-route-off
+schema: 2
+id: nc-agent-ro
+name: Node common agent route off
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: agent_task, prompt: p, route: off }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task-completion-auto
+schema: 2
+id: nc-agent-ca
+name: Node common agent completion auto
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: agent_task, prompt: p, completion_check: auto }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task-completion-off
+schema: 2
+id: nc-agent-co
+name: Node common agent completion off
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: agent_task, prompt: p, completion_check: off }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task-on-green-fail
+schema: 2
+id: nc-agent-og
+name: Node common agent on green fail
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: agent_task, prompt: p, success_check: "scripts/check.sh" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task-duration-text
+schema: 2
+id: nc-agent-dt
+name: Node common agent duration text
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: agent_task, prompt: p, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task-duration-seconds
+schema: 2
+id: nc-agent-ds
+name: Node common agent duration seconds
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: agent_task, prompt: p, expected_duration: 90 }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task-cache-mode
+schema: 2
+id: nc-agent-cm
+name: Node common agent cache mode
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: agent_task, prompt: p, cache: off }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task-continue
+schema: 2
+id: nc-agent-cs
+name: Node common agent continue
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: probe, type: agent_task, prompt: probe }
+  - { id: mid, type: agent_task, prompt: p, continue_session: { from: probe, mode: fork } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: probe }
+  - { from: probe, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task-continue-short
+schema: 2
+id: nc-agent-cs2
+name: Node common agent continue short
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: probe, type: agent_task, prompt: probe }
+  - { id: mid, type: agent_task, prompt: p, continue_session: probe }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: probe }
+  - { from: probe, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task-isolation
+schema: 2
+id: nc-agent-iso
+name: Node common agent isolation
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: agent_task
+    prompt: p
+    isolation:
+      level: best_effort
+      network: none
+      read_only: ["~/.rustup"]
+      writable: ["~/.cargo/registry"]
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task-isolation-full
+schema: 2
+id: nc-agent-isof
+name: Node common agent isolation full
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: agent_task, prompt: p, isolation: { level: full, network: open } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task-isolation-none
+schema: 2
+id: nc-agent-ison
+name: Node common agent isolation none
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: agent_task, prompt: p, isolation: none }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task-connectors
+schema: 2
+id: nc-agent-con
+name: Node common agent connectors
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: agent_task
+    prompt: p
+    connectors:
+      - name: mock-tracker
+        accounts: [main]
+        functions: [list_items]
+        max_calls: 5
+        on_unknown: resend
+        untrusted: true
+      - name: other
+        functions: read_only
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task-connectors-refuse
+schema: 2
+id: nc-agent-conr
+name: Node common agent connectors refuse
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: agent_task, prompt: p, connectors: [{ name: mock-tracker, functions: read_only, on_unknown: refuse }] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/human_review_gate
+schema: 2
+id: nc-gate
+name: Node common gate
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: human_review
+    options: [approve, reject]
+    person_only: true
+    auto_decide:
+      allow: [reject]
+      min_confidence: 0.9
+    option_descriptions:
+      approve: "it is fine"
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/approves
+schema: 2
+id: nc-appr
+name: Node common approves
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: act
+    type: agent_task
+    prompt: the change
+  - id: mid
+    type: human_review
+    options: [approve, reject]
+    approves:
+      results: [act]
+      options: [approve]
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/requires_approval
+schema: 2
+id: nc-ra
+name: Node common requires approval
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p }
+  - id: mid
+    type: agent_task
+    prompt: the change
+    requires_approval:
+      gate: act
+      of: [act]
+      live: ignore
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/requires_approval-ignore
+schema: 2
+id: nc-rai
+name: Node common requires approval ignore
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p }
+  - { id: mid, type: agent_task, prompt: the change, requires_approval: { gate: act, live: ignore } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: edges/conditions
+schema: 2
+id: e-cond
+name: Edge conditions
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p }
+  - { id: judge, type: judge, questions: { q: { type: choice, instructions: i, criteria: { a: x, b: y } } } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { id: e1, from: start, to: act, condition: { type: node_status, node: judge, equals: failure } }
+  - { from: act, to: done, fallback: true }
+  - { from: start, to: done, condition: { type: review_status, equals: rejected }, join: all }
+  - { from: start, to: judge, condition: { type: output_match, node: act, pattern: "ok.*" } }
+  - { from: judge, to: done, condition: { type: output_field, node: act, field: count, lt: 10 } }
+  - { from: judge, to: act, condition: { type: no_new_items, node: act, field: items, key: id, rounds: 2 }, max_traversals: 3, require: all_succeeded }
+# apb-freeze-document: edges/status-eq
+schema: 2
+id: e-seq
+name: Edge status eq
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act, condition: { type: node_status, node: act, equals: success } }
+  - { from: act, to: done }
+# apb-freeze-document: edges/status-eq-stalled
+schema: 2
+id: e-seq2
+name: Edge status eq stalled
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, stall_after: 5 }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act, condition: { type: node_status, node: act, equals: stalled } }
+  - { from: act, to: done }
+# apb-freeze-document: edges/output-field-comparators
+schema: 2
+id: e-ofc
+name: Edge output field comparators
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, outputs: { fields: [{ name: count, type: number }] } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act, condition: { type: output_field, node: act, field: count, lte: 5 } }
+  - { from: act, to: done }
+# apb-freeze-document: edges/output-field-gt
+schema: 2
+id: e-ofg
+name: Edge output field gt
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, outputs: { fields: [{ name: count, type: number }] } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act, condition: { type: output_field, node: act, field: count, gt: 1 } }
+  - { from: act, to: done }
+# apb-freeze-document: edges/output-field-gte
+schema: 2
+id: e-ofge
+name: Edge output field gte
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, outputs: { fields: [{ name: count, type: number }] } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act, condition: { type: output_field, node: act, field: count, gte: 2 } }
+  - { from: act, to: done }
+# apb-freeze-document: edges/output-field-equals
+schema: 2
+id: e-ofe
+name: Edge output field equals
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p, outputs: { fields: [state] } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act, condition: { type: output_field, node: act, field: state, equals: done } }
+  - { from: act, to: done }
+# apb-freeze-document: field/quality
+schema: 2
+id: f-quality
+name: Field field/quality
+version: 1.0.0
+quality:
+  task_type: "{{params.kind}}"
+  grade_on_finish: off
+  builtins:
+    outcome: { off: "the run answer is the criterion" }
+  criteria:
+    - id: thorough
+      subject: { node: act }
+      applies_when: "the run went deep"
+      evidence: both
+      reads: [journal, transcripts, outputs, connector_calls, findings]
+      levels:
+        good: "every angle covered"
+        partial: "some angles covered"
+        poor: "shallow"
+  criteria_grader: model
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/quality-rules
+schema: 2
+id: f-qr
+name: Field quality rules
+version: 1.0.0
+quality:
+  grade_on_finish: rules
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/quality-evidence
+schema: 2
+id: f-qe
+name: Field quality evidence
+version: 1.0.0
+quality:
+  criteria:
+    - id: a
+      evidence: presence
+      reads: [journal]
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/quality-evidence-absence
+schema: 2
+id: f-qa
+name: Field quality evidence absence
+version: 1.0.0
+quality:
+  criteria:
+    - id: a
+      evidence: absence
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/quality-subject-run
+schema: 2
+id: f-qs
+name: Field quality subject run
+version: 1.0.0
+quality:
+  criteria:
+    - id: a
+      subject: run
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/baseline-check
+schema: 2
+id: f-baseline-check
+name: Field field/baseline-check
+version: 1.0.0
+baseline_check:
+  enforce: true
+  checks:
+    - id: opened
+      description: the count went up
+      timeout_seconds: 30
+      connector:
+        name: mock-tracker
+        account: main
+        function: count
+        args: { state: open }
+      complete_when: { path: done, equals: "true" }
+      observe:
+        - id: open
+          type: number
+          path: count
+          count: true
+          expect: { at_least: 1, change: increase }
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/baseline-script
+schema: 2
+id: f-baseline-script
+name: Field field/baseline-script
+version: 1.0.0
+baseline_check:
+  checks:
+    - id: files
+      script: "scripts/observe.sh"
+      observe:
+        - id: lines
+          type: list
+          path: lines
+          expect: { contains: "main" }
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/baseline-project-checks
+schema: 2
+id: f-baseline-project-checks
+name: Field field/baseline-project-checks
+version: 1.0.0
+baseline_check:
+  checks:
+    - id: tests
+      project_checks:
+        only: [test]
+        junit: "reports/*.xml"
+      observe:
+        - id: failed
+          type: field
+          path: failures
+          expect: { equals: 0 }
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/baseline-expects
+schema: 2
+id: f-baseline-expects
+name: Field field/baseline-expects
+version: 1.0.0
+baseline_check:
+  checks:
+    - id: misc
+      script: "scripts/observe.sh"
+      observe:
+        - id: a
+          type: number
+          path: a
+          expect: { at_most: 5 }
+        - id: b
+          type: number
+          path: b
+          expect: { change: no_increase }
+        - id: c
+          type: number
+          path: c
+          expect: { change: no_decrease }
+        - id: d
+          type: number
+          path: d
+          expect: { change: unchanged }
+        - id: e
+          type: list
+          path: e
+          expect: { change: no_new }
+        - id: f
+          type: list
+          path: f
+          expect: { change: shrink }
+        - id: g
+          type: list
+          path: g
+          expect: { empty: false }
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: field/baseline-decrease
+schema: 2
+id: f-baseline-decrease
+name: Field field/baseline-decrease
+version: 1.0.0
+baseline_check:
+  checks:
+    - id: dec
+      script: "scripts/observe.sh"
+      observe:
+        - id: a
+          type: number
+          path: a
+          expect: { change: decrease }
+
+nodes:
+  - { id: start, type: start }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: done }
+# apb-freeze-document: node-common/list-full
+schema: 2
+id: nc-listf
+name: Node common list full
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: src, type: script, script: "scripts/items.sh", runner: sh, outputs: { fields: [{ name: items, type: array }] } }
+  - id: mid
+    type: agent_task
+    prompt: "handle {{item.name}}"
+    list:
+      items:
+        from: { node: src, field: items }
+        key: "{{item.id}}"
+        max_items: 10
+        where:
+          field: name
+          equals: main
+      batch:
+        size: 5
+        parallel: 2
+        retries: 1
+      item_outputs:
+        - name
+        - { name: score, type: enum, values: [low, high], required: true }
+      check:
+        output: { field: ok, equals: "yes" }
+      on_needs_look: continue
+      rerun: all
+      stop_when:
+        needs_look_at_least: 3
+        needs_look_share: 0.5
+        min_settled: 4
+      skip:
+        passed_in: previous_success
+        unless_changed: [name]
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: src }
+  - { from: src, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/list-inline
+schema: 2
+id: nc-listi
+name: Node common list inline
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: agent_task
+    prompt: "handle {{item}}"
+    list:
+      items:
+        inline: [a, b]
+      on_needs_look: fail
+      rerun: not_passed
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/list-state
+schema: 2
+id: nc-listst
+name: Node common list state
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: agent_task
+    prompt: "handle {{item}}"
+    list:
+      items:
+        inline: [a]
+        where:
+          state: passed
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/list-check-connector
+schema: 2
+id: nc-listcc
+name: Node common list check connector
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: agent_task
+    prompt: "handle {{item}}"
+    list:
+      items:
+        inline: [a]
+      check:
+        connector:
+          name: mock-tracker
+          account: main
+          function: get_issue
+          args: { id: "{{item}}" }
+          accept_when: { path: state, equals: open, exists: true, contains: tag }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/list-check-script
+schema: 2
+id: nc-listcs
+name: Node common list check script
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: agent_task
+    prompt: "handle {{item}}"
+    list:
+      items:
+        inline: [a]
+      check:
+        script: "scripts/check_item.sh"
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/list-check-judge
+schema: 2
+id: nc-listcj
+name: Node common list check judge
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: agent_task
+    prompt: "handle {{item}}"
+    list:
+      items:
+        inline: [a]
+      check:
+        judge:
+          state: { text: "{{item}}" }
+          instructions: "Was it done?"
+          criteria: { done: "the item is done" }
+          min_confidence: 0.6
+          on_unavailable: reject
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/list-pilot
+schema: 2
+id: nc-listp
+name: Node common list pilot
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: agent_task
+    prompt: "handle {{item}}"
+    list:
+      items:
+        inline: [a, b, c]
+      pilot:
+        items: 2
+        then: continue
+        unattended: fail
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/list-pilot-review
+schema: 2
+id: nc-listp2
+name: Node common list pilot review
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: agent_task
+    prompt: "handle {{item}}"
+    list:
+      items:
+        inline: [a, b, c]
+      pilot:
+        items: 2
+        then: review
+        unattended: continue
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/list-item-outputs-enum
+schema: 2
+id: nc-liste
+name: Node common list item outputs enum
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: agent_task
+    prompt: "handle {{item}}"
+    list:
+      items:
+        inline: [a]
+      item_outputs:
+        - { name: size, type: enum, values: [s, m], required: true }
+        - { name: ok, type: bool, required: true }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/list-item-outputs-types
+schema: 2
+id: nc-listt
+name: Node common list item outputs types
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: agent_task
+    prompt: "handle {{item}}"
+    list:
+      items:
+        inline: [a]
+      item_outputs:
+        - { name: a, type: string }
+        - { name: n, type: number }
+        - { name: b, type: bool }
+        - { name: c, type: array }
+        - { name: d, type: object }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: witness/scenario-playbook
+schema: 2
+id: w-scen
+name: W scenario playbook
+version: 1.0.0
+defaults:
+  profile: apb-main
+params:
+  - { name: secret_one, type: text, secret: true }
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: p }
+  - { id: gate, type: human_review, options: [approve, reject] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: gate }
+  - { from: gate, to: done }
+# apb-freeze-document: field/profile-scope-project
+schema: 2
+id: f-profile-scope-project
+name: Field field/profile-scope-project
+version: 1.0.0
+defaults:
+  profile: { name: apb-main, scope: project }
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: do it }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: field/profile-scope-global
+schema: 2
+id: f-profile-scope-global
+name: Field field/profile-scope-global
+version: 1.0.0
+defaults:
+  profile: { name: apb-main, scope: global }
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: do it }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: field/profile-scope-auto
+schema: 2
+id: f-profile-scope-auto
+name: Field field/profile-scope-auto
+version: 1.0.0
+defaults:
+  profile: { name: apb-main, scope: auto }
+nodes:
+  - { id: start, type: start }
+  - { id: act, type: agent_task, prompt: do it }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: act }
+  - { from: act, to: done }
+# apb-freeze-document: node/judge-list
+schema: 2
+id: n-judge-list
+name: Node judge list
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: mid
+    type: judge
+    state:
+      summary: "{{nodes.start.output}}"
+    questions:
+      - id: correct
+        type: choice
+        instructions: "Was the answer correct?"
+        criteria: { yes: "it was", no: "it was not" }
+    profile: apb-main
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node/playbook-short
+schema: 2
+id: n-sub-short
+name: Node node/playbook short reference
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: playbook, playbook: n-sub, instruction: run it }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/human_review-unattended-fail
+schema: 2
+id: nc-review-unattended-fail
+name: Node common human review unattended fail
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: gate, type: human_review, options: [approve, reject], prompt: look it over, unattended: fail }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: done }
+# apb-freeze-document: node-common/agent_task-success-marker
+schema: 2
+id: nc-agent-marker
+name: Node common agent success marker
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: agent_task, prompt: p, success_check: { marker: "DONE" } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task-on-green-fail-explicit
+schema: 2
+id: nc-agent-og-explicit
+name: Node common agent on green fail explicit
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: agent_task, prompt: p, success_check: { script: "scripts/check.sh", on_green_before: fail } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: node-common/agent_task-connector-name
+schema: 2
+id: nc-agent-conn-name
+name: Node common agent connector by name
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: mid, type: agent_task, prompt: p, connectors: [mock-tracker] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: mid }
+  - { from: mid, to: done }
+# apb-freeze-document: edges/join-any
+schema: 2
+id: e-join-any
+name: Edges join any
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: agent_task, prompt: p }
+  - { id: b, type: agent_task, prompt: p }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: done, join: any }
+  - { from: b, to: done, join: any }

@@ -182,11 +182,10 @@ pub fn playbook_dir_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// One env change at a time in this binary's tests: the crate's one
+    /// env lock, so these changes never race another module's.
+    use crate::server::tests::CROSS_ENV_LOCK as ENV_LOCK;
     use std::fs;
-    use std::sync::Mutex;
-
-    /// One env change at a time in this binary's tests.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     const PLAYBOOK: &str = "schema: 2\nid: cap\nname: cap\nversion: 1.0.0\ndefaults: { profile: main }\nnodes:\n  - { id: start, type: start }\n  - { id: work, type: agent_task, prompt: \"Fix {{run.instruction}}\" }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: work }\n  - { from: work, to: done, condition: { type: node_status, node: work, equals: success } }\n";
 

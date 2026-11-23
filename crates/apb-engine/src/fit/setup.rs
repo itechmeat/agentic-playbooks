@@ -263,17 +263,11 @@ pub(super) fn isolation_items(
         .into_iter()
         .map(|n| {
             let c = &n.contract;
-            let reasons = |r: &[apb_core::isolation::contract::Reason]| {
-                r.iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            };
             let (detail, severity) = if !c.allowed() {
                 (
                     format!(
                         "isolation full cannot be enforced here: {}",
-                        reasons(&c.refusals)
+                        reasons_text(&c.refusals)
                     ),
                     FitSeverity::Blocking,
                 )
@@ -282,7 +276,7 @@ pub(super) fn isolation_items(
                     format!(
                         "isolation {} runs without a sandbox here: {}",
                         n.level.as_str(),
-                        reasons(&c.fallbacks)
+                        reasons_text(&c.fallbacks)
                     ),
                     FitSeverity::Note,
                 )
@@ -431,4 +425,47 @@ pub(super) fn needs_value_items(names: &[String]) -> Vec<FitItem> {
             severity: FitSeverity::Note,
         })
         .collect()
+}
+
+/// One reason per line of the joined list: an `os_unsupported` refusal is
+/// the machine code, a colon and the 1.x sentence it states; every other
+/// reason keeps its `Display` form (`code (detail)`).
+fn reasons_text(reasons: &[apb_core::isolation::contract::Reason]) -> String {
+    use apb_core::isolation::contract::ReasonCode;
+    reasons
+        .iter()
+        .map(|r| {
+            if r.code == ReasonCode::OsUnsupported {
+                format!("{}: {}", r.code.id(), r.code.text())
+            } else {
+                r.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reasons_text;
+    use apb_core::isolation::contract::{Reason, ReasonCode};
+
+    #[test]
+    fn the_fit_item_carries_the_one_point_x_sentence() {
+        let sentence = "The sandbox needs Linux with bubblewrap; apb 1.x has no sandbox on this system, so full refuses and best_effort runs without one.";
+        let rendered = reasons_text(&[Reason::new(
+            ReasonCode::OsUnsupported,
+            "the sandbox needs Linux with bubblewrap",
+        )]);
+        assert_eq!(rendered, format!("os_unsupported: {sentence}"));
+        // Another reason keeps its Display form.
+        let mixed = reasons_text(&[
+            Reason::new(ReasonCode::OsUnsupported, "d"),
+            Reason::new(ReasonCode::Disabled, "APB_SANDBOX=off"),
+        ]);
+        assert_eq!(
+            mixed,
+            format!("os_unsupported: {sentence}; disabled (APB_SANDBOX=off)")
+        );
+    }
 }

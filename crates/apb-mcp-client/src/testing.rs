@@ -75,6 +75,34 @@ env > "$D/env.values"
 for a in "$@"; do printf '%s\n' "$a" >> "$D/args.log"; done
 if [ -n "${STUB_STDERR+x}" ]; then printf '%s\n' "$STUB_STDERR" >&2; fi
 ERA=$(cat "$D/era")
+# The orphan a close test needs: a writer of its own session, started now,
+# before the first request is read, and waited for until its pid is
+# recorded. A writer forked only at end of input is still in the server's
+# group until its `setsid` runs, so the close's group kill could take it
+# with the server and the test would time a close against nothing. It
+# holds stdout from here on and writes nothing until the stub touches
+# `orphan.go` at end of input; it gives up after about 30 seconds without
+# the go, so a test that never closes leaves no writer behind for long.
+# `orphan_writer` keeps the pipe open with a sleep, `orphan_flow` fills it
+# with bytes that carry no newline and never pause.
+orphan_mode=
+if [ -f "$D/orphan_writer.flag" ]; then orphan_mode=sleep; fi
+if [ -f "$D/orphan_flow.flag" ]; then orphan_mode=flow; fi
+if [ -n "$orphan_mode" ]; then
+  rm -f "$D/orphan.pid" "$D/orphan.pid.tmp" "$D/orphan.go" "$D/orphan.running"
+  setsid sh -c '
+    echo $$ > "$1/orphan.pid.tmp" && mv "$1/orphan.pid.tmp" "$1/orphan.pid"
+    i=0
+    while [ ! -f "$1/orphan.go" ]; do
+      i=$((i + 1)); [ "$i" -gt 3000 ] && exit 0; sleep 0.01
+    done
+    : > "$1/orphan.running"
+    if [ "$2" = sleep ]; then exec sleep 30; fi
+    while :; do printf "%s" "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; done
+  ' sh "$D" "$orphan_mode" </dev/null &
+  i=0
+  while [ ! -f "$D/orphan.pid" ] && [ "$i" -lt 3000 ]; do i=$((i + 1)); sleep 0.01; done
+fi
 while IFS= read -r line; do
   id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
@@ -185,16 +213,14 @@ if [ -f "$D/eof_bytes.flag" ]; then cat "$D/eof_bytes.flag"; fi
 if [ -f "$D/eof_log.flag" ]; then
   printf '%s\n' "$(cat "$D/eof_log.flag")"
 fi
-# A writer of its own session that keeps the pipe open for a while, so the
-# pipe never ends its output and the drain meets no end of input. Its pid
-# is recorded, so a test can kill it.
-if [ -f "$D/orphan_writer.flag" ]; then
-  setsid sh -c 'echo $$ > "$1/orphan.pid"; exec sleep 30' sh "$D" </dev/null &
-fi
-# The same writer, but it fills the pipe with bytes that carry no newline
-# and never pause: the drain reads and reads.
-if [ -f "$D/orphan_flow.flag" ]; then
-  setsid sh -c 'echo $$ > "$1/orphan.pid"; while :; do printf "%s" "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; done' sh "$D" </dev/null &
+# The orphan started above begins at end of input, after the client
+# cancelled the service and its reader is gone: it keeps the pipe open, so
+# the drain meets no end of input. The stub ends only once the orphan says
+# it runs, so the close always meets a writer that holds the pipe.
+if [ -n "$orphan_mode" ]; then
+  : > "$D/orphan.go"
+  i=0
+  while [ ! -f "$D/orphan.running" ] && [ "$i" -lt 3000 ]; do i=$((i + 1)); sleep 0.01; done
 fi
 exit 0
 "#;

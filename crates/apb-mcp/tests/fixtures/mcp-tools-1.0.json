@@ -1,0 +1,7491 @@
+{
+  "format": 1,
+  "tools": {
+    "agents_detect": {
+      "base": {},
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {
+          "refresh": {
+            "types": [
+              "boolean"
+            ]
+          }
+        },
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "restricted"
+    },
+    "connectors_list": {
+      "base": {},
+      "boundaries": {},
+      "examples": {
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "correction_decide": {
+      "base": {
+        "decision": "dismiss",
+        "entry": "x",
+        "id": "x"
+      },
+      "boundaries": {
+        "decision": [
+          "dismiss",
+          "reopen"
+        ]
+      },
+      "examples": {
+        "reason": [
+          "x",
+          null
+        ],
+        "scope": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "dismiss",
+              "reopen"
+            ],
+            "types": [
+              "string"
+            ]
+          },
+          "entry": {
+            "types": [
+              "string"
+            ]
+          },
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "reason": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "entry",
+          "decision"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "decision_ask": {
+      "base": {
+        "kind": "x",
+        "question": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "criteria": [
+          "x",
+          null
+        ],
+        "items": [
+          [],
+          null
+        ],
+        "node_id": [
+          "x",
+          null
+        ],
+        "options": [
+          [],
+          null
+        ],
+        "run_id": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "criteria": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "items": {
+            "union": [
+              {
+                "items": {
+                  "types": [
+                    "string"
+                  ]
+                },
+                "types": [
+                  "array"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "kind": {
+            "types": [
+              "string"
+            ]
+          },
+          "node_id": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "options": {
+            "union": [
+              {
+                "items": {
+                  "types": [
+                    "string"
+                  ]
+                },
+                "types": [
+                  "array"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "question": {
+            "types": [
+              "string"
+            ]
+          },
+          "run_id": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "question"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "judge_evaluate": {
+      "base": {
+        "id": "x",
+        "node": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "version": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "answers": {
+            "types": [
+              "any"
+            ]
+          },
+          "emulate": {
+            "types": [
+              "boolean"
+            ]
+          },
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "inputs": {
+            "types": [
+              "any"
+            ]
+          },
+          "node": {
+            "types": [
+              "string"
+            ]
+          },
+          "version": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "node"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "judge_example_save": {
+      "base": {
+        "expected": {},
+        "node": "x",
+        "run_id": "x"
+      },
+      "boundaries": {
+        "execution": [
+          0,
+          4294967295
+        ]
+      },
+      "examples": {
+        "execution": [
+          0,
+          null
+        ],
+        "note": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "execution": {
+            "union": [
+              {
+                "format": "uint32",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "expected": {
+            "additionalProperties": {
+              "types": [
+                "any"
+              ]
+            },
+            "required": [],
+            "types": [
+              "object"
+            ]
+          },
+          "node": {
+            "types": [
+              "string"
+            ]
+          },
+          "note": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "node",
+          "expected"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "judge_examples": {
+      "base": {
+        "id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "node": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "check": {
+            "types": [
+              "boolean"
+            ]
+          },
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "live": {
+            "types": [
+              "boolean"
+            ]
+          },
+          "node": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "judge_run_values": {
+      "base": {
+        "node": "x",
+        "run_id": "x"
+      },
+      "boundaries": {
+        "execution": [
+          0,
+          4294967295
+        ]
+      },
+      "examples": {
+        "execution": [
+          0,
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "execution": {
+            "union": [
+              {
+                "format": "uint32",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "node": {
+            "types": [
+              "string"
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "node"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "known_problem_decide": {
+      "base": {
+        "action": "x",
+        "id": "x",
+        "problem": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "quote": [
+          "x",
+          null
+        ],
+        "reason": [
+          "x",
+          null
+        ],
+        "scope": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "action": {
+            "types": [
+              "string"
+            ]
+          },
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "problem": {
+            "types": [
+              "string"
+            ]
+          },
+          "quote": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "reason": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "problem",
+          "action"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "known_problem_recheck": {
+      "base": {
+        "by": "x",
+        "id": "x",
+        "problem": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "quote": [
+          "x",
+          null
+        ],
+        "scope": [
+          "x",
+          null
+        ],
+        "verdict": [
+          "x",
+          null
+        ],
+        "why": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "by": {
+            "types": [
+              "string"
+            ]
+          },
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "problem": {
+            "types": [
+              "string"
+            ]
+          },
+          "quote": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "verdict": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "why": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "problem",
+          "by"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_adopt_report": {
+      "base": {},
+      "boundaries": {},
+      "examples": {
+        "id": [
+          "x",
+          null
+        ],
+        "scope": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "id": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "playbook_approve": {
+      "base": {
+        "id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "digest": [
+          "x",
+          null
+        ],
+        "scope": [
+          "x",
+          null
+        ],
+        "version": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "digest": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "version": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_candidate": {
+      "base": {
+        "id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "playbook_capture": {
+      "base": {
+        "selected_scope": "x",
+        "synopsis": null,
+        "yaml": "x"
+      },
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {
+          "selected_scope": {
+            "types": [
+              "string"
+            ]
+          },
+          "synopsis": {
+            "types": [
+              "any"
+            ]
+          },
+          "yaml": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "synopsis",
+          "selected_scope",
+          "yaml"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_catalog": {
+      "base": {},
+      "boundaries": {
+        "limit": [
+          0,
+          18446744073709551615
+        ]
+      },
+      "examples": {
+        "fit": [
+          false,
+          null
+        ],
+        "limit": [
+          0,
+          null
+        ],
+        "query": [
+          "x",
+          null
+        ],
+        "revision": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "fit": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "limit": {
+            "union": [
+              {
+                "format": "uint",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "query": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "revision": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "restricted"
+    },
+    "playbook_corrections": {
+      "base": {
+        "id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "entry": [
+          "x",
+          null
+        ],
+        "scope": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "entry": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "playbook_create": {
+      "base": {
+        "id": "x",
+        "yaml": "x"
+      },
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "yaml": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "yaml"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_delete": {
+      "base": {
+        "id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_discover": {
+      "base": {},
+      "boundaries": {
+        "since_days": [
+          0,
+          4294967295
+        ]
+      },
+      "examples": {
+        "projects": [
+          [],
+          null
+        ],
+        "roots": [
+          [],
+          null
+        ],
+        "since_days": [
+          0,
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "projects": {
+            "union": [
+              {
+                "items": {
+                  "types": [
+                    "string"
+                  ]
+                },
+                "types": [
+                  "array"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "roots": {
+            "union": [
+              {
+                "items": {
+                  "types": [
+                    "string"
+                  ]
+                },
+                "types": [
+                  "array"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "since_days": {
+            "union": [
+              {
+                "format": "uint32",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_discover_dismiss": {
+      "base": {
+        "kind": "x",
+        "result_id": "x",
+        "slug": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "scope": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "kind": {
+            "types": [
+              "string"
+            ]
+          },
+          "result_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "slug": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "result_id",
+          "slug",
+          "kind"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_discover_results": {
+      "base": {},
+      "boundaries": {},
+      "examples": {
+        "result_id": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "result_id": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "playbook_discover_save": {
+      "base": {
+        "result_id": "x",
+        "scope": "x",
+        "slug": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "workspace": [
+          "x",
+          null
+        ],
+        "yaml": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "result_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "scope": {
+            "types": [
+              "string"
+            ]
+          },
+          "slug": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "yaml": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "result_id",
+          "slug",
+          "scope"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_execute_plan": {
+      "base": {
+        "plan_token": "x"
+      },
+      "boundaries": {
+        "budget.tokens": [
+          0,
+          18446744073709551615
+        ],
+        "budget.usd": [
+          0
+        ]
+      },
+      "examples": {
+        "acknowledge_untrusted": [
+          false,
+          null
+        ],
+        "budget": [
+          {},
+          null
+        ],
+        "budget.on_no_estimate": [
+          "x",
+          null
+        ],
+        "budget.tokens": [
+          0,
+          null
+        ],
+        "budget.usd": [
+          0,
+          null
+        ],
+        "confirm_irreversible": [
+          false,
+          "x",
+          null
+        ],
+        "confirm_launch": [
+          "x",
+          null
+        ],
+        "external_data": [
+          false,
+          null
+        ],
+        "launch_choice": [
+          "x",
+          null
+        ],
+        "launch_version": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "acknowledge_untrusted": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "budget": {
+            "union": [
+              {
+                "properties": {
+                  "on_no_estimate": {
+                    "union": [
+                      {
+                        "types": [
+                          "string"
+                        ]
+                      },
+                      {
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  },
+                  "tokens": {
+                    "union": [
+                      {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "types": [
+                          "integer"
+                        ]
+                      },
+                      {
+                        "minimum": 0,
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  },
+                  "usd": {
+                    "union": [
+                      {
+                        "format": "double",
+                        "types": [
+                          "number"
+                        ]
+                      },
+                      {
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "required": [],
+                "types": [
+                  "object"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "confirm_irreversible": {
+            "union": [
+              {
+                "union": [
+                  {
+                    "types": [
+                      "boolean"
+                    ]
+                  },
+                  {
+                    "types": [
+                      "string"
+                    ]
+                  }
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "confirm_launch": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "external_data": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "launch_choice": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "launch_version": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "plan_token": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "plan_token"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_get": {
+      "base": {
+        "id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "detail": [
+          "x",
+          null
+        ],
+        "estimate": [
+          false,
+          null
+        ],
+        "version": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "detail": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "estimate": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "version": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "playbook_howto": {
+      "base": {},
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {},
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "playbook_interview": {
+      "base": {},
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {},
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "playbook_known_problems": {
+      "base": {
+        "id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "problem": [
+          "x",
+          null
+        ],
+        "scope": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "problem": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "playbook_list": {
+      "base": {},
+      "boundaries": {},
+      "examples": {
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "playbook_make_global": {
+      "base": {
+        "id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "variant": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "dry_run": {
+            "types": [
+              "boolean"
+            ]
+          },
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "move_profiles": {
+            "types": [
+              "boolean"
+            ]
+          },
+          "variant": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_memory": {
+      "base": {
+        "id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "action": [
+          "x",
+          null
+        ],
+        "instruction": [
+          "x",
+          null
+        ],
+        "params": [
+          {},
+          null
+        ],
+        "scope": [
+          "x",
+          null
+        ],
+        "what": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "action": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "instruction": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "params": {
+            "union": [
+              {
+                "additionalProperties": {
+                  "types": [
+                    "string"
+                  ]
+                },
+                "required": [],
+                "types": [
+                  "object"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "what": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "restricted"
+    },
+    "playbook_prepare_run": {
+      "base": {
+        "id": "x",
+        "workspace": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "version": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "params": {
+            "additionalProperties": {
+              "types": [
+                "string"
+              ]
+            },
+            "required": [],
+            "types": [
+              "object"
+            ]
+          },
+          "version": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "workspace"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_run": {
+      "base": {
+        "id": "x"
+      },
+      "boundaries": {
+        "budget.tokens": [
+          0,
+          18446744073709551615
+        ],
+        "budget.usd": [
+          0
+        ]
+      },
+      "examples": {
+        "acknowledge_untrusted": [
+          false,
+          null
+        ],
+        "background": [
+          false,
+          null
+        ],
+        "budget": [
+          {},
+          null
+        ],
+        "budget.on_no_estimate": [
+          "x",
+          null
+        ],
+        "budget.tokens": [
+          0,
+          null
+        ],
+        "budget.usd": [
+          0,
+          null
+        ],
+        "confirm_irreversible": [
+          false,
+          "x",
+          null
+        ],
+        "confirm_launch": [
+          "x",
+          null
+        ],
+        "continued_from": [
+          "x",
+          null
+        ],
+        "deadline": [
+          "x",
+          null
+        ],
+        "execution": [
+          "x",
+          null
+        ],
+        "external_data": [
+          false,
+          null
+        ],
+        "instruction": [
+          "x",
+          null
+        ],
+        "launch_choice": [
+          "x",
+          null
+        ],
+        "launch_version": [
+          "x",
+          null
+        ],
+        "notify": [
+          false,
+          {},
+          null
+        ],
+        "notify.finished": [
+          [],
+          null
+        ],
+        "notify.on": [
+          [],
+          null
+        ],
+        "notify.target": [
+          {
+            "account": "x",
+            "connector": "x",
+            "function": "x",
+            "to": "x"
+          },
+          null
+        ],
+        "remember": [
+          false,
+          null
+        ],
+        "scope": [
+          "x",
+          null
+        ],
+        "start_key": [
+          "x",
+          null
+        ],
+        "start_key_reuse": [
+          false,
+          null
+        ],
+        "supervise": [
+          "x",
+          null
+        ],
+        "unattended": [
+          false,
+          null
+        ],
+        "version": [
+          "x",
+          null
+        ],
+        "worktree": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "acknowledge_untrusted": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "background": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "budget": {
+            "union": [
+              {
+                "properties": {
+                  "on_no_estimate": {
+                    "union": [
+                      {
+                        "types": [
+                          "string"
+                        ]
+                      },
+                      {
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  },
+                  "tokens": {
+                    "union": [
+                      {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "types": [
+                          "integer"
+                        ]
+                      },
+                      {
+                        "minimum": 0,
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  },
+                  "usd": {
+                    "union": [
+                      {
+                        "format": "double",
+                        "types": [
+                          "number"
+                        ]
+                      },
+                      {
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "required": [],
+                "types": [
+                  "object"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "confirm_irreversible": {
+            "union": [
+              {
+                "union": [
+                  {
+                    "types": [
+                      "boolean"
+                    ]
+                  },
+                  {
+                    "types": [
+                      "string"
+                    ]
+                  }
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "confirm_launch": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "continued_from": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "deadline": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "execution": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "external_data": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "instruction": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "launch_choice": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "launch_version": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "notify": {
+            "union": [
+              {
+                "union": [
+                  {
+                    "types": [
+                      "boolean"
+                    ]
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "finished": {
+                        "union": [
+                          {
+                            "items": {
+                              "types": [
+                                "string"
+                              ]
+                            },
+                            "types": [
+                              "array"
+                            ]
+                          },
+                          {
+                            "types": [
+                              "null"
+                            ]
+                          }
+                        ]
+                      },
+                      "on": {
+                        "union": [
+                          {
+                            "items": {
+                              "types": [
+                                "string"
+                              ]
+                            },
+                            "types": [
+                              "array"
+                            ]
+                          },
+                          {
+                            "types": [
+                              "null"
+                            ]
+                          }
+                        ]
+                      },
+                      "target": {
+                        "union": [
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "account": {
+                                "types": [
+                                  "string"
+                                ]
+                              },
+                              "connector": {
+                                "types": [
+                                  "string"
+                                ]
+                              },
+                              "function": {
+                                "types": [
+                                  "string"
+                                ]
+                              },
+                              "to": {
+                                "types": [
+                                  "string"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "connector",
+                              "account",
+                              "function",
+                              "to"
+                            ],
+                            "types": [
+                              "object"
+                            ]
+                          },
+                          {
+                            "types": [
+                              "null"
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "required": [],
+                    "types": [
+                      "object"
+                    ]
+                  }
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "params": {
+            "additionalProperties": {
+              "types": [
+                "string"
+              ]
+            },
+            "required": [],
+            "types": [
+              "object"
+            ]
+          },
+          "remember": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "start_key": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "start_key_reuse": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "supervise": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "unattended": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "version": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "worktree": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_scenario_run": {
+      "base": {
+        "id": "x",
+        "level": "x",
+        "scenario": "x"
+      },
+      "boundaries": {
+        "max_decision_requests": [
+          0,
+          4294967295
+        ]
+      },
+      "examples": {
+        "external_data": [
+          false,
+          null
+        ],
+        "max_decision_requests": [
+          0,
+          null
+        ],
+        "scope": [
+          "x",
+          null
+        ],
+        "version": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "external_data": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "level": {
+            "types": [
+              "string"
+            ]
+          },
+          "max_decision_requests": {
+            "union": [
+              {
+                "format": "uint32",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "scenario": {
+            "types": [
+              "string"
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "version": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "scenario",
+          "level"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_scenarios": {
+      "base": {
+        "id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "scope": [
+          "x",
+          null
+        ],
+        "version": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "version": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_stats": {
+      "base": {},
+      "boundaries": {},
+      "examples": {
+        "compare": [
+          "x",
+          null
+        ],
+        "playbook": [
+          "x",
+          null
+        ],
+        "since": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "compare": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "playbook": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "since": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "playbook_trash_list": {
+      "base": {},
+      "boundaries": {},
+      "examples": {
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "playbook_trash_restore": {
+      "base": {
+        "name": "x"
+      },
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {
+          "name": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_trial": {
+      "base": {
+        "id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "confirm_launch": [
+          "x",
+          null
+        ],
+        "external_data": [
+          false,
+          null
+        ],
+        "instruction": [
+          "x",
+          null
+        ],
+        "launch_choice": [
+          "x",
+          null
+        ],
+        "launch_version": [
+          "x",
+          null
+        ],
+        "scope": [
+          "x",
+          null
+        ],
+        "version": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "confirm_launch": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "external_data": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "instruction": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "launch_choice": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "launch_version": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "params": {
+            "additionalProperties": {
+              "types": [
+                "string"
+              ]
+            },
+            "required": [],
+            "types": [
+              "object"
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "version": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_update": {
+      "base": {
+        "id": "x",
+        "yaml": "x"
+      },
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "yaml": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "yaml"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "playbook_validate": {
+      "base": {
+        "id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "profile_delete": {
+      "base": {
+        "name": "x"
+      },
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {
+          "force": {
+            "types": [
+              "boolean"
+            ]
+          },
+          "name": {
+            "types": [
+              "string"
+            ]
+          },
+          "scope": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "profile_get": {
+      "base": {
+        "name": "x"
+      },
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {
+          "name": {
+            "types": [
+              "string"
+            ]
+          },
+          "scope": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "profile_howto": {
+      "base": {},
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {},
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "profile_list": {
+      "base": {},
+      "boundaries": {},
+      "examples": {
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "profile_move": {
+      "base": {
+        "from": "x",
+        "name": "x",
+        "to": "x"
+      },
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {
+          "from": {
+            "types": [
+              "string"
+            ]
+          },
+          "name": {
+            "types": [
+              "string"
+            ]
+          },
+          "to": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "from",
+          "to"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "profile_write": {
+      "base": {
+        "agent": "x",
+        "model": "x",
+        "name": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "environment": [
+          "x",
+          null
+        ],
+        "expected_digest": [
+          "x",
+          null
+        ],
+        "hermetic": [
+          false,
+          null
+        ],
+        "process_env": [
+          {},
+          null
+        ],
+        "process_env.policy": [
+          "x",
+          null
+        ],
+        "soul": [
+          "x",
+          null
+        ],
+        "zcode_mode": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "agent": {
+            "types": [
+              "string"
+            ]
+          },
+          "description": {
+            "types": [
+              "string"
+            ]
+          },
+          "environment": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "expected_digest": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "fallbacks": {
+            "items": {
+              "properties": {
+                "agent": {
+                  "types": [
+                    "string"
+                  ]
+                },
+                "model": {
+                  "types": [
+                    "string"
+                  ]
+                }
+              },
+              "required": [
+                "agent",
+                "model"
+              ],
+              "types": [
+                "object"
+              ]
+            },
+            "types": [
+              "array"
+            ]
+          },
+          "hermetic": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "model": {
+            "types": [
+              "string"
+            ]
+          },
+          "name": {
+            "types": [
+              "string"
+            ]
+          },
+          "process_env": {
+            "union": [
+              {
+                "properties": {
+                  "allow": {
+                    "items": {
+                      "types": [
+                        "string"
+                      ]
+                    },
+                    "types": [
+                      "array"
+                    ]
+                  },
+                  "policy": {
+                    "union": [
+                      {
+                        "types": [
+                          "string"
+                        ]
+                      },
+                      {
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "required": [],
+                "types": [
+                  "object"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "scope": {
+            "types": [
+              "string"
+            ]
+          },
+          "skills": {
+            "items": {
+              "types": [
+                "string"
+              ]
+            },
+            "types": [
+              "array"
+            ]
+          },
+          "soul": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "soul_md": {
+            "types": [
+              "string"
+            ]
+          },
+          "zcode_mode": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "agent",
+          "model"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "projects_list": {
+      "base": {},
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {},
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "review_decide": {
+      "base": {
+        "decision": "x",
+        "node": "x",
+        "run_id": "x"
+      },
+      "boundaries": {
+        "request": [
+          0,
+          18446744073709551615
+        ]
+      },
+      "examples": {
+        "nonce": [
+          "x",
+          null
+        ],
+        "request": [
+          0,
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "decision": {
+            "types": [
+              "string"
+            ]
+          },
+          "fields": {
+            "additionalProperties": {
+              "types": [
+                "any"
+              ]
+            },
+            "required": [],
+            "types": [
+              "object"
+            ]
+          },
+          "node": {
+            "types": [
+              "string"
+            ]
+          },
+          "nonce": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "note": {
+            "types": [
+              "string"
+            ]
+          },
+          "request": {
+            "union": [
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "node",
+          "decision"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "run_answer": {
+      "base": {
+        "answer": "x"
+      },
+      "boundaries": {
+        "request": [
+          0,
+          18446744073709551615
+        ]
+      },
+      "examples": {
+        "node": [
+          "x",
+          null
+        ],
+        "request": [
+          0,
+          null
+        ],
+        "run_id": [
+          "x",
+          null
+        ],
+        "token": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "answer": {
+            "types": [
+              "string"
+            ]
+          },
+          "node": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "request": {
+            "union": [
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "run_id": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "token": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "answer"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "run_events": {
+      "base": {
+        "run_id": "x"
+      },
+      "boundaries": {
+        "from_seq": [
+          0,
+          18446744073709551615
+        ]
+      },
+      "examples": {
+        "from_seq": [
+          0,
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "from_seq": {
+            "union": [
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "run_evidence_read": {
+      "base": {
+        "op": "x",
+        "session": "x"
+      },
+      "boundaries": {
+        "count": [
+          0,
+          18446744073709551615
+        ],
+        "from": [
+          0,
+          18446744073709551615
+        ]
+      },
+      "examples": {
+        "count": [
+          0,
+          null
+        ],
+        "from": [
+          0,
+          null
+        ],
+        "phrase": [
+          "x",
+          null
+        ],
+        "ref": [
+          "x",
+          null
+        ],
+        "span": [
+          [
+            0,
+            0
+          ],
+          null
+        ],
+        "view": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "count": {
+            "union": [
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "from": {
+            "union": [
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "op": {
+            "types": [
+              "string"
+            ]
+          },
+          "phrase": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "ref": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "session": {
+            "types": [
+              "string"
+            ]
+          },
+          "span": {
+            "union": [
+              {
+                "items": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "types": [
+                    "integer"
+                  ]
+                },
+                "maxItems": 2,
+                "minItems": 2,
+                "types": [
+                  "array"
+                ]
+              },
+              {
+                "maxItems": 2,
+                "minItems": 2,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "view": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "session",
+          "op"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "run_grade": {
+      "base": {
+        "run_id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "grader": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "grader": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "run_grade_read": {
+      "base": {
+        "op": "x",
+        "run_id": "x",
+        "session": "x"
+      },
+      "boundaries": {
+        "count": [
+          0,
+          18446744073709551615
+        ],
+        "from": [
+          0,
+          18446744073709551615
+        ]
+      },
+      "examples": {
+        "count": [
+          0,
+          null
+        ],
+        "from": [
+          0,
+          null
+        ],
+        "query": [
+          "x",
+          null
+        ],
+        "ref": [
+          "x",
+          null
+        ],
+        "span": [
+          [
+            0,
+            0
+          ],
+          null
+        ],
+        "view": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "count": {
+            "union": [
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "from": {
+            "union": [
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "op": {
+            "types": [
+              "string"
+            ]
+          },
+          "query": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "ref": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "session": {
+            "types": [
+              "string"
+            ]
+          },
+          "span": {
+            "union": [
+              {
+                "items": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "types": [
+                    "integer"
+                  ]
+                },
+                "maxItems": 2,
+                "minItems": 2,
+                "types": [
+                  "array"
+                ]
+              },
+              {
+                "maxItems": 2,
+                "minItems": 2,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "view": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "session",
+          "op"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "run_grade_start": {
+      "base": {
+        "run_id": "x"
+      },
+      "boundaries": {
+        "budget_chars": [
+          0,
+          18446744073709551615
+        ]
+      },
+      "examples": {
+        "budget_chars": [
+          0,
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "budget_chars": {
+            "union": [
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "run_grade_submit": {
+      "base": {
+        "grades": [],
+        "run_id": "x",
+        "session": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "grades[].cites[].span": [
+          [
+            0,
+            0
+          ],
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "grades": {
+            "items": {
+              "properties": {
+                "absence": {
+                  "types": [
+                    "boolean"
+                  ]
+                },
+                "cites": {
+                  "items": {
+                    "properties": {
+                      "ref": {
+                        "types": [
+                          "string"
+                        ]
+                      },
+                      "span": {
+                        "union": [
+                          {
+                            "items": {
+                              "format": "uint64",
+                              "minimum": 0,
+                              "types": [
+                                "integer"
+                              ]
+                            },
+                            "maxItems": 2,
+                            "minItems": 2,
+                            "types": [
+                              "array"
+                            ]
+                          },
+                          {
+                            "maxItems": 2,
+                            "minItems": 2,
+                            "types": [
+                              "null"
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "ref"
+                    ],
+                    "types": [
+                      "object"
+                    ]
+                  },
+                  "types": [
+                    "array"
+                  ]
+                },
+                "criterion": {
+                  "types": [
+                    "string"
+                  ]
+                },
+                "level": {
+                  "types": [
+                    "string"
+                  ]
+                },
+                "reason_code": {
+                  "types": [
+                    "string"
+                  ]
+                },
+                "why": {
+                  "types": [
+                    "string"
+                  ]
+                }
+              },
+              "required": [
+                "criterion",
+                "level"
+              ],
+              "types": [
+                "object"
+              ]
+            },
+            "types": [
+              "array"
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "session": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "session",
+          "grades"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "run_grades": {
+      "base": {
+        "run_id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "run_intent_resolve": {
+      "base": {
+        "intent": "x",
+        "run_id": "x",
+        "sent": false
+      },
+      "boundaries": {},
+      "examples": {
+        "note": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "intent": {
+            "types": [
+              "string"
+            ]
+          },
+          "note": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "sent": {
+            "types": [
+              "boolean"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "intent",
+          "sent"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "run_notify": {
+      "base": {
+        "notify": false,
+        "run_id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "notify": [
+          false,
+          {}
+        ],
+        "notify.finished": [
+          [],
+          null
+        ],
+        "notify.on": [
+          [],
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "notify": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "finished": {
+                    "union": [
+                      {
+                        "items": {
+                          "types": [
+                            "string"
+                          ]
+                        },
+                        "types": [
+                          "array"
+                        ]
+                      },
+                      {
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  },
+                  "on": {
+                    "union": [
+                      {
+                        "items": {
+                          "types": [
+                            "string"
+                          ]
+                        },
+                        "types": [
+                          "array"
+                        ]
+                      },
+                      {
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "required": [],
+                "types": [
+                  "object"
+                ]
+              }
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "notify"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "run_pause": {
+      "base": {
+        "run_id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "mode": [
+          "x",
+          null
+        ],
+        "reason": [
+          "x",
+          null
+        ],
+        "until": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "keep_lock": {
+            "types": [
+              "boolean"
+            ]
+          },
+          "mode": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "reason": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "until": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "run_progress_report": {
+      "base": {
+        "done": 0,
+        "run_id": "x",
+        "total": 0
+      },
+      "boundaries": {
+        "done": [
+          0,
+          18446744073709551615
+        ],
+        "total": [
+          0,
+          18446744073709551615
+        ]
+      },
+      "examples": {
+        "label": [
+          "x",
+          null
+        ],
+        "node": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "done": {
+            "format": "uint64",
+            "minimum": 0,
+            "types": [
+              "integer"
+            ]
+          },
+          "label": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "node": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "total": {
+            "format": "uint64",
+            "minimum": 0,
+            "types": [
+              "integer"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "done",
+          "total"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "run_report": {
+      "base": {
+        "run_id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "run_report_html": {
+      "base": {
+        "run_id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "run_result_read": {
+      "base": {
+        "ref": "x",
+        "run_id": "x"
+      },
+      "boundaries": {
+        "limit": [
+          0,
+          18446744073709551615
+        ],
+        "offset": [
+          0,
+          18446744073709551615
+        ]
+      },
+      "examples": {
+        "compare_live": [
+          false,
+          null
+        ],
+        "limit": [
+          0,
+          null
+        ],
+        "offset": [
+          0,
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "compare_live": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "limit": {
+            "union": [
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "offset": {
+            "union": [
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "ref": {
+            "types": [
+              "string"
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "ref"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "run_results": {
+      "base": {
+        "run_id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "node": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "node": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "run_resume": {
+      "base": {
+        "run_id": "x"
+      },
+      "boundaries": {
+        "budget.raise_tokens": [
+          0,
+          18446744073709551615
+        ],
+        "budget.raise_usd": [
+          0
+        ],
+        "budget.tokens": [
+          0,
+          18446744073709551615
+        ],
+        "budget.usd": [
+          0
+        ]
+      },
+      "examples": {
+        "acknowledge_untrusted": [
+          false,
+          null
+        ],
+        "budget": [
+          {},
+          null
+        ],
+        "budget.on_no_estimate": [
+          "x",
+          null
+        ],
+        "budget.raise_tokens": [
+          0,
+          null
+        ],
+        "budget.raise_usd": [
+          0,
+          null
+        ],
+        "budget.tokens": [
+          0,
+          null
+        ],
+        "budget.usd": [
+          0,
+          null
+        ],
+        "confirm_budget": [
+          "x",
+          null
+        ],
+        "confirm_irreversible": [
+          false,
+          "x",
+          null
+        ],
+        "confirm_launch": [
+          "x",
+          null
+        ],
+        "deadline": [
+          "x",
+          null
+        ],
+        "external_data": [
+          false,
+          null
+        ],
+        "from_node": [
+          "x",
+          null
+        ],
+        "launch_choice": [
+          "x",
+          null
+        ],
+        "launch_version": [
+          "x",
+          null
+        ],
+        "node": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "acknowledge_untrusted": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "allow_environment_drift": {
+            "types": [
+              "boolean"
+            ]
+          },
+          "budget": {
+            "union": [
+              {
+                "properties": {
+                  "on_no_estimate": {
+                    "union": [
+                      {
+                        "types": [
+                          "string"
+                        ]
+                      },
+                      {
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  },
+                  "once": {
+                    "types": [
+                      "boolean"
+                    ]
+                  },
+                  "raise_tokens": {
+                    "union": [
+                      {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "types": [
+                          "integer"
+                        ]
+                      },
+                      {
+                        "minimum": 0,
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  },
+                  "raise_usd": {
+                    "union": [
+                      {
+                        "format": "double",
+                        "types": [
+                          "number"
+                        ]
+                      },
+                      {
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  },
+                  "tokens": {
+                    "union": [
+                      {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "types": [
+                          "integer"
+                        ]
+                      },
+                      {
+                        "minimum": 0,
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  },
+                  "usd": {
+                    "union": [
+                      {
+                        "format": "double",
+                        "types": [
+                          "number"
+                        ]
+                      },
+                      {
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "required": [],
+                "types": [
+                  "object"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "confirm_budget": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "confirm_irreversible": {
+            "union": [
+              {
+                "union": [
+                  {
+                    "types": [
+                      "boolean"
+                    ]
+                  },
+                  {
+                    "types": [
+                      "string"
+                    ]
+                  }
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "confirm_launch": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "deadline": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "external_data": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "from_node": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "launch_choice": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "launch_version": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "node": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "retry_now": {
+            "types": [
+              "boolean"
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "run_retro_context": {
+      "base": {
+        "run_id": "x"
+      },
+      "boundaries": {
+        "compare_last": [
+          0,
+          18446744073709551615
+        ]
+      },
+      "examples": {
+        "compare_last": [
+          0,
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "compare_last": {
+            "union": [
+              {
+                "format": "uint",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "run_scenario_capture": {
+      "base": {
+        "name": "x",
+        "run_id": "x"
+      },
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "types": [
+              "string"
+            ]
+          },
+          "nodes": {
+            "items": {
+              "types": [
+                "string"
+              ]
+            },
+            "types": [
+              "array"
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "name"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "run_status": {
+      "base": {
+        "run_id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "run_stop": {
+      "base": {
+        "run_id": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "run_task_submit": {
+      "base": {
+        "output": "x",
+        "run_id": "x",
+        "status": "x",
+        "task_id": "x"
+      },
+      "boundaries": {
+        "usage.cache_read_tokens": [
+          0,
+          18446744073709551615
+        ],
+        "usage.cache_write_tokens": [
+          0,
+          18446744073709551615
+        ],
+        "usage.cost_usd": [
+          0
+        ],
+        "usage.input_tokens": [
+          0,
+          18446744073709551615
+        ],
+        "usage.output_tokens": [
+          0,
+          18446744073709551615
+        ]
+      },
+      "examples": {
+        "model": [
+          "x",
+          null
+        ],
+        "note": [
+          "x",
+          null
+        ],
+        "usage": [
+          {},
+          null
+        ],
+        "usage.cache_read_tokens": [
+          0,
+          null
+        ],
+        "usage.cache_write_tokens": [
+          0,
+          null
+        ],
+        "usage.cost_usd": [
+          0,
+          null
+        ],
+        "usage.input_tokens": [
+          0,
+          null
+        ],
+        "usage.output_tokens": [
+          0,
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "findings": {
+            "types": [
+              "any"
+            ]
+          },
+          "model": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "note": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "output": {
+            "types": [
+              "string"
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "status": {
+            "types": [
+              "string"
+            ]
+          },
+          "task_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "usage": {
+            "union": [
+              {
+                "properties": {
+                  "cache_read_tokens": {
+                    "union": [
+                      {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "types": [
+                          "integer"
+                        ]
+                      },
+                      {
+                        "minimum": 0,
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  },
+                  "cache_write_tokens": {
+                    "union": [
+                      {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "types": [
+                          "integer"
+                        ]
+                      },
+                      {
+                        "minimum": 0,
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  },
+                  "cost_usd": {
+                    "union": [
+                      {
+                        "format": "double",
+                        "types": [
+                          "number"
+                        ]
+                      },
+                      {
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  },
+                  "input_tokens": {
+                    "union": [
+                      {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "types": [
+                          "integer"
+                        ]
+                      },
+                      {
+                        "minimum": 0,
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  },
+                  "output_tokens": {
+                    "union": [
+                      {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "types": [
+                          "integer"
+                        ]
+                      },
+                      {
+                        "minimum": 0,
+                        "types": [
+                          "null"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "required": [],
+                "types": [
+                  "object"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "warnings": {
+            "types": [
+              "any"
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "task_id",
+          "status",
+          "output"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "run_wait": {
+      "base": {
+        "run_id": "x"
+      },
+      "boundaries": {
+        "timeout_ms": [
+          0,
+          18446744073709551615
+        ]
+      },
+      "examples": {
+        "inline_prompt": [
+          false,
+          null
+        ],
+        "timeout_ms": [
+          0,
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "inline_prompt": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "run_id": {
+            "types": [
+              "string"
+            ]
+          },
+          "timeout_ms": {
+            "union": [
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "runs_list": {
+      "base": {},
+      "boundaries": {},
+      "examples": {
+        "playbook": [
+          "x",
+          null
+        ],
+        "scope": [
+          "x",
+          null
+        ],
+        "workspace": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "fields": {
+            "items": {
+              "types": [
+                "string"
+              ]
+            },
+            "types": [
+              "array"
+            ]
+          },
+          "playbook": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "workspace": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "setup_howto": {
+      "base": {},
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {},
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "setup_plan": {
+      "base": {},
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {
+          "project": {
+            "types": [
+              "boolean"
+            ]
+          }
+        },
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "subscriptions_set": {
+      "base": {},
+      "boundaries": {},
+      "examples": {
+        "subscriptions[].coverage": [
+          "x",
+          null
+        ],
+        "subscriptions[].plan": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "declined": {
+            "types": [
+              "boolean"
+            ]
+          },
+          "subscriptions": {
+            "items": {
+              "properties": {
+                "agent": {
+                  "types": [
+                    "string"
+                  ]
+                },
+                "coverage": {
+                  "union": [
+                    {
+                      "types": [
+                        "string"
+                      ]
+                    },
+                    {
+                      "types": [
+                        "null"
+                      ]
+                    }
+                  ]
+                },
+                "plan": {
+                  "union": [
+                    {
+                      "types": [
+                        "string"
+                      ]
+                    },
+                    {
+                      "types": [
+                        "null"
+                      ]
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "agent"
+              ],
+              "types": [
+                "object"
+              ]
+            },
+            "types": [
+              "array"
+            ]
+          }
+        },
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "suggestion_dismiss": {
+      "base": {
+        "pattern": "x"
+      },
+      "boundaries": {
+        "ttl_days": [
+          0,
+          18446744073709551615
+        ]
+      },
+      "examples": {
+        "kind": [
+          "x",
+          null
+        ],
+        "scope": [
+          "x",
+          null
+        ],
+        "ttl_days": [
+          0,
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "kind": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "pattern": {
+            "types": [
+              "string"
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "synopsis": {
+            "types": [
+              "string"
+            ]
+          },
+          "ttl_days": {
+            "union": [
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "supervisor_context_append": {
+      "base": {
+        "note": "x",
+        "token": "x"
+      },
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {
+          "note": {
+            "types": [
+              "string"
+            ]
+          },
+          "token": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "token",
+          "note"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "supervisor_interrupt_attempt": {
+      "base": {
+        "token": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "node": [
+          "x",
+          null
+        ],
+        "reason": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "node": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "reason": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "token": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "supervisor_node_retry": {
+      "base": {
+        "node": "x",
+        "token": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "prompt_override": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "node": {
+            "types": [
+              "string"
+            ]
+          },
+          "prompt_override": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "token": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "token",
+          "node"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "supervisor_patch_playbook": {
+      "base": {
+        "classification": "x",
+        "token": "x",
+        "yaml": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "continue_from": [
+          "x",
+          null
+        ],
+        "evidence": [
+          [],
+          null
+        ],
+        "rationale": [
+          "x",
+          null
+        ],
+        "scope": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "classification": {
+            "types": [
+              "string"
+            ]
+          },
+          "continue_from": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "evidence": {
+            "union": [
+              {
+                "items": {
+                  "types": [
+                    "string"
+                  ]
+                },
+                "types": [
+                  "array"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "rationale": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "token": {
+            "types": [
+              "string"
+            ]
+          },
+          "yaml": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "token",
+          "yaml",
+          "classification"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "supervisor_rebind_profile": {
+      "base": {
+        "node": "x",
+        "profile": "x",
+        "token": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "reason": [
+          "x",
+          null
+        ],
+        "scope": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "acknowledge_untrusted": {
+            "types": [
+              "boolean"
+            ]
+          },
+          "node": {
+            "types": [
+              "string"
+            ]
+          },
+          "profile": {
+            "types": [
+              "string"
+            ]
+          },
+          "reason": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "scope": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "token": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "token",
+          "node",
+          "profile"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "supervisor_report": {
+      "base": {
+        "text": "x",
+        "token": "x"
+      },
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {
+          "text": {
+            "types": [
+              "string"
+            ]
+          },
+          "token": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "token",
+          "text"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "supervisor_run_abort": {
+      "base": {
+        "token": "x"
+      },
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {
+          "token": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "supervisor_run_continue_from": {
+      "base": {
+        "node": "x",
+        "token": "x"
+      },
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {
+          "node": {
+            "types": [
+              "string"
+            ]
+          },
+          "token": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "token",
+          "node"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "supervisor_run_inspect": {
+      "base": {
+        "token": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "full_events": [
+          false,
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "full_events": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "token": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "supervisor_run_pause": {
+      "base": {
+        "token": "x"
+      },
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "properties": {
+          "token": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "supervisor_wait_event": {
+      "base": {
+        "token": "x"
+      },
+      "boundaries": {
+        "after_seq": [
+          0,
+          18446744073709551615
+        ],
+        "timeout_ms": [
+          0,
+          18446744073709551615
+        ]
+      },
+      "examples": {
+        "after_seq": [
+          0,
+          null
+        ],
+        "inline_prompt": [
+          false,
+          null
+        ],
+        "timeout_ms": [
+          0,
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "after_seq": {
+            "union": [
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "inline_prompt": {
+            "union": [
+              {
+                "types": [
+                  "boolean"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "timeout_ms": {
+            "union": [
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "token": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    },
+    "trigger_list": {
+      "base": {},
+      "boundaries": {},
+      "examples": {},
+      "input": {
+        "additionalProperties": false,
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "trigger_test": {
+      "base": {
+        "rule": "x"
+      },
+      "boundaries": {
+        "event_seq": [
+          0,
+          18446744073709551615
+        ]
+      },
+      "examples": {
+        "event_seq": [
+          0,
+          null
+        ]
+      },
+      "input": {
+        "additionalProperties": false,
+        "properties": {
+          "event_seq": {
+            "union": [
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "types": [
+                  "integer"
+                ]
+              },
+              {
+                "minimum": 0,
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "rule": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "rule"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "trust_list": {
+      "base": {},
+      "boundaries": {},
+      "examples": {
+        "kind": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "kind": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "full"
+    },
+    "trust_revoke": {
+      "base": {
+        "target": "x"
+      },
+      "boundaries": {},
+      "examples": {
+        "kind": [
+          "x",
+          null
+        ]
+      },
+      "input": {
+        "properties": {
+          "kind": {
+            "union": [
+              {
+                "types": [
+                  "string"
+                ]
+              },
+              {
+                "types": [
+                  "null"
+                ]
+              }
+            ]
+          },
+          "target": {
+            "types": [
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "types": [
+          "object"
+        ]
+      },
+      "read_only": "removed"
+    }
+  }
+}

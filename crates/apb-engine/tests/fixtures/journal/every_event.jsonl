@@ -1,0 +1,100 @@
+{"seq":0,"ts":1790000000000,"type":"run_started","playbook":"dependency-security-fix","version":"1.0.0","definition":"def-digest","external_data":true}
+{"seq":1,"ts":1790000000001,"type":"run_provenance","origin":"project","digest":"sha256:digest","execution_root":"/tmp/exec-root","scripts_digest":"sha256:scripts","profiles":[{"scope":"project","name":"main","bundle_digest":"sha256:bundle"}],"remembered":["title"],"apb":"1.0.0-beta.7","limits":[{"code":"same_agent_reviewer","detail":"the reviewer is the same agent"}],"previous_success":{"run_id":"r-1","started_at":"2026-01-01T00:00:00Z","finished_at":"2026-01-01T00:05:00Z","outputs":{"nodes.a.output":"text"},"withheld":["nodes.b.output"],"fallback":true},"untrusted":[{"node":"sum","sources":["inbox"],"outward":["text"],"secrets":["token"],"accepted":"accepted"}],"deadline":{"total_ms":3600000,"source":"run"},"start_key":"abc123def456","concurrency":{"key_digest":"digest","display":"team-a","on_busy":"queue","queued":true},"eval_doubles":true}
+{"seq":2,"ts":1790000000002,"type":"previous_success_set","previous_success":{"run_id":"r-1","fallback":true}}
+{"seq":3,"ts":1790000000003,"type":"list_skip_read","node":"list","set":{"source":"r-1","items":{"one":"digest"},"truncated":true,"outputs":{"one":"{\"ok\":true}"},"not_inherited":1}}
+{"seq":4,"ts":1790000000004,"type":"node_started","node":"work","attempt":1}
+{"seq":5,"ts":1790000000005,"type":"attempt_started","node":"work","attempt":1,"agent":"claude","soul_delivery":"file","skills_mode":"materialized","pid":1234,"spawn_ms":12,"model":"opus","workdir":"/tmp/work","transcript":"attempts/1","token":"attempt-token","item":"item-1","isolation":{"level":"full","backend":"bwrap","bwrap_version":"0.11","network":"none","holds":["workdir"],"limits":["cpus:2"],"fallbacks":["none (bwrap missing)"],"view":[{"path":"~/secrets","access":"hidden"}]},"exec":{"binding":"bind-0","step":0,"source":{"kind":"fallback","index":1,"of":2},"executed_by":"cli","entered":{"from_step":0,"closed_attempt":0,"reason":"transient"}},"cloud":{"provider":"near-ai-cloud","model":"Qwen/Qwen3.8-27B","privacy_class":"incognito"}}
+{"seq":6,"ts":1790000000006,"type":"attempt_exited","node":"work","attempt":1,"item":"item-1"}
+{"seq":7,"ts":1790000000007,"type":"attempt_finished","node":"work","attempt":1,"status":"succeeded","duration_ms":1500,"session":"session-1","summary":"done","rejected_output":"rejected","partial_output":"partial","failure_kind":"transient","usage":{"input_tokens":10,"output_tokens":20,"cache_read_tokens":30,"cache_write_tokens":40,"cost_usd":0.5,"source":"reported","cost_basis":"billed"},"output_truncated":[{"stream":"stdout","kept_bytes":100,"dropped_bytes_at_least":50}],"transcript_incomplete":true,"rejected_for":"missing field","rejection_fingerprint":"fp","stalled":true,"item":"item-1"}
+{"seq":8,"ts":1790000000008,"type":"node_finished","node":"work","status":"succeeded","attempt":1,"output":"done","artifacts":[{"name":"report","digest":"sha256:artifact","scope":"run","path":"runs/r-1/report.md"}],"result":{"snapshot_id":"rs-0","entries":1,"bytes":10}}
+{"seq":9,"ts":1790000000009,"type":"retry_started","node":"work","attempt":2}
+{"seq":10,"ts":1790000000010,"type":"fallback_triggered","node":"work","from":"claude","to":"codex","profile":"project/main","from_model":"opus","to_model":"gpt-5.1-codex","reason":"transient","executed_by":"cli"}
+{"seq":11,"ts":1790000000011,"type":"run_paused","reason":"budget","by":"operator","mode":"drain","until":1790000100000,"keep_lock":true}
+{"seq":12,"ts":1790000000012,"type":"run_queued","reason":"another run holds the workdir"}
+{"seq":13,"ts":1790000000013,"type":"worktree_resolved","path":"/tmp/worktree","source":"playbook","node":"work"}
+{"seq":14,"ts":1790000000014,"type":"run_resumed","from_node":"work","by":"operator","explicit":true,"launch":{"kind":"resume","initiator":"cli_terminal","confirmation":"terminal_prompt","policy":"allow","sources":["policy.yaml"]},"definition":"def-digest","apb":"1.0.0-beta.7","deadline":{"total_ms":7200000,"source":"resume"}}
+{"seq":15,"ts":1790000000015,"type":"run_finished","outcome":"succeeded"}
+{"seq":16,"ts":1790000000016,"type":"wake_raised","trigger":"node_failed","node":"work","detail":"attempt failed","triage":{"action":"retry_same","p":0.8,"confidence":0.9,"looping_p":0.1,"provider":"sys","model":"m-1","applied":true}}
+{"seq":17,"ts":1790000000017,"type":"supervisor_action","action":"node_retry","node":"work","detail":"retry"}
+{"seq":18,"ts":1790000000018,"type":"run_aborted","reason":"operator","by":"operator"}
+{"seq":19,"ts":1790000000019,"type":"supervisor_lost","detail":"heartbeat expired"}
+{"seq":20,"ts":1790000000020,"type":"patch_applied","version":"1.1.0","classification":"minor","continue_from":"work","definition":"def-digest"}
+{"seq":21,"ts":1790000000021,"type":"patch_rejected","reason":"breaking change"}
+{"seq":22,"ts":1790000000022,"type":"profile_rebound","node":"work","profile":"project/main","bundle":"sha256:bundle","reason":"model overloaded"}
+{"seq":23,"ts":1790000000023,"type":"rebind_rejected","node":"work","reason":"bundle drifted"}
+{"seq":24,"ts":1790000000024,"type":"run_migrated","from_version":"1.0.0","to_version":"1.1.0","continue_from":"work"}
+{"seq":25,"ts":1790000000025,"type":"version_promoted","version":"1.1.0"}
+{"seq":26,"ts":1790000000026,"type":"candidate_promoted","version":"1.1.0","run_id":"r-2","successes":3,"basis":"successes"}
+{"seq":27,"ts":1790000000027,"type":"candidate_rejected","version":"1.1.0","run_id":"r-2","reason":"goal failed"}
+{"seq":28,"ts":1790000000028,"type":"candidate_held","version":"1.1.0","run_id":"r-2","verdict":"wait","reason":"one more trial"}
+{"seq":29,"ts":1790000000029,"type":"run_graded","grade_id":"grade-1","grader":"rules","levels":{"accuracy":"met"}}
+{"seq":30,"ts":1790000000030,"type":"review_requested","node":"gate","options":["approve","needs_changes"],"title":"Publish","instruction":"decide","prompt":"check the diff","recommendation":{"option":"approve","p":0.9,"confidence":0.9,"provider":"sys","model":"m-1","calibrated":true,"applied":true},"binding":{"nonce":"nonce-0","snapshots":[{"node":"work","execution":1,"settlement_seq":0,"snapshot_id":"snap-0","redacted":true}],"missing":[{"node":"skip","reason":"no_snapshot"}]},"person_only":true}
+{"seq":31,"ts":1790000000031,"type":"review_decided","node":"gate","decision":"approve","note":"looks good","decided_by":"unattended","binding":"nonce-0","via":"terminal"}
+{"seq":32,"ts":1790000000032,"type":"review_withdrawn","node":"gate","reason":"moved on"}
+{"seq":33,"ts":1790000000033,"type":"review_detail","node":"gate","request":0,"scope":{"since_seq":0,"commits":2,"files":3,"lines_added":10,"lines_removed":4,"items_settled":2,"writes":1,"writes_unknown":0,"sends":1,"sends_open":1,"results":1},"show":[{"label":"diff","text":"the diff","untrusted":true,"clipped":true}],"fields":[{"name":"note","kind":"text","required":["needs_changes"],"default":"","max_len":200,"untrusted":true}],"withheld":["ship"],"withheld_reason":"max_scope"}
+{"seq":34,"ts":1790000000034,"type":"review_fields","node":"gate","request":0,"fields":{"note":"fine"}}
+{"seq":35,"ts":1790000000035,"type":"wait_started","node":"wait","kind":"timer"}
+{"seq":36,"ts":1790000000036,"type":"wait_signalled","node":"wait"}
+{"seq":37,"ts":1790000000037,"type":"wait_timeout","node":"wait"}
+{"seq":38,"ts":1790000000038,"type":"inbox_wait_read","node":"wait","through_seq":12,"examined":3,"end":"matched","output":"declared values"}
+{"seq":39,"ts":1790000000039,"type":"context_compacted","compact_file":"compacted/1.md","model":"m-1","up_to_seq":40}
+{"seq":40,"ts":1790000000040,"type":"decision_made","use_site":"completion_check","node":"work","attempt":1,"provider":"sys","model":"m-1","calibrated":true,"mode":"enforce","questions_digest":"q-digest","state_digest":"s-digest","state_bytes":512,"output_chars":1200,"answers":{"complete":{"value":true,"p":0.9,"confidence":0.9}},"applied":true,"would_change":true,"baseline":{"regex_flag":true,"pattern":"ok"},"latency_ms":320,"input_tokens":100,"cost_usd":0.01,"cost_estimated":true,"cached":true,"error":null,"join":{"wake_seq":12},"item":"item-1","edge_addresses":{"edge_0":"work->done#0"},"privacy_class":"incognito"}
+{"seq":41,"ts":1790000000041,"type":"run_progress","node_id":"work","done":3,"total":5,"label":"scanning"}
+{"seq":42,"ts":1790000000042,"type":"child_run_started","node_id":"child","run_id":"r-3"}
+{"seq":43,"ts":1790000000043,"type":"run_continued_from","from":"r-1"}
+{"seq":44,"ts":1790000000044,"type":"run_superseded_by","by":"r-2"}
+{"seq":45,"ts":1790000000045,"type":"environment_drift_accepted","agent_id":"claude","was":"fp-1","now":"fp-2"}
+{"seq":46,"ts":1790000000046,"type":"connector_call","node_id":"work","connector":"mock-tracker","function":"send_it","account":"main","url":"https://api.example.test/send","outcome":"ok","http_status":200,"duration_ms":120,"smtp_subject":"hello","smtp_recipients":2,"response_complete":true,"pages":2,"attempt":1,"attempt_seq":6,"intent":"intent-1","item":"item-1","tool_digest":"sha256:tool"}
+{"seq":47,"ts":1790000000047,"type":"send_intent_recorded","intent":"intent-1","nonce":"nonce-1","node":"work","attempt":1,"attempt_seq":6,"connector":"mock-tracker","function":"send_it","account":"main","mode":"marker","label":"args:abc","pid":1234,"deadline_ms":65000,"item":"item-1","target_digest":"target-digest"}
+{"seq":48,"ts":1790000000048,"type":"send_intent_settled","intent":"intent-1","outcome":"confirmed","source":"response","detail":"delivered","effect_ref":"msg-1"}
+{"seq":49,"ts":1790000000049,"type":"publish_target_pinned","node":"publish","remote":"origin","url":"https://git.example.test/repo.git","scheme":"https","common_dir":"/tmp/repo/.git"}
+{"seq":50,"ts":1790000000050,"type":"publish_planned","node":"publish","from":"work","from_seq":44,"branch":"main","local_branch":"refs/heads/main","after":"sha256:after","remote_before":"sha256:before","url":"https://git.example.test/repo.git","commits":[{"sha":"abc123","subject":"fix","apb_run":["r-2"],"this_run":true}],"omitted":1,"this_run":1,"outside_push_suspected":true,"plan_digest":"plan-digest","nonce":"nonce-2"}
+{"seq":51,"ts":1790000000051,"type":"inbox_gap","node_id":"wait","connector":"mock-tracker","account":"main","from":3,"through":5}
+{"seq":52,"ts":1790000000052,"type":"node_cache_hit","node":"work","key":"cache-key","source_run":"r-1"}
+{"seq":53,"ts":1790000000053,"type":"node_cache_miss","node":"work","key":"cache-key"}
+{"seq":54,"ts":1790000000054,"type":"node_cache_stored","node":"work","key":"cache-key"}
+{"seq":55,"ts":1790000000055,"type":"node_cache_rejected","node":"work","reason":"not deterministic"}
+{"seq":56,"ts":1790000000056,"type":"output_fields_missing","node":"work","fields":["summary"]}
+{"seq":57,"ts":1790000000057,"type":"session_handoff","node":"next","from_node":"work","warm":true,"mode":"fork"}
+{"seq":58,"ts":1790000000058,"type":"host_task_requested","task_id":"task-1","node":"work","attempt":1,"prompt_ref":"prompts/1.md","role_prompt_ref":"prompts/1-role.md","skills":["rust-skills"],"workdir":"/tmp/work","outputs":{"fields":[]},"deadline_ms":60000,"model_hint":"m-1","hint_source":{"kind":"fallback","index":1,"of":2,"profile":"project/main"},"fallback_of":{"attempt":0,"reason":"transient"},"hint_note":"fallback 1 of 2 of project/main"}
+{"seq":59,"ts":1790000000059,"type":"host_task_submitted","task_id":"task-1","status":"succeeded","output_ref":"outputs/1.md","usage":{"input_tokens":10,"output_tokens":20,"cache_read_tokens":30,"cache_write_tokens":40,"cost_usd":0.5,"source":"reported","cost_basis":"billed"},"submitted_by":"host","client":"claude","note":"fine","model":"m-1"}
+{"seq":60,"ts":1790000000060,"type":"execution_fallback","node":"work","attempt":1,"reason":"no cli"}
+{"seq":61,"ts":1790000000061,"type":"deliverable_missing","node":"work","globs":["report-*.md"],"detail":"unreadable"}
+{"seq":62,"ts":1790000000062,"type":"artifacts_committed","node":"work","before":"sha256:before","after":"sha256:after","commits":[{"sha":"abc123","subject":"fix","apb_run":["r-2"]}],"omitted":1,"branch":"refs/heads/main","attempt":6,"attempts":[{"attempt":6,"head":"sha256:after"}]}
+{"seq":63,"ts":1790000000063,"type":"goal_checked","index":0,"description":"tests pass","check":"script","status":"passed","detail":"all green","enforced":true}
+{"seq":64,"ts":1790000000064,"type":"protected_paths_modified","node":"work","attempt":1,"changes":[{"path":"Cargo.toml","change":"modified"}],"restore_failed":["Cargo.lock"],"kept_copies":"backup/"}
+{"seq":65,"ts":1790000000065,"type":"evidence_bound","node":"work","attempt":1,"check":"success_check","root":"/tmp/work","scope":["src/**"],"fingerprint":"fp"}
+{"seq":66,"ts":1790000000066,"type":"evidence_observed","observations":[{"root":"/tmp/work","scope":["src/**"],"fingerprint":"fp"}]}
+{"seq":67,"ts":1790000000067,"type":"read_only_checked","node":"work","attempt":1,"check":{"tier":"detected_partial","entries":12,"bytes":4096,"partial":"entries"}}
+{"seq":68,"ts":1790000000068,"type":"read_only_violated","node":"work","attempt":1,"tier":"detected","changes":[{"path":"src/main.rs","change":"modified"}],"truncated":2,"evidence":"read_only/work/1.json","concurrent_with":["other"]}
+{"seq":69,"ts":1790000000069,"type":"edge_traversed","from":"work","to":"done","via_policy":true,"uncounted":true,"edges":["work->done#0"]}
+{"seq":70,"ts":1790000000070,"type":"join_input_dead","node":"join","sources":["branch-a"]}
+{"seq":71,"ts":1790000000071,"type":"join_input_revived","node":"join","sources":["branch-a"],"from_node":"work"}
+{"seq":72,"ts":1790000000072,"type":"nodes_revived","from_node":"work","nodes":["join"],"superseded":["work"]}
+{"seq":73,"ts":1790000000073,"type":"branch_failed","fork":"fork","node":"branch-a","policy":"fail_fast","target":"cleanup"}
+{"seq":74,"ts":1790000000074,"type":"branch_cancelled","fork":"fork","node":"branch-b","failed_node":"branch-a"}
+{"seq":75,"ts":1790000000075,"type":"join_refused","node":"join","sources":["branch-a"],"reason":"arrived failed"}
+{"seq":76,"ts":1790000000076,"type":"question_asked","node":"work","question":"proceed?","options":["yes","no"]}
+{"seq":77,"ts":1790000000077,"type":"question_answered","node":"work","answer":"yes","answered_by":"human"}
+{"seq":78,"ts":1790000000078,"type":"run_error","node":"work","reason":"no outgoing edge"}
+{"seq":79,"ts":1790000000079,"type":"baseline_observed","check":"coverage","phase":"before","status":"observed","observations":{"tests":{"state":"value","value":{"type":"number","value":3.5}}},"input_digest":"digest","inputs":["rendered args"],"commands":[{"name":"cargo_test","kind":"cargo_test","argv":["cargo","test"],"source_file":"Cargo.toml"}],"workdir":"/tmp/work","inherited_from":"r-1"}
+{"seq":80,"ts":1790000000080,"type":"follow_up_observed","check":"follow_up","status":"observed","observations":{"tests":{"state":"value","value":{"type":"number","value":3.5}}},"results":[{"observation":"tests","rule":"at least 10","verdict":"met","detail":"11"}],"verdict":"met","finished_seq":5,"due_at_ms":1790000200000,"observed_at_ms":1790000300000,"input_digest":"digest"}
+{"seq":81,"ts":1790000000081,"type":"baseline_compared","check":"coverage","observation":"tests","rule":"at least 10","before":{"state":"value","value":{"type":"number","value":3.5}},"after":{"state":"value","value":{"type":"number","value":3.5}},"verdict":"met","regressed":false,"detail":"stable","enforced":true}
+{"seq":82,"ts":1790000000082,"type":"agent_env_applied","node":"work","attempt":1,"agent":"claude","kept":20,"withheld":["AWS_SECRET"],"withheld_more":2,"absent":["WANT"],"item":"item-1","forced_by":"isolation"}
+{"seq":83,"ts":1790000000083,"type":"attempt_notes","node":"work","attempt":1,"findings":[{"kind":"todo","location":"src/main.rs","evidence":"TODO left","why_not_fixed":"out of scope","workaround":"tracked"}],"warnings":[{"subject":"output","reason":"truncated"}],"dropped":1,"dropped_reasons":["malformed"]}
+{"seq":84,"ts":1790000000084,"type":"tool_exposure_mismatch","node":"work","attempt":1,"agent":"claude","missing_tools":["apb_call"],"missing_servers":["apb"],"unexpected_servers":["other"],"item":"item-1"}
+{"seq":85,"ts":1790000000085,"type":"list_started","node":"list","total":4,"filtered_out":1,"items_digest":"digest","batch_size":2,"parallel":2,"reopened":true,"skip_refused":"scripts changed"}
+{"seq":86,"ts":1790000000086,"type":"list_batch_started","node":"list","batch":1,"items":["one","two"]}
+{"seq":87,"ts":1790000000087,"type":"list_item_settled","node":"list","item":"one","state":"passed","verdict":"pass","note":"fine","output":"{\"ok\":true}","round":2,"carried":true,"check":"output","digest":"digest","skipped_from":"r-1","skip_digest":"skip-digest","skip_latched":"scripts changed","result":{"snapshot_id":"rs-0","entries":1,"bytes":10}}
+{"seq":88,"ts":1790000000088,"type":"list_pilot","node":"list","round":1,"items":["one"]}
+{"seq":89,"ts":1790000000089,"type":"list_stopped","node":"list","reason":"pilot","detail":"the pilot gate said stop"}
+{"seq":90,"ts":1790000000090,"type":"known_problems_shown","shown":[{"id":"kp-1","scope":"src/main.rs","symptom":"slow","workaround":"wait","nodes":["work"],"basis":"model"}],"hidden":[{"id":"kp-2","reason":"over_limit"}],"unsigned":1}
+{"seq":91,"ts":1790000000091,"type":"budget_set","tokens":100000,"usd":1.5,"on_no_estimate":"continue","source":"run","by":"operator","counts_subscription":true}
+{"seq":92,"ts":1790000000092,"type":"budget_gate","node":"work","batch":1,"items":2,"decision":"waived","basis":"operator","need":{"tokens":100.0,"usd":0.5},"remaining":{"tokens":50.0},"spent":{"tokens":{"known":50.0,"unknown_attempts":1,"imputed":25.0}},"by":"operator"}
+{"seq":93,"ts":1790000000093,"type":"notify_set","target":{"connector":"smtp","account":"main","function":"send","to":"person@example.test","connector_digest":"sha256:connector","account_digest":"sha256:account"},"on":["review","finished"],"source":"run","by":"operator","remind_ms":[3600000]}
+{"seq":94,"ts":1790000000094,"type":"retry_deferred","node":"work","after_attempt":6,"retry":1,"step":0,"binding":"bind-0","delay_ms":3600000,"failure_kind":"transient"}
+{"seq":95,"ts":1790000000095,"type":"deferred_retry_guard","open":["work"]}
+{"seq":96,"ts":1790000000096,"type":"check_proved","node":"work","script":"prove.sh","failed_first":true,"on_green_before":"fail","changed_tree":true}
+{"seq":97,"ts":1790000000097,"type":"run_guard","requires":["wait_park","review_fields"]}
+{"seq":98,"ts":1790000000098,"type":"drive_released","wake_at_ms":1790000400000,"nodes":["work"]}
+{"seq":99,"ts":1790000000099,"type":"retry_expedited","node":"work","by":"operator"}

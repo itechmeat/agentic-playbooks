@@ -709,6 +709,8 @@ pub async fn serve_stdio(root: PathBuf, mode: ServeMode) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+mod freeze_tests;
+#[cfg(test)]
 mod read_only_tests;
 #[cfg(test)]
 pub(crate) mod tests;

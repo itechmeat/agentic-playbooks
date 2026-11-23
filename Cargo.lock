@@ -104,7 +104,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "apb"
-version = "1.0.0-beta.7"
+version = "1.0.0-rc.1"
 dependencies = [
  "anyhow",
  "apb-core",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "apb-core"
-version = "1.0.0-beta.7"
+version = "1.0.0-rc.1"
 dependencies = [
  "apb-core",
  "base64 0.23.1",
@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "apb-decide"
-version = "1.0.0-beta.7"
+version = "1.0.0-rc.1"
 dependencies = [
  "apb-decide",
  "serde",
@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "apb-engine"
-version = "1.0.0-beta.7"
+version = "1.0.0-rc.1"
 dependencies = [
  "apb-core",
  "apb-decide",
@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "apb-mcp"
-version = "1.0.0-beta.7"
+version = "1.0.0-rc.1"
 dependencies = [
  "anyhow",
  "apb-core",
@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "apb-mcp-client"
-version = "1.0.0-beta.7"
+version = "1.0.0-rc.1"
 dependencies = [
  "apb-core",
  "apb-mcp-client",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "apb-server"
-version = "1.0.0-beta.7"
+version = "1.0.0-rc.1"
 dependencies = [
  "apb-core",
  "apb-engine",
@@ -1260,9 +1260,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -4028,9 +4028,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",
