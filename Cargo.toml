@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/apb-core", "crates/apb-decide", "crates/apb-mcp-client", "crates/apb-server", "crates/apb-cli", "crates/apb-engine", "crates/apb-mcp"]
 
 [workspace.package]
-version = "1.0.0-rc.1"
+version = "1.0.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/itechmeat/agentic-playbooks"
@@ -24,12 +24,12 @@ lto = "thin"
 [workspace.dependencies]
 # Internal crates: published under these package names; the version is exact
 # because they are released together and are not a public API.
-apb-core = { package = "agentic-playbooks-core", path = "crates/apb-core", version = "=1.0.0-rc.1" }
-apb-decide = { package = "agentic-playbooks-decide", path = "crates/apb-decide", version = "=1.0.0-rc.1" }
-apb-engine = { package = "agentic-playbooks-engine", path = "crates/apb-engine", version = "=1.0.0-rc.1" }
-apb-mcp = { package = "agentic-playbooks-mcp", path = "crates/apb-mcp", version = "=1.0.0-rc.1" }
-apb-mcp-client = { package = "agentic-playbooks-mcp-client", path = "crates/apb-mcp-client", version = "=1.0.0-rc.1" }
-apb-server = { package = "agentic-playbooks-server", path = "crates/apb-server", version = "=1.0.0-rc.1" }
+apb-core = { package = "agentic-playbooks-core", path = "crates/apb-core", version = "=1.0.0" }
+apb-decide = { package = "agentic-playbooks-decide", path = "crates/apb-decide", version = "=1.0.0" }
+apb-engine = { package = "agentic-playbooks-engine", path = "crates/apb-engine", version = "=1.0.0" }
+apb-mcp = { package = "agentic-playbooks-mcp", path = "crates/apb-mcp", version = "=1.0.0" }
+apb-mcp-client = { package = "agentic-playbooks-mcp-client", path = "crates/apb-mcp-client", version = "=1.0.0" }
+apb-server = { package = "agentic-playbooks-server", path = "crates/apb-server", version = "=1.0.0" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 yaml_serde = "0.10.7"

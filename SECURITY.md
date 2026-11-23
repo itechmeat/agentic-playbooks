@@ -77,3 +77,24 @@ steps (two more by default, which do not advance `max_retries`), plus one per
 question and answer round under `reprompt` or `resume` interaction. Stored
 bodies are kept at mode 0600 under the global config directory and are never
 written to a run's event log or to stdout.
+
+## Running the dashboard on a server
+
+By default the dashboard binds `127.0.0.1` with no authentication, which is safe
+only because nothing off the machine can reach it. To run it on a server, issue
+an authorization key and put it behind a reverse proxy that terminates TLS:
+
+```sh
+apb server key issue     # printed once, stored only as a hash
+apb dashboard --no-open  # keep the loopback bind, let the proxy reach it
+```
+
+With at least one key present, every `/api` route requires either
+`Authorization: Bearer apb_...` or a session cookie obtained by signing in
+through the dashboard. Binding a non-loopback address with no key configured is
+refused at startup. The full runbook, including Caddy and nginx examples, a
+systemd unit, and a fail2ban filter, is in
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+Do not expose `apb mcp` to untrusted users; it speaks stdio and has no
+authentication of its own.

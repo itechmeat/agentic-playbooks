@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agentic-playbooks-core"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "agentic-playbooks-core",
  "base64 0.23.1",
@@ -38,7 +38,7 @@ dependencies = [
 
 [[package]]
 name = "agentic-playbooks-decide"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "agentic-playbooks-decide",
  "serde",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "agentic-playbooks-engine"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "agentic-playbooks-core",
  "agentic-playbooks-decide",
@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "agentic-playbooks-mcp"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "agentic-playbooks-core",
  "agentic-playbooks-decide",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "agentic-playbooks-mcp-client"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "agentic-playbooks-core",
  "agentic-playbooks-mcp-client",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "agentic-playbooks-server"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "agentic-playbooks-core",
  "agentic-playbooks-engine",
@@ -252,7 +252,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "apb"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "agentic-playbooks-core",
  "agentic-playbooks-engine",

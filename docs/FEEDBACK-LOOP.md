@@ -34,3 +34,26 @@ itechmeat/agentic-playbooks`.
 Attach the run id and any relevant lines from `runs/<id>/events.jsonl` when
 they make the report reproducible. Never include secrets, tokens, or private
 prompt content in an issue.
+
+## The block for your project
+
+The most valuable reports come from real supervised runs. If you drive
+playbooks through a coding agent, add the block below to your `CLAUDE.md` or
+`AGENTS.md` so the agent reports what it hits (`apb init` offers to add it for
+you).
+
+```markdown
+## apb feedback loop (standing instruction)
+
+apb (agentic-playbooks) is under active development. On every playbook run you
+supervise from this workspace, collect flaws, bugs, and improvement ideas that
+belong to apb itself (the MCP server, the playbook engine, the validator, the
+supervisor tools, the run lifecycle). Keep those separate from problems that
+belong to this project's own playbooks, profiles, or prompts.
+
+When the run is finished and the list is not empty, follow the reporting
+instruction in
+https://github.com/itechmeat/agentic-playbooks/blob/main/docs/FEEDBACK-LOOP.md
+to check existing issues and file one consolidated issue for the run. Never
+include secrets, tokens, or private prompt content in an issue.
+```

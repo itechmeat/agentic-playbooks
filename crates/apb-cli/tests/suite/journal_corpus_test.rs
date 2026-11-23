@@ -5,8 +5,9 @@
 //! The in-binary tests (`apb-engine`'s `journal_compat_test.rs`) check what
 //! this build does with a journal shape; only a released binary can show what
 //! an older apb does with a journal this build wrote, and the other way
-//! round. Three released readers matter: `v1.0.0-beta.1`, `v0.25.0` and
-//! the freeze reader `v1.0.0-beta.7` (rows F1 and F2).
+//! round. Four released readers matter: `v1.0.0-beta.1`, `v0.25.0`, the
+//! freeze reader `v1.0.0-beta.7` (rows F1 and F2) and the release
+//! candidate `v1.0.0-rc.1` (rows R1 and R2).
 //!
 //! The old binaries come from `APB_OLD_BINARIES`, a directory holding
 //! `<tag>/apb`, built by `scripts/old-apb.sh <tag> <dir>`. Without them each
@@ -185,9 +186,10 @@ use crate::common::RunGuard;
 const BETA1: &str = "v1.0.0-beta.1";
 const V025: &str = "v0.25.0";
 /// The freeze reader: the newest published release when the freeze was
-/// written. rc.1 and 1.0.0 join as readers with release-1.0.0, after
-/// their tags exist.
+/// written.
 const FREEZE_READER: &str = "v1.0.0-beta.7";
+/// The release candidate of 1.0.0, the first release with the freeze.
+const RC1: &str = "v1.0.0-rc.1";
 
 /// The writer playbook and the sub-playbook it calls.
 const PLAYBOOKS: [&str; 2] = ["corpus", "corpus-child"];
@@ -1142,6 +1144,30 @@ fn rowf1_freeze_reader_writer_new_reader() {
 fn rowf2_new_writer_freeze_reader() {
     let mut case = Case::new("row F2");
     let Some(old) = old_binary(FREEZE_READER, &case) else {
+        return;
+    };
+    let run = case.write_waiting_at_review(&new_binary());
+    case.read_resume_stop(&old, &run);
+}
+
+/// Row R1: the release candidate (rc.1) is the writer; the new binary
+/// reads, resumes to the end and stops.
+#[test]
+fn rowr1_rc1_writer_new_reader() {
+    let mut case = Case::new("row R1");
+    let Some(old) = old_binary(RC1, &case) else {
+        return;
+    };
+    let run = case.write_waiting_at_review(&old);
+    case.read_resume_stop(&new_binary(), &run);
+}
+
+/// Row R2: the new binary writes a run waiting at review; the release
+/// candidate reads, resumes to the end and stops.
+#[test]
+fn rowr2_new_writer_rc1_reader() {
+    let mut case = Case::new("row R2");
+    let Some(old) = old_binary(RC1, &case) else {
         return;
     };
     let run = case.write_waiting_at_review(&new_binary());

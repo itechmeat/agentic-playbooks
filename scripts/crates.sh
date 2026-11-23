@@ -89,11 +89,18 @@ cd "${root}"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/crates-sh.XXXXXX")"
 renamed=0
+# The scratch directories of `installed`. They are global, not local to
+# cmd_installed: the EXIT trap runs after the function returned, when its
+# locals are gone and `set -u` would fail on them.
+installed_home=""
+installed_dest=""
 cleanup() {
   if [ "${renamed}" = 1 ]; then
     git_plain checkout -- crates/apb-cli/Cargo.toml Cargo.lock
   fi
   rm -rf "${work}"
+  if [ -n "${installed_home}" ]; then rm -rf "${installed_home}"; fi
+  if [ -n "${installed_dest}" ]; then rm -rf "${installed_dest}"; fi
 }
 trap cleanup EXIT
 
@@ -548,14 +555,13 @@ cmd_publish() {
 
 cmd_installed() {
   [ "$#" = 1 ] || usage
-  local version="$1" base home dest printed
+  local version="$1" base printed
   base="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
-  home="$(mktemp -d "${base}/crates-installed-home.XXXXXX")"
-  dest="$(mktemp -d "${base}/crates-installed-root.XXXXXX")"
-  trap 'rm -rf "${home}" "${dest}"; cleanup' EXIT
-  CARGO_HOME="${home}" cargo install --locked agentic-playbooks --version "${version}" --root "${dest}" \
+  installed_home="$(mktemp -d "${base}/crates-installed-home.XXXXXX")"
+  installed_dest="$(mktemp -d "${base}/crates-installed-root.XXXXXX")"
+  CARGO_HOME="${installed_home}" cargo install --locked agentic-playbooks --version "${version}" --root "${installed_dest}" \
     || die "cargo install --locked agentic-playbooks --version ${version} failed: the published release does not install"
-  printed="$("${dest}/bin/apb" --version)" || die "the installed apb did not run"
+  printed="$("${installed_dest}/bin/apb" --version)" || die "the installed apb did not run"
   [ "${printed}" = "apb ${version}" ] || die "the installed apb prints '${printed}', not 'apb ${version}'"
   echo "installed agentic-playbooks ${version}: ${printed}"
 }
