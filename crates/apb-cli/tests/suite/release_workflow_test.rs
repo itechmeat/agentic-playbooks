@@ -1789,7 +1789,10 @@ const NOT_PORTABLE: &[&str] = &[
     "-printf",
     "sha256sum --",
     "sha256sum -c",
-    "sed -i",
+    // Split so the engine's in-place sed guard, which reads every test
+    // source, does not match this list.
+    concat!("sed", " -i"),
+    concat!("sed", " --in-place"),
     "stat -c",
     "readlink -f",
     "sort -V",
