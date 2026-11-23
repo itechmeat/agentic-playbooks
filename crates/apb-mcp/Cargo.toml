@@ -1,14 +1,21 @@
 [package]
-name = "apb-mcp"
+name = "agentic-playbooks-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Internal crate of the apb command (crate agentic-playbooks): the MCP server and its tools. Not a public API; it changes in any release."
+include = ["src/**", "embedded/**", "LICENSE"]
+
+[lib]
+name = "apb_mcp"
 
 [dependencies]
-apb-core = { path = "../apb-core" }
-apb-engine = { path = "../apb-engine" }
-apb-decide = { path = "../apb-decide" }
+apb-core.workspace = true
+apb-engine.workspace = true
+apb-decide.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 yaml_serde.workspace = true
@@ -34,10 +41,10 @@ testing = []
 
 [dev-dependencies]
 # The crate's own `testing` seams for its integration tests.
-apb-mcp = { path = ".", features = ["testing"] }
+apb-mcp = { package = "agentic-playbooks-mcp", path = ".", features = ["testing"] }
 # `apb_core::process_mode::testing`: guard tests in a read-only child process.
 # `apb_engine::deadline_hooks`: a test holds the fire at the key's admission.
-apb-core = { path = "../apb-core", features = ["testing"] }
-apb-decide = { path = "../apb-decide", features = ["testing"] }
-apb-engine = { path = "../apb-engine", features = ["testing"] }
+apb-core = { package = "agentic-playbooks-core", path = "../apb-core", features = ["testing"] }
+apb-decide = { package = "agentic-playbooks-decide", path = "../apb-decide", features = ["testing"] }
+apb-engine = { package = "agentic-playbooks-engine", path = "../apb-engine", features = ["testing"] }
 tempfile = "3.27.0"

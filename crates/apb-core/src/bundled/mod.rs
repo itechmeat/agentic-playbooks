@@ -172,9 +172,10 @@ impl InstallState {
 }
 
 /// The embedded `bundled/` tree, baked in at build time (release) or read
-/// from the repository folder at run time (debug).
+/// from the repository folder at run time (debug). `embedded/bundled` is a
+/// committed link to the root `bundled/`, which packaging resolves into files.
 #[derive(rust_embed::Embed)]
-#[folder = "../../bundled"]
+#[folder = "embedded/bundled"]
 struct BundledAssets;
 
 /// The id prefix reserved for the playbooks, skills and role profiles apb

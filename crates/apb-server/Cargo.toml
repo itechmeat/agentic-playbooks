@@ -1,12 +1,19 @@
 [package]
-name = "apb-server"
+name = "agentic-playbooks-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Internal crate of the apb command (crate agentic-playbooks): the dashboard web API with the built dashboard. Not a public API; it changes in any release."
+include = ["src/**", "build.rs", "dashboard/**", "LICENSE"]
+
+[lib]
+name = "apb_server"
 
 [dependencies]
-apb-core = { path = "../apb-core" }
+apb-core.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -14,7 +21,6 @@ yaml_serde.workspace = true
 thiserror.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5.3"
-tower-http = { version = "0.7", features = ["cors"] }
 hyper-util = { version = "0.1.20", features = [
     "server-auto",
     "server-graceful",
@@ -25,8 +31,8 @@ notify = "8.2"
 uuid = { version = "1.23.4", features = ["v4"] }
 rust-embed = "8.12"
 mime_guess = "2.0.5"
-apb-engine = { version = "1.0.0-rc.1", path = "../apb-engine" }
-apb-mcp = { version = "1.0.0-rc.1", path = "../apb-mcp" }
+apb-engine.workspace = true
+apb-mcp.workspace = true
 # Self-contained WebAuthn passkey verification (module `webauthn`): ES256 and
 # EdDSA public-key verification over COSE keys, CBOR parsing for the
 # attestation object, and SHA-256 for the authenticator data hash. No
@@ -45,13 +51,13 @@ base64.workspace = true
 [dev-dependencies]
 # The generated-TypeScript contract test (`src/ts_contract.rs`) needs the run
 # types' and the trash types' TS derives.
-apb-engine = { version = "1.0.0-rc.1", path = "../apb-engine", features = ["ts"] }
-apb-core = { path = "../apb-core", features = ["ts", "testing"] }
-apb-mcp = { version = "1.0.0-rc.1", path = "../apb-mcp", features = ["ts"] }
+apb-engine = { package = "agentic-playbooks-engine", path = "../apb-engine", features = ["ts"] }
+apb-core = { package = "agentic-playbooks-core", path = "../apb-core", features = ["ts", "testing"] }
+apb-mcp = { package = "agentic-playbooks-mcp", path = "../apb-mcp", features = ["ts"] }
 ts-rs = "12"
 http-body-util = "0.1.3"
 tempfile = "3.27.0"
 tower = "0.5.3"
 # The scripted stdio MCP server of the MCP connector tests; a test build
 # only (the feature refuses a build without debug assertions).
-apb-mcp-client = { path = "../apb-mcp-client", features = ["testing"] }
+apb-mcp-client = { package = "agentic-playbooks-mcp-client", path = "../apb-mcp-client", features = ["testing"] }

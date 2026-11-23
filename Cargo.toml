@@ -7,6 +7,8 @@ version = "1.0.0-rc.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/itechmeat/agentic-playbooks"
+homepage = "https://github.com/itechmeat/agentic-playbooks"
+rust-version = "1.99"
 
 # Light debug info for iterative builds: backtraces keep file and line, but
 # the linker stops packaging full debug info into every test binary (the most
@@ -20,6 +22,14 @@ inherits = "release"
 lto = "thin"
 
 [workspace.dependencies]
+# Internal crates: published under these package names; the version is exact
+# because they are released together and are not a public API.
+apb-core = { package = "agentic-playbooks-core", path = "crates/apb-core", version = "=1.0.0-rc.1" }
+apb-decide = { package = "agentic-playbooks-decide", path = "crates/apb-decide", version = "=1.0.0-rc.1" }
+apb-engine = { package = "agentic-playbooks-engine", path = "crates/apb-engine", version = "=1.0.0-rc.1" }
+apb-mcp = { package = "agentic-playbooks-mcp", path = "crates/apb-mcp", version = "=1.0.0-rc.1" }
+apb-mcp-client = { package = "agentic-playbooks-mcp-client", path = "crates/apb-mcp-client", version = "=1.0.0-rc.1" }
+apb-server = { package = "agentic-playbooks-server", path = "crates/apb-server", version = "=1.0.0-rc.1" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 yaml_serde = "0.10.7"
@@ -49,11 +59,6 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 # 2): blocking client over a plaintext or rustls stream, silent-read discipline
 # (BODY.PEEK, EXAMINE) enforced by the engine.
 imap = { version = "2.4", default-features = false }
-# The envelope/address types `imap::types::Fetch::envelope` returns are defined
-# in imap-proto and are not re-exported by the imap crate, so naming them in
-# the search-result decoder needs this direct dependency (version matched to
-# imap 2.4's transitive pin).
-imap-proto = "0.17"
 mail-parser = "1.0"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7"

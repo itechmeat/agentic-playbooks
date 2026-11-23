@@ -1,10 +1,16 @@
 [package]
-name = "apb-decide"
+name = "agentic-playbooks-decide"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Provider-agnostic client for decision models (typed choice, score and noul questions over a text state)"
+homepage.workspace = true
+rust-version.workspace = true
+description = "Internal crate of the apb command (crate agentic-playbooks): the decision model client. Not a public API; it changes in any release."
+include = ["src/**", "LICENSE"]
+
+[lib]
+name = "apb_decide"
 
 [dependencies]
 serde.workspace = true
@@ -21,4 +27,4 @@ ureq.workspace = true
 testing = []
 
 [dev-dependencies]
-apb-decide = { path = ".", features = ["testing"] }
+apb-decide = { package = "agentic-playbooks-decide", path = ".", features = ["testing"] }

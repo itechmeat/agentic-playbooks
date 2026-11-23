@@ -23,6 +23,11 @@ export default defineConfig({
   plugins: [...(process.env.VITEST ? [] : [tailwindcss()]), svelte()],
   build: {
     assetsInlineLimit: inlineAsset,
+    // The server crate embeds this directory (rust-embed in
+    // crates/apb-server/src/assets.rs), and its published package ships it.
+    // It is outside vite's root, so vite empties it only when told to.
+    outDir: '../crates/apb-server/dashboard',
+    emptyOutDir: true,
   },
   resolve: {
     alias: {

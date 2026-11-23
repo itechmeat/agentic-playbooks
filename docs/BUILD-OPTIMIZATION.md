@@ -23,10 +23,18 @@ run tests exactly what a change can affect.
 During a task, run tests only for the crates the change can affect: the
 crate you touched plus its dependents.
 
-- Touched `apb-server` or `apb-cli` only: `cargo test -p <that-crate>`.
-- Touched `apb-mcp`: `cargo test -p apb-mcp` (nothing depends on it except
-  the cli/server binaries; add them only when their code consumed the change).
-- Touched `apb-engine`: `cargo test -p apb-engine -p apb-mcp -p apb-server`.
+- Touched `apb-server` or `apb-cli` only: `cargo test -p
+  agentic-playbooks-server` or `cargo test -p apb`.
+- Touched `apb-mcp`: `cargo test -p agentic-playbooks-mcp` (nothing depends
+  on it except the cli/server binaries; add them only when their code
+  consumed the change).
+- Touched `apb-engine`: `cargo test -p agentic-playbooks-engine -p
+  agentic-playbooks-mcp -p agentic-playbooks-server`.
+
+The six library crates are the packages `agentic-playbooks-core`,
+`-engine`, `-server`, `-mcp`, `-mcp-client` and `-decide` (their
+directories and import names stay `apb-*` and `apb_*`); the CLI package is
+`apb`.
 - Touched `apb-core`: scoped runs still help while iterating (fail fast on
   the changed crate first), but finish with the full workspace run below.
 
@@ -172,8 +180,8 @@ against a 6-hour ceiling.
   30s on every run for everyone. Choose the shortest duration that still
   distinguishes pass from fail.
 - Do not split the CI job to parallelize unless the split is genuinely
-  cheap. Here it is not: `web/dist` is gitignored and rust-embed depends
-  on it, so every cargo step needs the bun build first, and splitting
+  cheap. Here it is not: `crates/apb-server/dashboard` is gitignored and
+  rust-embed depends on it, so every cargo step needs the bun build first, and splitting
   would duplicate the whole pipeline for no gain.
 - The macOS binary-spawn cost from rule 8 still argues for one integration
   binary per crate. nextest changes the per-test cost, not the per-binary

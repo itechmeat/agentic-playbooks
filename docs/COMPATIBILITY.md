@@ -39,6 +39,12 @@ summarizes.
    history, the `candidate` pointer, the provenance sidecar
    (`created_by` included), the trust store and the launch floor store
    written by 1.0 still read with the same meaning.
+7. The install channels. The crate `agentic-playbooks` on crates.io
+   installs the binary `apb` (`cargo install --locked agentic-playbooks`).
+   The shell installer `apb-installer.sh` at
+   `https://github.com/itechmeat/agentic-playbooks/releases/latest/download/apb-installer.sh`,
+   the Homebrew formula `apb`, the archives `apb-<target>.tar.xz` and
+   `apb self-update` of an installer install keep their names.
 
 ## Deprecation
 
@@ -57,7 +63,13 @@ and `best_effort` runs without a sandbox, for the whole 1.x line
 The compatibility freeze does not cover: scenario files, eval cases and
 suites; the dashboard's HTTP routes and payloads (also where they share
 code with MCP); the CLI's text and JSON output; `diagnostics.jsonl`; the
-generated TypeScript; the Rust API of the crates; the results of MCP
+generated TypeScript; the Rust API of the crates, including the
+six `agentic-playbooks-*` library crates on crates.io, which are internal
+to the `apb` command (any item may change in any release, and the crates
+may be merged or retired); the minimum Rust version of `cargo install`
+(the `rust-version` of the release, checked by the CI job `msrv`), which
+may rise in a minor release; the native build tools a cargo install needs
+(a C compiler and linker); the results of MCP
 tools the host integration does not list, and result variants no document
 names; the values (not the keys) of a frozen result other than the
 machine codes; files signed by other means than `SignedDoc` (grade files,
@@ -125,11 +137,11 @@ Every frozen group except the journal has one writer test, run with the
 switch set:
 
 ```sh
-APB_WRITE_FREEZE=1 cargo test -p apb-core --test main schema_freeze_test::write_freeze
-APB_WRITE_FREEZE=1 cargo test -p apb-core --test main files_freeze_test::write_freeze
-APB_WRITE_FREEZE=1 cargo test -p apb-engine --test main persistence_freeze_test::write_freeze
-APB_WRITE_FREEZE=1 cargo test -p apb-mcp --lib server::freeze_tests::write_freeze
-APB_WRITE_FREEZE=1 cargo test -p apb-core --test main store_freeze_test::write_freeze
+APB_WRITE_FREEZE=1 cargo test -p agentic-playbooks-core --test main schema_freeze_test::write_freeze
+APB_WRITE_FREEZE=1 cargo test -p agentic-playbooks-core --test main files_freeze_test::write_freeze
+APB_WRITE_FREEZE=1 cargo test -p agentic-playbooks-engine --test main persistence_freeze_test::write_freeze
+APB_WRITE_FREEZE=1 cargo test -p agentic-playbooks-mcp --lib server::freeze_tests::write_freeze
+APB_WRITE_FREEZE=1 cargo test -p agentic-playbooks-core --test main store_freeze_test::write_freeze
 ```
 
 The switch only adds: a frozen line, key or file is never removed, and a

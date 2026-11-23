@@ -849,3 +849,920 @@ fn testing_features_stay_in_test_builds() {
         "the crates that define a testing feature were found: {defining}"
     );
 }
+
+/// The aggregate check the main ruleset requires runs under `!cancelled()`,
+/// so it also runs after a job it needs failed; it fails only on what its
+/// step compares. Every job it needs therefore has its own variable and its
+/// own comparison, the packaging job `crates` and the minimum Rust version
+/// job `msrv` included.
+#[cfg(unix)]
+#[test]
+fn the_required_check_fails_unless_every_linux_job_succeeded() {
+    let doc = load(&repo_root().join(".github/workflows/ci.yml"));
+    let job = doc
+        .get("jobs")
+        .and_then(|j| j.get("build-and-test"))
+        .expect("the build-and-test job");
+    let mut needed = needs(job);
+    needed.sort();
+    assert_eq!(
+        needed,
+        [
+            "crates",
+            "journal-corpus",
+            "lint",
+            "msrv",
+            "test-linux",
+            "web"
+        ],
+        "build-and-test needs every Linux job"
+    );
+    assert_eq!(condition(job), "${{ !cancelled() }}");
+    let steps = Release::steps(job);
+    assert_eq!(steps.len(), 1, "one comparing step");
+    let env = steps[0]
+        .get("env")
+        .and_then(Value::as_mapping)
+        .expect("the step env");
+    let mut mapped: Vec<(String, String)> = env
+        .iter()
+        .map(|(k, v)| {
+            let value = v.as_str().expect("env value");
+            let job = value
+                .strip_prefix("${{ needs.")
+                .and_then(|s| s.strip_suffix(".result }}"))
+                .unwrap_or_else(|| panic!("{value} maps a job result"));
+            (job.to_string(), k.as_str().expect("env name").to_string())
+        })
+        .collect();
+    mapped.sort();
+    let jobs: Vec<&str> = mapped.iter().map(|(j, _)| j.as_str()).collect();
+    assert_eq!(jobs, needed, "one variable per needed job and nothing else");
+
+    let script = run_of(steps[0]);
+    let run = |failing: Option<(&str, &str)>| -> bool {
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c").arg(script);
+        for (_, var) in &mapped {
+            let value = match failing {
+                Some((v, result)) if v == var => result,
+                _ => "success",
+            };
+            cmd.env(var, value);
+        }
+        cmd.output().expect("run bash").status.success()
+    };
+    assert!(run(None), "every job succeeded");
+    for (_, var) in &mapped {
+        for result in ["failure", "cancelled", "skipped"] {
+            assert!(
+                !run(Some((var, result))),
+                "{var}={result} fails the required check"
+            );
+        }
+    }
+}
+
+/// The minimum Rust version is checked, not assumed: the `msrv` job reads
+/// `rust-version` from `[workspace.package]` of Cargo.toml (the workflow
+/// repeats no version), installs exactly that toolchain, exports it as
+/// RUSTUP_TOOLCHAIN over rust-toolchain.toml's `stable`, and checks the
+/// workspace with the locked dependencies.
+#[cfg(unix)]
+#[test]
+fn the_msrv_job_checks_the_rust_version_of_cargo_toml() {
+    let root = repo_root();
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo.toml");
+    let mut section = "";
+    let mut declared = None;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            section = line;
+        } else if section == "[workspace.package]"
+            && let Some(value) = line.strip_prefix("rust-version = ")
+        {
+            declared = Some(value.trim_matches('"').to_string());
+        }
+    }
+    let declared = declared.expect("[workspace.package] rust-version");
+
+    let text = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let doc = load(&root.join(".github/workflows/ci.yml"));
+    let job = doc
+        .get("jobs")
+        .and_then(|j| j.get("msrv"))
+        .expect("the msrv job");
+    let job_text = text
+        .split("\n  msrv:\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n  test-linux:\n").next())
+        .expect("the msrv job text");
+    assert!(
+        !job_text.contains(&format!("\"{declared}\""))
+            && !job_text.contains(&format!(" {declared}\n")),
+        "the msrv job repeats no literal version"
+    );
+
+    let steps = Release::steps(job);
+    let read = steps
+        .iter()
+        .find(|s| s.get("id").and_then(Value::as_str) == Some("msrv"))
+        .expect("the step that reads rust-version");
+    let dir = std::env::temp_dir().join(format!("apb-msrv-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let output = dir.join("output");
+    let env = dir.join("env");
+    let status = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(run_of(read))
+        .current_dir(&root)
+        .env("GITHUB_OUTPUT", &output)
+        .env("GITHUB_ENV", &env)
+        .status()
+        .expect("run bash");
+    let written_output = std::fs::read_to_string(&output).unwrap_or_default();
+    let written_env = std::fs::read_to_string(&env).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(status.success(), "the read step succeeds");
+    assert_eq!(written_output, format!("version={declared}\n"));
+    assert_eq!(written_env, format!("RUSTUP_TOOLCHAIN={declared}\n"));
+
+    let install = steps
+        .iter()
+        .find(|s| step_uses(s).starts_with("dtolnay/rust-toolchain@"))
+        .expect("the toolchain install");
+    assert_eq!(
+        install
+            .get("with")
+            .and_then(|w| w.get("toolchain"))
+            .and_then(Value::as_str),
+        Some("${{ steps.msrv.outputs.version }}")
+    );
+    let check = steps
+        .iter()
+        .map(|s| run_of(s))
+        .find(|r| r.contains("cargo check"))
+        .expect("the check step");
+    assert!(
+        check
+            .lines()
+            .any(|l| l.trim() == "cargo check --workspace --locked"),
+        "the check is `cargo check --workspace --locked`"
+    );
+}
+
+// Crates publication. `publish-crates.yml` follows every completed Release
+// run like the notes workflow, in three jobs: `prepare` (no credential)
+// builds and checks, `publish` (the only job that can hold one) runs no code
+// of the tagged checkout but the publish script, `installed` (no credential)
+// installs the published version.
+
+const CRATES_WORKFLOW: &str = ".github/workflows/publish-crates.yml";
+
+fn crates_doc() -> Value {
+    load(&repo_root().join(CRATES_WORKFLOW))
+}
+
+fn crates_job<'a>(doc: &'a Value, id: &str) -> &'a Value {
+    doc.get("jobs")
+        .and_then(|j| j.get(id))
+        .unwrap_or_else(|| panic!("publish-crates.yml job {id}"))
+}
+
+fn step_name(step: &Value) -> &str {
+    step.get("name").and_then(Value::as_str).unwrap_or_default()
+}
+
+fn step_uses(step: &Value) -> &str {
+    step.get("uses").and_then(Value::as_str).unwrap_or_default()
+}
+
+/// The `run` script of the named step of a publish-crates job.
+fn crates_step(job: &str, name: &str) -> String {
+    let doc = crates_doc();
+    Release::steps(crates_job(&doc, job))
+        .into_iter()
+        .find(|s| step_name(s) == name)
+        .map(|s| run_of(s).to_string())
+        .unwrap_or_else(|| panic!("{job} has a step named {name:?}"))
+}
+
+/// The seven crate names in the publish order of `scripts/crates.sh`.
+fn crates_order() -> Vec<String> {
+    let script =
+        std::fs::read_to_string(repo_root().join("scripts/crates.sh")).expect("read crates.sh");
+    let line = script
+        .lines()
+        .find_map(|l| l.strip_prefix("PUBLISH_ORDER=\""))
+        .expect("the PUBLISH_ORDER line");
+    line.trim_end_matches('"')
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
+const MAIN_CHECK: &str = "The tagged commit is on main";
+const RELEASE_CHECK: &str = "The GitHub release exists and is not a draft";
+const TAG_CHECK: &str = "Verify the tag of the Release run";
+
+#[test]
+fn crates_follow_every_completed_release_run() {
+    let root = repo_root();
+    let doc = crates_doc();
+    let release_name = load(&root.join(".github/workflows/release.yml"))
+        .get("name")
+        .and_then(Value::as_str)
+        .expect("release.yml name")
+        .to_string();
+    let trigger = doc
+        .get("on")
+        .and_then(|o| o.get("workflow_run"))
+        .expect("publish-crates.yml runs on workflow_run");
+    let list = |key: &str| -> Vec<String> {
+        trigger
+            .get(key)
+            .and_then(Value::as_sequence)
+            .map(|s| {
+                s.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert_eq!(list("workflows"), vec![release_name]);
+    assert_eq!(list("types"), vec!["completed".to_string()]);
+    assert_eq!(
+        doc.get("on").and_then(Value::as_mapping).map(|m| m.len()),
+        Some(1),
+        "workflow_run is the only trigger"
+    );
+    assert!(
+        doc.get("permissions")
+            .and_then(Value::as_mapping)
+            .is_some_and(|m| m.is_empty()),
+        "top-level permissions must be {{}}"
+    );
+    let concurrency = doc.get("concurrency").expect("concurrency");
+    assert_eq!(
+        concurrency.get("group").and_then(Value::as_str),
+        Some("publish-crates")
+    );
+    assert_eq!(
+        concurrency
+            .get("cancel-in-progress")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+
+    let jobs = doc.get("jobs").and_then(Value::as_mapping).expect("jobs");
+    let mut ids: Vec<&str> = jobs.keys().filter_map(Value::as_str).collect();
+    ids.sort();
+    assert_eq!(ids, ["installed", "prepare", "publish"]);
+    assert!(needs(crates_job(&doc, "prepare")).is_empty());
+    assert_eq!(needs(crates_job(&doc, "publish")), ["prepare"]);
+    let mut installed_needs = needs(crates_job(&doc, "installed"));
+    installed_needs.sort();
+    assert_eq!(installed_needs, ["prepare", "publish"]);
+
+    let perms = |id: &str| -> Vec<(String, String)> {
+        let mut p: Vec<(String, String)> = crates_job(&doc, id)
+            .get("permissions")
+            .and_then(Value::as_mapping)
+            .unwrap_or_else(|| panic!("{id} permissions"))
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().expect("key").to_string(),
+                    v.as_str().expect("value").to_string(),
+                )
+            })
+            .collect();
+        p.sort();
+        p
+    };
+    // crates.io does not accept trusted publishing from a `workflow_run`
+    // workflow: publication uses the environment's token, and no job can
+    // request an identity token.
+    let read = vec![("contents".to_string(), "read".to_string())];
+    for id in ["prepare", "publish", "installed"] {
+        assert_eq!(perms(id), read, "{id}");
+    }
+    assert!(
+        !yaml_serde::to_string(&doc)
+            .expect("yaml")
+            .contains("id-token"),
+        "no job requests id-token: write"
+    );
+    for id in ["prepare", "publish", "installed"] {
+        let env = crates_job(&doc, id).get("environment");
+        if id == "publish" {
+            assert_eq!(env.and_then(Value::as_str), Some("crates-io"));
+        } else {
+            assert!(env.is_none(), "{id} has no environment");
+        }
+    }
+    assert_eq!(
+        crates_job(&doc, "prepare")
+            .get("outputs")
+            .and_then(|o| o.get("nothing_to_publish"))
+            .and_then(Value::as_str),
+        Some("${{ steps.plan.outputs.nothing_to_publish }}")
+    );
+    let plan = Release::steps(crates_job(&doc, "prepare"))
+        .into_iter()
+        .find(|s| s.get("id").and_then(Value::as_str) == Some("plan"))
+        .expect("a step with id plan");
+    assert!(run_of(plan).contains("crates.sh preflight"));
+}
+
+#[test]
+fn the_crates_job_conditions_admit_a_pre_release_and_refuse_a_pull_request() {
+    let doc = crates_doc();
+    let notes = condition(&notes_job().1);
+    let prepare = condition(crates_job(&doc, "prepare"));
+    assert_eq!(
+        prepare, notes,
+        "prepare runs exactly when the notes job runs"
+    );
+    assert_eq!(
+        condition(crates_job(&doc, "publish")),
+        format!("{notes} && needs.prepare.outputs.nothing_to_publish != 'true'")
+    );
+    assert_eq!(
+        condition(crates_job(&doc, "installed")),
+        format!(
+            "!cancelled() && {notes} && needs.prepare.result == 'success' && \
+             (needs.publish.result == 'success' || (needs.publish.result == 'skipped' && \
+             needs.prepare.outputs.nothing_to_publish == 'true'))"
+        )
+    );
+    let pre = release_run("push", "success", REPO, "v1.0.0-rc.1");
+    assert!(
+        eval_condition(&prepare, &pre),
+        "a pre-release tag run passes"
+    );
+    for refused in [
+        release_run("pull_request", "success", REPO, "v1.0.0"),
+        release_run("push", "failure", REPO, "v1.0.0"),
+        release_run("push", "success", "someone/fork", "v1.0.0"),
+    ] {
+        assert!(!eval_condition(&prepare, &refused));
+    }
+}
+
+#[test]
+fn the_crates_jobs_check_tag_main_and_release_before_checkout() {
+    let doc = crates_doc();
+    let notes_tag = notes_step("git/ref/tags/${TAG}");
+    for id in ["prepare", "publish"] {
+        let job = crates_job(&doc, id);
+        let steps = Release::steps(job);
+        let names: Vec<&str> = steps.iter().take(3).map(|s| step_name(s)).collect();
+        assert_eq!(names, [TAG_CHECK, MAIN_CHECK, RELEASE_CHECK], "{id}");
+        assert_eq!(
+            run_of(steps[0]),
+            notes_tag,
+            "{id}: the notes job's tag check"
+        );
+        let checkout = steps
+            .iter()
+            .position(|s| step_uses(s).starts_with("actions/checkout@"))
+            .unwrap_or_else(|| panic!("{id} checks out"));
+        assert!(checkout > 2, "{id}: the checks come before the checkout");
+        let with = |key: &str| steps[checkout].get("with").and_then(|w| w.get(key));
+        assert_eq!(
+            with("ref").and_then(Value::as_str),
+            Some("${{ github.event.workflow_run.head_sha }}")
+        );
+        assert_eq!(
+            with("persist-credentials").and_then(Value::as_bool),
+            Some(false)
+        );
+        for key in ["TAG", "HEAD_SHA"] {
+            assert!(
+                job.get("env").and_then(|e| e.get(key)).is_some(),
+                "{id} sets {key}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_main_check_admits_only_an_ancestor_of_main() {
+    let script = crates_step("prepare", MAIN_CHECK);
+    assert_eq!(
+        script,
+        crates_step("publish", MAIN_CHECK),
+        "identical checks"
+    );
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let answer = |out: &str| {
+        let stub = format!(
+            "#!/bin/sh\n[ \"$2\" = \"repos/{REPO}/compare/main...{BUILT}\" ] || exit 9\n{out}\n"
+        );
+        run_with_gh(&script, &stub, cwd.path(), "v1.0.0", BUILT)
+            .status
+            .success()
+    };
+    assert!(answer("echo behind"));
+    assert!(answer("echo identical"));
+    assert!(!answer("echo ahead"));
+    assert!(!answer("echo diverged"));
+    assert!(!answer("echo"));
+    assert!(!answer("echo 'gh: Not Found (HTTP 404)' >&2; exit 1"));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_release_check_refuses_a_draft() {
+    let script = crates_step("prepare", RELEASE_CHECK);
+    assert_eq!(
+        script,
+        crates_step("publish", RELEASE_CHECK),
+        "identical checks"
+    );
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let answer = |out: &str| {
+        let stub = format!(
+            "#!/bin/sh\n[ \"$2\" = \"repos/{REPO}/releases/tags/v1.0.0\" ] || exit 9\n{out}\n"
+        );
+        run_with_gh(&script, &stub, cwd.path(), "v1.0.0", BUILT)
+            .status
+            .success()
+    };
+    assert!(answer("echo false"));
+    assert!(!answer("echo true"));
+    assert!(!answer("echo null"));
+    assert!(!answer("echo"));
+    assert!(!answer("echo 'gh: Not Found (HTTP 404)' >&2; exit 1"));
+}
+
+#[test]
+fn no_code_from_the_checkout_runs_next_to_a_credential() {
+    let doc = crates_doc();
+    let publish = crates_job(&doc, "publish");
+    let steps = Release::steps(publish);
+    let names: Vec<&str> = steps.iter().map(|s| step_name(s)).collect();
+    assert_eq!(
+        names,
+        [
+            TAG_CHECK,
+            MAIN_CHECK,
+            RELEASE_CHECK,
+            "Install Rust",
+            "Download the verified packages",
+            "Check the handed-over packages",
+            "Check out the tagged commit",
+            "Prepare the tree",
+            "Repack and compare",
+            "Publish",
+        ]
+    );
+    for step in &steps {
+        let uses = step_uses(step);
+        assert!(
+            uses.is_empty()
+                || [
+                    "actions/checkout@",
+                    "dtolnay/rust-toolchain@",
+                    "actions/download-artifact@",
+                ]
+                .iter()
+                .any(|p| uses.starts_with(p)),
+            "publish uses only checkout, Rust and download: {uses}"
+        );
+        let run = run_of(step);
+        for banned in [
+            "bun",
+            "npm",
+            "npx",
+            "cargo build",
+            "cargo test",
+            "cargo run",
+            "cargo install",
+            "make",
+            "crates.sh check",
+            "crates.sh preflight",
+            "crates.sh installed",
+        ] {
+            assert!(!run.contains(banned), "publish runs {banned:?}: {run}");
+        }
+    }
+    let scripted: Vec<(&str, &str)> = steps
+        .iter()
+        .filter(|s| run_of(s).contains("crates.sh"))
+        .map(|s| (step_name(s), run_of(s)))
+        .collect();
+    assert_eq!(scripted.len(), 2, "two steps run crates.sh: {scripted:?}");
+    assert_eq!(scripted[0].0, "Repack and compare");
+    assert!(scripted[0].1.contains("crates.sh repack"));
+    assert_eq!(scripted[1].0, "Publish");
+    assert!(scripted[1].1.contains("crates.sh publish"));
+    assert_eq!(
+        publish
+            .get("env")
+            .and_then(|e| e.get("RUSTUP_TOOLCHAIN"))
+            .and_then(Value::as_str),
+        Some("stable")
+    );
+
+    // Where secrets and the token may appear.
+    let text = |v: &Value| yaml_serde::to_string(v).expect("yaml");
+    let checks = [TAG_CHECK, MAIN_CHECK, RELEASE_CHECK];
+    for id in ["prepare", "publish", "installed"] {
+        let job = crates_job(&doc, id);
+        let job_env = job.get("env").map(text).unwrap_or_default();
+        assert!(
+            !job_env.contains("GH_TOKEN"),
+            "{id}: GH_TOKEN is set per check step"
+        );
+        assert!(
+            job.get("env")
+                .and_then(|e| e.get("CARGO_REGISTRY_TOKEN"))
+                .is_none(),
+            "{id}: the token is set on the publish step only"
+        );
+        assert!(!job_env.contains("secrets."), "{id}: {job_env}");
+        assert!(
+            !text(job.get("permissions").expect("permissions")).contains("id-token"),
+            "{id} has no id-token"
+        );
+        if id != "publish" {
+            assert!(job.get("environment").is_none());
+        }
+        for step in Release::steps(job) {
+            assert!(
+                !step_uses(step).contains("crates-io-auth-action"),
+                "{id}: no trusted publishing exchange"
+            );
+        }
+        for step in Release::steps(job) {
+            let name = step_name(step);
+            let body = text(step);
+            let env = step.get("env").map(text).unwrap_or_default();
+            if checks.contains(&name) {
+                assert_eq!(
+                    step.get("env")
+                        .and_then(|e| e.get("GH_TOKEN"))
+                        .and_then(Value::as_str),
+                    Some("${{ secrets.GITHUB_TOKEN }}"),
+                    "{id}/{name}"
+                );
+                assert_eq!(body.matches("secrets.").count(), 1, "{id}/{name}");
+            } else if id == "publish" && name == "Publish" {
+                assert_eq!(
+                    step.get("env")
+                        .and_then(|e| e.get("CARGO_REGISTRY_TOKEN"))
+                        .and_then(Value::as_str),
+                    Some("${{ secrets.CARGO_REGISTRY_TOKEN }}")
+                );
+                assert_eq!(env.matches("secrets.").count(), 1, "{env}");
+                assert!(step.get("if").is_none(), "Publish always runs");
+                // Fails closed on a missing or empty token before cargo runs.
+                let run = run_of(step);
+                let check = run
+                    .find(r#"[[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]"#)
+                    .expect("Publish checks the token");
+                let publish = run.find("crates.sh publish").expect("crates.sh publish");
+                assert!(check < publish, "the token check comes first: {run}");
+                assert!(run[check..publish].contains("exit 1"), "{run}");
+                assert!(run.contains("::error::"), "{run}");
+            } else {
+                assert!(!body.contains("GH_TOKEN"), "{id}/{name}");
+                assert!(!body.contains("CARGO_REGISTRY_TOKEN"), "{id}/{name}");
+                assert!(!body.contains("secrets."), "{id}/{name}");
+            }
+        }
+    }
+    let runs = |id: &str| -> Vec<String> {
+        Release::steps(crates_job(&doc, id))
+            .iter()
+            .map(|s| run_of(s).to_string())
+            .filter(|r| r.contains("crates.sh"))
+            .collect()
+    };
+    let prepare = runs("prepare");
+    assert_eq!(prepare.len(), 2, "{prepare:?}");
+    assert!(prepare[0].contains("crates.sh check"));
+    assert!(prepare[1].contains("crates.sh preflight"));
+    let installed = runs("installed");
+    assert_eq!(installed.len(), 1);
+    assert!(installed[0].contains("crates.sh installed"));
+
+    // No cache anywhere.
+    for id in ["prepare", "publish", "installed"] {
+        for step in Release::steps(crates_job(&doc, id)) {
+            assert!(
+                !step_uses(step).contains("cache"),
+                "{id}: {}",
+                step_uses(step)
+            );
+            if let Some(with) = step.get("with").and_then(Value::as_mapping) {
+                for (key, value) in with {
+                    let key = key.as_str().expect("key");
+                    if key.contains("cache") {
+                        assert!(
+                            key == "no-cache" && value.as_bool() == Some(true),
+                            "{id}/{}: {key} must not enable a cache",
+                            step_name(step)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Writes a `.crate` tarball `<dir>/<name>-<version>.crate` holding
+/// `<name>-<version>/Cargo.toml` with the given name and version lines, and
+/// `extra` (a path relative to the tar root) when set.
+#[cfg(unix)]
+fn fake_crate(dir: &Path, name: &str, version: &str, manifest_version: &str, extra: Option<&str>) {
+    let src = tempfile::tempdir().expect("tempdir");
+    let base = format!("{name}-{version}");
+    std::fs::create_dir_all(src.path().join(&base)).expect("mkdir");
+    std::fs::write(
+        src.path().join(&base).join("Cargo.toml"),
+        format!("[package]\nname = \"{name}\"\nversion = \"{manifest_version}\"\n"),
+    )
+    .expect("manifest");
+    let mut args = vec![
+        "-czf".to_string(),
+        dir.join(format!("{base}.crate")).display().to_string(),
+        "-C".to_string(),
+        src.path().display().to_string(),
+        base.clone(),
+    ];
+    if let Some(extra) = extra {
+        let path = src.path().join(extra);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&path, "x").expect("extra");
+        args.push(extra.to_string());
+    }
+    let status = std::process::Command::new("tar")
+        .args(&args)
+        .status()
+        .expect("tar");
+    assert!(status.success());
+}
+
+/// Writes `SHA256SUMS` of the seven crates of `dir` in the publish order.
+#[cfg(unix)]
+fn write_sums(dir: &Path, order: &[String], version: &str) {
+    let mut text = String::new();
+    for name in order {
+        let file = format!("{name}-{version}.crate");
+        let out = std::process::Command::new("sha256sum")
+            .arg(&file)
+            .current_dir(dir)
+            .output()
+            .expect("sha256sum");
+        let sum = String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
+            .expect("sum")
+            .to_string();
+        text.push_str(&format!("{sum}  {file}\n"));
+    }
+    std::fs::write(dir.join("SHA256SUMS"), text).expect("sums");
+}
+
+/// A `verified` directory under a new `RUNNER_TEMP` as `prepare` hands it
+/// over.
+#[cfg(unix)]
+fn handed_over(version: &str) -> tempfile::TempDir {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dir = temp.path().join("verified");
+    std::fs::create_dir_all(dir.join("dashboard/assets")).expect("mkdir");
+    std::fs::write(dir.join("dashboard/index.html"), "<html></html>").expect("index");
+    std::fs::write(dir.join("dashboard/assets/app.js"), "x").expect("asset");
+    let order = crates_order();
+    for name in &order {
+        fake_crate(&dir, name, version, version, None);
+    }
+    write_sums(&dir, &order, version);
+    let mut plan = format!("{version}\n");
+    for name in &order {
+        plan.push_str(&format!("{name} publish\n"));
+    }
+    std::fs::write(dir.join("publish-plan"), plan).expect("plan");
+    temp
+}
+
+#[cfg(unix)]
+fn run_inline(script: &str, runner_temp: &Path, cwd: &Path, tag: &str) -> std::process::Output {
+    std::process::Command::new("bash")
+        .arg("-c")
+        .arg(script)
+        .current_dir(cwd)
+        .env("RUNNER_TEMP", runner_temp)
+        .env("TAG", tag)
+        .output()
+        .expect("run bash")
+}
+
+#[cfg(unix)]
+#[test]
+fn the_handed_over_packages_are_checked_inline() {
+    let script = crates_step("publish", "Check the handed-over packages");
+    let version = "1.2.3-rc.1";
+    let tag = format!("v{version}");
+    let order = crates_order();
+    let check = |temp: &tempfile::TempDir| -> std::process::Output {
+        run_inline(&script, temp.path(), temp.path(), &tag)
+    };
+
+    let ok = handed_over(version);
+    let out = check(&ok);
+    assert!(
+        out.status.success(),
+        "a well-formed hand-over passes: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The names written in the step are the script's order line.
+    let names_line = script
+        .lines()
+        .find(|l| l.trim_start().starts_with("names=("))
+        .expect("a names=( line in the step");
+    let written: Vec<String> = names_line
+        .trim()
+        .trim_start_matches("names=(")
+        .trim_end_matches(')')
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        written, order,
+        "the step's names equal the script's order line"
+    );
+
+    let dir = |t: &tempfile::TempDir| t.path().join("verified");
+    type Spoil = Box<dyn Fn(&Path)>;
+    let cases: Vec<(&str, Spoil)> = vec![
+        (
+            "one checksum changed",
+            Box::new(|d: &Path| {
+                let sums = std::fs::read_to_string(d.join("SHA256SUMS")).expect("sums");
+                let first = sums.chars().next().expect("char");
+                let other = if first == '0' { '1' } else { '0' };
+                std::fs::write(d.join("SHA256SUMS"), format!("{other}{}", &sums[1..]))
+                    .expect("write");
+            }),
+        ),
+        (
+            "an extra file",
+            Box::new(|d: &Path| std::fs::write(d.join("extra.txt"), "x").expect("write")),
+        ),
+        (
+            "a crate naming another version",
+            Box::new(|d: &Path| {
+                let order = crates_order();
+                fake_crate(d, &order[2], version, "9.9.9", None);
+                write_sums(d, &order, version);
+            }),
+        ),
+        (
+            "a path outside the crate's directory",
+            Box::new(|d: &Path| {
+                let order = crates_order();
+                fake_crate(d, &order[0], version, version, Some("elsewhere/file"));
+                write_sums(d, &order, version);
+            }),
+        ),
+        (
+            "a plan with six package lines",
+            Box::new(|d: &Path| {
+                let plan = std::fs::read_to_string(d.join("publish-plan")).expect("plan");
+                let six: Vec<&str> = plan.lines().take(7).collect();
+                std::fs::write(d.join("publish-plan"), six.join("\n") + "\n").expect("write");
+            }),
+        ),
+        (
+            "a link under dashboard",
+            Box::new(|d: &Path| {
+                std::os::unix::fs::symlink("/etc/passwd", d.join("dashboard/assets/link"))
+                    .expect("symlink");
+            }),
+        ),
+    ];
+    for (what, spoil) in cases {
+        let temp = handed_over(version);
+        spoil(&dir(&temp));
+        assert!(!check(&temp).status.success(), "{what} fails the check");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_publish_step_fails_closed_without_the_token() {
+    let script = crates_step("publish", "Publish");
+    let temp = tempfile::tempdir().expect("tempdir");
+    // A stand-in crates.sh that records being run: it must never be reached.
+    let scripts = temp.path().join("scripts");
+    std::fs::create_dir_all(&scripts).expect("mkdir");
+    let marker = temp.path().join("ran");
+    std::fs::write(
+        scripts.join("crates.sh"),
+        format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    )
+    .expect("stub");
+    std::fs::set_permissions(
+        scripts.join("crates.sh"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("chmod");
+    for token in [None, Some("")] {
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c")
+            .arg(&script)
+            .current_dir(temp.path())
+            .env("RUNNER_TEMP", temp.path())
+            .env("TAG", "v1.0.0")
+            .env_remove("CARGO_REGISTRY_TOKEN");
+        if let Some(t) = token {
+            cmd.env("CARGO_REGISTRY_TOKEN", t);
+        }
+        let out = cmd.output().expect("run bash");
+        assert_eq!(out.status.code(), Some(1), "{token:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("::error::the crates-io environment has no CARGO_REGISTRY_TOKEN"),
+            "{token:?}: {stdout}"
+        );
+        assert!(!marker.exists(), "{token:?}: crates.sh ran without a token");
+    }
+    let out = run_inline_with_token(&script, temp.path());
+    assert!(out.status.success(), "{out:?}");
+    assert!(marker.exists(), "with a token the publish runs");
+}
+
+#[cfg(unix)]
+fn run_inline_with_token(script: &str, dir: &Path) -> std::process::Output {
+    std::process::Command::new("bash")
+        .arg("-c")
+        .arg(script)
+        .current_dir(dir)
+        .env("RUNNER_TEMP", dir)
+        .env("TAG", "v1.0.0")
+        .env("CARGO_REGISTRY_TOKEN", "stand-in")
+        .output()
+        .expect("run bash")
+}
+
+#[cfg(unix)]
+#[test]
+fn the_tree_step_refuses_cargo_configuration() {
+    let script = crates_step("publish", "Prepare the tree");
+    let setup = || -> (tempfile::TempDir, tempfile::TempDir) {
+        let runner = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(runner.path().join("verified/dashboard")).expect("mkdir");
+        std::fs::write(runner.path().join("verified/dashboard/index.html"), "x").expect("index");
+        let tree = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tree.path().join("crates/apb-server/src")).expect("mkdir");
+        std::fs::create_dir_all(tree.path().join(".git")).expect("mkdir");
+        (runner, tree)
+    };
+
+    let (runner, tree) = setup();
+    std::fs::create_dir_all(tree.path().join("crates/apb-core/.cargo")).expect("mkdir");
+    std::fs::write(tree.path().join("crates/apb-core/.cargo/config.toml"), "").expect("write");
+    assert!(
+        !run_inline(&script, runner.path(), tree.path(), "v1.0.0")
+            .status
+            .success()
+    );
+    assert!(
+        runner.path().join("verified/dashboard/index.html").exists(),
+        "nothing moved"
+    );
+    assert!(!tree.path().join("crates/apb-server/dashboard").exists());
+
+    let (runner, tree) = setup();
+    std::fs::create_dir_all(tree.path().join("crates/apb-server/dashboard")).expect("mkdir");
+    assert!(
+        !run_inline(&script, runner.path(), tree.path(), "v1.0.0")
+            .status
+            .success()
+    );
+    assert!(
+        runner.path().join("verified/dashboard/index.html").exists(),
+        "nothing moved"
+    );
+
+    let (runner, tree) = setup();
+    let out = run_inline(&script, runner.path(), tree.path(), "v1.0.0");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        tree.path()
+            .join("crates/apb-server/dashboard/index.html")
+            .is_file()
+    );
+}

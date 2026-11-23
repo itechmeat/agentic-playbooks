@@ -2,7 +2,9 @@
 //! install receipt that installer wrote under the XDG config dir. Builds
 //! that came from Homebrew or from source have no receipt, so self-update
 //! deliberately refuses to guess and instead points the user at the right
-//! upgrade path for their install method.
+//! upgrade path for their install method. A binary compiled from the
+//! published crate (`cargo install agentic-playbooks`) names the cargo
+//! command instead, whatever receipt sits next to it (`crate::cargo_install`).
 //!
 //! After an update the new binary brings the default playbooks and skills
 //! setup installed in line with its own embedded content: this process
@@ -17,7 +19,8 @@ use axoupdater::{AxoUpdater, AxoupdateError, UpdateRequest, Version};
 
 const NO_RECEIPT_GUIDANCE: &str = "self-update only works for installs made by the apb installer. \
 If you installed with Homebrew, run: brew upgrade apb. \
-If you built from source, rebuild and reinstall from the repo.";
+If you built from source, rebuild and reinstall from the repo. \
+To install the published crate with cargo instead, run: cargo install --locked agentic-playbooks.";
 
 /// Outcome of a self-update attempt, decoupled from process exit so it can be
 /// asserted on directly in tests.
@@ -119,6 +122,27 @@ fn running_version() -> Version {
 
 /// [`self_update_with_config_root`] for an install of `running`.
 fn self_update_as(check: bool, config_root: Option<&Path>, running: &Version) -> Outcome {
+    self_update_from(check, config_root, running, env!("CARGO_PKG_NAME"))
+}
+
+/// [`self_update_as`] for a binary compiled as the package `package`.
+fn self_update_from(
+    check: bool,
+    config_root: Option<&Path>,
+    running: &Version,
+    package: &str,
+) -> Outcome {
+    // A binary compiled from the published crate came from `cargo install`,
+    // whatever receipt sits in the config root: nothing is downloaded,
+    // written or reconciled, and no receipt is loaded.
+    if crate::cargo_install::built_for_cargo_install(package) {
+        return Outcome {
+            code: 2,
+            message: crate::cargo_install::guidance(running),
+            updated: false,
+            warning: None,
+        };
+    }
     let _env_guard = config_root.map(ConfigRootGuard::set);
 
     let (mut updater, warning) = match updater_for(running) {
@@ -310,7 +334,17 @@ mod tests {
     /// [`serve_releases`] whose `/releases` listing answers 500 unless
     /// `list_ok`.
     fn serve_api(releases: Vec<(&'static str, bool)>, list_ok: bool) -> String {
+        serve_counting(releases, list_ok).0
+    }
+
+    /// [`serve_api`] with the number of requests it answered.
+    fn serve_counting(
+        releases: Vec<(&'static str, bool)>,
+        list_ok: bool,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         use std::io::{Read, Write};
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = seen.clone();
         let release = |tag: &str, prerelease: bool| {
             serde_json::json!({
                 "tag_name": tag,
@@ -341,6 +375,7 @@ mod tests {
                 while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
                     head.push(byte[0]);
                 }
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let line = String::from_utf8_lossy(&head);
                 let path = line.split_whitespace().nth(1).unwrap_or_default();
                 let (status, body) = if path.contains("/releases/latest") {
@@ -357,7 +392,7 @@ mod tests {
                 );
             }
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), seen)
     }
 
     /// An install receipt for this very executable at `version`, in `dir`.
@@ -623,5 +658,120 @@ mod tests {
             Some(crate::Command::SelfUpdate { check: true })
         );
         assert!(matched, "expected SelfUpdate {{ check: true }}");
+    }
+
+    /// The requests the stub answered so far.
+    fn requests(seen: &std::sync::atomic::AtomicUsize) -> usize {
+        seen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A cargo build next to an installer receipt of `receipt`: the cargo
+    /// command, code 2, no request and the receipt untouched.
+    fn assert_cargo_build_ignores_receipt(receipt: &str, check: bool) {
+        let _env = env_lock();
+        let (api, seen) = serve_counting(vec![("v0.30.0", false), ("v1.0.0", false)], true);
+        let _api = use_api(&api);
+        let dir = tempfile::tempdir().unwrap();
+        write_receipt(dir.path(), receipt);
+        let before = std::fs::read(dir.path().join("apb-receipt.json")).unwrap();
+        let running = v("1.0.0");
+        let out = self_update_from(check, Some(dir.path()), &running, "agentic-playbooks");
+        assert_eq!(out.code, 2);
+        assert_eq!(out.message, crate::cargo_install::guidance(&running));
+        assert!(!out.updated);
+        assert_eq!(requests(&seen), 0, "nothing was asked of the release API");
+        assert_eq!(
+            std::fs::read(dir.path().join("apb-receipt.json")).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn a_cargo_build_ignores_an_installer_receipt_of_the_same_version() {
+        assert_cargo_build_ignores_receipt("1.0.0", false);
+    }
+
+    #[test]
+    fn a_cargo_build_ignores_an_older_installer_receipt() {
+        assert_cargo_build_ignores_receipt("0.30.0", false);
+    }
+
+    #[test]
+    fn a_cargo_build_answers_check_the_same_way() {
+        assert_cargo_build_ignores_receipt("1.0.0", true);
+    }
+
+    /// Removes the cargo install record a test wrote, on drop.
+    struct RemoveOnDrop(PathBuf);
+
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn an_installer_build_follows_its_receipt_next_to_a_cargo_record() {
+        let _env = env_lock();
+        let (api, seen) = serve_counting(vec![("v0.30.0", false), ("v1.0.0", false)], true);
+        let _api = use_api(&api);
+        let dir = tempfile::tempdir().unwrap();
+        write_receipt(dir.path(), "1.0.0");
+        let running = v("1.0.0");
+
+        let plain = self_update_from(true, Some(dir.path()), &running, "apb");
+        let plain_requests = requests(&seen);
+        assert!(
+            plain_requests > 0,
+            "the installer path asks the release API"
+        );
+
+        // cargo's install record in the install root above the receipt's
+        // install directory, naming the published crate at this version.
+        let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let root = exe.parent().unwrap().parent().unwrap();
+        let record = root.join(".crates2.json");
+        assert!(
+            !record.exists(),
+            "no cargo record sits there before the test"
+        );
+        let _remove = RemoveOnDrop(record.clone());
+        std::fs::write(
+            &record,
+            serde_json::json!({
+                "installs": {
+                    "agentic-playbooks 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)": {
+                        "bins": ["apb"]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let with_record = self_update_from(true, Some(dir.path()), &running, "apb");
+        assert_eq!(
+            (with_record.code, with_record.message.as_str()),
+            (plain.code, plain.message.as_str())
+        );
+        assert_eq!(
+            requests(&seen) - plain_requests,
+            plain_requests,
+            "the same requests as without the record"
+        );
+    }
+
+    #[test]
+    fn an_installer_build_without_a_receipt_names_the_cargo_command() {
+        let _env = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let out = self_update_from(false, Some(dir.path()), &v("1.0.0"), "apb");
+        assert_eq!(out.code, 2);
+        assert_eq!(out.message, NO_RECEIPT_GUIDANCE);
+        assert!(
+            out.message
+                .contains("To install the published crate with cargo instead, run: cargo install --locked agentic-playbooks."),
+            "{}",
+            out.message
+        );
     }
 }

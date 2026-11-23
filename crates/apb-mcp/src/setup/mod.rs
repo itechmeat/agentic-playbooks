@@ -55,4 +55,4 @@ pub fn step_refusal() -> Option<String> {
 
 /// The installing agent's procedure, `docs/AGENT-SETUP.md`: served by the
 /// MCP tool `setup_howto` and linked first from `llms.txt`.
-pub const HOWTO: &str = include_str!("../../../../docs/AGENT-SETUP.md");
+pub const HOWTO: &str = include_str!("../../embedded/AGENT-SETUP.md");

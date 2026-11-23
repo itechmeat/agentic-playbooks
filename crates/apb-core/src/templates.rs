@@ -7,8 +7,10 @@
 
 use std::path::Path;
 
+/// The template gallery: `embedded/templates` is a committed link to the root
+/// `examples/playbooks/`, which packaging resolves into files.
 #[derive(rust_embed::Embed)]
-#[folder = "../../examples/playbooks"]
+#[folder = "embedded/templates"]
 struct TemplateAssets;
 
 /// The `created_by` of a draft installed from a template.

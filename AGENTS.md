@@ -22,7 +22,7 @@ with cli and server on top, `apb-decide` (no workspace dependency) <-
 engine, mcp, and core <- mcp-client <- engine. Do not introduce import cycles
 (enforced by code-ranker, see below).
 
-- `apb-core` - domain layer, no async. Playbook schema (`schema.rs`,
+- `apb-core` (package `agentic-playbooks-core`) - domain layer, no async. Playbook schema (`schema.rs`,
   `Playbook::from_yaml`; a node's `results:` entries are `ResultDecl`), validator (`validate/`, codes V01+ with
   `validate/codes.rs` the registry of every active code (`CODES`, with the severities it may be reported
   at, and `RETIRED_CODES`, a retired code keeps its number) and its freeze test, one module per
@@ -349,14 +349,14 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   suggestion with its draft, scrubbed examples and sources, `store` the
   signed result store, the one-time resolve of a save or a decline and
   the saved slugs).
-- `apb-decide` - a blocking, provider-agnostic decision-model client: the
+- `apb-decide` (package `agentic-playbooks-decide`) - a blocking, provider-agnostic decision-model client: the
   `DecisionProvider` trait, question and answer types, the `systemone`,
   `fake` and `llm_emulation` (uncalibrated) providers and the route
   adapters (`vercel_evaluate`, `openrouter_decisions`, `cloudflare`) over
   one shared HTTP exchange, limit checks and strict reply validation,
   retries, the provider chain, the per-run cache and the `ApiKey` wrapper; the `testing` feature adds a
   multi-response HTTP stub. Knows nothing about runs.
-- `apb-mcp-client` - a blocking client of the Model Context Protocol over
+- `apb-mcp-client` (package `agentic-playbooks-mcp-client`) - a blocking client of the Model Context Protocol over
   stdio and Streamable HTTP over rmcp `=3.9.0` (the version `apb-mcp`
   pins), depending on `apb-core`
   only (core <- mcp-client <- engine): `Session` with its own runtime on its
@@ -388,7 +388,7 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   listing with `x-mcp-header` annotations refused, `FailureKind::Auth`
   for a 401 or 403, `close` answering `Ended::NotStarted`. Knows nothing
   about runs, grants, pins or the send ledger.
-- `apb-engine` - execution. The drive loop (`scheduler.rs`) with its phases in
+- `apb-engine` (package `agentic-playbooks-engine`) - execution. The drive loop (`scheduler.rs`) with its phases in
   `scheduler/` (`entry` start, handoff and dead-attempt reaping, `control_apply`
   the control scan (a park applied only as the last entry of a pass at its
   own node, else discarded, also right behind the entry any exit of a pass
@@ -888,7 +888,7 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   a gate's scope re-asks; the inbox wait is its own module beside the
   drive (`inbox_wait/`: `mod` the authorization, the visit, `position` and
   `in_time`; `pending` the park waker's check); see `docs/DECISIONS.md`).
-- `apb-mcp` - rmcp stdio MCP server (`server/`, with `read_only` the
+- `apb-mcp` (package `agentic-playbooks-mcp`) - rmcp stdio MCP server (`server/`, with `read_only` the
   allowlist of `apb mcp --read-only` and the tables every tool is classified
   in) and the tool layer in `tools/`
   (one module per domain: `playbook`, `run`, `supervisor`, `trial`, `capture`,
@@ -955,7 +955,8 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   plan is not, and a changed default
   is replaced only through the plan's `--replace-modified` actions; the MCP tools `setup_plan` and `setup_howto`
   (`docs/AGENT-SETUP.md`) sit over it, applying is CLI only.
-- `apb-cli` - package name `apb` (bin `apb`, `main.rs`); thin dispatch over
+- `apb-cli` - package name `apb` (bin `apb`, `main.rs`; published to crates.io
+  as `agentic-playbooks`, renamed only by `scripts/crates.sh`); thin dispatch over
   core/engine/mcp. `apb run --scope global` starts a global playbook in the
   current project through the resolved engine starts (`run_resolved`,
   `start_detached_resolved`, `run_background_resolved`), `--supervise`
@@ -1027,7 +1028,7 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   child per scenario through `apb_mcp::tools::scenario::play`) and `apb
   eval --scenarios`; `scenario_capture.rs` is `apb scenario capture`
   (the preview, the terminal question, `--save --yes`).
-- `apb-server` - axum web API: a thin router in `lib.rs`, one module per
+- `apb-server` (package `agentic-playbooks-server`) - axum web API: a thin router in `lib.rs`, one module per
   resource in `routes/` (`estimate` for the estimate route and the run and
   resume budgets, `templates` for the template gallery and its install,
   `playbooks` with the `scope` of the playbook list and detail (`origin_of`,
@@ -1062,7 +1063,8 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   webauthn module (`webauthn.rs`: ES256 and EdDSA verification over COSE,
   origin and RP ID against the dashboard's own origin), shared request
   state in `state.rs`, and the svelte
-  frontend from `web/` embedded via rust-embed (`assets.rs`, `web/dist`).
+  frontend from `web/` built into `crates/apb-server/dashboard` and embedded
+  via rust-embed (`assets.rs`; `build.rs` stops a build without it).
 
 ### Concepts that span files
 
@@ -1827,13 +1829,15 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
 
 ## Commands
 
-Build (debug): `cargo build`. Release (bakes the frontend first):
-`cd web && bun install && bun run build` then `cargo build --release`.
+Build (debug): `cargo build`, after the frontend build. Release (bakes the
+frontend first): `cd web && bun install && bun run build` (it writes
+`crates/apb-server/dashboard`) then `cargo build --release`.
 
 Test everything: `cargo test --workspace`. A single test:
 `cargo test -p <crate> --test main <module>::<test_name>` (each crate has
 one integration binary, `main`; e.g.
-`cargo test -p apb-engine --test main profile_run_test::legacy_run_resume_via_ephemeral_snapshot`).
+`cargo test -p agentic-playbooks-engine --test main profile_run_test::legacy_run_resume_via_ephemeral_snapshot`;
+the six libraries are `agentic-playbooks-*` packages, the CLI stays `-p apb`).
 
 Frontend (`web/`, bun + vite + vitest): `bun run test`, `bun run build`,
 `bun run check`.
@@ -1842,12 +1846,32 @@ Generated TypeScript: `web/src/lib/api.gen.ts` (run payload types) and
 `web/src/lib/consts.gen.ts` (core constants) are rendered from the Rust side by
 `apb-server`'s `ts_contract` test, which fails when they drift. After changing
 a mirrored Rust type or constant, regenerate with
-`APB_WRITE_TS=1 cargo test -p apb-server --lib ts_contract` and commit the
+`APB_WRITE_TS=1 cargo test -p agentic-playbooks-server --lib ts_contract` and commit the
 result; never edit the generated files by hand.
 
 Format and lint gates (must be clean):
 `cargo fmt --all -- --check` and
 `cargo clippy --workspace --all-targets -- -D warnings`.
+
+Publishing to crates.io: `scripts/crates.sh check|preflight|repack|publish|installed`.
+The repository keeps the CLI package named `apb`, so dist derives the same
+release names; the script alone renames it to `agentic-playbooks` (one line
+of `crates/apb-cli/Cargo.toml` and one of `Cargo.lock`, checked by `cargo
+metadata --locked`, no resolver run) and restores both on every exit. The
+CI job `crates` runs `scripts/crates.sh check` (pack and verify all seven
+crates through cargo's temporary local registry, file lists, license, sizes,
+`SHA256SUMS`); it is required through the explicit result comparison of
+`build-and-test`. So is the CI job `msrv`: it reads `rust-version` from
+`[workspace.package]` of `Cargo.toml` and runs `cargo check --workspace
+--locked` with exactly that toolchain, so a change that needs a newer Rust
+fails there; raise `rust-version` (a minor release) or keep the older
+dependency. `.github/workflows/publish-crates.yml` publishes in three
+jobs: `prepare` (no credential: dashboard build, `check`, `preflight`, the
+verified packages handed over as an artifact), `publish` (the only job with
+the `crates-io` environment and its token, no job with `id-token: write`:
+an inline check of the artifact, `repack` without building, then
+`publish`, which fails closed without the token) and `installed` (no
+credential: `cargo install --locked` of the published version).
 
 ### Release pipeline (dist)
 
@@ -1884,7 +1908,8 @@ the notes file, failing when the file is missing. As a `workflow_run`
 workflow it runs from the default branch, so a change to it takes effect
 once merged. `release_workflow_test` covers its trigger, permissions and
 checks, with a pre-release run that passes and a pull request run that does
-not.
+not. `.github/workflows/publish-crates.yml` follows the same Release runs the
+same way and publishes the crates (see "Publishing to crates.io" above).
 
 Every archive also ships `THIRD-PARTY-NOTICES.txt` (`include` in
 `dist-workspace.toml`), generated from `Cargo.lock` and `web/bun.lock` by

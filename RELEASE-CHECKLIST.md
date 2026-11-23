@@ -5,10 +5,11 @@ described in `CLAUDE.md` / `AGENTS.md` ("Release pipeline (dist)").
 
 ## In the release pull request
 
-- Bump `version` in the root `Cargo.toml` (`[workspace.package]`) and in the
-  `version = ` of the path dependencies in `crates/apb-cli/Cargo.toml` and
-  `crates/apb-server/Cargo.toml`, then refresh `Cargo.lock`
-  (`cargo check --workspace`).
+- Bump `version` in the root `Cargo.toml` (`[workspace.package]`) and the six
+  exact `version = "=X.Y.Z"` requirements of the internal crates in its
+  `[workspace.dependencies]`, then refresh `Cargo.lock`
+  (`cargo check --workspace`). The test `every_internal_dependency_is_exact`
+  fails on a missed one.
 - Add `docs/release-notes/vX.Y.Z.md`. The release test gate fails without it,
   and its text becomes the GitHub release body.
 - Update the "latest release" line in `README.md`.
@@ -40,6 +41,10 @@ described in `CLAUDE.md` / `AGENTS.md` ("Release pipeline (dist)").
 - Confirm that the archives hold `LICENSE` and the third-party notices, and
   no runtime state, logs, tokens or credentials.
 - Confirm that `apb dashboard` still binds to loopback by default.
+- Watch the three jobs of `publish-crates` (`prepare`, `publish`,
+  `installed`). When `installed` fails, yank the seven versions
+  (`cargo yank --version X.Y.Z <crate>`) and report it. When `publish` stops
+  on the crates.io rate limit, use "Re-run all jobs" later.
 
 ## Repository settings (verify occasionally)
 

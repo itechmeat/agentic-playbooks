@@ -1,17 +1,24 @@
 [package]
-name = "apb-engine"
+name = "agentic-playbooks-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Internal crate of the apb command (crate agentic-playbooks): the run engine. Not a public API; it changes in any release."
+include = ["src/**", "LICENSE"]
+
+[lib]
+name = "apb_engine"
 
 [dependencies]
 globset.workspace = true
-apb-core = { path = "../apb-core" }
+apb-core.workspace = true
 # Decision models (issue #165): the provider client the decision runner asks.
-apb-decide = { path = "../apb-decide" }
+apb-decide.workspace = true
 # MCP tool connectors: the blocking stdio client sessions.
-apb-mcp-client = { path = "../apb-mcp-client" }
+apb-mcp-client.workspace = true
 # The decision runner's redaction patterns (token shapes, e-mail, paths).
 regex.workspace = true
 serde.workspace = true
@@ -33,7 +40,6 @@ lettre.workspace = true
 # ops open with EXAMINE), message parsing via mail-parser, TLS via rustls with
 # the platform certificate verifier.
 imap.workspace = true
-imap-proto.workspace = true
 mail-parser.workspace = true
 rustls.workspace = true
 rustls-platform-verifier.workspace = true
@@ -64,14 +70,14 @@ testing = []
 
 [dev-dependencies]
 # The crate's own `testing` seams for its integration tests.
-apb-engine = { path = ".", features = ["testing"] }
+apb-engine = { package = "agentic-playbooks-engine", path = ".", features = ["testing"] }
 # `apb_core::process_mode::testing`: guard tests in a read-only child process.
-apb-core = { path = "../apb-core", features = ["testing"] }
+apb-core = { package = "agentic-playbooks-core", path = "../apb-core", features = ["testing"] }
 tempfile = "3.27.0"
 # The multi-response HTTP stub the decision tests point a provider at.
-apb-decide = { path = "../apb-decide", features = ["testing"] }
+apb-decide = { package = "agentic-playbooks-decide", path = "../apb-decide", features = ["testing"] }
 # The scripted stdio MCP server the connector tests start.
-apb-mcp-client = { path = "../apb-mcp-client", features = ["testing"] }
+apb-mcp-client = { package = "agentic-playbooks-mcp-client", path = "../apb-mcp-client", features = ["testing"] }
 # Decodes the recorded XOAUTH2 SASL payload in the imap listener tests.
 base64 = "0.23"
 # Reads the fixture ZCode desktop task index in the zcode ui_sync tests.

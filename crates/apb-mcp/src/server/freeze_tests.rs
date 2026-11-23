@@ -2245,7 +2245,7 @@ fn every_served_tool_and_argument_is_frozen() {
     for name in &served_tools {
         assert!(
             frozen_tools().contains_key(name),
-            "new tool `{name}`: run APB_WRITE_FREEZE=1 cargo test -p apb-mcp --lib server::freeze_tests::write_freeze"
+            "new tool `{name}`: run APB_WRITE_FREEZE=1 cargo test -p agentic-playbooks-mcp --lib server::freeze_tests::write_freeze"
         );
         let frozen = frozen_tools()[name]["input"].clone();
         let served = served_tool(name);
@@ -2255,7 +2255,7 @@ fn every_served_tool_and_argument_is_frozen() {
         for path in missing {
             if !frozen_has_argument(&frozen, &path) {
                 panic!(
-                    "new argument `{name}.{path}`: run APB_WRITE_FREEZE=1 cargo test -p apb-mcp --lib server::freeze_tests::write_freeze"
+                    "new argument `{name}.{path}`: run APB_WRITE_FREEZE=1 cargo test -p agentic-playbooks-mcp --lib server::freeze_tests::write_freeze"
                 );
             }
         }
@@ -3982,7 +3982,7 @@ fn every_table_code_is_frozen() {
     }
     assert!(
         missing.is_empty(),
-        "the machine codes {missing:?} are produced but not frozen: run APB_WRITE_FREEZE=1 cargo test -p apb-mcp --lib server::freeze_tests::write_freeze"
+        "the machine codes {missing:?} are produced but not frozen: run APB_WRITE_FREEZE=1 cargo test -p agentic-playbooks-mcp --lib server::freeze_tests::write_freeze"
     );
 }
 
@@ -4626,7 +4626,7 @@ fn every_returned_key_is_frozen() {
             .and_then(|t| t.get(*variant))
             .unwrap_or_else(|| {
                 panic!(
-                    "new result variant `{tool}/{variant}`: run APB_WRITE_FREEZE=1 cargo test -p apb-mcp --lib server::freeze_tests::write_freeze"
+                    "new result variant `{tool}/{variant}`: run APB_WRITE_FREEZE=1 cargo test -p agentic-playbooks-mcp --lib server::freeze_tests::write_freeze"
                 )
             });
         let result =
@@ -4636,13 +4636,13 @@ fn every_returned_key_is_frozen() {
         for key in &now.keys {
             assert!(
                 frozen.keys.contains(key),
-                "new result key `{key}` of {tool}/{variant}: run APB_WRITE_FREEZE=1 cargo test -p apb-mcp --lib server::freeze_tests::write_freeze"
+                "new result key `{key}` of {tool}/{variant}: run APB_WRITE_FREEZE=1 cargo test -p agentic-playbooks-mcp --lib server::freeze_tests::write_freeze"
             );
         }
         assert!(
             (now.error.is_none() || frozen.error.is_some())
                 && (now.code.is_none() || frozen.code.is_some()),
-            "new error head or code of {tool}/{variant} ({:?}, {:?}): run APB_WRITE_FREEZE=1 cargo test -p apb-mcp --lib server::freeze_tests::write_freeze",
+            "new error head or code of {tool}/{variant} ({:?}, {:?}): run APB_WRITE_FREEZE=1 cargo test -p agentic-playbooks-mcp --lib server::freeze_tests::write_freeze",
             now.error,
             now.code
         );

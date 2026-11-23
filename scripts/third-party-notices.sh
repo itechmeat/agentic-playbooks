@@ -3,8 +3,8 @@
 # third-party compiled or embedded into the apb binary:
 #   1. Rust crates, from Cargo.lock via cargo-about (about.toml, about.hbs),
 #      limited to the shipped release targets and the apb package's graph.
-#   2. npm packages that the production Vite build puts into web/dist, from
-#      web/bun.lock via web/scripts/third-party-notices.ts.
+#   2. npm packages that the production Vite build puts into
+#      crates/apb-server/dashboard, from web/bun.lock via web/scripts/third-party-notices.ts.
 #
 # Usage (from anywhere in the repository):
 #   scripts/third-party-notices.sh          rewrite THIRD-PARTY-NOTICES.txt

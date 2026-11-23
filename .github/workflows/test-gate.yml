@@ -71,8 +71,9 @@ jobs:
       - name: Install bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
-      # web/dist is gitignored: build the frontend BEFORE cargo, since the
-      # tests compile apb-server which embeds it via rust-embed.
+      # crates/apb-server/dashboard is gitignored: build the frontend BEFORE
+      # cargo, since the tests compile apb-server which embeds it via
+      # rust-embed.
       - name: Build web (needed by rust-embed)
         working-directory: web
         run: |

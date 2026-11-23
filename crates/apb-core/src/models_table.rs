@@ -224,7 +224,7 @@ struct ModelsOverlay {
     subscriptions: Vec<Subscription>,
 }
 
-const BUILTIN_YAML: &str = include_str!("../../../assets/models.yaml");
+const BUILTIN_YAML: &str = include_str!("../embedded/models.yaml");
 
 /// The built-in table. Parsing the baked-in asset must not fail at
 /// runtime - this is guaranteed by the CI test `builtin_parses`.
