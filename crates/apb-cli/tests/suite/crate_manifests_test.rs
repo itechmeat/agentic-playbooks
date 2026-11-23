@@ -351,6 +351,27 @@ fn the_script_refuses_a_token_where_code_runs() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    // Another registry's token would reach every program publish starts.
+    let out = run_script(
+        &script,
+        &["publish", "0.0.0", "/nonexistent"],
+        bin.path(),
+        &[
+            ("CARGO_REGISTRY_TOKEN", "x"),
+            ("CARGO_REGISTRIES_OTHER_TOKEN", "y"),
+        ],
+    );
+    assert!(
+        !out.status.success(),
+        "publish with another token is refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(
+            "refusing to run publish with a CARGO_REGISTRIES_<name>_TOKEN in the environment"
+        ),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     assert!(!calls.exists(), "no cargo or curl call happened");
     assert_eq!(
@@ -531,6 +552,206 @@ fn an_all_skipped_plan_runs_no_cargo_command() {
     );
     assert!(!package.contains("--exclude agentic-playbooks-engine "));
     assert!(package.contains("--no-verify"), "{package}");
+    // The stand-in's manifest and lockfile are restored.
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(&repo)
+        .output()
+        .expect("git status");
+    assert!(status.stdout.is_empty(), "{status:?}");
+}
+
+/// The first `tool` on `PATH`.
+#[cfg(unix)]
+fn on_path(tool: &str) -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|d| d.join(tool))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| panic!("{tool} on PATH"))
+}
+
+/// `publish` with a planted `sitecustomize.py`, `usercustomize.py` and
+/// `json.py` in the checkout, `PYTHONPATH` pointing at it, and recording
+/// stubs of `python3`, `git`, `curl` and `cargo` that log their arguments
+/// and environment: the token reaches `cargo publish` and nothing else, and
+/// no file of the checkout is imported.
+#[cfg(unix)]
+#[test]
+fn the_token_reaches_cargo_publish_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const TOKEN: &str = "stand-in-registry-token-4711";
+    let meta = metadata();
+    let version = members(&meta)[0].1["version"]
+        .as_str()
+        .expect("version")
+        .to_string();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    stand_in_repository(&repo, &version);
+    let script = repo.join("scripts/crates.sh");
+
+    // Any import of these files is the failure, token or not.
+    let imported = tmp.path().join("imported");
+    let planted = format!(
+        "import os\nwith open({:?}, 'a') as f:\n    f.write(__file__ + ' ' + str('{TOKEN}' in repr(os.environ)) + '\\n')\n",
+        imported.display().to_string()
+    );
+    for dir in [repo.clone(), repo.join("scripts")] {
+        for module in [
+            "sitecustomize.py",
+            "usercustomize.py",
+            "json.py",
+            "tomllib.py",
+        ] {
+            std::fs::write(dir.join(module), &planted).expect("plant");
+        }
+    }
+
+    let order = publish_order();
+    let publishing = "agentic-playbooks-engine";
+    let verified = tmp.path().join("verified");
+    std::fs::create_dir_all(&verified).expect("mkdir");
+    let sums: String = order
+        .iter()
+        .enumerate()
+        .map(|(i, name)| format!("{:064x}  {name}-{version}.crate\n", i + 1))
+        .collect();
+    std::fs::write(verified.join("SHA256SUMS"), &sums).expect("sums");
+    let mut plan = format!("{version}\n");
+    for name in &order {
+        let what = if name == publishing {
+            "publish"
+        } else {
+            "skip"
+        };
+        plan.push_str(&format!("{name} {what}\n"));
+    }
+    std::fs::write(verified.join("publish-plan"), plan).expect("plan");
+
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("mkdir");
+    let log = tmp.path().join("log");
+    let published = tmp.path().join("published");
+    let target = tmp.path().join("target");
+    let record = |tool: &str| {
+        format!(
+            "#!/bin/sh\n{{ echo \"== {tool} $*\"; env; }} >> '{}'\n",
+            log.display()
+        )
+    };
+    let python = format!(
+        "{}exec '{}' \"$@\"\n",
+        record("python3"),
+        on_path("python3").display()
+    );
+    let git = format!(
+        "{}exec '{}' \"$@\"\n",
+        record("git"),
+        on_path("git").display()
+    );
+    let cargo = format!(
+        "{}case \"$1\" in\n  \
+         metadata) echo '{{\"packages\":[],\"workspace_members\":[],\"target_directory\":\"{target}\"}}' ;;\n  \
+         publish) touch '{published}' ;;\n  \
+         *) exit 1 ;;\nesac\n",
+        record("cargo"),
+        target = target.display(),
+        published = published.display()
+    );
+    let curl = format!(
+        "{}out=''\nurl=''\nwhile [ $# -gt 0 ]; do\n  \
+         case \"$1\" in -o) out=\"$2\"; shift ;; https://*) url=\"$1\" ;; esac\n  shift\ndone\n\
+         name=\"${{url##*/}}\"\n\
+         if [ \"$name\" = {publishing} ] && [ ! -e '{published}' ]; then printf 404; exit 0; fi\n\
+         sum=$(grep \" $name-{version}.crate$\" '{sums}' | cut -c1-64)\n\
+         printf '{{\"name\":\"%s\",\"vers\":\"{version}\",\"cksum\":\"%s\"}}\\n' \"$name\" \"$sum\" > \"$out\"\n\
+         printf 200\n",
+        record("curl"),
+        published = published.display(),
+        sums = verified.join("SHA256SUMS").display()
+    );
+    for (tool, text) in [
+        ("python3", python),
+        ("git", git),
+        ("cargo", cargo),
+        ("curl", curl),
+    ] {
+        let stub = bin.join(tool);
+        std::fs::write(&stub, text).expect("write stub");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    let repo_path = repo.to_str().expect("utf-8 path");
+    let out = run_script(
+        &script,
+        &["publish", &version, verified.to_str().expect("utf-8 path")],
+        &bin,
+        &[
+            ("CARGO_REGISTRY_TOKEN", TOKEN),
+            ("PYTHONPATH", repo_path),
+            (
+                "PYTHONSTARTUP",
+                &repo.join("sitecustomize.py").display().to_string(),
+            ),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "publish: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(published.exists(), "cargo publish ran");
+    assert!(
+        !imported.exists(),
+        "a planted module was imported: {}",
+        std::fs::read_to_string(&imported).unwrap_or_default()
+    );
+
+    let log = std::fs::read_to_string(&log).expect("log");
+    let calls: Vec<&str> = log.split("== ").filter(|c| !c.is_empty()).collect();
+    let first = |c: &&str| c.lines().next().unwrap_or_default().to_string();
+    let with_token: Vec<String> = calls
+        .iter()
+        .filter(|c| c.contains(TOKEN))
+        .map(first)
+        .collect();
+    assert_eq!(
+        with_token.len(),
+        1,
+        "only cargo publish sees the token: {with_token:?}"
+    );
+    assert!(
+        with_token[0].starts_with("cargo publish "),
+        "{with_token:?}"
+    );
+    assert!(
+        calls.iter().any(|c| first(c).starts_with("cargo publish ")
+            && c.lines()
+                .any(|l| l == format!("CARGO_REGISTRY_TOKEN={TOKEN}"))),
+        "cargo publish gets the token in its environment"
+    );
+    let pythons: Vec<String> = calls
+        .iter()
+        .map(first)
+        .filter(|c| c.starts_with("python3"))
+        .collect();
+    assert!(
+        pythons.len() >= 3,
+        "the preparation ran python3: {pythons:?}"
+    );
+    assert!(
+        pythons.iter().all(|c| c.starts_with("python3 -I -S ")),
+        "every python3 runs isolated: {pythons:?}"
+    );
+    assert!(
+        calls.iter().any(|c| first(c).starts_with("git ")),
+        "the preparation ran git"
+    );
+    assert!(
+        calls.iter().any(|c| first(c).starts_with("cargo metadata")),
+        "the preparation ran cargo metadata"
+    );
     // The stand-in's manifest and lockfile are restored.
     let status = std::process::Command::new("git")
         .args(["status", "--porcelain", "--untracked-files=no"])

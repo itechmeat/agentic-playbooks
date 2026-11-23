@@ -15,6 +15,9 @@
 #   scripts/crates.sh installed <version>         install the published version, check it
 #
 # Only `publish` runs with a registry token; every other command refuses one.
+# `publish` takes CARGO_REGISTRY_TOKEN out of its environment before it starts
+# any program and hands it to the one `cargo publish` invocation only, so git,
+# python3, curl and the other cargo commands never inherit it.
 # The workflow .github/workflows/publish-crates.yml runs `check` and
 # `preflight` in its job without a credential, `repack` and `publish` in the
 # job that holds one, and `installed` last. CI runs `check` on every pull
@@ -46,8 +49,7 @@ cmd="${1:-}"
 shift
 
 # 1. Credentials, before anything else.
-token_in_env() {
-  [ -n "${CARGO_REGISTRY_TOKEN:-}" ] && return 0
+other_registry_token() {
   local name
   while read -r name; do
     case "${name}" in
@@ -57,14 +59,24 @@ token_in_env() {
   return 1
 }
 
+# The token of `publish`, in a shell variable that is never exported.
+REGISTRY_TOKEN=""
 case "${cmd}" in
   check | preflight | repack | installed)
-    if token_in_env; then
+    if [ -n "${CARGO_REGISTRY_TOKEN:-}" ] || other_registry_token; then
       die "refusing to run ${cmd} with a registry token in the environment"
     fi
     ;;
   publish)
     [ -n "${CARGO_REGISTRY_TOKEN:-}" ] || die "refusing to run publish without CARGO_REGISTRY_TOKEN"
+    if other_registry_token; then
+      die "refusing to run publish with a CARGO_REGISTRIES_<name>_TOKEN in the environment"
+    fi
+    REGISTRY_TOKEN="${CARGO_REGISTRY_TOKEN}"
+    unset CARGO_REGISTRY_TOKEN
+    # rustup ranks this above the checkout's rust-toolchain.toml, so the
+    # checkout cannot pick the cargo that receives the token.
+    export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
     ;;
   *) usage ;;
 esac
@@ -76,11 +88,26 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/crates-sh.XXXXXX")"
 renamed=0
 cleanup() {
   if [ "${renamed}" = 1 ]; then
-    git checkout -- crates/apb-cli/Cargo.toml Cargo.lock
+    git_plain checkout -- crates/apb-cli/Cargo.toml Cargo.lock
   fi
   rm -rf "${work}"
 }
 trap cleanup EXIT
+
+# git with no hook and no filesystem monitor program, whatever the
+# repository's configuration says.
+git_plain() {
+  git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
+}
+
+# python3 isolated: -I puts neither the current nor the script's directory on
+# the import path and ignores every PYTHON* variable and the user site; -S
+# skips the site module, so no sitecustomize, usercustomize or .pth file is
+# read. It runs from the scratch directory; every path handed to it is
+# absolute.
+py() {
+  (cd "${work}" && python3 -I -S "$@")
+}
 
 sha256() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -91,14 +118,14 @@ sha256() {
 }
 
 workspace_version() {
-  python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["workspace"]["package"]["version"])' Cargo.toml
+  py -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["workspace"]["package"]["version"])' "${root}/Cargo.toml"
 }
 
 # `http_get <url> <file>` prints the HTTP status; the body goes to <file>.
-# A transport failure stops the script.
+# A transport failure stops the script. `-q` first: no .curlrc is read.
 http_get() {
   local code
-  code="$(curl -sS -A "${USER_AGENT}" -o "$2" -w '%{http_code}' "$1")" || die "request failed: $1"
+  code="$(curl -q -sS -A "${USER_AGENT}" -o "$2" -w '%{http_code}' "$1")" || die "request failed: $1"
   printf '%s' "${code}"
 }
 
@@ -124,7 +151,7 @@ index_cksum() {
     200) ;;
     *) die "the index answered ${code} for $1" ;;
   esac
-  python3 - "${body}" "$2" <<'PY'
+  py - "${body}" "$2" <<'PY'
 import json, sys
 path, version = sys.argv[1], sys.argv[2]
 for line in open(path, encoding="utf-8"):
@@ -205,6 +232,16 @@ exclude_skipped() {
 }
 
 # The shared preparation of check, repack and publish.
+#
+# What it trusts from the checkout: the manifests and the lockfile as data
+# (cargo metadata, package and publish read them; none of them builds here
+# except `check`, which runs without a credential). Cargo reads its
+# configuration from the current directory and its parents and from
+# CARGO_HOME; the current directory is the repository root, whose
+# .cargo/config(.toml) is refused, and its parents and CARGO_HOME are the
+# runner's, not the checkout's. Nothing the checkout holds is run as code by
+# git (no hook, no fsmonitor, no external diff or textconv) or python3
+# (isolated, from the scratch directory).
 META="${work}/metadata.json"
 TARGET_DIR=""
 VERSION=""
@@ -214,23 +251,26 @@ prepare() {
     [ ! -e "${config}" ] || die "refusing a checked-in cargo configuration: ${config}"
   done
 
-  git diff --quiet HEAD -- crates/apb-cli/Cargo.toml Cargo.lock \
+  git_plain diff --no-ext-diff --no-textconv --quiet HEAD -- crates/apb-cli/Cargo.toml Cargo.lock \
     || die "crates/apb-cli/Cargo.toml or Cargo.lock has uncommitted changes; commit or discard them first"
   renamed=1
-  python3 - <<'PY' || die "the rename of the CLI package failed"
+  py - "${root}/crates/apb-cli/Cargo.toml" "${root}/Cargo.lock" <<'PY' || die "the rename of the CLI package failed"
 import sys
 
-def rewrite(path, pick):
+PATHS = {"crates/apb-cli/Cargo.toml": sys.argv[1], "Cargo.lock": sys.argv[2]}
+
+def rewrite(label, pick):
+    path = PATHS[label]
     with open(path, encoding="utf-8") as f:
         lines = f.read().split("\n")
     hits = pick(lines)
     if len(hits) != 1:
-        sys.exit(f"{path}: expected exactly one line to rename, found {len(hits)}")
+        sys.exit(f"{label}: expected exactly one line to rename, found {len(hits)}")
     new = list(lines)
     new[hits[0]] = 'name = "agentic-playbooks"'
     changed = sum(1 for a, b in zip(lines, new) if a != b)
     if changed != 1:
-        sys.exit(f"{path}: expected exactly one changed line, got {changed}")
+        sys.exit(f"{label}: expected exactly one changed line, got {changed}")
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(new))
     return new
@@ -260,7 +300,7 @@ PY
     || die "cargo would change Cargo.lock after the rename; nothing was packaged"
 
   VERSION="$(workspace_version)"
-  TARGET_DIR="$(python3 - "${META}" "${VERSION}" <<'PY'
+  TARGET_DIR="$(py - "${META}" "${VERSION}" <<'PY'
 import json, sys
 meta = json.load(open(sys.argv[1], encoding="utf-8"))
 version = sys.argv[2]
@@ -289,7 +329,8 @@ crate_file() {
   printf '%s/package/%s-%s.crate' "${TARGET_DIR}" "$1" "$2"
 }
 
-# `contains <list file> <path>` fails naming the crate when <path> is missing.
+# `require_path <crate> <list file> <path>` fails naming the crate when
+# <path> is missing.
 require_path() {
   grep -qxF -- "$3" "$2" || die "$1: the package does not hold $3"
 }
@@ -319,7 +360,7 @@ cmd_check() {
             connectors/*) require_path "${name}" "${list}" "${base}/embedded/${tracked}" ;;
             examples/playbooks/*) require_path "${name}" "${list}" "${base}/embedded/templates/${tracked#examples/playbooks/}" ;;
           esac
-        done < <(git ls-files bundled connectors examples/playbooks)
+        done < <(git_plain ls-files bundled connectors examples/playbooks)
         require_path "${name}" "${list}" "${base}/embedded/models.yaml"
         require_path "${name}" "${list}" "${base}/embedded/near-ai-cloud.json"
         ;;
@@ -359,10 +400,10 @@ cmd_preflight() {
     case "${code}" in
       404) ;;
       200)
-        answered="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["crate"]["name"])' "${body}")"
+        answered="$(py -c 'import json, sys; print(json.load(open(sys.argv[1]))["crate"]["name"])' "${body}")"
         code="$(http_get "https://crates.io/api/v1/crates/${name}/owners" "${body}.owners")"
         [ "${code}" = 200 ] || die "crates.io answered ${code} for the owners of ${name}"
-        owners="$(python3 -c 'import json, sys; print(" ".join(u["login"] + ":" + u["kind"] for u in json.load(open(sys.argv[1]))["users"]))' "${body}.owners")"
+        owners="$(py -c 'import json, sys; print(" ".join(u["login"] + ":" + u["kind"] for u in json.load(open(sys.argv[1]))["users"]))' "${body}.owners")"
         if [ "${answered}" != "${name}" ] || [[ " ${owners} " != *" ${OWNER_LOGIN}:user "* ]]; then
           die "crate ${name} exists on crates.io and is not ours (name ${answered}, owners ${owners})"
         fi
@@ -428,11 +469,13 @@ cmd_publish() {
         || die "${name} ${version} appeared on crates.io after the plan was made; nothing was published; rerun all jobs"
     done
     exclude_skipped
-    if ! cargo publish --workspace --no-verify --locked --allow-dirty "${EXCLUDE[@]}"; then
+    # The one program that gets the token, in its own environment only.
+    if ! CARGO_REGISTRY_TOKEN="${REGISTRY_TOKEN}" cargo publish --workspace --no-verify --locked --allow-dirty "${EXCLUDE[@]}"; then
       echo "publishing ${version} stopped; rerun all jobs of the publish-crates run later: crates already published with the verified checksums are skipped" >&2
       exit 1
     fi
   fi
+  REGISTRY_TOKEN=""
   for name in "${ORDER[@]}"; do
     tries=0
     while :; do
