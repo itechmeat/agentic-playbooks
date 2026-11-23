@@ -1475,6 +1475,134 @@ fn no_code_from_the_checkout_runs_next_to_a_credential() {
     }
 }
 
+/// The prefix every step between the checkout and Publish that runs code
+/// from the checkout starts with.
+const NO_COMMAND_FILES: &str = "env -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_OUTPUT -u GITHUB_STATE ";
+
+/// Steps after the checkout that run only main's inline text, nothing from
+/// the checkout.
+const INLINE_ONLY: &[&str] = &["Prepare the tree"];
+
+/// Why a step of the publish job between the checkout and Publish could
+/// hand the Publish step an environment (`BASH_ENV`, `LD_PRELOAD`, a `PATH`
+/// entry) through the workflow command files.
+fn command_file_problems(steps: &[&Value]) -> Vec<String> {
+    let checkout = steps
+        .iter()
+        .position(|s| step_uses(s).starts_with("actions/checkout@"))
+        .expect("a checkout step");
+    let publish = steps
+        .iter()
+        .position(|s| step_name(s) == "Publish")
+        .expect("a Publish step");
+    let mut problems = Vec::new();
+    for step in &steps[checkout + 1..publish] {
+        let name = step_name(step);
+        if !step_uses(step).is_empty() {
+            problems.push(format!("{name}: an action runs after the checkout"));
+            continue;
+        }
+        let run = run_of(step);
+        if INLINE_ONLY.contains(&name) {
+            for line in run.lines().map(str::trim) {
+                let starts = [
+                    "cargo", "./", "bash", "sh ", "source", ". ", "make", "exec", "eval", "python",
+                    "node", "bun", "npm", "env ",
+                ]
+                .iter()
+                .any(|p| line.starts_with(p));
+                if starts || line.contains("scripts/") || line.contains("crates.sh") {
+                    problems.push(format!("{name}: runs code from the checkout: {line}"));
+                }
+            }
+        } else if !run.starts_with(NO_COMMAND_FILES) || run.trim_end().contains('\n') {
+            problems.push(format!(
+                "{name}: runs code from the checkout with the workflow command files: {run}"
+            ));
+        }
+    }
+    problems
+}
+
+#[test]
+fn no_step_before_publish_keeps_the_workflow_command_files() {
+    let doc = crates_doc();
+    let steps = Release::steps(crates_job(&doc, "publish"));
+    assert_eq!(command_file_problems(&steps), Vec::<String>::new());
+
+    // A step that runs the checkout's script with the files fails it.
+    let mut kept = doc.clone();
+    let repack = kept["jobs"]["publish"]["steps"]
+        .as_sequence_mut()
+        .expect("steps")
+        .iter_mut()
+        .find(|s| step_name(s) == "Repack and compare")
+        .expect("repack");
+    let plain = run_of(repack).replacen(NO_COMMAND_FILES, "", 1);
+    repack["run"] = Value::String(plain);
+    let problems = command_file_problems(&Release::steps(crates_job(&kept, "publish")));
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].starts_with("Repack and compare:"),
+        "{problems:?}"
+    );
+
+    // The inline step may not start the checkout's code either.
+    let mut inline = doc.clone();
+    let tree = inline["jobs"]["publish"]["steps"]
+        .as_sequence_mut()
+        .expect("steps")
+        .iter_mut()
+        .find(|s| step_name(s) == "Prepare the tree")
+        .expect("tree");
+    let run = format!("{}scripts/crates.sh check\n", run_of(tree));
+    tree["run"] = Value::String(run);
+    let problems = command_file_problems(&Release::steps(crates_job(&inline, "publish")));
+    assert!(
+        problems.iter().any(|p| p.starts_with("Prepare the tree:")),
+        "{problems:?}"
+    );
+
+    // Publish: an absolute shell that loads no startup file, BASH_ENV and
+    // ENV empty, PATH reset before the checkout's script runs.
+    let publish = steps
+        .iter()
+        .find(|s| step_name(s) == "Publish")
+        .expect("Publish");
+    let shell = publish
+        .get("shell")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        shell.starts_with("/bin/bash --noprofile --norc "),
+        "{shell}"
+    );
+    assert!(shell.ends_with(" {0}"), "{shell}");
+    for var in ["BASH_ENV", "ENV"] {
+        assert_eq!(
+            publish
+                .get("env")
+                .and_then(|e| e.get(var))
+                .and_then(Value::as_str),
+            Some(""),
+            "Publish sets {var} empty"
+        );
+    }
+    let run = run_of(publish);
+    let reset = run
+        .find("export PATH=\"${HOME}/.cargo/bin:")
+        .expect("PATH reset");
+    let unset = run.find("unset BASH_ENV ENV").expect("unset");
+    let script = run
+        .find("scripts/crates.sh publish")
+        .expect("crates.sh publish");
+    assert!(reset < script && unset < script, "{run}");
+    assert!(
+        !run[reset..script].contains("${PATH"),
+        "PATH keeps nothing: {run}"
+    );
+}
+
 /// Writes a `.crate` tarball `<dir>/<name>-<version>.crate` holding
 /// `<name>-<version>/Cargo.toml` with the given name and version lines, and
 /// `extra` (a path relative to the tar root) when set.

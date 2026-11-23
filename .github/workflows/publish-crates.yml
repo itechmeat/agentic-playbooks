@@ -299,17 +299,28 @@ jobs:
           fi
           mv "${RUNNER_TEMP}/verified/dashboard" crates/apb-server/dashboard
       # Packs the publishing crates again without building and requires the
-      # recorded checksums, before any credential exists.
+      # recorded checksums, before any credential exists. Code from the
+      # checkout runs here, so it runs without the workflow command files:
+      # it cannot set BASH_ENV, LD_PRELOAD or a PATH entry for the Publish
+      # step through GITHUB_ENV or GITHUB_PATH.
       - name: Repack and compare
-        run: scripts/crates.sh repack "${TAG#v}" "${RUNNER_TEMP}/verified"
+        run: env -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_OUTPUT -u GITHUB_STATE scripts/crates.sh repack "${TAG#v}" "${RUNNER_TEMP}/verified"
       # The only step that sees the token. Without it (no secret in the
       # crates-io environment, or an empty one) the job fails closed before
-      # cargo runs; the secret itself is never printed.
+      # cargo runs; the secret itself is never printed. The shell is named
+      # by its absolute path, so a PATH entry an earlier step added cannot
+      # pick it; BASH_ENV and ENV are empty, so bash loads no file at start;
+      # PATH is reset before the checkout's script runs.
       - name: Publish
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          BASH_ENV: ""
+          ENV: ""
         run: |
           set -euo pipefail
+          unset BASH_ENV ENV
+          export PATH="${HOME}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
           if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
             echo "::error::the crates-io environment has no CARGO_REGISTRY_TOKEN secret, or it is empty: add the crates.io token to that environment and run this workflow again"
             exit 1
