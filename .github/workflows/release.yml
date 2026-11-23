@@ -127,6 +127,12 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      - name: "Install Rust"
+        uses: "dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87"
+        with:
+          "components": "clippy, rustfmt"
+          "targets": "${{ join(matrix.targets, ',') }}"
+          "toolchain": "stable"
       - name: "Install Bun"
         uses: "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
         with:

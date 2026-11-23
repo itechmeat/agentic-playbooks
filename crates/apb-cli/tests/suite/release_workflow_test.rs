@@ -1963,3 +1963,150 @@ fn the_publish_scripts_stay_portable_to_bash_3_2_and_bsd_tools() {
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
+
+// The current stable toolchain in every build and test leg. A runner image
+// carries a preinstalled stable Rust, and rustup uses it as is: the
+// `rust-toolchain.toml` of the tree names only the channel. An older image's
+// stable can be below `rust-version`, so every job that runs cargo first
+// installs the current stable through the pinned `dtolnay/rust-toolchain`
+// (which runs `rustup toolchain install`, an update for an installed channel).
+// The one exception is the msrv job, which installs exactly `rust-version`.
+
+const TOOLCHAIN_ACTION: &str = "dtolnay/rust-toolchain@";
+
+/// The index of the first step that runs cargo, a repository script (which
+/// runs cargo) or a dist build, if any.
+fn first_cargo_call(steps: &[&Value]) -> Option<usize> {
+    steps.iter().position(|s| {
+        let run = run_of(s);
+        run.contains("dist build")
+            || run.contains("scripts/")
+            || run
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                .any(|w| w == "cargo")
+    })
+}
+
+/// The index of the first step that installs the given toolchain through the
+/// pinned toolchain action, if any.
+fn toolchain_install(steps: &[&Value], toolchain: &str) -> Option<usize> {
+    steps.iter().position(|s| {
+        step_uses(s).starts_with(TOOLCHAIN_ACTION)
+            && s.get("with")
+                .and_then(|w| w.get("toolchain"))
+                .and_then(Value::as_str)
+                == Some(toolchain)
+    })
+}
+
+/// The jobs of a workflow that run cargo without installing the current
+/// stable (or, for `msrv`, the declared minimum) before the first cargo call.
+fn toolchain_problems(file: &str) -> Vec<String> {
+    let doc = load(&repo_root().join(file));
+    let jobs = doc
+        .get("jobs")
+        .and_then(Value::as_mapping)
+        .unwrap_or_else(|| panic!("{file} jobs"));
+    let mut problems = Vec::new();
+    for (id, job) in jobs {
+        let id = id.as_str().expect("job id");
+        let steps = Release::steps(job);
+        let Some(call) = first_cargo_call(&steps) else {
+            continue;
+        };
+        let wanted = if file.ends_with("ci.yml") && id == "msrv" {
+            "${{ steps.msrv.outputs.version }}"
+        } else {
+            "stable"
+        };
+        match toolchain_install(&steps, wanted) {
+            Some(install) if install < call => {}
+            _ => problems.push(format!(
+                "{file} job {id}: no {TOOLCHAIN_ACTION} step with toolchain {wanted} before step {call}"
+            )),
+        }
+    }
+    problems
+}
+
+#[test]
+fn every_build_and_test_job_installs_the_current_stable_before_cargo() {
+    let mut problems = Vec::new();
+    for file in [
+        ".github/workflows/ci.yml",
+        ".github/workflows/test-gate.yml",
+        ".github/workflows/publish-crates.yml",
+    ] {
+        problems.extend(toolchain_problems(file));
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+
+    // The negative case: a job whose cargo call comes before the install, or
+    // that has none, is reported.
+    let late: Value = yaml_serde::from_str(
+        "- run: cargo build\n- uses: dtolnay/rust-toolchain@x\n  with: { toolchain: stable }\n",
+    )
+    .expect("yaml");
+    let late: Vec<&Value> = late.as_sequence().expect("steps").iter().collect();
+    assert_eq!(first_cargo_call(&late), Some(0));
+    assert_eq!(toolchain_install(&late, "stable"), Some(1));
+    let none: Value = yaml_serde::from_str("- run: scripts/crates.sh check\n").expect("yaml");
+    let none: Vec<&Value> = none.as_sequence().expect("steps").iter().collect();
+    assert_eq!(first_cargo_call(&none), Some(0));
+    assert_eq!(toolchain_install(&none, "stable"), None);
+}
+
+#[test]
+fn every_dist_build_leg_installs_the_current_stable_first() {
+    // The dist build legs get their extra steps from build-setup.yml, so the
+    // install is its first step, ahead of the frontend build and dist.
+    let setup = load(&repo_root().join(".github/build-setup.yml"));
+    let setup: Vec<&Value> = setup
+        .as_sequence()
+        .expect("build-setup.yml is a list of steps")
+        .iter()
+        .collect();
+    assert_eq!(
+        toolchain_install(&setup, "stable"),
+        Some(0),
+        "build-setup.yml installs the current stable in its first step"
+    );
+    let first = setup[0];
+    assert_eq!(
+        first
+            .get("with")
+            .and_then(|w| w.get("targets"))
+            .and_then(Value::as_str),
+        Some("${{ join(matrix.targets, ',') }}"),
+        "the install adds the leg's targets"
+    );
+
+    // And the generated release.yml carries it (dist generate was run).
+    let release = Release::load();
+    let (_, build) = release
+        .jobs
+        .iter()
+        .find(|(_, job)| {
+            Release::steps(job)
+                .iter()
+                .any(|s| run_of(s).contains("dist build"))
+                && job
+                    .get("strategy")
+                    .and_then(|s| s.get("matrix"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|m| m.contains("artifacts_matrix"))
+        })
+        .expect("the dist build job");
+    let steps = Release::steps(build);
+    let build_step = steps
+        .iter()
+        .position(|s| run_of(s).contains("dist build"))
+        .expect("the dist build step");
+    let install = toolchain_install(&steps, "stable").expect("release.yml installs stable");
+    assert!(install < build_step, "the install precedes the dist build");
+    let bun = steps
+        .iter()
+        .position(|s| step_uses(s).starts_with("oven-sh/setup-bun@"))
+        .expect("the bun step");
+    assert!(install < bun, "the install precedes the other setup steps");
+}
