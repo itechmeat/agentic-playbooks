@@ -421,10 +421,19 @@ fn every_expectation_holds() {
 fn every_official_connector_meets_its_expectation() {
     for (name, auth, fields, functions) in OFFICIAL_CONNECTORS {
         let doc = connector(name);
-        assert_eq!(auth_kind(&doc), *auth, "the auth kind of {name}");
-        let got: Vec<&str> = doc.account_fields.iter().map(|f| f.name.as_str()).collect();
-        let want: Vec<&str> = fields.split_whitespace().collect();
-        assert_eq!(got, want, "the account fields of {name}");
+        // A bool first and a message that carries no auth or account data:
+        // the label is the manifest's name from the table.
+        let auth_ok = auth_kind(&doc) == *auth;
+        assert!(auth_ok, "{name}: the auth kind is not the frozen one");
+        let fields_ok = doc
+            .account_fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .eq(fields.split_whitespace());
+        assert!(
+            fields_ok,
+            "{name}: the account fields are not the frozen ones"
+        );
         let got: Vec<&str> = doc.functions.iter().map(|f| f.name.as_str()).collect();
         let want: Vec<&str> = functions.split_whitespace().collect();
         assert_eq!(got, want, "the functions of {name}");
@@ -874,8 +883,14 @@ fn halves(case: &str) -> (Option<String>, Option<String>) {
 /// On success every key of every account that wins the merge (each
 /// project account, and each global one no project account replaces) is
 /// checked against the merged account the reader kept.
+///
+/// Every assertion over account data computes a `bool` first and fails
+/// with a static message naming the case (a `&'static str` from the test
+/// table), so no failure message carries anything read from an account
+/// document: no value, no field name, no account name, no reader error.
+/// A refusal comes back as its text for the caller to test, never print.
 fn merged_of(
-    case: &str,
+    case: &'static str,
     connector: &str,
 ) -> Result<Vec<apb_core::connector::config::Account>, String> {
     let (global, project) = halves(case);
@@ -902,20 +917,28 @@ fn merged_of(
         .chain(project_accounts.iter().cloned());
     for raw in winners {
         let name = name_of(&raw);
-        let kept = merged
-            .iter()
-            .find(|a| a.name == name)
-            .unwrap_or_else(|| panic!("{case}: the account {name} is not in the merged list"));
+        let kept = merged.iter().find(|a| a.name == name);
+        assert!(
+            kept.is_some(),
+            "{case}: an account that wins the merge is not in the merged list"
+        );
+        let Some(kept) = kept else { continue };
         // A cleared default is the merge's decision, not a dropped key:
-        // compare the account's own keys with the reader's account.
-        keys_kept_value(
-            "connector-accounts.yaml",
-            case,
+        // compare the account's own keys with the reader's account. No
+        // account key is normalized (`NORMALIZED` names none), so every
+        // key must be kept as written.
+        let all_kept = dropped_paths(
             &raw,
             &typed(&apb_core::connector::config::Account {
                 default: raw["default"].as_bool().unwrap_or(kept.default),
                 ..kept.clone()
             }),
+            "",
+        )
+        .is_empty();
+        assert!(
+            all_kept,
+            "{case}: the account reader drops a frozen key, which breaks the freeze"
         );
     }
     Ok(merged)
@@ -983,147 +1006,165 @@ const ACCOUNT_KINDS: &[AccountKind] = &[
 
 /// The account of one auth kind in one scope merges as frozen, and the
 /// connector of that kind accepts it (`validate_accounts`: declared
-/// fields, required ones present, secrets as references only).
-fn expect_account_kind(scope: &str, kind: &str) {
-    let (_, manifest, fields) = ACCOUNT_KINDS
-        .iter()
-        .find(|(k, _, _)| *k == kind)
-        .unwrap_or_else(|| panic!("ACCOUNT_KINDS has no {kind}"));
+/// fields, required ones present, secrets as references only). `case` is
+/// the document's name in the test table; every message names it alone.
+fn expect_account_kind(case: &'static str, scope: &str, kind: &str) {
+    let entry = ACCOUNT_KINDS.iter().find(|(k, _, _)| *k == kind);
+    assert!(entry.is_some(), "{case}: ACCOUNT_KINDS has no entry for it");
+    let Some((_, manifest, fields)) = entry else {
+        return;
+    };
     let doc = connector(manifest);
-    assert_eq!(auth_kind(&doc), kind, "{manifest} authenticates by {kind}");
-    let case = format!("accounts/{scope}-{kind}");
-    let merged = merged_of(&case, &doc.name).unwrap_or_else(|e| panic!("{case} merges: {e}"));
-    assert_eq!(merged.len(), 1, "{case}: one account merges");
+    let auth_ok = auth_kind(&doc) == kind;
+    assert!(auth_ok, "{case}: the connector has another auth kind");
+    let merged = merged_of(case, &doc.name);
+    assert!(merged.is_ok(), "{case}: the account does not merge");
+    let Ok(merged) = merged else { return };
+    assert!(merged.len() == 1, "{case}: not exactly one account merges");
     let account = &merged[0];
-    assert_eq!(account.name, format!("{scope}-{}", kind.replace('_', "-")));
-    assert!(account.default, "{case}: the account is the default");
+    let name_ok = account.name == format!("{scope}-{}", kind.replace('_', "-"));
+    assert!(name_ok, "{case}: the merged account has another name");
+    assert!(account.default, "{case}: the account is not the default");
     let want: BTreeMap<String, String> = fields
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-    // Compared by name, so a failure names the field and never prints a
-    // field's value.
-    let names: Vec<&String> = account.fields.keys().collect();
-    let want_names: Vec<&String> = want.keys().collect();
+    let fields_ok = account.fields == want;
     assert!(
-        names == want_names,
+        fields_ok,
         "{case}: the merged fields are not the frozen ones"
     );
-    for (name, value) in &want {
-        assert!(
-            account.fields.get(name) == Some(value),
-            "{case}: the merged field {name} differs from the frozen one"
-        );
-    }
-    let errors = apb_core::connector::config::validate_accounts(&doc, &merged);
+    let accepted = apb_core::connector::config::validate_accounts(&doc, &merged).is_empty();
     assert!(
-        errors.is_empty(),
-        "{case}: the {kind} connector {manifest} refuses the frozen account: {errors:?}"
+        accepted,
+        "{case}: the connector of its auth kind refuses the frozen account"
     );
 }
 
 fn expect_accounts_global_header() {
-    expect_account_kind("global", "header");
+    expect_account_kind("accounts/global-header", "global", "header");
 }
 fn expect_accounts_global_query() {
-    expect_account_kind("global", "query");
+    expect_account_kind("accounts/global-query", "global", "query");
 }
 fn expect_accounts_global_basic() {
-    expect_account_kind("global", "basic");
+    expect_account_kind("accounts/global-basic", "global", "basic");
 }
 fn expect_accounts_global_path() {
-    expect_account_kind("global", "path");
+    expect_account_kind("accounts/global-path", "global", "path");
 }
 fn expect_accounts_global_oauth2_refresh() {
-    expect_account_kind("global", "oauth2_refresh");
+    expect_account_kind("accounts/global-oauth2_refresh", "global", "oauth2_refresh");
 }
 fn expect_accounts_project_header() {
-    expect_account_kind("project", "header");
+    expect_account_kind("accounts/project-header", "project", "header");
 }
 fn expect_accounts_project_query() {
-    expect_account_kind("project", "query");
+    expect_account_kind("accounts/project-query", "project", "query");
 }
 fn expect_accounts_project_basic() {
-    expect_account_kind("project", "basic");
+    expect_account_kind("accounts/project-basic", "project", "basic");
 }
 fn expect_accounts_project_path() {
-    expect_account_kind("project", "path");
+    expect_account_kind("accounts/project-path", "project", "path");
 }
 fn expect_accounts_project_oauth2_refresh() {
-    expect_account_kind("project", "oauth2_refresh");
+    expect_account_kind(
+        "accounts/project-oauth2_refresh",
+        "project",
+        "oauth2_refresh",
+    );
 }
 
 /// The global-only account (`{{cmd:...}}` in a field, which only the
 /// global file may use) merges: the merged list holds it with its command
 /// field untouched.
 fn expect_accounts_global_only_with_cmd() {
-    let merged = merged_of("accounts/global-only-with-cmd", "case-global-cmd")
-        .expect("the global-only account merges");
-    assert_eq!(merged.len(), 1, "one account merges");
-    assert_eq!(merged[0].name, "main");
-    assert!(merged[0].default, "the global account stays the default");
-    assert_eq!(
-        merged[0].fields.get("token").map(String::as_str),
-        Some("{{cmd:op read token}}"),
-        "the command field passes through the global file"
+    const CASE: &str = "accounts/global-only-with-cmd";
+    let merged = merged_of(CASE, "case-global-cmd");
+    assert!(
+        merged.is_ok(),
+        "{CASE}: the global-only account does not merge"
+    );
+    let Ok(merged) = merged else { return };
+    assert!(merged.len() == 1, "{CASE}: not exactly one account merges");
+    assert!(
+        merged[0].name == "main",
+        "{CASE}: the account has another name"
+    );
+    assert!(
+        merged[0].default,
+        "{CASE}: the global account is not the default"
+    );
+    let passes = merged[0].fields.get("token").map(String::as_str) == Some("{{cmd:op read token}}");
+    assert!(
+        passes,
+        "{CASE}: the command field does not pass through the global file"
     );
 }
 
 /// A project account of the same name replaces the global one entirely.
 fn expect_accounts_project_replaces_global() {
-    let merged =
-        merged_of("accounts/project-replaces-global", "case-replace").expect("the accounts merge");
-    let names: Vec<&str> = merged.iter().map(|a| a.name.as_str()).collect();
-    assert_eq!(
-        names,
-        vec!["other", "main"],
-        "global-only first, then project order"
+    const CASE: &str = "accounts/project-replaces-global";
+    let merged = merged_of(CASE, "case-replace");
+    assert!(merged.is_ok(), "{CASE}: the accounts do not merge");
+    let Ok(merged) = merged else { return };
+    let order_ok = merged.iter().map(|a| a.name.as_str()).eq(["other", "main"]);
+    assert!(
+        order_ok,
+        "{CASE}: not global-only first, then project order"
     );
-    let main = merged.iter().find(|a| a.name == "main").expect("main");
-    assert_eq!(
-        main.fields.get("token").map(String::as_str),
-        Some("project-token"),
-        "the project account's field wins"
+    let Some(main) = merged.iter().find(|a| a.name == "main") else {
+        panic!("{CASE}: the project account is not merged");
+    };
+    let project_wins = main.fields.get("token").map(String::as_str) == Some("project-token");
+    assert!(
+        project_wins,
+        "{CASE}: the project account's field does not win"
     );
     assert!(
         !main.fields.contains_key("api_base"),
-        "the global account is replaced entirely, its other fields are gone"
+        "{CASE}: the global account is not replaced entirely, its other fields remain"
     );
     assert!(
         !main.default,
-        "the replaced global default does not carry over to the project account"
+        "{CASE}: the replaced global default carries over to the project account"
     );
 }
 
 /// A project `default: true` clears a global default.
 fn expect_accounts_project_default_clears_global() {
-    let merged = merged_of("accounts/project-default-clears-global", "case-default")
-        .expect("the accounts merge");
-    let by_name = |n: &str| {
-        merged
-            .iter()
-            .find(|a| a.name == n)
-            .expect("the account merges")
-    };
+    const CASE: &str = "accounts/project-default-clears-global";
+    let merged = merged_of(CASE, "case-default");
+    assert!(merged.is_ok(), "{CASE}: the accounts do not merge");
+    let Ok(merged) = merged else { return };
+    let default_of = |n: &str| merged.iter().find(|a| a.name == n).map(|a| a.default);
     assert!(
-        !by_name("global-keep").default,
-        "the global default is cleared while a project default exists"
+        default_of("global-keep") == Some(false),
+        "{CASE}: the global default is not cleared while a project default exists"
     );
-    assert!(by_name("main").default, "the project default holds");
+    assert!(
+        default_of("main") == Some(true),
+        "{CASE}: the project default does not hold"
+    );
 }
 
 /// A project account with a `{{cmd:...}}` field is refused, naming the
 /// account.
 fn expect_accounts_project_cmd_refused() {
-    let error = merged_of("accounts/project-cmd-refused", "case-project-cmd")
-        .expect_err("a project command field is a hard error");
+    const CASE: &str = "accounts/project-cmd-refused";
+    let Err(error) = merged_of(CASE, "case-project-cmd") else {
+        panic!("{CASE}: a project command field merges instead of a hard error");
+    };
+    let names_field = error.contains("cmd");
     assert!(
-        error.contains("cmd"),
-        "the refusal names the command field: {error}"
+        names_field,
+        "{CASE}: the refusal does not name the command field"
     );
+    let names_account = error.contains("main");
     assert!(
-        error.contains("main"),
-        "the refusal names the account: {error}"
+        names_account,
+        "{CASE}: the refusal does not name the account"
     );
 }
 
@@ -1537,7 +1578,12 @@ fn expect_trigger_rule_inbox() {
     assert_eq!(rule.name, "triage-opened-issues");
     let apb_core::trigger::RuleSource::Inbox(inbox) = &rule.source;
     assert_eq!(inbox.connector, "github");
-    assert_eq!(inbox.account, "acme");
+    // A bool and a static message: the account name is not printed.
+    let account_ok = inbox.account == "acme";
+    assert!(
+        account_ok,
+        "trigger-rule/inbox: the inbox account is not the frozen one"
+    );
     assert_eq!(inbox.types, vec!["issues".to_string()]);
     assert_eq!(inbox.conditions.len(), 1, "one where condition is frozen");
     assert_eq!(
