@@ -1498,20 +1498,16 @@ mod tests {
         )
     }
 
-    /// The orphan the stub left behind while the close ran: its pid is
-    /// recorded, so the close was timed against a writer that really held
-    /// the pipe. Waits a little for the recording, which the orphan writes
-    /// itself once it runs.
+    /// The orphan the stub left behind, read right after the session
+    /// connected: the stub starts it before it reads its first request and
+    /// waits until its pid is recorded, so by the handshake's answer the
+    /// orphan is a writer of its own session, out of the server's group,
+    /// and the close is timed against a writer that really holds the pipe.
+    /// No wait here: a missing pid is a broken stub, never a slow machine.
     #[cfg(target_os = "linux")]
     fn started_orphan(stub: &StubServer) -> u32 {
-        let until = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(pid) = stub.orphan_pid() {
-                return pid;
-            }
-            assert!(Instant::now() < until, "the orphan never started");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        stub.orphan_pid()
+            .expect("the stub records its orphan before it answers the handshake")
     }
 
     /// Kills the orphan the stub left behind, so a test leaves no process
@@ -1663,11 +1659,11 @@ mod tests {
             deadline,
         )
         .expect("the session connects");
+        let orphan = started_orphan(&stub);
         let started = Instant::now();
         let ended = session.close();
         // The quiet orphan sleeps and writes nothing, so the close's end
         // of the pipe going away does not end it: it still holds the pipe.
-        let orphan = started_orphan(&stub);
         assert!(StubServer::is_alive(orphan), "the orphan held the pipe");
         kill_orphan(&stub);
         assert!(
@@ -1703,9 +1699,12 @@ mod tests {
             deadline,
         )
         .expect("the session connects");
+        // Recorded before the close: the writer runs out of the server's
+        // group, so the close's group kill cannot take it. Once the close
+        // drops its end of the pipe the writer dies of SIGPIPE.
+        started_orphan(&stub);
         let started = Instant::now();
         let ended = session.close();
-        started_orphan(&stub);
         kill_orphan(&stub);
         assert!(
             matches!(ended, Ended::Reaped { .. }),
