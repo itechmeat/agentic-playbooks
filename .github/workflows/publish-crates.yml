@@ -206,17 +206,35 @@ jobs:
           path: ${{ runner.temp }}/verified
       # Main's text, no repository code: the exact file set, every checksum,
       # each crate's name and version, the plan and a dashboard of plain
-      # files and directories only.
+      # files and directories only. Portable to bash 3.2 and BSD tools (its
+      # test runs on macOS too): no mapfile, no GNU find or sha256sum option.
       - name: Check the handed-over packages
         run: |
           set -euo pipefail
           V="${TAG#v}"
           names=(agentic-playbooks-decide agentic-playbooks-core agentic-playbooks-mcp-client agentic-playbooks-engine agentic-playbooks-mcp agentic-playbooks-server agentic-playbooks)
           fail() { echo "::error::$*"; exit 1; }
+          sha256() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | cut -d' ' -f1
+            else
+              shasum -a 256 "$1" | cut -d' ' -f1
+            fi
+          }
+          # `lines_of <file>`: one array element per line, into LINES.
+          lines_of() {
+            LINES=()
+            local line
+            while IFS= read -r line || [[ -n "${line}" ]]; do
+              LINES+=("${line}")
+            done <"$1"
+          }
           cd "${RUNNER_TEMP}/verified" || fail "no handed-over packages"
 
           expected=$(for n in "${names[@]}"; do echo "${n}-${V}.crate"; done; printf '%s\n' SHA256SUMS publish-plan dashboard)
-          present=$(find . -mindepth 1 -maxdepth 1 -printf '%f\n')
+          shopt -s dotglob nullglob
+          present=$(for entry in *; do printf '%s\n' "${entry}"; done)
+          shopt -u dotglob nullglob
           [[ "$(sort <<<"${expected}")" == "$(sort <<<"${present}")" ]] \
             || fail "the artifact must hold exactly the seven packages, SHA256SUMS, publish-plan and dashboard"
           for f in SHA256SUMS publish-plan; do
@@ -224,18 +242,19 @@ jobs:
           done
           [[ -d dashboard && ! -L dashboard ]] || fail "dashboard is not a directory"
 
-          mapfile -t sums <SHA256SUMS
-          [[ "${#sums[@]}" == 7 ]] || fail "SHA256SUMS must hold seven lines"
+          lines_of SHA256SUMS
+          [[ "${#LINES[@]}" == 7 ]] || fail "SHA256SUMS must hold seven lines"
           for i in "${!names[@]}"; do
-            line="${sums[$i]}"
+            line="${LINES[$i]}"
             [[ "${line:0:64}" =~ ^[0-9a-f]{64}$ && "${line:64}" == "  ${names[$i]}-${V}.crate" ]] \
               || fail "SHA256SUMS line $((i + 1)) must be the checksum of ${names[$i]}-${V}.crate"
           done
-          sha256sum --strict --check SHA256SUMS >/dev/null || fail "a package does not match SHA256SUMS"
 
-          for n in "${names[@]}"; do
+          for i in "${!names[@]}"; do
+            n="${names[$i]}"
             crate="${n}-${V}.crate"
             [[ -f "${crate}" && ! -L "${crate}" ]] || fail "${crate} is not a plain file"
+            [[ "$(sha256 "${crate}")" == "${LINES[$i]:0:64}" ]] || fail "${crate} does not match SHA256SUMS"
             listing=$(tar -tzf "${crate}") || fail "${crate} is not a gzip tar archive"
             while IFS= read -r entry; do
               [[ "${entry}" == "${n}-${V}/"* && "/${entry}/" != *"/../"* ]] \
@@ -246,11 +265,11 @@ jobs:
             grep -qxF "version = \"${V}\"" <<<"${manifest}" || fail "${crate} is not version ${V}"
           done
 
-          mapfile -t plan <publish-plan
-          [[ "${#plan[@]}" == 8 && "${plan[0]}" == "${V}" ]] \
+          lines_of publish-plan
+          [[ "${#LINES[@]}" == 8 && "${LINES[0]}" == "${V}" ]] \
             || fail "publish-plan must be the version ${V} and seven package lines"
           for i in "${!names[@]}"; do
-            line="${plan[$((i + 1))]}"
+            line="${LINES[$((i + 1))]}"
             [[ "${line}" == "${names[$i]} publish" || "${line}" == "${names[$i]} skip" ]] \
               || fail "publish-plan line $((i + 2)) must be '${names[$i]} publish' or '${names[$i]} skip'"
           done

@@ -1514,11 +1514,19 @@ fn write_sums(dir: &Path, order: &[String], version: &str) {
     let mut text = String::new();
     for name in order {
         let file = format!("{name}-{version}.crate");
-        let out = std::process::Command::new("sha256sum")
+        // macOS has `shasum`, not always `sha256sum`.
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(
+                "if command -v sha256sum >/dev/null 2>&1; then sha256sum \"$1\"; \
+                 else shasum -a 256 \"$1\"; fi",
+            )
+            .arg("sh")
             .arg(&file)
             .current_dir(dir)
             .output()
-            .expect("sha256sum");
+            .expect("sha256");
+        assert!(out.status.success(), "sha256 of {file}: {out:?}");
         let sum = String::from_utf8_lossy(&out.stdout)
             .split_whitespace()
             .next()
@@ -1765,4 +1773,62 @@ fn the_tree_step_refuses_cargo_configuration() {
             .join("crates/apb-server/dashboard/index.html")
             .is_file()
     );
+}
+
+/// Constructs bash 3.2 (the macOS `/bin/bash`) or the BSD tools of macOS do
+/// not have. The publish workflow runs on Linux, but its inline steps and
+/// `scripts/crates.sh` also run in this suite on macOS.
+const NOT_PORTABLE: &[&str] = &[
+    "declare -A",
+    "local -A",
+    "typeset -A",
+    "mapfile",
+    "readarray",
+    ",,}",
+    "^^}",
+    "-printf",
+    "sha256sum --",
+    "sha256sum -c",
+    "sed -i",
+    "stat -c",
+    "readlink -f",
+    "sort -V",
+    "grep -P",
+    "date -d",
+    "xargs -r",
+    "cp --",
+    "mktemp --",
+    "&>>",
+    "|&",
+];
+
+fn portability_problems(origin: &str, text: &str) -> Vec<String> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim_start().starts_with('#'))
+        .flat_map(|(i, l)| {
+            NOT_PORTABLE
+                .iter()
+                .filter(|c| l.contains(**c))
+                .map(move |c| format!("{origin}:{}: {c:?} in {l:?}", i + 1))
+        })
+        .collect()
+}
+
+#[test]
+fn the_publish_scripts_stay_portable_to_bash_3_2_and_bsd_tools() {
+    let mut problems = portability_problems(
+        "scripts/crates.sh",
+        &std::fs::read_to_string(repo_root().join("scripts/crates.sh")).expect("crates.sh"),
+    );
+    let doc = crates_doc();
+    for id in ["prepare", "publish", "installed"] {
+        for step in Release::steps(crates_job(&doc, id)) {
+            problems.extend(portability_problems(
+                &format!("{CRATES_WORKFLOW} {id}/{}", step_name(step)),
+                run_of(step),
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
