@@ -384,6 +384,64 @@ fn the_script_refuses_a_token_where_code_runs() {
     );
 }
 
+/// `installed` against a `cargo` stub that installs an `apb` printing the
+/// asked version: it exits 0 after the check, and its EXIT trap removes the
+/// scratch directories it made. The rc.1 publish run failed here, after a
+/// passing check, on `home: unbound variable`.
+#[cfg(unix)]
+#[test]
+fn installed_exits_zero_after_a_passing_check() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let script = repo_root().join("scripts/crates.sh");
+    let bin = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let stub = bin.path().join("cargo");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\n\
+         [ \"$1\" = install ] || exit 1\n\
+         root=''; version=''\n\
+         while [ \"$#\" -gt 0 ]; do\n\
+           case \"$1\" in\n\
+             --root) root=\"$2\"; shift ;;\n\
+             --version) version=\"$2\"; shift ;;\n\
+           esac\n\
+           shift\n\
+         done\n\
+         [ -n \"$CARGO_HOME\" ] && [ -d \"$CARGO_HOME\" ] || exit 1\n\
+         mkdir -p \"$root/bin\"\n\
+         printf '#!/bin/sh\\necho \"apb %s\"\\n' \"$version\" > \"$root/bin/apb\"\n\
+         chmod 755 \"$root/bin/apb\"\n",
+    )
+    .expect("write stub");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let dir = scratch.path().to_str().expect("utf-8 path");
+    let out = run_script(
+        &script,
+        &["installed", "9.9.9"],
+        bin.path(),
+        &[("RUNNER_TEMP", dir), ("TMPDIR", dir)],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "installed exits 0: {out:?}");
+    assert!(
+        stdout.contains("installed agentic-playbooks 9.9.9: apb 9.9.9"),
+        "{stdout}"
+    );
+    assert!(!stderr.contains("unbound variable"), "{stderr}");
+    let left: Vec<_> = std::fs::read_dir(scratch.path())
+        .expect("read scratch")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    assert!(
+        left.is_empty(),
+        "the trap removed its directories: {left:?}"
+    );
+}
+
 /// A committed stand-in of the repository in `dir`: the root manifest at the
 /// workspace version, the CLI manifest, a lockfile entry, the built
 /// dashboard and a copy of `scripts/crates.sh`.

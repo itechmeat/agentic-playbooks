@@ -122,8 +122,8 @@ every key the document holds, and run the document's hand-written
 expectation of what the reader decides from it.
 
 The released binary corpus, `crates/apb-cli/tests/suite/journal_corpus_test.rs`,
-runs released binaries (`v0.25.0`, `v1.0.0-beta.1` and the freeze
-reader `v1.0.0-beta.7`) and this one against each other's run journals:
+runs released binaries (`v0.25.0`, `v1.0.0-beta.1`, the freeze
+reader `v1.0.0-beta.7` and the release candidate `v1.0.0-rc.1`) and this one against each other's run journals:
 each writes a run the other reads, resumes and stops. It covers the
 journal only; the other frozen files are checked against the fixtures
 above, not against files an earlier release wrote. The old binaries come

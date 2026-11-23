@@ -1,394 +1,157 @@
 <p align="center"><img src="docs/brand/banner.png" alt="apb - Agentic Playbooks: repeatable playbooks that a team of AI agents runs for you" width="100%"></p>
 
-# Agentic Playbooks - `apb`
+# Give your agent a playbook for the work you keep explaining
 
-Repeatable multi-step workflows for coding agents, defined in YAML and executed
-locally. One binary: the execution engine, a visual web editor, and an MCP
-server your agent can drive.
+Ask Claude Code, Codex or another supported agent to write down the steps for
+reviewing a code change or sorting unread mail. Each time you run that
+playbook, `apb` follows the same steps on your machine and waits for your
+approval at each review step you add.
 
-You already ask Claude Code (or another agent) to "plan, implement, lint, fix,
-repeat" by hand. A playbook turns that into a versioned artifact: agent tasks,
-scripts, conditions, review gates, and parallel branches wired into a graph
-that runs the same way every time, survives restarts, and leaves a full event
-log behind.
+**[Run the built-in demo](docs/FIRST-RUN.md)**: one command on your machine.
+It writes a report and waits for your approval, with no agent and no API key.
 
-## Why `apb`
+**[Meet Open Second Brain](#give-your-agents-memory-with-open-second-brain)**:
+the companion project that gives the same agents a shared memory.
 
-- **Playbooks as YAML.** Node types: `agent_task`, `script`, `condition`,
-  `human_review`, `wait` (timer/webhook), parallel branches with `join`.
-  Templating over params and node outputs, retries, fallbacks, timeouts. An
-  `agent_task` can be marked `interactive: true` to ask the user a question
-  mid-run and wait for an answer.
-- **Your coding agents, via profiles.** Claude Code, Codex, OpenCode, Cursor
-  Agent, Grok, Hermes, Qoder, Antigravity, Pi and ZCode. A profile binds agent + model + ordered
-  fallbacks + role prompt + skills. Nodes reference profiles by name; swapping
-  models never means editing the playbook.
-- **Recorded and resumable runs.** The graph, not the agent, decides what
-  runs next. Append-only event log, immutable
-  per-run snapshot of the playbook and profiles, `apb resume` after a crash,
-  `apb pause` to stop a run for a while and continue it later with its clocks frozen.
-- **Visual editor and live monitor.** `apb dashboard` opens a svelte-flow web UI:
-  edit YAML and graph side by side, watch runs light up node by node.
-- **Built for agents, not just humans.** `apb mcp` exposes the whole surface
-  as MCP tools, so an agent can create, run, and supervise playbooks itself.
-- **Self-improving playbooks.** A supervisor agent can watch a run, retry or
-  reroute nodes, patch the playbook mid-run; successful patches are promoted
-  into a new version. Runs are graded on quality criteria (built-in ones by
-  rules, the playbook's own by your agent or an opt-in decision model, every
-  level citing what it read),
-  and with `promote_supervisor_patches: { when: quality }` apb promotes a
-  candidate version on its own only when it is shown not worse (a person
-  can still promote it or keep the current one).
-- **Known problems.** Trouble a playbook's runs keep meeting with their
-  tools (a rate-limited connector function, a misleading script or skill)
-  is collected across runs and shown to later runs' agents as facts to
-  check. A problem whose source changed is rechecked first, and it closes
-  only on a quote of the new source that shows the fix.
-- **Repeats in your session history.** `apb discover` reads the Claude Code
-  and Codex history of the projects you name, finds the step sequences your
-  sessions keep repeating (code work, mail or CRM routines alike) and offers
-  each as a playbook draft with its sources. No model, no network, no tool
-  arguments kept.
-- **Local-first.** No cloud, no accounts. State lives in `.apb/` next to your
-  code; versions are immutable and diffable.
+<p align="center"><img src="docs/brand/report-demo-review.png" width="100%" alt="The dashboard after the demo wrote its report: the run waits for a person to approve or reject it."></p>
 
-## Requirements
+<p align="center"><em>The demo has written its report. You decide whether the run continues.</em></p>
 
-- macOS (Apple silicon or Intel) or Linux x86_64. Windows works through WSL2;
-  Linux on ARM needs a source build. See [docs/INSTALL.md](docs/INSTALL.md).
-- At least one coding agent CLI, installed and signed in: Claude Code, Codex,
-  OpenCode, Cursor Agent, Grok, Hermes, Qoder, Antigravity, Pi or ZCode.
-  Playbooks made only of `script` nodes need no agent.
-- A git repository to run playbooks in.
+## What you get
+
+### Stop explaining the same work
+
+- **Explain it once.** Describe a routine a single time. From then on your
+  agents go through the same steps on every run.
+- **Your agent writes the playbook.** Ask Claude Code or Codex to save what
+  you just did together. You never have to write the file by hand.
+- **It finds your next playbook.** `apb` looks through your Claude Code and
+  Codex sessions on this machine, spots what you keep repeating and hands
+  you a draft.
+- **Start with ready ones.** Code review and mail sorting come with `apb`.
+  Use a gallery template to start your own playbook.
+- **Not only code.** Reviews, mail, documents, records: a routine with
+  steps and checks fits.
+
+### Trust what comes back
+
+- **Done means checked.** `apb` runs the checks your playbook names and
+  marks a step done only when they pass, not because an agent said so.
+- **See what happened.** Follow the run step by step in the dashboard, and
+  get a one-page report: what was done, what was checked, and what nobody
+  checked.
+- **Pick up where it stopped.** After a crash, a used-up quota or a
+  reboot, `apb resume` continues the run at the step it stopped on. Steps
+  that finished are not run again.
+- **Nothing goes out twice.** A send through a
+  [connector](docs/CONNECTORS.md) that declares send-once is recorded before
+  it leaves and is not repeated when the run resumes. When `apb` cannot tell
+  whether it went out, it leaves the decision to you instead of sending again.
+
+### Routines that improve and run on their own
+
+- **Playbooks get better with use.** `apb` suggests edits based on what
+  people corrected and where agents struggled. You decide what to apply, and
+  you can compare the new version with the current one before you switch.
+- **Let it run without you.** Once the same playbook has succeeded under
+  your eye, you can let it start on its own when something arrives, while
+  you do something else.
+- **A team, not a single agent.** One agent writes, another reviews, a third
+  looks things up, each on the model that fits. A backup steps in when the
+  first choice is not available.
+- **Agents that remember.** With
+  [Open Second Brain](#give-your-agents-memory-with-open-second-brain) the
+  same agents keep what earlier runs decided.
+
+### Use your own tools and see the cost up front
+
+- **Works with your services.** Mail, Google and other web services become
+  steps of a playbook, with your keys and your permissions.
+- **Try a playbook in seconds.** Play it through without an agent and
+  without spending anything, before the first real run.
+- **Know the cost first.** See an estimate before you start, based on
+  earlier runs of the same playbook. A first run has no history, and says so.
+- **Yours to keep.** One program on your machine or your own server. No
+  account and no hosted service required.
+
+## Two playbooks you can run
+
+Both ship with `apb`.
+
+**Review a code change**
+Ask once: "For each change I bring you, check correctness, security, tests
+and maintainability. Give me one report."
+Each run reviews those four areas while the project's own checks run. You
+get the findings and the check results in one report. The review leaves
+your code untouched.
+
+**Sort unread mail**
+Ask once: "Tell me which unread messages need action and which need a
+reply."
+Each run reads the mail folder you approved, checks every classification and
+writes a digest beside your files. Your messages stay unread.
+
+## Give your agents memory with Open Second Brain
+
+<p align="center"><a href="https://github.com/itechmeat/open-second-brain"><img src="docs/brand/banner-apb-open-second-brain.png" width="100%" alt="Agentic Playbooks (apb) gives agents hands: it runs them through a playbook. Open Second Brain gives them shared memory."></a></p>
+
+[Open Second Brain](https://github.com/itechmeat/open-second-brain) is a
+separate open source project by the same author. `apb` runs the agents; Open
+Second Brain gives those agents memory, so they can use decisions and
+corrections recorded in earlier runs. Each works without the other.
 
 ## Install
 
-Shell installer (macOS, Linux x86_64):
+**The easy way: let your agent do it.** Open your coding agent in your
+project and paste this prompt.
+
+```text
+Read https://raw.githubusercontent.com/itechmeat/agentic-playbooks/main/llms.txt
+and follow its agent setup procedure. Install apb if needed and check the
+installation. Run the read-only setup plan for this project. Show me the
+proposed changes, warnings, and anything I need to decide. Stop and wait for
+my explicit approval. Apply only the plan I approved, using its digest and
+the same project. If the plan changes, show me the new plan and wait for
+approval again. Verify setup and tell me how to undo it.
+```
+
+**By hand.** On macOS or x86_64 Linux, one command installs `apb`:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/itechmeat/agentic-playbooks/releases/latest/download/apb-installer.sh | sh
 ```
 
-It installs the `apb` binary to `CARGO_HOME` (`~/.cargo/bin` by default) and
-needs no build tools. Update with `apb self-update`.
+Then `apb setup plan` shows what setup would add to this machine, and writes
+nothing until you apply it.
 
-Homebrew is equivalent; update with `brew upgrade apb`:
+**Everything else.** Homebrew, `cargo install`, pinned versions, checksums, a
+source build, updating and uninstalling: [the full install guide](docs/INSTALL.md).
 
-```sh
-brew install itechmeat/agentic-playbooks/apb
-```
+## What you control
 
-The `apb` crate on crates.io is an unrelated project, so `cargo install apb`
-does not install this tool. Version pinning, manual downloads with checksum
-and attestation checks, building from source, and uninstalling:
-[docs/INSTALL.md](docs/INSTALL.md).
+Run history stays beside your project files. Agents and scripts use the
+access you already have, so read a playbook from someone else as you would
+read code before you run it.
 
-To set apb up after installing, run `apb setup plan` to see what it would do
-on this machine (it writes nothing), then `apb setup apply --plan <digest>`:
-it installs the default `apb-*` playbooks and process skills, writes role
-profiles for the agents you have, registers the MCP server in Claude Code,
-Codex and OpenCode, and records all of it so `apb setup remove` undoes it. A
-default you changed is kept and replaced only when you ask
-(`apb setup plan --replace-modified <name>`). A
-coding agent installing apb for you follows
-[docs/AGENT-SETUP.md](docs/AGENT-SETUP.md).
+- You choose which agents may start. Billed agent work needs your explicit
+  approval by default.
+- Scripts of an imported playbook run only after you approve the exact
+  content you reviewed.
+- Before a push, the publish step shows the commits, the destination and the
+  branch, and waits for a person to approve that plan.
 
-## Quick start
-
-To see a run end to end before writing anything, `apb demo --run` installs a
-small demo project under the config dir and starts it: a script writes
-`report.md`, then the run waits for you at a review (`apb review <run>
-review --decision approve`). It needs no agent and no key. `apb demo
---remove` deletes it.
-
-A playbook that plans a task with an agent, runs a lint script, and lets the
-agent fix the result until the lint passes (at most three times).
-
-1. Set up a project and a profile. A profile says which agent and model run
-   a node; `apb detect` lists the agents and models apb found on this machine.
-
-   ```sh
-   cd my-project            # any git repository
-   apb init                 # creates .apb/
-   apb profile write architect --agent claude --model claude-opus-5-5
-   ```
-
-2. Save the playbook as `.apb/playbooks/implement-task/1.0.0/playbook.yaml`:
-
-   ```yaml
-   schema: 2
-   id: implement-task
-   name: Implement Task
-   version: 1.0.0
-
-   params:
-     - { name: task, type: text, label: "Task" }
-
-   defaults:
-     profile: architect
-
-   nodes:
-     - { id: start, type: start, title: Start }
-     - id: plan
-       type: agent_task
-       title: Plan
-       expected_duration: 3m
-       prompt: |
-         Write a plan: {{params.task}}
-     - { id: lint, type: script, title: Lint, expected_duration: 10s, script: scripts/lint.sh, runner: sh }
-     - { id: check, type: condition, title: Passed?, max_loops: 3 }
-     - id: fix
-       type: agent_task
-       title: Fix
-       expected_duration: 5m
-       prompt: |
-         Fix: {{nodes.lint.output}}
-     - { id: done, type: finish, outcome: success }
-
-   edges:
-     - { from: start, to: plan }
-     - { from: plan, to: lint }
-     - { from: lint, to: check }
-     - { from: check, to: done, condition: { type: node_status, node: lint, equals: success } }
-     - { from: check, to: fix, condition: { type: node_status, node: lint, equals: failure } }
-     - { from: fix, to: lint }
-   ```
-
-3. Add the lint script next to it, as
-   `.apb/playbooks/implement-task/1.0.0/scripts/lint.sh`, and mark `1.0.0` as
-   the current version:
-
-   ```sh
-   #!/bin/sh
-   # Replace with your real linter; a non-zero exit sends the run to "fix".
-   set -e
-   test -f README.md || { echo "README.md is missing"; exit 1; }
-   echo "lint ok"
-   ```
-
-   ```sh
-   printf '1.0.0\n' > .apb/playbooks/implement-task/current
-   ```
-
-4. Check it and run it:
-
-   ```sh
-   apb validate implement-task
-   apb run implement-task --param task="add a health endpoint"
-   apb dashboard            # watch runs and edit playbooks at http://127.0.0.1:7321
-   ```
-
-The dashboard can also create playbooks from scratch, and a coding agent can
-write them for you over MCP (see below). The full playbook format, node types
-and templating are in [docs/HOWTO-authoring.md](docs/HOWTO-authoring.md).
-
-## Everyday commands
-
-```text
-apb init            create the .apb structure (--standing-block, --feedback-loop, --subscriptions answer without a terminal; --json)
-apb setup           plan (read only), apply --plan <digest>, remove: default playbooks, skills, role profiles, MCP registration
-apb list            playbooks and versions
-apb validate        validate playbooks, the profiles and scripts they reference, requires and connectors
-apb run <id>        run a playbook (--param k=v, --overrides, --supervise, --detach, --execution, --confirm-irreversible, --scope project|global)
-apb wait <run>      block until a run finishes, needs input or stops (exit code = verdict)
-apb runs [run]      list runs, or one run with its execution mode and tokens (--json)
-apb pause <run>     pause a run (--drain default, --now, --reason, --until, --keep-lock)
-apb resume <run>    resume a paused or interrupted run (--all: runs a lost driver or a passed pause left waiting)
-apb stop <run>      stop a run: interrupt the running node, finalize if the driver is gone
-apb note <run> <t>  post a note (context append) to a run's control channel
-apb review          decide a pending human_review node
-apb answer <run> <t> answer an interactive node's pending question (--node)
-apb tasks [run]     host tasks of host-mode runs; `apb tasks submit` replies to one
-apb trash list      deleted playbooks; `apb trash restore <name|id>` brings one back
-apb trust list      approvals in the trust store; `apb trust revoke <digest|id>` removes them
-apb dashboard       web UI (port 7321)
-apb mcp             stdio MCP server for coding agents (--read-only: look, never act)
-apb self-update     update apb to the latest release (--check only reports)
-```
-
-Profiles, environment and analysis:
-
-```text
-apb detect          detect installed coding agents and their models (local checks only)
-apb profile         list / show / write / edit / move / delete agent profiles
-apb subscriptions   view or declare the agent subscriptions you pay for
-apb connector       list / show / call / approve / doctor / env / init / install / test - connectors to external services
-apb migrate         migrate schema 1 playbooks (executors) to schema 2 (profiles)
-apb templates       list / show / install the example playbooks apb ships, as drafts
-apb adopt           adoption readiness report for a playbook
-apb doctor          diagnose agents, profiles, runners, playbooks, the defaults (--run <id> one run's health, --agents every installed agent, --probe-agent <id> one paid format check, --json)
-apb export/import   move a playbook version (YAML, layout, scripts) as one bundle file
-apb suggestions     list / allow / reset save-as-playbook suggestion declines
-apb discover        find step sequences your past agent sessions repeat; list / show / save / dismiss
-apb stats           cross-run metrics per playbook version and node (read-only)
-apb grade <run>     grade an ended run by rules (--model: by the decision model); --backfill <id> grades earlier runs
-apb candidate <id>  a candidate version compared with current by quality, with the summary to read first; --promote --expect <v>@<digest> [--ack <id>], --keep-current
-apb problems <id>   a playbook's known problems; confirm / dismiss / reopen / close --quote / recheck / scan
-apb eval <id>       run a playbook's eval cases in scratch repositories (opt-in, paid); --level quick plays its scenarios in seconds, free
-apb judge           evaluate one judge node outside any run; keep and check labelled examples
-apb demo            install (--run: start) the keyless demo project; --remove deletes it
-apb cache           status / inspect / prune / clear the node result cache
-apb decide          ask the configured decision models a bounded question
-apb decisions       decision-model report, stored thresholds, replay
-apb projects        list / remove / prune [--dry-run] entries of the workspace registry
-apb ingest          only the inbound webhook listener (headless)
-apb server key      issue / list / revoke the keys that protect a networked dashboard
-```
-
-### The workspace registry
-
-Every project you run apb in is recorded in `projects.json` under the config
-dir, which the dashboard's project pickers and `apb projects list` read. An
-entry whose directory is gone turns `unreachable`; `apb projects prune`
-removes every such entry (unreachable or tombstoned) at once, printing each
-one, and `--dry-run` only prints them. Any registry write also drops an entry
-that has been unreachable for 30 days. A git linked worktree of a registered
-project records that project's workspace id, and both `apb projects list` and
-the dashboard's project pickers list it indented under its parent project
-instead of as a peer.
-
-## Use from a coding agent (MCP)
-
-`apb mcp` serves the current project's playbooks over stdio MCP. The server
-identifies itself as `agentic-playbooks` to MCP clients. Claude Code:
-
-```sh
-claude mcp add agentic-playbooks -- apb mcp
-```
-
-or in the project's `.mcp.json`:
-
-```json
-{ "mcpServers": { "agentic-playbooks": { "command": "apb", "args": ["mcp"] } } }
-```
-
-For global scope (available in all projects), add `--scope user`:
-
-```sh
-claude mcp add --scope user agentic-playbooks -- apb mcp
-```
-
-Other MCP-compatible hosts (Codex, OpenCode, etc.): add a stdio MCP server
-with command `apb` and args `["mcp"]`, using the name `agentic-playbooks`.
-
-`apb mcp --read-only` serves only the tools that read playbooks and runs, in a
-process that writes nothing, starts no program and sends no request; see
-[docs/MCP.md](docs/MCP.md#read-only-server).
-
-Tool families: playbook CRUD and validation, run control (`playbook_run`,
-`run_wait`, `run_status`, `run_events`, `run_report`, `run_pause`, `run_resume`, `run_stop`), profile and advisory
-tools, and supervisor tools.
-
-**Supervised runs.** `playbook_run` with `supervise: "self"` starts the run in
-the background and hands the calling agent a supervisor token. The agent then
-loops: `supervisor_wait_event` -> `supervisor_run_inspect` -> intervene if
-needed (`supervisor_node_retry`, `supervisor_run_continue_from`,
-`supervisor_patch_playbook`, `supervisor_run_abort`, ...) -> `supervisor_report`.
-Alternatively, `apb run <id> --supervise` spawns a separate supervisor agent
-with heartbeat monitoring and a fallback respawn. Capabilities are gated per
-playbook policy. Details: [docs/MCP.md](docs/MCP.md).
-
-## Status
-
-The current release is the `1.0.0-beta.4` pre-release (the latest stable
-release is `0.25.0`); each tagged release has its notes in
-[docs/release-notes/](docs/release-notes/) and on the GitHub releases page.
-The engine, web editor, versioning, MCP surface, and supervisor are
-implemented and tested. In the beta, the playbook schema and the CLI are the
-ones 1.0 intends to keep, but they may still change before `1.0.0` where
-feedback shows a problem. Installing the beta: [docs/INSTALL.md](docs/INSTALL.md).
-Design specs live in [docs/superpowers/specs/](docs/superpowers/specs/).
+The [1.x compatibility promise](docs/COMPATIBILITY.md) covers saved
+playbooks, run journals and the tools agents call.
 
 ## Documentation
 
-- [Install](docs/INSTALL.md): platforms, installer, Homebrew, manual download, source build, uninstall
-- [Playbook authoring](docs/HOWTO-authoring.md): the playbook format, node types, edges, conditions, templating
-- [Profiles](docs/PROFILES.md): agent, model, fallbacks, role prompt and skills
-- [MCP tools](docs/MCP.md): the tool surface for coding agents, supervision, safety model
-- [Host integration](docs/HOST-INTEGRATION.md): host-mode runs where the calling agent executes the tasks
-- [Interactive agents](docs/INTERACTIVE-AGENTS.md): nodes that ask the user a question mid-run
-- [Playbook interview](docs/HOWTO-interview.md): capturing a process as a playbook by interviewing the user
-- [Connectors](docs/CONNECTORS.md): calling external services from playbooks
-- [Guardrails](docs/GUARDRAILS.md): which controls advise and which enforce
-- [Isolation](docs/ISOLATION.md): running an agent in a sandbox on Linux, and what each level guarantees
-- [Decision models](docs/DECISIONS.md): optional small models for checks, judges and ranking
-- [Reference scenarios](docs/scenarios/README.md): realistic code and routine situations features are checked against, with the gaps they name
-- [Run stats](docs/STATS.md) and [evals](docs/EVALS.md): measuring playbooks across runs
-- [Run quality](docs/QUALITY.md): grading runs on quality criteria and promoting a candidate by quality
-- [Repeats in session history](docs/DISCOVER.md): step sequences past agent sessions repeat, offered as playbook drafts
-- [Known problems](docs/KNOWN-PROBLEMS.md): what earlier runs met with a playbook's tools, shown to later runs and rechecked when the source changes
-- [CI](docs/CI.md) and [deployment](docs/DEPLOYMENT.md): running apb in pipelines and on a server
+- [Your first run](docs/FIRST-RUN.md): the local demo, a shipped playbook, a playbook of your own
+- [Install guide](docs/INSTALL.md): every way to install, update and remove `apb`
+- [Write a playbook](docs/HOWTO-authoring.md): steps, checks, review gates, loops and lists
+- [Connect a service](docs/CONNECTORS.md): mail and other services a playbook can call
+- [Use it from your agent](docs/MCP.md): the tools a coding agent gets
+- [Command line reference](docs/CLI.md): every command in one map
+- [Safety model](docs/GUARDRAILS.md): what `apb` enforces and what it only advises
+- [All documentation](docs/README.md): the full index, grouped by task
 
-## Development
-
-```sh
-(cd web && bun install && bun run build)   # the binary embeds web/dist
-cargo test --workspace                      # engine, core, server, CLI tests
-cd web && bun run test                      # frontend tests (vitest)
-cd web && bun run dev                       # dev frontend with a proxy to :7321
-apb dev                                     # Vite HMR + API from the source tree
-```
-
-Contributor guide, gates and the third-party notices workflow:
-[CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Security
-
-> [!WARNING]
-> Playbooks can execute local scripts and invoke coding agents. Treat third-party
-> playbooks and imported bundles as executable code, and review them before running.
-
-By default the dashboard binds `127.0.0.1` with no authentication, which is safe
-only because nothing off the machine can reach it. To run it on a server, issue
-an authorization key and put it behind a reverse proxy that terminates TLS:
-
-```sh
-apb server key issue     # printed once, stored only as a hash
-apb dashboard --no-open  # keep the loopback bind, let the proxy reach it
-```
-
-With at least one key present, every `/api` route requires either
-`Authorization: Bearer apb_...` or a session cookie obtained by signing in
-through the dashboard. Binding a non-loopback address with no key configured is
-refused at startup. The full runbook, including Caddy and nginx examples, a
-systemd unit, and a fail2ban filter, is in
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
-
-Do not expose `apb mcp` to untrusted users; it speaks stdio and has no
-authentication of its own.
-
-Please report suspected vulnerabilities privately as described in
-[SECURITY.md](SECURITY.md).
-
-## Contributing
-
-Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md).
-All commits must be signed off under the [Developer Certificate of Origin](DCO).
-
-### Help apb improve: the feedback loop
-
-apb is under active development, and the most valuable reports come from real
-supervised runs. If you drive playbooks through a coding agent, add the block
-below to your `CLAUDE.md` or `AGENTS.md` so the agent reports what it hits
-(`apb init` offers to add it for you). The full reporting instruction lives in
-[docs/FEEDBACK-LOOP.md](docs/FEEDBACK-LOOP.md).
-
-```markdown
-## apb feedback loop (standing instruction)
-
-apb (agentic-playbooks) is under active development. On every playbook run you
-supervise from this workspace, collect flaws, bugs, and improvement ideas that
-belong to apb itself (the MCP server, the playbook engine, the validator, the
-supervisor tools, the run lifecycle). Keep those separate from problems that
-belong to this project's own playbooks, profiles, or prompts.
-
-When the run is finished and the list is not empty, follow the reporting
-instruction in
-https://github.com/itechmeat/agentic-playbooks/blob/main/docs/FEEDBACK-LOOP.md
-to check existing issues and file one consolidated issue for the run. Never
-include secrets, tokens, or private prompt content in an issue.
-```
-
-## License
-
-Licensed under the [Apache License, Version 2.0](LICENSE).
+[Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Apache License 2.0](LICENSE)

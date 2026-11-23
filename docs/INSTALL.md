@@ -96,11 +96,14 @@ What it needs:
   tools next to it.
 - No bun: the dashboard is already built into the published package.
 
-A release candidate is never chosen without its version; name it:
+To pin a release, name its version:
 
 ```sh
-cargo install --locked agentic-playbooks --version 1.0.0-rc.1
+cargo install --locked agentic-playbooks --version 1.0.0
 ```
+
+A release candidate is never chosen without its version; install one only
+this way, with its own version (such as `1.0.0-rc.1`).
 
 Update by running the same command again. `apb self-update` does not update
 a cargo install: it prints the cargo command instead and exits 2. Uninstall

@@ -1084,6 +1084,29 @@ trust rules are in `docs/NOTIFY.md`; the MCP side:
 Local agents run the stdio MCP server themselves, so APB works for them as-is,
 with full access to the filesystem, git, and keys.
 
+`apb setup apply` registers the server for you in Claude Code, Codex and
+OpenCode. By hand, in Claude Code (the server identifies itself as
+`agentic-playbooks`):
+
+```sh
+claude mcp add agentic-playbooks -- apb mcp
+```
+
+or in the project's `.mcp.json`:
+
+```json
+{ "mcpServers": { "agentic-playbooks": { "command": "apb", "args": ["mcp"] } } }
+```
+
+For global scope (available in all projects), add `--scope user`:
+
+```sh
+claude mcp add --scope user agentic-playbooks -- apb mcp
+```
+
+Other MCP-compatible hosts (Codex, OpenCode, etc.): add a stdio MCP server
+with command `apb` and args `["mcp"]`, using the name `agentic-playbooks`.
+
 Claude Desktop (`claude_desktop_config.json`):
 
 ```json

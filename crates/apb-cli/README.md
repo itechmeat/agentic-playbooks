@@ -11,9 +11,9 @@ cargo install --locked agentic-playbooks
 ```
 
 `--locked` builds with the exact dependency versions the release was tested
-with. The installed binary is named `apb`. A release candidate is installed
-only by its version, for example
-`cargo install --locked agentic-playbooks --version 1.0.0-rc.1`.
+with. The installed binary is named `apb`. To pin a release, name its
+version: `cargo install --locked agentic-playbooks --version 1.0.0`. A
+release candidate is installed only by its version.
 
 It needs Rust 1.99 or newer (the crate's `rust-version`), and a C compiler
 and linker: on macOS the Xcode Command Line Tools (`xcode-select

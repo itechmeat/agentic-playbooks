@@ -224,8 +224,9 @@ The journal compatibility rules (`CLAUDE.md`, "Conventions") are about what
 an older apb does with a journal a newer one wrote, so an in-binary test
 cannot check them. The journal corpus
 (`crates/apb-cli/tests/suite/journal_corpus_test.rs`) runs the released
-binaries of `v1.0.0-beta.1` and `v0.25.0` against journals this build wrote,
-this build against journals they wrote, and both on one journal: beta.1
+binaries of `v1.0.0-beta.1`, `v0.25.0`, `v1.0.0-beta.7` and `v1.0.0-rc.1`
+against journals this build wrote, this build against journals they wrote,
+and beta.1 and this build on one journal: beta.1
 starts and pauses a run, this build resumes it, beta.1 reads it. The writers
 run the script-only playbooks of `tests/fixtures/journal-corpus/` (a script,
 a sub-playbook node, a `human_review` gate), so no agent is needed. Rows 7 and
@@ -235,8 +236,9 @@ later checkpoint) and test readers and resumers only.
 Build the old binaries once, into a directory outside `/tmp`:
 
 ```
-scripts/old-apb.sh v1.0.0-beta.1 ~/.cache/apb-old-binaries
-scripts/old-apb.sh v0.25.0 ~/.cache/apb-old-binaries
+for tag in v0.25.0 v1.0.0-beta.1 v1.0.0-beta.7 v1.0.0-rc.1; do
+  scripts/old-apb.sh "$tag" ~/.cache/apb-old-binaries
+done
 ```
 
 Each call builds `apb` from a worktree of the tag (web build, then

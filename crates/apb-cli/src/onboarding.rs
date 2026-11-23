@@ -42,7 +42,7 @@ const FEEDBACK: StandingBlock = StandingBlock {
     question: "Allow coding agents to report apb errors after playbook runs? \
                Anonymized, consolidated issues are filed transparently at \
                https://github.com/itechmeat/agentic-playbooks (no secrets, no private prompts)",
-    skip_note: "Skipped. You can add the section later from the README",
+    skip_note: "Skipped. You can add the section later from docs/FEEDBACK-LOOP.md",
 };
 
 /// Appends `block` to every target file, creating a file that does not exist.
@@ -449,11 +449,11 @@ mod tests {
     }
 
     #[test]
-    fn readme_and_asset_do_not_drift() {
-        let readme = include_str!("../../../README.md");
+    fn feedback_doc_and_asset_do_not_drift() {
+        let doc = include_str!("../../../docs/FEEDBACK-LOOP.md");
         assert!(
-            readme.contains(FEEDBACK_BLOCK),
-            "README no longer contains the feedback-loop block verbatim"
+            doc.contains(FEEDBACK_BLOCK),
+            "docs/FEEDBACK-LOOP.md no longer contains the feedback-loop block verbatim"
         );
         assert!(
             FEEDBACK_BLOCK.contains("docs/FEEDBACK-LOOP.md"),
