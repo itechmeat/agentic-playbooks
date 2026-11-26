@@ -1,2 +1,3 @@
-# Default owner - all files require review from @itechmeat
-* @itechmeat
+# Default owners: every file is reviewed by a maintainer (see MAINTAINERS.md).
+# The first name is the lead maintainer.
+* @solaitken @itechmeat

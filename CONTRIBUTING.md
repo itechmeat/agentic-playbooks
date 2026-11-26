@@ -102,6 +102,11 @@ command execution, file access, web or MCP interfaces, credentials, supervisor
 permissions, and run-state storage as security-sensitive. Describe the trust
 boundary and expected failure modes in the pull request.
 
+## Maintainers
+
+The maintainers are listed in [MAINTAINERS.md](MAINTAINERS.md). They are asked
+for review on every pull request through `.github/CODEOWNERS`.
+
 ## Pull request checklist
 
 - All commits in the pull request are signed off under the DCO.
