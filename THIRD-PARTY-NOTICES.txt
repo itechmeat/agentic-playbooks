@@ -7315,7 +7315,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-@lucide/svelte 1.72.0
+@lucide/svelte 1.77.0
 License: ISC
 Source: https://github.com/lucide-icons/lucide
 
@@ -7965,7 +7965,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-svelte 5.57.3
+svelte 5.59.1
 License: MIT
 Source: https://github.com/sveltejs/svelte
 
@@ -8087,7 +8087,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-tailwind-merge 3.7.0
+tailwind-merge 3.7.1
 License: MIT
 Source: https://github.com/dcastil/tailwind-merge
 
