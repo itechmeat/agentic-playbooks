@@ -1,6 +1,6 @@
 <script lang="ts">
   import { SvelteFlow, Background, Controls } from '@xyflow/svelte'
-  import '@xyflow/svelte/dist/style.css'
+  import '@xyflow/svelte/style.css'
   import { tick } from 'svelte'
   import {
     fetchProfiles,

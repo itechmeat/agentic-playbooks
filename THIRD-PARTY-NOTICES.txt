@@ -2192,9 +2192,9 @@ Used by:
   num-rational 0.4.2 https://github.com/rust-num/num-rational
   num-traits 0.2.19 https://github.com/rust-num/num-traits
   num 0.4.3 https://github.com/rust-num/num
-  regex-automata 0.4.18 https://github.com/rust-lang/regex
-  regex-syntax 0.8.11 https://github.com/rust-lang/regex
-  regex 1.13.1 https://github.com/rust-lang/regex
+  regex-automata 0.4.19 https://github.com/rust-lang/regex
+  regex-syntax 0.8.12 https://github.com/rust-lang/regex
+  regex 1.13.2 https://github.com/rust-lang/regex
 
 Copyright (c) 2014 The Rust Project Developers
 
@@ -2226,7 +2226,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  uuid 1.29.2 https://github.com/uuid-rs/uuid
+  uuid 1.29.3 https://github.com/uuid-rs/uuid
 
 Copyright (c) 2014 The Rust Project Developers
 Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon
@@ -2259,8 +2259,8 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  libsqlite3-sys 0.39.1 https://github.com/rusqlite/rusqlite
-  rusqlite 0.41.1 https://github.com/rusqlite/rusqlite
+  libsqlite3-sys 0.40.0 https://github.com/rusqlite/rusqlite
+  rusqlite 0.43.0 https://github.com/rusqlite/rusqlite
 
 Copyright (c) 2014 The rusqlite developers
 
@@ -2550,15 +2550,15 @@ THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  futures-channel 0.3.32 https://github.com/rust-lang/futures-rs
-  futures-core 0.3.32 https://github.com/rust-lang/futures-rs
-  futures-executor 0.3.32 https://github.com/rust-lang/futures-rs
-  futures-io 0.3.32 https://github.com/rust-lang/futures-rs
-  futures-macro 0.3.32 https://github.com/rust-lang/futures-rs
-  futures-sink 0.3.32 https://github.com/rust-lang/futures-rs
-  futures-task 0.3.32 https://github.com/rust-lang/futures-rs
-  futures-util 0.3.32 https://github.com/rust-lang/futures-rs
-  futures 0.3.32 https://github.com/rust-lang/futures-rs
+  futures-channel 0.3.34 https://github.com/rust-lang/futures-rs
+  futures-core 0.3.34 https://github.com/rust-lang/futures-rs
+  futures-executor 0.3.34 https://github.com/rust-lang/futures-rs
+  futures-io 0.3.34 https://github.com/rust-lang/futures-rs
+  futures-macro 0.3.34 https://github.com/rust-lang/futures-rs
+  futures-sink 0.3.34 https://github.com/rust-lang/futures-rs
+  futures-task 0.3.34 https://github.com/rust-lang/futures-rs
+  futures-util 0.3.34 https://github.com/rust-lang/futures-rs
+  futures 0.3.34 https://github.com/rust-lang/futures-rs
 
 Copyright (c) 2016 Alex Crichton
 Copyright (c) 2017 The Tokio Authors
@@ -4711,9 +4711,9 @@ Used by:
   anstyle-parse 1.0.0 https://github.com/rust-cli/anstyle.git
   anstyle-query 1.1.5 https://github.com/rust-cli/anstyle.git
   anstyle 1.0.14 https://github.com/rust-cli/anstyle.git
-  clap 4.6.7 https://github.com/clap-rs/clap
+  clap 4.6.9 https://github.com/clap-rs/clap
   clap_builder 4.6.7 https://github.com/clap-rs/clap
-  clap_derive 4.6.7 https://github.com/clap-rs/clap
+  clap_derive 4.6.9 https://github.com/clap-rs/clap
   clap_lex 1.1.0 https://github.com/clap-rs/clap
   colorchoice 1.0.5 https://github.com/rust-cli/anstyle.git
   is_terminal_polyfill 1.70.2 https://github.com/polyfill-rs/is_terminal_polyfill
@@ -5344,8 +5344,8 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  jsonschema 0.60.2 https://github.com/Stranger6667/jsonschema
-  referencing 0.60.2 https://github.com/Stranger6667/jsonschema
+  jsonschema 0.61.2 https://github.com/Stranger6667/jsonschema
+  referencing 0.61.2 https://github.com/Stranger6667/jsonschema
 
 MIT License
 
@@ -5659,8 +5659,8 @@ Used by:
   encodify 1.0.2 https://github.com/stalwartlabs/encodify
   hashify 0.3.2 https://github.com/stalwartlabs/hashify
   imap-proto 0.10.2 https://github.com/djc/tokio-imap
-  jsonschema-regex 0.60.2 https://github.com/Stranger6667/jsonschema
-  jsonschema-value 0.60.2 https://github.com/Stranger6667/jsonschema
+  jsonschema-regex 0.61.2 https://github.com/Stranger6667/jsonschema
+  jsonschema-value 0.61.2 https://github.com/Stranger6667/jsonschema
   mail-parser 1.0.1 https://github.com/stalwartlabs/mail-parser
   num-cmp 0.1.0 https://github.com/lifthrasiir/num-cmp
   objc2-core-foundation 0.3.2 https://github.com/madsmtm/objc2
@@ -5913,8 +5913,8 @@ Used by:
   pastey 0.2.3 https://github.com/as1100k/pastey
   pin-project-lite 0.2.17 https://github.com/taiki-e/pin-project-lite
   portable-atomic 1.14.0 https://github.com/taiki-e/portable-atomic
-  proc-macro2 1.0.106 https://github.com/dtolnay/proc-macro2
-  quote 1.0.46 https://github.com/dtolnay/quote
+  proc-macro2 1.0.107 https://github.com/dtolnay/proc-macro2
+  quote 1.0.47 https://github.com/dtolnay/quote
   ref-cast-impl 1.0.25 https://github.com/dtolnay/ref-cast
   ref-cast 1.0.25 https://github.com/dtolnay/ref-cast
   rustix 1.1.4 https://github.com/bytecodealliance/rustix
@@ -5926,7 +5926,7 @@ Used by:
   serde_json 1.0.154 https://github.com/serde-rs/json
   serde_path_to_error 0.1.20 https://github.com/dtolnay/path-to-error
   syn 2.0.118 https://github.com/dtolnay/syn
-  syn 3.0.2 https://github.com/dtolnay/syn
+  syn 3.0.10 https://github.com/dtolnay/syn
   thiserror-impl 2.0.21 https://github.com/dtolnay/thiserror
   thiserror 2.0.21 https://github.com/dtolnay/thiserror
   unicode-ident 1.0.24 https://github.com/dtolnay/unicode-ident
@@ -5992,7 +5992,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  fancy-regex 0.19.0 https://github.com/fancy-regex/fancy-regex
+  fancy-regex 0.20.2 https://github.com/fancy-regex/fancy-regex
 
 The MIT License
 
@@ -7315,7 +7315,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-@lucide/svelte 1.72.0
+@lucide/svelte 1.77.0
 License: ISC
 Source: https://github.com/lucide-icons/lucide
 
@@ -7418,7 +7418,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-@xyflow/svelte 1.7.1
+@xyflow/svelte 2.0.2
 License: MIT
 Source: https://github.com/xyflow/xyflow
 
@@ -7445,7 +7445,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-@xyflow/system 0.0.84
+@xyflow/system 1.0.0
 License: MIT
 Source: https://github.com/xyflow/xyflow
 
@@ -7965,7 +7965,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-svelte 5.57.3
+svelte 5.59.1
 License: MIT
 Source: https://github.com/sveltejs/svelte
 
@@ -8087,7 +8087,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-tailwind-merge 3.7.0
+tailwind-merge 3.7.1
 License: MIT
 Source: https://github.com/dcastil/tailwind-merge
 

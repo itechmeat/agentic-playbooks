@@ -121,6 +121,23 @@ struct Cli {
     command: Option<Command>,
 }
 
+/// Runs `f` on a thread with the stack `main` has (8 MiB). clap's derive
+/// builds every subcommand of `Command` inside one function, and in a debug
+/// build that frame outgrows the 2 MiB a test thread gets (clap 4.6.9 needs
+/// between 2 and 3 MiB), so a unit test that builds or parses the whole CLI
+/// does it through here. `main` itself runs on the main thread.
+#[cfg(test)]
+fn with_cli_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn_scoped(s, f)
+            .expect("spawn a thread for the CLI parser")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Create empty .apb structure. At a terminal without flags it asks
@@ -1640,8 +1657,10 @@ mod tests {
     use super::*;
 
     fn registers(args: &[&str]) -> bool {
-        let cli = Cli::try_parse_from(args).expect("args parse");
-        registers_workspace(cli.command.as_ref())
+        with_cli_stack(|| {
+            let cli = Cli::try_parse_from(args).expect("args parse");
+            registers_workspace(cli.command.as_ref())
+        })
     }
 
     /// E3: an agent installing apb for a person reads llms.txt first; its
@@ -1668,16 +1687,18 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("\n## ").next())
             .expect("llms.txt has a `## CLI commands` section");
-        let missing: Vec<String> = Cli::command()
-            .get_subcommands()
-            .filter(|c| !c.is_hide_set())
-            .map(|c| c.get_name().to_string())
-            .filter(|name| {
-                !section
-                    .lines()
-                    .any(|l| l.starts_with(&format!("apb {name} ")) || l == format!("apb {name}"))
-            })
-            .collect();
+        let missing: Vec<String> = with_cli_stack(|| {
+            Cli::command()
+                .get_subcommands()
+                .filter(|c| !c.is_hide_set())
+                .map(|c| c.get_name().to_string())
+                .filter(|name| {
+                    !section.lines().any(|l| {
+                        l.starts_with(&format!("apb {name} ")) || l == format!("apb {name}")
+                    })
+                })
+                .collect()
+        });
         assert!(
             missing.is_empty(),
             "commands missing from llms.txt: {missing:?}"

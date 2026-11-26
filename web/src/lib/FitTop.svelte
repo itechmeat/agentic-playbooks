@@ -29,9 +29,11 @@
     const bottom = Math.max(...nodes.map((n) => n.position.y))
     const slice =
       bottom - top > span * 1.5 ? nodes.filter((n) => n.position.y <= top + span) : undefined
+    // Svelte Flow 2 reads a unitless padding as pixels; 3.7% is the old
+    // relative 0.08 (0.08 / (2 * 1.08) of the viewport on each side).
     void flow.fitView({
       maxZoom: 1,
-      padding: 0.08,
+      padding: '3.7%',
       ...(slice ? { nodes: slice.map((n) => ({ id: n.id })) } : {}),
     })
   })

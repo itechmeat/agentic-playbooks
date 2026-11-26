@@ -1,3 +1,9 @@
+/* Layer order, declared once before any import. Svelte Flow 2 ships its
+   styles in the `xyflow` layer, loaded later with the graph pages: after the
+   preflight in `base` so the reset does not undo the canvas, before
+   `components` and `utilities` so the app's own rules still win. */
+@layer theme, base, xyflow, components, utilities;
+
 @import 'tailwindcss';
 @import 'tw-animate-css';
 @import 'shadcn-svelte/tailwind.css';
@@ -435,10 +441,15 @@
   }
 }
 
-/* SvelteFlow canvas chrome. `#app` beats the library's own `.svelte-flow__*`
-   rules on specificity, so these win regardless of bundle order. The library
-   reads its colors from --xy-* variables, set here from the palette. */
+/* SvelteFlow canvas chrome. These rules sit outside any layer, so they beat
+   the library's own `.svelte-flow__*` rules (layer `xyflow`) regardless of
+   bundle order. The library reads its colors from --xy-* variables, set here
+   from the palette. Its own defaults resolve through `light-dark()` on a
+   `color-scheme: light dark` it sets on the canvas, which follows the
+   operating system; the canvas inherits the page's scheme instead, so a light
+   page on a dark system stays light. */
 #app .svelte-flow {
+  color-scheme: inherit;
   --xy-background-color: transparent;
   --xy-background-pattern-color: var(--c-line-2);
   --xy-edge-stroke: var(--c-muted);
@@ -484,11 +495,10 @@
 #app .svelte-flow__attribution a {
   color: var(--c-muted);
 }
-/* Edge condition labels ("match: ...", "node: status") default to a white
-   pill with `color: inherit`; the library only swaps it for its own `.dark`
-   root, which this app never sets (the class lives on <html>). Pin them to
-   the palette: a small bordered tag on the page tone, failure edges in red
-   when the page marks the label `.fail`, fallbacks muted with `.else`. */
+/* Edge condition labels ("match: ...", "node: status") default to the
+   library's own pill colors. Pin them to the palette: a small bordered tag
+   on the page tone, failure edges in red when the page marks the label
+   `.fail`, fallbacks muted with `.else`. */
 #app .svelte-flow__edge-label {
   padding: 0 4px;
   border: 1px solid var(--c-line);

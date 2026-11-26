@@ -641,9 +641,13 @@ mod tests {
     #[test]
     fn the_reconcile_command_is_hidden() {
         use clap::CommandFactory;
-        let cmd = crate::Cli::command();
-        let sub = cmd.find_subcommand(RECONCILE_COMMAND).unwrap();
-        assert!(sub.is_hide_set());
+        let hidden = crate::with_cli_stack(|| {
+            let cmd = crate::Cli::command();
+            cmd.find_subcommand(RECONCILE_COMMAND)
+                .unwrap()
+                .is_hide_set()
+        });
+        assert!(hidden);
     }
 
     #[test]
@@ -652,11 +656,13 @@ mod tests {
         // expected variant (Command has no Debug derive, so match instead of
         // asserting equality)
         use clap::Parser;
-        let cli = crate::Cli::try_parse_from(["apb", "self-update", "--check"]).unwrap();
-        let matched = matches!(
-            cli.command,
-            Some(crate::Command::SelfUpdate { check: true })
-        );
+        let matched = crate::with_cli_stack(|| {
+            let cli = crate::Cli::try_parse_from(["apb", "self-update", "--check"]).unwrap();
+            matches!(
+                cli.command,
+                Some(crate::Command::SelfUpdate { check: true })
+            )
+        });
         assert!(matched, "expected SelfUpdate {{ check: true }}");
     }
 
