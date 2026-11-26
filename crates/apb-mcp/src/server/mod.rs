@@ -675,6 +675,8 @@ impl ServerHandler for WfMcp {
             ))
             .with_instructions(crate::instructions::TIER0)
     }
+
+    crate::unadvertised::answer_unadvertised!();
 }
 
 /// Which server `serve_stdio` brings up.

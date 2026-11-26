@@ -19,7 +19,7 @@ apb-core.workspace = true
 # server itself and hands rmcp the two pipes. The Streamable HTTP worker
 # without reqwest and without `auth`: apb's own client (`src/http.rs`)
 # sends every request over ureq.
-rmcp = { version = "=3.9.0", default-features = false, features = ["client", "transport-async-rw", "transport-streamable-http-client"] }
+rmcp = { version = "=3.11.0", default-features = false, features = ["client", "transport-async-rw", "transport-streamable-http-client"] }
 # The HTTP requests of an http MCP server.
 ureq.workspace = true
 # The stream types rmcp's `StreamableHttpClient` trait names (both already

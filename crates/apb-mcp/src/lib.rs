@@ -32,3 +32,4 @@ pub mod promote;
 pub mod server;
 pub mod setup;
 pub mod tools;
+mod unadvertised;

@@ -10,6 +10,10 @@ updates:
           - "patch"
           - "minor"
     # Major bumps stay ungrouped on purpose: each is its own PR for review.
+    ignore:
+      # Its Sse type must be rmcp's (rmcp up to 3.12.0 needs ^0.2.4, so 0.3 fails with E0271); lift once the pinned rmcp moves to 0.3.
+      - dependency-name: "sse-stream"
+        versions: [">=0.3"]
 
   - package-ecosystem: bun
     directory: /web

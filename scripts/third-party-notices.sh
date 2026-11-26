@@ -17,7 +17,9 @@
 #   1  anything else: a bad argument, a tool that failed or is missing (a
 #      cargo fetch, cargo-about, a bun install, the Vite build), a local path
 #      in the output, a grep that could not look for one, a committed file
-#      that cannot be read or a diff that could not compare it
+#      that cannot be read, a diff that could not compare it, or (after a
+#      check that passed or a write) a temporary directory that could not be
+#      removed
 # Only the stale branch below exits 3. The EXIT trap turns every other
 # non-zero status into 1, so a tool that itself exits 3 never reads as
 # stale. A tool whose status is read as a verdict (grep, diff) gives one
@@ -35,11 +37,21 @@ stale=0
 work=""
 finish() {
   local rc=$?
-  if [ -n "$work" ]; then
-    rm -rf "$work" || true
-  fi
   if [ "$rc" -ne 0 ] && { [ "$rc" -ne 3 ] || [ "$stale" -ne 1 ]; }; then
     rc=1
+  fi
+  # A directory rm cannot empty (one a tool left without write permission)
+  # is made writable and removed again. A cleanup that still fails is an
+  # error of its own, but never replaces the verdict of the check: a stale
+  # file stays 3 and a check that could not run stays 1.
+  if [ -n "$work" ] && ! rm -rf -- "$work" 2>/dev/null; then
+    chmod -R u+rwx -- "$work" 2>/dev/null || true
+    if ! rm -rf -- "$work"; then
+      echo "error: cannot remove the temporary directory $work" >&2
+      if [ "$rc" -eq 0 ]; then
+        rc=1
+      fi
+    fi
   fi
   exit "$rc"
 }
@@ -56,7 +68,7 @@ case "$mode" in
     ;;
 esac
 
-work="$(mktemp -d)"
+work="$(mktemp -d "${TMPDIR:-/tmp}/apb-notices.XXXXXX")"
 
 # Trailing whitespace stripped and runs of blank lines squeezed to one, in
 # one awk pass. Not `cat -s`: some cat implementations (uutils coreutils

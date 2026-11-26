@@ -382,6 +382,54 @@ fn input_required_is_reported() {
     s.close();
 }
 
+/// An answer whose `result` is no call result (none of `content`,
+/// `structuredContent` and `isError`) stays an unexpected answer, as apb
+/// 1.0 read it: rmcp 3.11 reads such an answer as an empty successful
+/// call, which would settle `confirmed` a send that 1.0 settles `unknown`.
+/// The last answer is a frame with one more member, whose `result` rmcp
+/// still reads.
+#[test]
+fn an_answer_that_is_no_call_result_stays_unexpected() {
+    for raw in [
+        "{}",
+        r#"{"_meta":{"example.com/replica":"r1"}}"#,
+        r#"{"resultType":"complete"}"#,
+        r#"{"resultType":"complete","_meta":{"example.com/replica":"r1"}}"#,
+        r#"{"content":null}"#,
+        r#"{},"x":1"#,
+    ] {
+        let (_tmp, stub) = stub(StubEra::Modern);
+        stub.set_call(StubCall::RawResult(raw.into())).unwrap();
+        let mut s = open(&stub);
+        let f = lost(call(&s, 10));
+        assert_eq!(f.kind, FailureKind::Transport, "{raw}: {f:?}");
+        assert_eq!(f.message, "Unexpected response type", "{raw}");
+        s.close();
+    }
+}
+
+/// An empty `content` list is a call result: it stays a complete answer.
+#[test]
+fn an_empty_content_list_is_a_complete_answer() {
+    let (_tmp, stub) = stub(StubEra::Modern);
+    stub.set_call(StubCall::RawResult(r#"{"content":[]}"#.into()))
+        .unwrap();
+    let mut s = open(&stub);
+    match call(&s, 10).expect("an answer") {
+        ToolAnswer::Complete {
+            content,
+            structured,
+            is_error,
+        } => {
+            assert!(content.is_empty());
+            assert_eq!(structured, None);
+            assert!(!is_error);
+        }
+        other => panic!("{other:?}"),
+    }
+    s.close();
+}
+
 #[test]
 fn list_tools_keeps_members_the_struct_drops() {
     let (_tmp, stub) = stub(StubEra::Modern);

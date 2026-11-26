@@ -28,6 +28,10 @@ pub const MAX_SESSION_BYTES: usize = 4 * MAX_LINE_BYTES;
 struct TapState {
     /// The ids of the `tools/list` requests written so far.
     listing: HashSet<String>,
+    /// The id key of the latest `tools/call` request and, once the first
+    /// frame answering it was read, whether that frame was no call result
+    /// (`frame::is_untyped_call_answer`); rmcp takes that first frame.
+    call: Option<(String, Option<bool>)>,
     /// The listing ids whose answer was not read yet: a line is parsed
     /// only while one is awaited.
     awaiting: HashSet<String>,
@@ -227,13 +231,28 @@ impl LineTap {
         Ok(s.results.remove(&id))
     }
 
+    /// Whether the first frame answering the latest `tools/call` was no
+    /// call result (`frame::is_untyped_call_answer`).
+    pub(crate) fn call_answer_untyped(&self) -> bool {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|s| s.call.as_ref().and_then(|(_, first)| *first))
+            .unwrap_or(false)
+    }
+
     /// Classifies one whole line the client is about to write (design D3
     /// "The line tap"): registers a `tools/list` request, answers whether
     /// it is a `tools/call`, and refuses a line it cannot classify, so
     /// nothing reaches the server unclassified.
     fn classify_line(&self, line: &[u8]) -> std::io::Result<bool> {
         match frame::classify(line) {
-            Ok(Outgoing::Call) => Ok(true),
+            Ok(Outgoing::Call(key)) => {
+                if let Ok(mut s) = self.state.lock() {
+                    s.call = key.map(|key| (key, None));
+                }
+                Ok(true)
+            }
             Ok(Outgoing::Other) => Ok(false),
             Ok(Outgoing::Listing(key)) => {
                 if let Ok(mut s) = self.state.lock() {
@@ -280,6 +299,11 @@ impl LineTap {
         let Ok(mut s) = self.state.lock() else {
             return Ok(());
         };
+        if let Some((id, first @ None)) = s.call.as_mut()
+            && *id == key
+        {
+            *first = Some(frame::is_untyped_call_answer(line));
+        }
         if !s.awaiting.contains(&key) && !s.results.contains_key(&key) {
             return Ok(());
         }
