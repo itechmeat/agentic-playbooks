@@ -1024,6 +1024,13 @@ impl Conn {
             }
         };
         match answered {
+            // rmcp 3.11 reads an answer that is no call result as an empty
+            // successful call; apb 1.0 (rmcp 3.9) read it as unexpected,
+            // and still does.
+            Ok(Ok(CallToolResponse::Complete(_))) if self.tap.call_answer_untyped() => Err(lost(
+                FailureKind::Transport,
+                ServiceError::UnexpectedResponse.to_string(),
+            )),
             Ok(Ok(CallToolResponse::Complete(r))) => Ok(ToolAnswer::Complete {
                 content: r
                     .content

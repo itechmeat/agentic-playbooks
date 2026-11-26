@@ -193,6 +193,43 @@ fn ask_user_posts_question_emits_progress_and_returns_the_answer() {
     let _ = reaper.child().wait();
 }
 
+/// The sidecar keeps the 1.0 answers to the requests of the capabilities it
+/// does not advertise: rmcp 3.11 answers them `-32601` by default.
+#[test]
+fn unadvertised_capabilities_keep_their_1_0_answers() {
+    use serde_json::{Value, json};
+    let (_reaper, mut stdin, rx, _tmp, _run_dir) = spawn_sidecar("ask");
+    handshake(&mut stdin, &rx);
+    let completion = json!({
+        "ref": { "type": "ref/prompt", "name": "x" },
+        "argument": { "name": "a", "value": "" }
+    });
+    let requests = [
+        ("prompts/list", json!({}), json!({ "prompts": [] })),
+        ("resources/list", json!({}), json!({ "resources": [] })),
+        (
+            "resources/templates/list",
+            json!({}),
+            json!({ "resourceTemplates": [] }),
+        ),
+        (
+            "completion/complete",
+            completion,
+            json!({ "completion": { "values": [] } }),
+        ),
+    ];
+    for (id, (method, params, expected)) in (2..).zip(requests) {
+        let request = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        writeln!(stdin, "{request}").unwrap();
+        stdin.flush().unwrap();
+        let line = wait_for_line(&rx, method, |l| {
+            serde_json::from_str::<Value>(l).is_ok_and(|v| v["id"] == id)
+        });
+        let answer: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(answer["result"], expected, "{line}");
+    }
+}
+
 #[test]
 fn sidecar_exits_when_stdin_closes() {
     let (mut reaper, stdin, _rx, _tmp, _run_dir) = spawn_sidecar("ask");

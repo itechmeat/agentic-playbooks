@@ -144,8 +144,9 @@ pub(crate) fn id_key(id: &Value) -> String {
 /// What one line the client is about to write is.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Outgoing {
-    /// A `tools/call` request (or notification): counted when handed over.
-    Call,
+    /// A `tools/call` request (or notification) with its id key, when it
+    /// has one: counted when handed over.
+    Call(Option<String>),
     /// A `tools/list` request with its id key.
     Listing(String),
     /// A classified line that is neither (another request, a notification,
@@ -168,7 +169,7 @@ pub(crate) fn classify(line: &[u8]) -> Result<Outgoing, &'static str> {
         Some(_) => return Err(UNCLASSIFIED),
     };
     match (method, msg.get("id")) {
-        ("tools/call", _) => Ok(Outgoing::Call),
+        ("tools/call", id) => Ok(Outgoing::Call(id.map(id_key))),
         ("tools/list", Some(id)) => Ok(Outgoing::Listing(id_key(id))),
         _ => Ok(Outgoing::Other),
     }
@@ -208,9 +209,10 @@ pub(crate) const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 /// client", item 3.3): one optional carriage return before the newline,
 /// which rmcp also strips, and nothing else around the object; no byte
 /// order mark; valid UTF-8; one JSON object with no member named twice at
-/// any depth; `jsonrpc` `"2.0"`; and one frame shape by rmcp 3.9.0's rule
-/// (`src/model.rs` lines 853 to 910) with a well-typed id. `Err` names
-/// why; the caller then forwards nothing of the line and ends the session.
+/// any depth; `jsonrpc` `"2.0"`; and one frame shape by the pinned rmcp's
+/// rule (`src/model.rs` lines 853 to 910, the same in 3.9.0 and 3.11.0)
+/// with a well-typed id. `Err` names why; the caller then forwards nothing
+/// of the line and ends the session.
 pub(crate) fn incoming(line: &[u8]) -> Result<Incoming, &'static str> {
     let body = line.strip_suffix(b"\r").unwrap_or(line);
     if body.starts_with(UTF8_BOM) {
@@ -261,6 +263,26 @@ pub(crate) fn incoming(line: &[u8]) -> Result<Incoming, &'static str> {
     }
 }
 
+/// Whether one line from the server is a response whose `result` is no
+/// call result by rmcp's own rule (`CallToolResult`: at least one of
+/// `content`, `structuredContent` and `isError`, and a `resultType` of
+/// `complete` when there is one), whatever other members the frame holds.
+/// rmcp 3.11 reads such an answer to a `tools/call` as an empty successful
+/// call; apb keeps it an unexpected answer, as apb 1.0 read it with rmcp
+/// 3.9. `false` for a line that is no response.
+pub(crate) fn is_untyped_call_answer(line: &[u8]) -> bool {
+    let body = line.strip_suffix(b"\r").unwrap_or(line);
+    let Some(mut msg) = strict_object(body) else {
+        return false;
+    };
+    if msg.contains_key("method") || msg.contains_key("error") {
+        return false;
+    }
+    msg.remove("result").is_some_and(|result| {
+        serde_json::from_value::<rmcp::model::CallToolResult>(result).is_err()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,7 +325,7 @@ mod tests {
         }))
         .unwrap();
         assert!(line.len() < crate::tap::MAX_LINE_BYTES);
-        assert_eq!(classify(&line), Ok(Outgoing::Call));
+        assert_eq!(classify(&line), Ok(Outgoing::Call(Some("1".into()))));
     }
 
     /// The review's arguments: 126 arrays around 0 pass the parser alone

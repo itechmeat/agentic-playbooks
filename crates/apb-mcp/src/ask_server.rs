@@ -213,6 +213,8 @@ impl ServerHandler for AskServer {
             Implementation::new("apb-ask-server", env!("CARGO_PKG_VERSION")),
         )
     }
+
+    crate::unadvertised::answer_unadvertised!();
 }
 
 /// Reads the progress cadence from `APB_ASK_PROGRESS_SECS`, defaulting to

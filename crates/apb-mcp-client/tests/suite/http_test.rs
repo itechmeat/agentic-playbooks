@@ -532,6 +532,73 @@ fn an_event_stream_answer_is_read() {
     assert_eq!(text_of(&call(&session, 10).unwrap()), "streamed");
 }
 
+/// The `tools/call` answer `result` as a JSON body, or as the answering
+/// event of an event stream after a notification's event.
+fn call_answered(result_json: &'static str, stream: bool) -> Script {
+    with("tools/call", move |req| {
+        let raw: Value = serde_json::from_str(result_json).unwrap();
+        let answer = result(&req.id, raw);
+        if stream {
+            sse(
+                "text/event-stream",
+                &format!("{}{}", event(&note()), event(&answer)),
+            )
+        } else {
+            json_reply(&answer)
+        }
+    })
+}
+
+/// Over HTTP as over stdio, an answer whose `result` is no call result
+/// (none of `content`, `structuredContent` and `isError`) stays an
+/// unexpected answer, as apb 1.0 read it, and the call is lost (a write
+/// `unknown`), never complete: in a JSON body and as the answering event
+/// of a stream, whose frame must pass the line tap before rmcp decodes it.
+#[test]
+fn an_answer_that_is_no_call_result_stays_unexpected() {
+    for raw in [
+        "{}",
+        r#"{"resultType":"complete"}"#,
+        r#"{"_meta":{"example.com/replica":"r1"}}"#,
+        r#"{"content":null}"#,
+    ] {
+        for stream in [false, true] {
+            let script = call_answered(raw, stream);
+            let session = open(&script);
+            match call(&session, 10) {
+                Err(CallFailure::Lost(f)) => {
+                    assert_eq!(f.kind, FailureKind::Transport, "{raw} {stream}: {f:?}");
+                    assert_eq!(f.message, "Unexpected response type", "{raw} {stream}");
+                }
+                other => panic!("{raw} {stream}: not lost: {other:?}"),
+            }
+            assert_eq!(script.calls(), 1, "{raw} {stream}");
+        }
+    }
+}
+
+/// An empty `content` list is a call result over HTTP too, in a JSON body
+/// and in a stream: a complete answer.
+#[test]
+fn an_empty_content_list_is_a_complete_answer() {
+    for stream in [false, true] {
+        let script = call_answered(r#"{"content":[]}"#, stream);
+        let session = open(&script);
+        match call(&session, 10) {
+            Ok(ToolAnswer::Complete {
+                content,
+                structured,
+                is_error,
+            }) => {
+                assert!(content.is_empty(), "{stream}");
+                assert_eq!(structured, None, "{stream}");
+                assert!(!is_error, "{stream}");
+            }
+            other => panic!("{stream}: not complete: {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn an_event_stream_past_the_message_bound_is_too_large() {
     let script = with("tools/list", |req| {

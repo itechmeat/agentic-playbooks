@@ -1149,6 +1149,9 @@ How each answer counts (what decides the send ledger is whether the
   and `tool_error` for any other code.
 - No answer: a timeout is `timeout`, a broken pipe, a server that exited or
   an answer over the message limit is `network`; a write settles `unknown`.
+  So is an answer that is no call result (it holds none of `content`,
+  `structuredContent` and `isError`): `network`, and a write settles
+  `unknown`.
 
 A call that failed closes its server before its result is journaled and
 its send settled, so a warning from the close (a process group not shown

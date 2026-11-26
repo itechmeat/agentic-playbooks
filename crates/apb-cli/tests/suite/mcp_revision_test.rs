@@ -319,6 +319,79 @@ fn a_2026_07_28_client_gets_discover_tier0_and_cache_hints() {
     assert!(p.is_empty(), "{prompts}");
 }
 
+/// The requests of the capabilities `apb mcp` does not advertise, with
+/// their 1.0 answers on an old revision and on 2026-07-28. rmcp 3.11
+/// answers them `-32601` by default; apb answers them itself.
+fn unadvertised() -> [(&'static str, Value, Value, Value); 4] {
+    let complete = json!({ "resultType": "complete", "ttlMs": 0, "cacheScope": "private" });
+    let listed = |member: &str| {
+        let mut modern = complete.clone();
+        modern[member] = json!([]);
+        (json!({ member: [] }), modern)
+    };
+    let (prompts, prompts_modern) = listed("prompts");
+    let (resources, resources_modern) = listed("resources");
+    let (templates, templates_modern) = listed("resourceTemplates");
+    let no_values = json!({ "values": [] });
+    [
+        ("prompts/list", json!({}), prompts, prompts_modern),
+        ("resources/list", json!({}), resources, resources_modern),
+        (
+            "resources/templates/list",
+            json!({}),
+            templates,
+            templates_modern,
+        ),
+        (
+            "completion/complete",
+            json!({
+                "ref": { "type": "ref/prompt", "name": "x" },
+                "argument": { "name": "a", "value": "" }
+            }),
+            json!({ "completion": no_values }),
+            json!({ "resultType": "complete", "completion": no_values }),
+        ),
+    ]
+}
+
+#[test]
+fn unadvertised_capabilities_keep_their_1_0_answers() {
+    let dir = project();
+    let (child, mut stdin, rx) = start_mcp_raw(dir.path(), &[]);
+    call(&mut stdin, &rx, 1, &initialize("2025-06-18"));
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+    );
+    let mut id = 1;
+    for (method, params, old, _) in unadvertised() {
+        id += 1;
+        let answer = call(
+            &mut stdin,
+            &rx,
+            id,
+            &format!(r#""method":"{method}","params":{params}"#),
+        );
+        assert_eq!(answer["result"], old, "{answer}");
+    }
+    stop(child);
+
+    let (child, mut stdin, rx) = start_mcp_raw(dir.path(), &[]);
+    let meta: Value = serde_json::from_str(META_2026).unwrap();
+    for (method, mut params, _, modern) in unadvertised() {
+        id += 1;
+        params["_meta"] = meta.clone();
+        let answer = call(
+            &mut stdin,
+            &rx,
+            id,
+            &format!(r#""method":"{method}","params":{params}"#),
+        );
+        assert_eq!(answer["result"], modern, "{answer}");
+    }
+    stop(child);
+}
+
 #[test]
 fn a_2026_07_28_request_without_meta_is_refused() {
     let dir = project();

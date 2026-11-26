@@ -357,7 +357,7 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   retries, the provider chain, the per-run cache and the `ApiKey` wrapper; the `testing` feature adds a
   multi-response HTTP stub. Knows nothing about runs.
 - `apb-mcp-client` (package `agentic-playbooks-mcp-client`) - a blocking client of the Model Context Protocol over
-  stdio and Streamable HTTP over rmcp `=3.9.0` (the version `apb-mcp`
+  stdio and Streamable HTTP over rmcp `=3.11.0` (the version `apb-mcp`
   pins), depending on `apb-core`
   only (core <- mcp-client <- engine): `Session` with its own runtime on its
   own thread (`connect` in `auto`, `modern` or `legacy`, `list_tools` as
@@ -890,7 +890,10 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   `in_time`; `pending` the park waker's check); see `docs/DECISIONS.md`).
 - `apb-mcp` (package `agentic-playbooks-mcp`) - rmcp stdio MCP server (`server/`, with `read_only` the
   allowlist of `apb mcp --read-only` and the tables every tool is classified
-  in) and the tool layer in `tools/`
+  in; `unadvertised` the 1.0 answers of `prompts/list`, `resources/list`,
+  `resources/templates/list` and `completion/complete` that both servers
+  give themselves, since rmcp 3.11 answers them `-32601`) and the tool layer
+  in `tools/`
   (one module per domain: `playbook`, `run`, `supervisor`, `trial`, `capture`,
   `actions` the next actions and start actions as tool calls with
   `available_to_caller`, `caller_refusal` and `mcp_channel` (the channel of

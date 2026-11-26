@@ -23,6 +23,10 @@ case "$1" in
       shift
     done
     printf 'crate-a 1.0.0 MIT\n\nUsed by:\n  crate-a 1.0.0\n' >"$out"
+    if [ -n "${STUB_ABOUT_LOCKED:-}" ]; then
+      locked="${out%/*}/locked"
+      mkdir "$locked" && : >"$locked/f" && chmod 500 "$locked"
+    fi
     exit "${STUB_ABOUT_RC:-0}"
     ;;
   *) exit 99 ;;
@@ -85,21 +89,39 @@ impl Repo {
         self.run_in(None, args, env)
     }
 
-    /// Runs the script with `tool` replaced on the PATH by a stand-in that
-    /// exits `rc` without doing its work, as a tool that cannot run does.
-    fn run_failing(&self, args: &[&str], tool: &str, rc: i32) -> Output {
+    /// A directory holding a stand-in for `tool` that exits `rc` without
+    /// doing its work, as a tool that cannot run does.
+    fn stand_in(&self, tool: &str, rc: i32) -> PathBuf {
         let fail = self.dir.path().join("fail");
         std::fs::create_dir_all(&fail).expect("fail dir");
         let path = fail.join(tool);
         let body = format!("#!/bin/sh\necho \"{tool}: stand-in failure\" >&2\nexit {rc}\n");
         std::fs::write(&path, body).expect("write stand-in");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        fail
+    }
+
+    /// Runs the script with `tool` replaced on the PATH by its stand-in.
+    fn run_failing(&self, args: &[&str], tool: &str, rc: i32) -> Output {
+        let fail = self.stand_in(tool, rc);
         let out = self.run_in(Some(&fail), args, &[]);
         std::fs::remove_dir_all(&fail).expect("remove fail dir");
         out
     }
 
     fn run_in(&self, first: Option<&Path>, args: &[&str], env: &[(&str, &str)]) -> Output {
+        let (out, left) = self.run_leaving(first, args, env);
+        assert!(left.is_empty(), "the work dir is removed on exit: {left:?}");
+        out
+    }
+
+    /// Runs the script and returns what it left in its temporary directory.
+    fn run_leaving(
+        &self,
+        first: Option<&Path>,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> (Output, Vec<PathBuf>) {
         let mut path = format!(
             "{}:{}",
             self.dir.path().join("bin").display(),
@@ -122,8 +144,7 @@ impl Repo {
             .expect("read tmp")
             .map(|e| e.expect("entry").path())
             .collect();
-        assert!(left.is_empty(), "the work dir is removed on exit: {left:?}");
-        out
+        (out, left)
     }
 }
 
@@ -201,4 +222,43 @@ fn a_grep_or_diff_that_fails_exits_1_never_3() {
     assert_cannot_run(&repo.run_failing(&[], "grep", 2), "grep, write");
     let left = std::fs::read_to_string(repo.notices()).expect("read notices");
     assert_eq!(left, stale, "the committed file is not rewritten");
+}
+
+/// The temporary directory goes on every exit, also when a tool left a
+/// directory in it without write permission.
+#[test]
+fn a_directory_a_tool_left_read_only_is_still_removed() {
+    let repo = Repo::current();
+    let out = repo.run(&["--check"], &[("STUB_ABOUT_LOCKED", "1")]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
+/// A cleanup that fails is reported and fails a check that passed, but
+/// never replaces the verdict of one that did not: stale stays 3 and a
+/// check that could not run stays 1.
+#[test]
+fn a_cleanup_that_fails_never_hides_the_verdict() {
+    let repo = Repo::current();
+    let rm = repo.stand_in("rm", 1);
+    let current = std::fs::read_to_string(repo.notices()).expect("read notices");
+    let stale = format!("{current}an edit by hand\n");
+    for (what, notices, env, code) in [
+        ("current", &current, &[][..], 1),
+        ("stale", &stale, &[][..], 3),
+        ("could not run", &current, &[("STUB_FETCH_RC", "1")][..], 1),
+    ] {
+        std::fs::write(repo.notices(), notices).expect("write notices");
+        let (out, left) = repo.run_leaving(Some(&rm), &["--check"], env);
+        assert_eq!(out.status.code(), Some(code), "{what}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("cannot remove the temporary directory"),
+            "{what}: {}",
+            stderr(&out)
+        );
+        assert_eq!(left.len(), 1, "{what}: {left:?}");
+        for dir in left {
+            std::fs::remove_dir_all(dir).expect("remove the left directory");
+        }
+    }
+    std::fs::remove_dir_all(&rm).expect("remove fail dir");
 }
