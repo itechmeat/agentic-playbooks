@@ -5344,8 +5344,8 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  jsonschema 0.60.2 https://github.com/Stranger6667/jsonschema
-  referencing 0.60.2 https://github.com/Stranger6667/jsonschema
+  jsonschema 0.61.2 https://github.com/Stranger6667/jsonschema
+  referencing 0.61.2 https://github.com/Stranger6667/jsonschema
 
 MIT License
 
@@ -5659,8 +5659,8 @@ Used by:
   encodify 1.0.2 https://github.com/stalwartlabs/encodify
   hashify 0.3.2 https://github.com/stalwartlabs/hashify
   imap-proto 0.10.2 https://github.com/djc/tokio-imap
-  jsonschema-regex 0.60.2 https://github.com/Stranger6667/jsonschema
-  jsonschema-value 0.60.2 https://github.com/Stranger6667/jsonschema
+  jsonschema-regex 0.61.2 https://github.com/Stranger6667/jsonschema
+  jsonschema-value 0.61.2 https://github.com/Stranger6667/jsonschema
   mail-parser 1.0.1 https://github.com/stalwartlabs/mail-parser
   num-cmp 0.1.0 https://github.com/lifthrasiir/num-cmp
   objc2-core-foundation 0.3.2 https://github.com/madsmtm/objc2
@@ -5992,7 +5992,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  fancy-regex 0.19.0 https://github.com/fancy-regex/fancy-regex
+  fancy-regex 0.20.2 https://github.com/fancy-regex/fancy-regex
 
 The MIT License
 
