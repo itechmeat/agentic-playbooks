@@ -231,14 +231,18 @@ impl LineTap {
         Ok(s.results.remove(&id))
     }
 
-    /// Whether the first frame answering the latest `tools/call` was no
-    /// call result (`frame::is_untyped_call_answer`).
+    /// Whether rmcp's answer to the latest `tools/call` may not be taken
+    /// as a call result: the first frame answering it was no call result
+    /// (`frame::is_untyped_call_answer`), or the tap cannot vouch for it,
+    /// failing closed like every reader of its state: the state is
+    /// poisoned, or no frame answering that call was noted (rmcp reads
+    /// only frames the tap read first, on both transports, so its answer
+    /// then came from somewhere the tap did not see). Only a noted call
+    /// result answers `false`.
     pub(crate) fn call_answer_untyped(&self) -> bool {
         self.state
             .lock()
-            .ok()
-            .and_then(|s| s.call.as_ref().and_then(|(_, first)| *first))
-            .unwrap_or(false)
+            .map_or(true, |s| !matches!(s.call, Some((_, Some(false)))))
     }
 
     /// Classifies one whole line the client is about to write (design D3
@@ -248,8 +252,17 @@ impl LineTap {
     fn classify_line(&self, line: &[u8]) -> std::io::Result<bool> {
         match frame::classify(line) {
             Ok(Outgoing::Call(key)) => {
-                if let Ok(mut s) = self.state.lock() {
-                    s.call = key.map(|key| (key, None));
+                // A call whose answer the tap cannot note is never handed
+                // over (`call_answer_untyped` needs that note).
+                let noted = match self.state.lock() {
+                    Ok(mut s) => {
+                        s.call = key.map(|key| (key, None));
+                        true
+                    }
+                    Err(_) => false,
+                };
+                if !noted {
+                    return Err(self.refuse(TAP_POISONED));
                 }
                 Ok(true)
             }
@@ -479,6 +492,10 @@ pub(crate) const LISTING_AMBIGUOUS: &str = "mcp_listing_ambiguous: the MCP serve
 /// The refusal of a request line past the line limit; nothing of it is
 /// sent.
 pub(crate) const REQUEST_TOO_LARGE: &str = "mcp_request_too_large: the message apb was about to send to the MCP server passed the line limit, so nothing of it was sent";
+
+/// The refusal of a `tools/call` the tap could not note because its state
+/// is poisoned; nothing of it is sent.
+pub(crate) const TAP_POISONED: &str = "mcp_tap_poisoned: apb could not note the tools/call it was about to send to the MCP server, so nothing of it was sent";
 
 fn sealed_error() -> std::io::Error {
     std::io::Error::new(
@@ -1103,6 +1120,74 @@ mod tests {
             .unwrap()
             .expect("captured over stdio");
         assert_eq!(over_http, over_stdio);
+    }
+
+    /// Poisons the tap's state lock as a panic inside one of its critical
+    /// sections would.
+    fn poison(tap: &LineTap) {
+        let state = tap.state.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = state.lock().unwrap();
+            panic!("a panic while the tap's state is held");
+        })
+        .join();
+        assert!(tap.state.is_poisoned());
+    }
+
+    /// The first frame answering the call, a call result: vouched for.
+    const CALL_RESULT: &[u8] = br#"{"jsonrpc":"2.0","id":4,"result":{"content":[]}}"#;
+
+    /// A poisoned state vouches for no answer to a `tools/call`, not even
+    /// one noted as a call result before the poison: rmcp's success then
+    /// settles as the unexpected answer apb 1.0 read, a write `unknown`.
+    #[test]
+    fn a_poisoned_tap_vouches_for_no_call_answer() {
+        let tap = LineTap::new();
+        assert!(
+            tap.classify_line(call_line(4).trim_end().as_bytes())
+                .unwrap()
+        );
+        tap.observe(CALL_RESULT).unwrap();
+        assert!(!tap.call_answer_untyped(), "a noted call result");
+        poison(&tap);
+        assert!(tap.call_answer_untyped(), "a poisoned state");
+    }
+
+    /// Without a noted first frame answering the latest call (no call, or
+    /// only another id's answer read) the tap vouches for nothing either.
+    #[test]
+    fn a_call_answer_the_tap_did_not_note_is_not_vouched_for() {
+        let tap = LineTap::new();
+        assert!(tap.call_answer_untyped(), "no call was classified");
+        assert!(
+            tap.classify_line(call_line(4).trim_end().as_bytes())
+                .unwrap()
+        );
+        assert!(tap.call_answer_untyped(), "no answer was read");
+        tap.observe(br#"{"jsonrpc":"2.0","id":40,"result":{"content":[]}}"#)
+            .unwrap();
+        assert!(tap.call_answer_untyped(), "only another id's answer");
+        tap.observe(CALL_RESULT).unwrap();
+        assert!(!tap.call_answer_untyped(), "the call's own answer");
+    }
+
+    /// A `tools/call` the tap cannot note (its state is poisoned) is
+    /// refused before any byte of it is forwarded, and the refusal seals
+    /// the writer: the call settles not sent instead of reaching the
+    /// server with an answer nobody can vouch for.
+    #[tokio::test]
+    async fn a_poisoned_tap_forwards_no_call() {
+        let mut r = rig(json!(9), usize::MAX);
+        poison(&r.tap);
+        let err = r
+            .writer
+            .write_all(call_line(9).as_bytes())
+            .await
+            .expect_err("refused");
+        assert_eq!(err.to_string(), TAP_POISONED);
+        assert!(r.got.lock().unwrap().is_empty(), "nothing was forwarded");
+        assert!(r.tap.is_sealed());
+        assert_eq!(r.tap.seal(), 0, "no call was handed over");
     }
 
     /// Once the gate is sealed, `start_call` starts nothing and the
