@@ -16,11 +16,14 @@
 #      and differ from it
 #   1  anything else: a bad argument, a tool that failed or is missing (a
 #      cargo fetch, cargo-about, a bun install, the Vite build), a local path
-#      in the output, a committed file that cannot be read
+#      in the output, a grep that could not look for one, a committed file
+#      that cannot be read or a diff that could not compare it
 # Only the stale branch below exits 3. The EXIT trap turns every other
 # non-zero status into 1, so a tool that itself exits 3 never reads as
-# stale. CI's lint job lets exit 3 pass as a warning on a Dependabot pull
-# request only; every other caller treats any non-zero exit as a failure.
+# stale. A tool whose status is read as a verdict (grep, diff) gives one
+# only with status 1, "no match" or "differ"; 2 or more is an error. CI's
+# lint job lets exit 3 pass as a warning on a Dependabot pull request only;
+# every other caller treats any non-zero exit as a failure.
 #
 # Requires cargo-about (the version pinned in scripts/install-cargo-about.sh) and
 # bun. cargo-about runs with --frozen: no network, license texts come from the
@@ -111,8 +114,15 @@ EOF
 } | squeeze >"$work/notices.txt"
 
 # Never ship a local path (a cargo registry or node_modules location).
-if grep -nE '/(home|Users)/|/\.cargo/registry|node_modules/' "$work/notices.txt" >&2; then
+# grep exits 0 on a match, 1 on none and 2 or more when it could not search
+# (an unreadable file, a missing grep), which is no verdict at all.
+found=0
+grep -nE '/(home|Users)/|/\.cargo/registry|node_modules/' "$work/notices.txt" >&2 || found=$?
+if [ "$found" -eq 0 ]; then
   echo "error: the generated notices contain a local path" >&2
+  exit 1
+elif [ "$found" -ne 1 ]; then
+  echo "error: cannot check the generated notices for a local path" >&2
   exit 1
 fi
 

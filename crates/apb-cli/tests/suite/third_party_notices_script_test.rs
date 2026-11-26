@@ -6,7 +6,8 @@
 //!
 //! The real script runs in a scratch repository with stand-ins for `cargo`
 //! and `bun` on the PATH, each failure injected through an environment
-//! variable.
+//! variable. A `grep` or `diff` that cannot do its work is put first on the
+//! PATH for one run: a tool error must never read as a verdict.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -81,11 +82,32 @@ impl Repo {
     }
 
     fn run(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
-        let path = format!(
+        self.run_in(None, args, env)
+    }
+
+    /// Runs the script with `tool` replaced on the PATH by a stand-in that
+    /// exits `rc` without doing its work, as a tool that cannot run does.
+    fn run_failing(&self, args: &[&str], tool: &str, rc: i32) -> Output {
+        let fail = self.dir.path().join("fail");
+        std::fs::create_dir_all(&fail).expect("fail dir");
+        let path = fail.join(tool);
+        let body = format!("#!/bin/sh\necho \"{tool}: stand-in failure\" >&2\nexit {rc}\n");
+        std::fs::write(&path, body).expect("write stand-in");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let out = self.run_in(Some(&fail), args, &[]);
+        std::fs::remove_dir_all(&fail).expect("remove fail dir");
+        out
+    }
+
+    fn run_in(&self, first: Option<&Path>, args: &[&str], env: &[(&str, &str)]) -> Output {
+        let mut path = format!(
             "{}:{}",
             self.dir.path().join("bin").display(),
             std::env::var("PATH").unwrap_or_default()
         );
+        if let Some(first) = first {
+            path = format!("{}:{path}", first.display());
+        }
         let tmp = self.dir.path().join("tmp");
         let mut cmd = Command::new("bash");
         cmd.arg(self.dir.path().join("repo/scripts/third-party-notices.sh"))
@@ -151,4 +173,32 @@ fn a_check_that_cannot_run_exits_1_even_when_a_tool_exits_3() {
     std::fs::remove_file(repo.notices()).expect("remove notices");
     let out = repo.run(&["--check"], &[]);
     assert_eq!(out.status.code(), Some(1), "missing: {}", stderr(&out));
+}
+
+/// Exit 1, never 3: the error of a tool is not read as a stale file.
+fn assert_cannot_run(out: &Output, what: &str) {
+    assert_eq!(out.status.code(), Some(1), "{what}: {}", stderr(out));
+    assert!(!stderr(out).contains("is stale"), "{what}: {}", stderr(out));
+}
+
+#[test]
+fn a_grep_or_diff_that_fails_exits_1_never_3() {
+    let repo = Repo::current();
+    let current = std::fs::read_to_string(repo.notices()).expect("read notices");
+
+    // grep exits 1 for no match and 2 when it could not search; diff exits
+    // 1 when the files differ and 2 when it could not compare them. Only
+    // the 1s are verdicts.
+    assert_cannot_run(&repo.run_failing(&["--check"], "grep", 2), "grep, current");
+    assert_cannot_run(&repo.run_failing(&["--check"], "diff", 2), "diff, current");
+
+    let stale = format!("{current}an edit by hand\n");
+    std::fs::write(repo.notices(), &stale).expect("write notices");
+    assert_cannot_run(&repo.run_failing(&["--check"], "grep", 2), "grep, stale");
+    assert_cannot_run(&repo.run_failing(&["--check"], "diff", 2), "diff, stale");
+
+    // A write whose path check could not run leaves the committed file alone.
+    assert_cannot_run(&repo.run_failing(&[], "grep", 2), "grep, write");
+    let left = std::fs::read_to_string(repo.notices()).expect("read notices");
+    assert_eq!(left, stale, "the committed file is not rewritten");
 }
