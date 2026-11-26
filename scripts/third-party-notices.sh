@@ -8,13 +8,42 @@
 #
 # Usage (from anywhere in the repository):
 #   scripts/third-party-notices.sh          rewrite THIRD-PARTY-NOTICES.txt
-#   scripts/third-party-notices.sh --check  exit 1 when the committed file is stale
+#   scripts/third-party-notices.sh --check  compare it with the committed file
+#
+# Exit codes:
+#   0  the file was written, or (--check) the committed file is current
+#   3  (--check only) the committed file is stale: the notices were generated
+#      and differ from it
+#   1  anything else: a bad argument, a tool that failed or is missing (a
+#      cargo fetch, cargo-about, a bun install, the Vite build), a local path
+#      in the output, a grep that could not look for one, a committed file
+#      that cannot be read or a diff that could not compare it
+# Only the stale branch below exits 3. The EXIT trap turns every other
+# non-zero status into 1, so a tool that itself exits 3 never reads as
+# stale. A tool whose status is read as a verdict (grep, diff) gives one
+# only with status 1, "no match" or "differ"; 2 or more is an error. CI's
+# lint job lets exit 3 pass as a warning on a Dependabot pull request only;
+# every other caller treats any non-zero exit as a failure.
 #
 # Requires cargo-about (the version pinned in scripts/install-cargo-about.sh) and
 # bun. cargo-about runs with --frozen: no network, license texts come from the
 # crate sources in the local cargo registry, so the output depends only on the
 # lockfiles.
 set -euo pipefail
+
+stale=0
+work=""
+finish() {
+  local rc=$?
+  if [ -n "$work" ]; then
+    rm -rf "$work" || true
+  fi
+  if [ "$rc" -ne 0 ] && { [ "$rc" -ne 3 ] || [ "$stale" -ne 1 ]; }; then
+    rc=1
+  fi
+  exit "$rc"
+}
+trap finish EXIT
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$root/THIRD-PARTY-NOTICES.txt"
@@ -23,12 +52,11 @@ case "$mode" in
   write | --check) ;;
   *)
     echo "usage: $0 [--check]" >&2
-    exit 2
+    exit 1
     ;;
 esac
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
 
 # Trailing whitespace stripped and runs of blank lines squeezed to one, in
 # one awk pass. Not `cat -s`: some cat implementations (uutils coreutils
@@ -86,15 +114,30 @@ EOF
 } | squeeze >"$work/notices.txt"
 
 # Never ship a local path (a cargo registry or node_modules location).
-if grep -nE '/(home|Users)/|/\.cargo/registry|node_modules/' "$work/notices.txt" >&2; then
+# grep exits 0 on a match, 1 on none and 2 or more when it could not search
+# (an unreadable file, a missing grep), which is no verdict at all.
+found=0
+grep -nE '/(home|Users)/|/\.cargo/registry|node_modules/' "$work/notices.txt" >&2 || found=$?
+if [ "$found" -eq 0 ]; then
   echo "error: the generated notices contain a local path" >&2
+  exit 1
+elif [ "$found" -ne 1 ]; then
+  echo "error: cannot check the generated notices for a local path" >&2
   exit 1
 fi
 
 if [ "$mode" = "--check" ]; then
-  if ! diff -u "$out" "$work/notices.txt" >"$work/diff.txt"; then
+  # diff exits 1 when the files differ and 2 when it cannot compare them
+  # (a missing or unreadable committed file), which is not "stale".
+  same=0
+  diff -u "$out" "$work/notices.txt" >"$work/diff.txt" || same=$?
+  if [ "$same" -eq 1 ]; then
     head -n 60 "$work/diff.txt" >&2
     echo "error: THIRD-PARTY-NOTICES.txt is stale; run scripts/third-party-notices.sh and commit the result" >&2
+    stale=1
+    exit 3
+  elif [ "$same" -ne 0 ]; then
+    echo "error: cannot compare THIRD-PARTY-NOTICES.txt with the generated notices" >&2
     exit 1
   fi
   echo "THIRD-PARTY-NOTICES.txt is up to date"

@@ -90,7 +90,11 @@ scripts/third-party-notices.sh
 It needs `cargo-about` (`scripts/install-cargo-about.sh` installs the pinned
 release on x86_64 Linux, or `cargo install --locked cargo-about --features cli
 --version 0.9.2`) and `bun`. CI runs `scripts/third-party-notices.sh --check`
-and fails when the committed file is stale. A crate or an npm package under
+and fails when the committed file is stale (exit 3) or the check cannot run
+(exit 1). On a pull request Dependabot opened, a stale file is only a
+warning, since Dependabot cannot regenerate it: the branch that lands the
+update regenerates and commits the file, and main and the release gate fail
+without it. A crate or an npm package under
 a license outside the `about.toml` allowlist (for npm packages also
 `OFL-1.1`, which fonts use), or one whose license cannot be determined, fails
 generation until the license is reviewed.

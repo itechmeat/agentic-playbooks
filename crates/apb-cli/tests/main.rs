@@ -214,6 +214,10 @@ mod setup_cli_test;
 mod stats_cli_test;
 #[path = "suite/templates_cli_test.rs"]
 mod templates_cli_test;
+// Unix-only: shell scripts stand in for cargo and bun on PATH.
+#[cfg(unix)]
+#[path = "suite/third_party_notices_script_test.rs"]
+mod third_party_notices_script_test;
 // --- 0.24.0 eval suites ---
 #[path = "suite/eval_cli_test.rs"]
 mod eval_cli_test;

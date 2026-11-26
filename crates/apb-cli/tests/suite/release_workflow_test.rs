@@ -321,6 +321,279 @@ fn archives_ship_third_party_notices_that_are_checked_for_staleness() {
     assert!(runs_check(gate), "the release gate must check the notices");
 }
 
+/// The jobs of a workflow file as `(id, job)` pairs.
+fn jobs_of(doc: &Value) -> Vec<(&str, &Value)> {
+    doc.get("jobs")
+        .and_then(Value::as_mapping)
+        .map(|jobs| {
+            jobs.iter()
+                .map(|(k, v)| (k.as_str().expect("job id"), v))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every step of `doc` that runs the notices check, with its job.
+fn notices_steps(doc: &Value) -> Vec<(&str, &Value, &Value)> {
+    jobs_of(doc)
+        .into_iter()
+        .flat_map(|(id, job)| {
+            Release::steps(job)
+                .into_iter()
+                .filter(|s| run_of(s).contains("scripts/third-party-notices.sh --check"))
+                .map(move |s| (id, job, s))
+        })
+        .collect()
+}
+
+/// How many keys and strings under `value` name Dependabot.
+fn dependabot_mentions(value: &Value) -> usize {
+    let named = |v: &Value| {
+        v.as_str()
+            .is_some_and(|s| s.to_ascii_lowercase().contains("dependabot"))
+    };
+    match value {
+        Value::Mapping(map) => map
+            .iter()
+            .map(|(k, v)| usize::from(named(k)) + dependabot_mentions(v))
+            .sum(),
+        Value::Sequence(seq) => seq.iter().map(dependabot_mentions).sum(),
+        v => usize::from(named(v)),
+    }
+}
+
+/// The `github` context of a CI run: its event, who triggered it and, for a
+/// pull request, the pull request's author.
+fn ci_run(event: &str, actor: &str, author: Option<&str>) -> Value {
+    let pr = author
+        .map(|a| format!("event:\n  pull_request:\n    user:\n      login: '{a}'\n"))
+        .unwrap_or_default();
+    yaml_serde::from_str(&format!(
+        "event_name: {event}\nactor: '{actor}'\ntriggering_actor: '{actor}'\n{pr}"
+    ))
+    .expect("fixture")
+}
+
+/// Runs a notices step's `run` script as GitHub does (`bash -e`), with
+/// stand-ins for the two scripts it calls: the check exits `check_rc` and
+/// the cargo-about install `install_rc`.
+#[cfg(unix)]
+fn run_notices_step(
+    script: &str,
+    check_rc: i32,
+    install_rc: i32,
+    dependabot_pr: &str,
+) -> std::process::Output {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let scripts = temp.path().join("scripts");
+    std::fs::create_dir_all(&scripts).expect("mkdir");
+    for (name, body) in [
+        (
+            "install-cargo-about.sh",
+            format!("#!/bin/sh\nexit {install_rc}\n"),
+        ),
+        (
+            "third-party-notices.sh",
+            format!("#!/bin/sh\n[ \"$1\" = --check ] || exit 99\nexit {check_rc}\n"),
+        ),
+    ] {
+        let path = scripts.join(name);
+        std::fs::write(&path, body).expect("stub");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    std::process::Command::new("bash")
+        .args(["--noprofile", "--norc", "-e", "-c", script])
+        .current_dir(temp.path())
+        .env("DEPENDABOT_PR", dependabot_pr)
+        .output()
+        .expect("run bash")
+}
+
+/// The one exception to a stale notices file failing CI: on a pull request
+/// Dependabot authored, the lint job's check lets exit 3 (stale, and only
+/// stale) pass as a warning. Keyed to the pull request's author, never to
+/// the actor; no `continue-on-error`, no skipped step; nowhere else.
+#[test]
+fn a_stale_notices_file_is_a_warning_only_on_a_dependabot_pull_request() {
+    let ci = load(&repo_root().join(".github/workflows/ci.yml"));
+    let found = notices_steps(&ci);
+    assert_eq!(found.len(), 1, "ci.yml checks the notices in one step");
+    let (id, job, step) = found[0];
+    assert_eq!(id, "lint", "the lint job checks the notices");
+    for (what, v) in [("the lint job", job), ("the notices step", step)] {
+        assert!(
+            v.get("continue-on-error").is_none(),
+            "{what} must not continue on error: it would also hide a check that cannot run"
+        );
+    }
+    assert!(
+        step.get("if").is_none(),
+        "the notices step runs on every event"
+    );
+    assert_eq!(
+        dependabot_mentions(&ci),
+        dependabot_mentions(step),
+        "only the notices step of ci.yml names Dependabot"
+    );
+
+    let env = step
+        .get("env")
+        .and_then(Value::as_mapping)
+        .expect("the notices step has an env");
+    assert_eq!(env.len(), 1, "the step's env is DEPENDABOT_PR alone");
+    let expr = env
+        .get("DEPENDABOT_PR")
+        .and_then(Value::as_str)
+        .expect("DEPENDABOT_PR");
+    let cond = expr
+        .strip_prefix("${{")
+        .and_then(|s| s.strip_suffix("}}"))
+        .unwrap_or_else(|| panic!("DEPENDABOT_PR is one expression, got {expr:?}"))
+        .trim();
+    assert!(
+        !cond.contains("actor"),
+        "the pull request's author decides, not the actor: {cond}"
+    );
+    let dependabot = "dependabot[bot]";
+    for (what, run, want) in [
+        (
+            "a Dependabot pull request",
+            ci_run("pull_request", dependabot, Some(dependabot)),
+            true,
+        ),
+        (
+            "a person's re-run of a Dependabot pull request",
+            ci_run("pull_request", "maintainer", Some(dependabot)),
+            true,
+        ),
+        (
+            "a person's pull request",
+            ci_run("pull_request", "maintainer", Some("maintainer")),
+            false,
+        ),
+        (
+            "a person's pull request with Dependabot as the actor",
+            ci_run("pull_request", dependabot, Some("maintainer")),
+            false,
+        ),
+        (
+            "another bot's pull request",
+            ci_run("pull_request", "renovate[bot]", Some("renovate[bot]")),
+            false,
+        ),
+        ("a push to main", ci_run("push", dependabot, None), false),
+    ] {
+        assert_eq!(eval_condition(cond, &run), want, "{what}: {cond}");
+    }
+
+    // No other workflow, the release gate and release.yml included, has an
+    // exception of its own.
+    for file in workflow_files() {
+        if file.ends_with(".github/workflows/ci.yml") {
+            continue;
+        }
+        assert_eq!(
+            dependabot_mentions(&load(&file)),
+            0,
+            "{} must not name Dependabot",
+            file.display()
+        );
+    }
+}
+
+/// The lint job's step: exit 3 passes, with a warning, only when
+/// `DEPENDABOT_PR` is `true`; every other exit code fails the step as is.
+#[cfg(unix)]
+#[test]
+fn the_lint_notices_step_passes_only_a_stale_file_on_a_dependabot_pull_request() {
+    let ci = load(&repo_root().join(".github/workflows/ci.yml"));
+    let (_, _, step) = notices_steps(&ci)[0];
+    let script = run_of(step);
+    for (check_rc, dependabot_pr, want) in [
+        (0, "true", 0),
+        (0, "false", 0),
+        (3, "true", 0),
+        (3, "false", 3),
+        (3, "", 3),
+        (1, "true", 1),
+        (1, "false", 1),
+        (2, "true", 2),
+    ] {
+        let out = run_notices_step(script, check_rc, 0, dependabot_pr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            out.status.code(),
+            Some(want),
+            "check exit {check_rc}, DEPENDABOT_PR={dependabot_pr:?}: {stdout}"
+        );
+        let warned = stdout.contains("::warning");
+        assert_eq!(
+            warned,
+            check_rc == 3 && dependabot_pr == "true",
+            "check exit {check_rc}, DEPENDABOT_PR={dependabot_pr:?}: {stdout}"
+        );
+        if warned {
+            assert!(
+                stdout.contains("the branch that lands this update must regenerate it"),
+                "{stdout}"
+            );
+        }
+    }
+    // A cargo-about install that fails, with 3 or not, fails the step.
+    let out = run_notices_step(script, 0, 3, "true");
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a failed install fails the step"
+    );
+}
+
+/// The release gate refuses a tag whose notices file is stale, whoever
+/// authored the change: its step is the bare check, whose exit code is the
+/// step's.
+#[cfg(unix)]
+#[test]
+fn the_release_gate_fails_on_a_stale_notices_file() {
+    let doc = load(&repo_root().join(".github/workflows/test-gate.yml"));
+    let found = notices_steps(&doc);
+    assert_eq!(
+        found.len(),
+        1,
+        "test-gate.yml checks the notices in one step"
+    );
+    let (id, job, step) = found[0];
+    assert_eq!(id, "gate");
+    for (what, v) in [("the gate job", job), ("the notices step", step)] {
+        assert!(
+            v.get("continue-on-error").is_none(),
+            "{what} must not continue on error"
+        );
+    }
+    assert!(
+        step.get("env").is_none(),
+        "the gate's notices step has no env"
+    );
+    let lines: Vec<&str> = run_of(step)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "scripts/install-cargo-about.sh",
+            "scripts/third-party-notices.sh --check"
+        ],
+        "the release gate runs the bare check"
+    );
+    for dependabot_pr in ["true", "false"] {
+        let out = run_notices_step(run_of(step), 3, 0, dependabot_pr);
+        assert_eq!(out.status.code(), Some(3), "DEPENDABOT_PR={dependabot_pr}");
+    }
+}
+
 #[test]
 fn the_linux_test_leg_runs_the_sandbox_tests_for_real() {
     // The isolation enforcement tests skip where bubblewrap is missing; on

@@ -1916,7 +1916,11 @@ Every archive also ships `THIRD-PARTY-NOTICES.txt` (`include` in
 `scripts/third-party-notices.sh` (cargo-about with `about.toml`/`about.hbs`,
 and `web/scripts/third-party-notices.ts` for what Vite bundles). After a
 dependency change, regenerate and commit it; CI and the release test gate run
-`scripts/third-party-notices.sh --check`.
+`scripts/third-party-notices.sh --check` (exit 3 stale, 1 could not run). On a
+pull request Dependabot authored, CI's `lint` job turns exit 3 into a warning,
+so the branch that lands the update regenerates the file; every other exit,
+author, push to main and the release gate still fail
+(`release_workflow_test` pins it).
 
 ## Required gates
 
