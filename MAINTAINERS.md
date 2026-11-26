@@ -5,7 +5,7 @@ The people who review and merge changes to `apb` and cut its releases.
 | Maintainer | GitHub | Role |
 |---|---|---|
 | Sol Aitken | [@solaitken](https://github.com/solaitken) | Lead maintainer: day-to-day development, reviews, pull requests |
-| Sergey Eroshenkov | [@itechmeat](https://github.com/itechmeat) | Maintainer and project owner: direction, releases, repository settings |
+| Serg Eroshe | [@itechmeat](https://github.com/itechmeat) | Maintainer and project owner: direction, releases, repository settings |
 
 ## How to reach us
 
