@@ -5344,8 +5344,8 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  jsonschema 0.61.2 https://github.com/Stranger6667/jsonschema
-  referencing 0.61.2 https://github.com/Stranger6667/jsonschema
+  jsonschema 0.63.2 https://github.com/Stranger6667/jsonschema
+  referencing 0.63.2 https://github.com/Stranger6667/jsonschema
 
 MIT License
 
@@ -5659,9 +5659,9 @@ Used by:
   encodify 1.0.2 https://github.com/stalwartlabs/encodify
   hashify 0.3.2 https://github.com/stalwartlabs/hashify
   imap-proto 0.10.2 https://github.com/djc/tokio-imap
-  jsonschema-regex 0.61.2 https://github.com/Stranger6667/jsonschema
-  jsonschema-value 0.61.2 https://github.com/Stranger6667/jsonschema
-  mail-parser 1.0.1 https://github.com/stalwartlabs/mail-parser
+  jsonschema-regex 0.63.2 https://github.com/Stranger6667/jsonschema
+  jsonschema-value 0.63.2 https://github.com/Stranger6667/jsonschema
+  mail-parser 1.0.2 https://github.com/stalwartlabs/mail-parser
   num-cmp 0.1.0 https://github.com/lifthrasiir/num-cmp
   objc2-core-foundation 0.3.2 https://github.com/madsmtm/objc2
   objc2-core-services 0.3.2 https://github.com/madsmtm/objc2
@@ -5897,7 +5897,7 @@ MIT License (MIT)
 
 Used by:
   adler2 2.0.1 https://github.com/oyvindln/adler2
-  anyhow 1.0.104 https://github.com/dtolnay/anyhow
+  anyhow 1.0.105 https://github.com/dtolnay/anyhow
   atomic-waker 1.1.2 https://github.com/smol-rs/atomic-waker
   camino 1.2.4 https://github.com/camino-rs/camino
   curve25519-dalek-derive 0.1.1 https://github.com/dalek-cryptography/curve25519-dalek
@@ -6107,7 +6107,7 @@ MIT License (MIT)
 Used by:
   aho-corasick 1.1.4 https://github.com/BurntSushi/aho-corasick
   byteorder-lite 0.1.0 https://github.com/image-rs/byteorder-lite
-  globset 0.4.21 https://github.com/BurntSushi/ripgrep/tree/master/crates/globset
+  globset 0.4.22 https://github.com/BurntSushi/ripgrep/tree/master/crates/globset
   memchr 2.8.3 https://github.com/BurntSushi/memchr
   walkdir 2.5.0 https://github.com/BurntSushi/walkdir
 
@@ -7315,7 +7315,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-@lucide/svelte 1.77.0
+@lucide/svelte 1.78.0
 License: ISC
 Source: https://github.com/lucide-icons/lucide
 
@@ -7418,7 +7418,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-@xyflow/svelte 2.0.2
+@xyflow/svelte 2.0.3
 License: MIT
 Source: https://github.com/xyflow/xyflow
 
@@ -7445,7 +7445,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-@xyflow/system 1.0.0
+@xyflow/system 1.0.1
 License: MIT
 Source: https://github.com/xyflow/xyflow
 
@@ -7472,7 +7472,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-bits-ui 2.21.0
+bits-ui 2.22.0
 License: MIT
 Source: https://github.com/huntabyte/bits-ui
 
