@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte'
   import { SvelteFlow, Background, Controls } from '@xyflow/svelte'
-  import '@xyflow/svelte/dist/style.css'
+  import '@xyflow/svelte/style.css'
   import {
     ApiError,
     decideKnownProblem,

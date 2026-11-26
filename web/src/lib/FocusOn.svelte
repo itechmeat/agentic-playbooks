@@ -15,7 +15,9 @@
     void flow.fitView({
       nodes: focus.nodes.map((id) => ({ id })),
       maxZoom: 1,
-      padding: 0.4,
+      // A percentage: Svelte Flow 2 reads a unitless padding as pixels.
+      // 14.3% is the old relative 0.4 (0.4 / (2 * 1.4) on each side).
+      padding: '14.3%',
       duration: reduce ? 0 : 250,
     })
   })

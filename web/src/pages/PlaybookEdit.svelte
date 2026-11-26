@@ -1,7 +1,7 @@
 <script lang="ts">
   import { SvelteFlow, Background, Controls } from '@xyflow/svelte'
   import { untrack } from 'svelte'
-  import '@xyflow/svelte/dist/style.css'
+  import '@xyflow/svelte/style.css'
   import {
     ApiError,
     createPlaybook,
