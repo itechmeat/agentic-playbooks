@@ -2192,9 +2192,9 @@ Used by:
   num-rational 0.4.2 https://github.com/rust-num/num-rational
   num-traits 0.2.19 https://github.com/rust-num/num-traits
   num 0.4.3 https://github.com/rust-num/num
-  regex-automata 0.4.18 https://github.com/rust-lang/regex
-  regex-syntax 0.8.11 https://github.com/rust-lang/regex
-  regex 1.13.1 https://github.com/rust-lang/regex
+  regex-automata 0.4.19 https://github.com/rust-lang/regex
+  regex-syntax 0.8.12 https://github.com/rust-lang/regex
+  regex 1.13.2 https://github.com/rust-lang/regex
 
 Copyright (c) 2014 The Rust Project Developers
 
@@ -2226,7 +2226,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  uuid 1.29.2 https://github.com/uuid-rs/uuid
+  uuid 1.29.3 https://github.com/uuid-rs/uuid
 
 Copyright (c) 2014 The Rust Project Developers
 Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon
@@ -2550,15 +2550,15 @@ THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-  futures-channel 0.3.32 https://github.com/rust-lang/futures-rs
-  futures-core 0.3.32 https://github.com/rust-lang/futures-rs
-  futures-executor 0.3.32 https://github.com/rust-lang/futures-rs
-  futures-io 0.3.32 https://github.com/rust-lang/futures-rs
-  futures-macro 0.3.32 https://github.com/rust-lang/futures-rs
-  futures-sink 0.3.32 https://github.com/rust-lang/futures-rs
-  futures-task 0.3.32 https://github.com/rust-lang/futures-rs
-  futures-util 0.3.32 https://github.com/rust-lang/futures-rs
-  futures 0.3.32 https://github.com/rust-lang/futures-rs
+  futures-channel 0.3.34 https://github.com/rust-lang/futures-rs
+  futures-core 0.3.34 https://github.com/rust-lang/futures-rs
+  futures-executor 0.3.34 https://github.com/rust-lang/futures-rs
+  futures-io 0.3.34 https://github.com/rust-lang/futures-rs
+  futures-macro 0.3.34 https://github.com/rust-lang/futures-rs
+  futures-sink 0.3.34 https://github.com/rust-lang/futures-rs
+  futures-task 0.3.34 https://github.com/rust-lang/futures-rs
+  futures-util 0.3.34 https://github.com/rust-lang/futures-rs
+  futures 0.3.34 https://github.com/rust-lang/futures-rs
 
 Copyright (c) 2016 Alex Crichton
 Copyright (c) 2017 The Tokio Authors
@@ -4711,9 +4711,9 @@ Used by:
   anstyle-parse 1.0.0 https://github.com/rust-cli/anstyle.git
   anstyle-query 1.1.5 https://github.com/rust-cli/anstyle.git
   anstyle 1.0.14 https://github.com/rust-cli/anstyle.git
-  clap 4.6.7 https://github.com/clap-rs/clap
+  clap 4.6.9 https://github.com/clap-rs/clap
   clap_builder 4.6.7 https://github.com/clap-rs/clap
-  clap_derive 4.6.7 https://github.com/clap-rs/clap
+  clap_derive 4.6.9 https://github.com/clap-rs/clap
   clap_lex 1.1.0 https://github.com/clap-rs/clap
   colorchoice 1.0.5 https://github.com/rust-cli/anstyle.git
   is_terminal_polyfill 1.70.2 https://github.com/polyfill-rs/is_terminal_polyfill
@@ -5913,8 +5913,8 @@ Used by:
   pastey 0.2.3 https://github.com/as1100k/pastey
   pin-project-lite 0.2.17 https://github.com/taiki-e/pin-project-lite
   portable-atomic 1.14.0 https://github.com/taiki-e/portable-atomic
-  proc-macro2 1.0.106 https://github.com/dtolnay/proc-macro2
-  quote 1.0.46 https://github.com/dtolnay/quote
+  proc-macro2 1.0.107 https://github.com/dtolnay/proc-macro2
+  quote 1.0.47 https://github.com/dtolnay/quote
   ref-cast-impl 1.0.25 https://github.com/dtolnay/ref-cast
   ref-cast 1.0.25 https://github.com/dtolnay/ref-cast
   rustix 1.1.4 https://github.com/bytecodealliance/rustix
@@ -5926,7 +5926,7 @@ Used by:
   serde_json 1.0.154 https://github.com/serde-rs/json
   serde_path_to_error 0.1.20 https://github.com/dtolnay/path-to-error
   syn 2.0.118 https://github.com/dtolnay/syn
-  syn 3.0.2 https://github.com/dtolnay/syn
+  syn 3.0.10 https://github.com/dtolnay/syn
   thiserror-impl 2.0.21 https://github.com/dtolnay/thiserror
   thiserror 2.0.21 https://github.com/dtolnay/thiserror
   unicode-ident 1.0.24 https://github.com/dtolnay/unicode-ident

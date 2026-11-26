@@ -382,10 +382,12 @@ mod tests {
         let cmd = render(a, values).expect("a CLI command");
         assert!(cmd.runnable, "{:?} is not runnable", cmd.argv);
         assert_eq!(through_shell(&cmd.line()), cmd.argv, "line {}", cmd.line());
-        Cli::try_parse_from(&cmd.argv)
-            .unwrap_or_else(|e| panic!("{} does not parse: {e}", cmd.line()))
-            .command
-            .expect("a subcommand")
+        crate::with_cli_stack(|| {
+            Cli::try_parse_from(&cmd.argv)
+                .unwrap_or_else(|e| panic!("{} does not parse: {e}", cmd.line()))
+                .command
+                .expect("a subcommand")
+        })
     }
 
     #[test]
@@ -511,10 +513,11 @@ mod tests {
             a
         };
         let open = vec![review(9)];
-        let parse = |line: String| match Cli::try_parse_from(through_shell(&line))
-            .unwrap_or_else(|e| panic!("{line} does not parse: {e}"))
-            .command
-        {
+        let parse = |line: String| match crate::with_cli_stack(|| {
+            Cli::try_parse_from(through_shell(&line))
+                .unwrap_or_else(|e| panic!("{line} does not parse: {e}"))
+                .command
+        }) {
             Some(Command::Review {
                 run_id,
                 node_id,
