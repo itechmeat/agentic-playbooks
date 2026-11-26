@@ -52,5 +52,5 @@ machine-oriented entry point in [llms.txt](../llms.txt).
 - [Compatibility](COMPATIBILITY.md): what the 1.x promise covers
 - [Release notes](release-notes/): one file per tagged release
 - [Feedback loop](FEEDBACK-LOOP.md): how an agent reports apb problems after a run, and the block to add to your project
-- [Contributing](../CONTRIBUTING.md), [testing guidelines](TESTING-GUIDELINES.md), [build optimization](BUILD-OPTIMIZATION.md)
+- [Contributing](../CONTRIBUTING.md), [maintainers](../MAINTAINERS.md), [testing guidelines](TESTING-GUIDELINES.md), [build optimization](BUILD-OPTIMIZATION.md)
 - [Decision records](adr/) and [design specs](superpowers/specs/)
