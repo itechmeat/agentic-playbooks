@@ -100,10 +100,26 @@ jobs:
       # change that did not refresh it. cargo-about is a pinned, checksummed
       # release binary (seconds, nothing compiled); the web dependencies are
       # already installed by the web build step above.
+      #
+      # The script exits 3 when the file is only stale and 1 when it could
+      # not run. On a pull request Dependabot authored, a stale file is a
+      # warning: Dependabot cannot regenerate it, and the branch that lands
+      # the update does. The author is read, not github.actor, so a person's
+      # re-run keeps the rule. Every other exit code, every other author, a
+      # push to main and the release gate (test-gate.yml) still fail. Not
+      # continue-on-error, which would also hide a script that cannot run.
       - name: Third-party notices are current
+        env:
+          DEPENDABOT_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]' }}
         run: |
           scripts/install-cargo-about.sh
-          scripts/third-party-notices.sh --check
+          rc=0
+          scripts/third-party-notices.sh --check || rc=$?
+          if [ "$rc" = 3 ] && [ "$DEPENDABOT_PR" = true ]; then
+            echo "::warning title=Third-party notices are stale::THIRD-PARTY-NOTICES.txt is stale; the branch that lands this update must regenerate it with scripts/third-party-notices.sh"
+            exit 0
+          fi
+          exit "$rc"
 
   # The workspace stays publishable to crates.io: scripts/crates.sh check
   # renames the CLI package as the publication does (two lines, no resolver
