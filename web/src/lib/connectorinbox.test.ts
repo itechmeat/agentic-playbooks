@@ -80,6 +80,6 @@ describe('UNTRUSTED_NOTICE', () => {
   it('states the risk in plain words, with no exclamation mark or em-dash', () => {
     expect(UNTRUSTED_NOTICE).toContain('untrusted')
     expect(UNTRUSTED_NOTICE).not.toContain('!')
-    expect(UNTRUSTED_NOTICE).not.toContain('—')
+    expect(UNTRUSTED_NOTICE).not.toContain('\u2014')
   })
 })

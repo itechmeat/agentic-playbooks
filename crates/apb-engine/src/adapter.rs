@@ -139,7 +139,7 @@ pub fn item_env(id: &str, file: &std::path::Path) -> Result<Vec<(&'static str, S
     ])
 }
 
-/// What [`spawn_env::prepare`] needs of an attempt.
+/// What [`spawn_env::command`] needs of an attempt.
 fn spawn_target<'a>(task: &'a AgentTask) -> spawn_env::SpawnTarget<'a> {
     spawn_env::SpawnTarget {
         env: task.spawn_env,

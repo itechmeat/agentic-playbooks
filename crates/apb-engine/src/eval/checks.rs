@@ -102,6 +102,18 @@ impl RepUsage {
     pub fn tokens(&self) -> u64 {
         self.input_tokens.saturating_add(self.output_tokens)
     }
+
+    /// The cost split by basis; a cost an older apb stored without a split
+    /// is of unknown basis. Empty without a cost.
+    pub fn cost_split(&self) -> crate::run_view::CostByBasis {
+        match self.cost_usd {
+            Some(c) if self.cost_by_basis.is_empty() => crate::run_view::CostByBasis {
+                unknown_basis_usd: Some(c),
+                ..Default::default()
+            },
+            _ => self.cost_by_basis,
+        }
+    }
 }
 
 /// Whether `t` is an event type this apb's journal can hold. Asked of the

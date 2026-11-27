@@ -116,7 +116,7 @@ pub fn reconcile_defaults() -> Vec<ReconcileNote> {
         let (skill_notes, updated) = skill_notes(&dirs, &super::skills());
         notes.extend(skill_notes);
         notes.extend(
-            super::role_trust::carry(held, &updated)
+            super::role_trust::carry(held, &updated, super::skills::shipped_and_current)
                 .into_iter()
                 .map(|text| ReconcileNote { failed: true, text }),
         );

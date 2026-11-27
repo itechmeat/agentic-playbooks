@@ -1,4 +1,4 @@
-//! The environment of every agent process apb spawns: one [`prepare`] for a
+//! The environment of every agent process apb spawns: one [`command`] for a
 //! node attempt's start and resume forms alike, and [`SpawnEnv::apply`] for
 //! the background supervisor.
 //!
@@ -8,8 +8,10 @@
 //! run-scoped environment (codex's config home, zcode's provider config),
 //! the attempt's status file and, for a sandboxed attempt, the sandbox
 //! overlay (`crate::sandbox::SandboxPlan::overlay`). Each later step wins over
-//! an earlier one.
+//! an earlier one. [`SpawnEnv::command`] is the one place an isolation
+//! sandbox is applied: the wrap, the overlay last and the own session.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -76,7 +78,7 @@ pub struct SpawnEnv {
     /// Unlike `run_dir` it sets no run-context variable. `run_dir` wins.
     pub scoped_base: Option<PathBuf>,
     /// The isolation sandbox the attempt's process runs in; `None` runs it
-    /// as before.
+    /// as before. Applied only by [`Self::command`].
     pub sandbox: Option<Arc<crate::sandbox::SandboxPlan>>,
     /// The attempt's evidence session (`APB_EVIDENCE_SESSION`), for a node
     /// with `evidence:`.
@@ -179,6 +181,49 @@ impl SpawnEnv {
         self.overlay.iter().any(|(k, _)| k == name) || self.passes(name)
     }
 
+    /// The command of an agent process this env spawns, with its whole
+    /// environment, and the one place an isolation sandbox is applied:
+    /// `program argv` runs in `workdir`, or inside the sandbox when the
+    /// attempt has one (bwrap, in the sandbox's working directory); its
+    /// environment is [`Self::apply`], then the steps `then` adds, and last
+    /// the sandbox overlay; the process leads its own process group, or in
+    /// a sandbox its own session. So a sandboxed process never misses its
+    /// overlay or its session.
+    pub(crate) fn command(
+        &self,
+        program: &str,
+        argv: &[String],
+        workdir: &std::path::Path,
+        then: impl FnOnce(&mut Command) -> Result<(), (ErrorClass, String)>,
+    ) -> Result<Command, (ErrorClass, String)> {
+        let sandbox = self.sandbox.as_deref();
+        let mut cmd = match sandbox {
+            Some(plan) => {
+                let args: Vec<OsString> = argv.iter().map(OsString::from).collect();
+                plan.command(program.as_ref(), &args)
+            }
+            None => {
+                let mut c = Command::new(program);
+                c.args(argv).current_dir(workdir);
+                c
+            }
+        };
+        self.apply(&mut cmd);
+        then(&mut cmd)?;
+        if let Some(plan) = sandbox {
+            plan.overlay(&mut cmd);
+        }
+        #[cfg(unix)]
+        crate::proc::own_group(&mut cmd, sandbox.is_some());
+        Ok(cmd)
+    }
+
+    /// The bwrap a sandboxed spawn starts, to name it when the spawn fails;
+    /// `None` without a sandbox.
+    pub(crate) fn sandbox_bwrap(&self) -> Option<&std::path::Path> {
+        self.sandbox.as_deref().map(|plan| plan.bwrap.as_path())
+    }
+
     /// Applies the plan, the scrub, the run-context env, the pager and the
     /// overlay to `cmd`. Called at every agent spawn site.
     pub fn apply(&self, cmd: &mut Command) {
@@ -277,21 +322,25 @@ pub(crate) struct SpawnTarget<'a> {
     pub status_file: Option<&'a std::path::Path>,
 }
 
-/// The whole environment of a node agent's process, for its start and
-/// resume forms alike: [`SpawnEnv::apply`], then the agent's run-scoped
+/// The command of a node agent's process `program argv` in `workdir`, for
+/// its start and resume forms alike ([`SpawnEnv::command`]), with its whole
+/// environment: [`SpawnEnv::apply`], then the agent's run-scoped
 /// environment, the attempt's status file and, last, the sandbox overlay.
-pub(crate) fn prepare(cmd: &mut Command, task: &SpawnTarget) -> Result<(), (ErrorClass, String)> {
-    task.env.apply(cmd);
-    apply_scoped_env(cmd, task)?;
-    // Per-attempt status file (subtask S2): the agent may write its final
-    // verdict as JSON here, which the engine reads before the textual report.
-    if let Some(sf) = task.status_file {
-        cmd.env("APB_STATUS_FILE", sf);
-    }
-    if let Some(plan) = &task.env.sandbox {
-        plan.overlay(cmd);
-    }
-    Ok(())
+pub(crate) fn command(
+    program: &str,
+    argv: &[String],
+    workdir: &std::path::Path,
+    task: &SpawnTarget,
+) -> Result<Command, (ErrorClass, String)> {
+    task.env.command(program, argv, workdir, |cmd| {
+        apply_scoped_env(cmd, task)?;
+        // Per-attempt status file (subtask S2): the agent may write its final
+        // verdict as JSON here, which the engine reads before the textual report.
+        if let Some(sf) = task.status_file {
+            cmd.env("APB_STATUS_FILE", sf);
+        }
+        Ok(())
+    })
 }
 
 /// The agent's run-scoped environment (spec 2026-07-21 run-reliability),

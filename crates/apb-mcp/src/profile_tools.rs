@@ -12,7 +12,7 @@ use apb_core::profile_store::{self, PlaybookOrigin, ProfileError};
 use apb_core::trust::{Kind, OriginKind, TrustStore};
 use serde_json::{Value, json};
 
-use crate::tools::ToolError;
+use crate::tool_error::ToolError;
 
 fn scope_dir(root: &Path, scope: ProfileScope) -> Result<PathBuf, ToolError> {
     match scope {

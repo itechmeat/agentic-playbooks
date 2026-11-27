@@ -136,7 +136,7 @@ fn undo_one(
 fn undo_profile(root: &Path, e: &Entry) -> Result<String, String> {
     let current = match crate::profile_tools::profile_get(root, &e.target, "global") {
         Ok(v) => v,
-        Err(crate::tools::ToolError::NotFound(_)) => return Ok("already gone".to_string()),
+        Err(crate::tool_error::ToolError::NotFound(_)) => return Ok("already gone".to_string()),
         Err(err) => return Err(err.to_string()),
     };
     let written = e.data.get("profile_digest").and_then(Value::as_str);

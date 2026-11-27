@@ -307,12 +307,7 @@ impl EvalResult {
     pub fn cost_by_basis(cases: &[CaseResult]) -> crate::run_view::CostByBasis {
         let mut total = crate::run_view::CostByBasis::default();
         for u in cases.iter().flat_map(|c| &c.repetitions).map(|r| &r.usage) {
-            match u.cost_usd {
-                Some(c) if u.cost_by_basis.is_empty() => {
-                    total.add(apb_core::agent_output::CostBasis::Unknown, c)
-                }
-                _ => total.merge(&u.cost_by_basis),
-            }
+            total.merge(&u.cost_split());
         }
         total
     }
@@ -525,19 +520,13 @@ pub fn latest_for<'a>(all: &'a [EvalResult], workspace: &str) -> Option<&'a Eval
     all.iter().rev().find(|r| r.workspace == workspace)
 }
 
-/// A repetition's cost split by basis; a figure stored without one (an
-/// older apb) is of unknown basis.
+/// A repetition's cost split by basis ([`super::checks::RepUsage::cost_split`]).
 fn rep_cost(u: &super::checks::RepUsage) -> String {
-    if !u.cost_by_basis.is_empty() {
-        return u.cost_by_basis.describe(|c| format!("${c:.4}"));
+    let split = u.cost_split();
+    if split.is_empty() {
+        return "n/a".into();
     }
-    match u.cost_usd {
-        Some(c) => format!(
-            "${c:.4} {}",
-            apb_core::agent_output::CostBasis::Unknown.label()
-        ),
-        None => "n/a".into(),
-    }
+    split.describe(|c| format!("${c:.4}"))
 }
 
 fn money(v: Option<f64>) -> String {

@@ -22,7 +22,7 @@
   })
 
   // Server mode: nothing routed renders until the first status read lands
-  // (`authSnapshot.checked`) — otherwise the store's optimistic default
+  // (`authSnapshot.checked`); otherwise the store's optimistic default
   // (authenticated: true) would let a protected page flash on first paint
   // and fire 401ing requests before the real answer arrives. Once checked,
   // show the login screen when the server requires a credential this browser

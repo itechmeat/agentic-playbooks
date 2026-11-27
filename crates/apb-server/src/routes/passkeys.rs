@@ -174,6 +174,28 @@ impl AssertPurpose {
         ))
     }
 
+    /// The purpose an assertion request names, checked (400 otherwise) and,
+    /// for a decision, resolved in its run's project like the review post
+    /// does ([`Self::resolved_decision`]); enroll and remove purposes stay
+    /// workspace-independent. The challenge and the verify request both go
+    /// through this one step, so both ends of a ceremony take the digest of
+    /// the same purpose. The error is a ready-to-return HTTP `Response`, the
+    /// shape of a request helper, so the large-Err lint does not apply.
+    #[allow(clippy::result_large_err)]
+    fn checked(self, state: &AppState, workspace: Option<&str>) -> Result<AssertPurpose, Response> {
+        if let Err(why) = self.validate() {
+            return Err((StatusCode::BAD_REQUEST, why).into_response());
+        }
+        match &self.decision {
+            Some(d) => {
+                let root = resolve_root(state, workspace)?;
+                AssertPurpose::resolved_decision(&root, d)
+                    .map_err(|why| (StatusCode::INTERNAL_SERVER_ERROR, why).into_response())
+            }
+            None => Ok(self),
+        }
+    }
+
     /// The challenge an assertion for this purpose is issued with: a
     /// decision's challenge is derived deterministically from the run, the
     /// gate, the decision (bound to its field values through
@@ -476,23 +498,9 @@ pub(crate) async fn assert_challenge_handler(
     Query(q): Query<WorkspaceQuery>,
     Json(body): Json<AssertChallengeBody>,
 ) -> Response {
-    if let Err(why) = body.purpose.validate() {
-        return (StatusCode::BAD_REQUEST, why).into_response();
-    }
-    let purpose = match &body.purpose.decision {
-        Some(d) => {
-            // A decision names its run's project like the review post does;
-            // enroll and remove purposes stay workspace-independent.
-            let root = match resolve_root(&state, q.workspace.as_deref()) {
-                Ok(root) => root,
-                Err(response) => return response,
-            };
-            match AssertPurpose::resolved_decision(&root, d) {
-                Ok(p) => p,
-                Err(why) => return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response(),
-            }
-        }
-        None => body.purpose,
+    let purpose = match body.purpose.checked(&state, q.workspace.as_deref()) {
+        Ok(p) => p,
+        Err(response) => return response,
     };
     match apb_core::passkey::count_strict() {
         Ok(0) => {
@@ -535,23 +543,9 @@ pub(crate) async fn assert_verify_handler(
     Query(q): Query<WorkspaceQuery>,
     Json(body): Json<AssertVerifyBody>,
 ) -> Response {
-    if let Err(why) = body.purpose.validate() {
-        return (StatusCode::BAD_REQUEST, why).into_response();
-    }
-    let purpose = match &body.purpose.decision {
-        Some(d) => {
-            // A decision names its run's project like the review post does;
-            // enroll and remove purposes stay workspace-independent.
-            let root = match resolve_root(&state, q.workspace.as_deref()) {
-                Ok(root) => root,
-                Err(response) => return response,
-            };
-            match AssertPurpose::resolved_decision(&root, d) {
-                Ok(p) => p,
-                Err(why) => return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response(),
-            }
-        }
-        None => body.purpose,
+    let purpose = match body.purpose.checked(&state, q.workspace.as_deref()) {
+        Ok(p) => p,
+        Err(response) => return response,
     };
     let rp = match rp_for_request(&headers) {
         Ok(rp) => rp,
