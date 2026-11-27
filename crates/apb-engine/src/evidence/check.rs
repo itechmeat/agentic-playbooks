@@ -110,7 +110,7 @@ fn written(outputs: Option<&Value>) -> Result<Vec<Written>, String> {
             };
             // The absence kinds are stored in the session file: each is
             // clipped to the kind grammar's length first, then only kept
-            // when it is a slug — anything else is a claim problem, and no
+            // when it is a slug; anything else is a claim problem, and no
             // raw value is ever stored or quoted.
             if let Ok(Some(kinds)) = &mut absence {
                 for k in kinds.iter_mut() {

@@ -88,21 +88,16 @@ pub(crate) fn snapshot() -> Vec<Held> {
         .collect()
 }
 
-/// Whether the installed copy of the shipped skill `name` holds exactly the
-/// shipped files.
-fn shipped_and_current(name: &str) -> bool {
-    super::skill(name).is_some_and(|s| {
-        matches!(
-            super::skill_state(&s),
-            super::InstallState::UpToDate { installed } if installed == s.version
-        )
-    })
-}
-
 /// Approves the new bundle of each `held` profile that carries one of the
 /// `updated` skills, when only shipped content changed; returns a line for
-/// each approval that could not be written.
-pub(crate) fn carry(held: Vec<Held>, updated: &[String]) -> Vec<String> {
+/// each approval that could not be written. `shipped_and_current` answers
+/// whether the installed copy of a skill holds exactly the shipped files
+/// (the skills module gives it, so this module never reads skill state).
+pub(crate) fn carry(
+    held: Vec<Held>,
+    updated: &[String],
+    shipped_and_current: impl Fn(&str) -> bool,
+) -> Vec<String> {
     let mut notes = Vec::new();
     for h in held {
         if h.origin == OriginKind::Bundled

@@ -779,14 +779,16 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   estimate key), invocation resolution
   (`invocation.rs`), agent adapters (`adapter.rs`, `CliAdapter`, the one
   adapter of every command-line agent, with `adapter/command`
-  the one `spawn_agent` both transports use, the sandbox wrap and `setsid`
-  included, with the agent's run-scoped leading arguments in front
+  the one `spawn_agent` both transports use, with the agent's run-scoped
+  leading arguments in front
   (`spawn_env::with_scoped_args`, dsh's model patch,
   [decision record 0013](docs/adr/0013-run-scoped-files-an-agent-takes-only-as-arguments-lead-its-argv.md)),
   and `adapter/spawn_env`
   the one environment every agent spawn gets: the process-env plan, the
   connector scrub, the run context, the agent's run-scoped environment in
-  the directory `agent_home.rs` names, the sandbox overlay last), the
+  the directory `agent_home.rs` names, the sandbox overlay last;
+  `SpawnEnv::command` is the one place a sandbox is applied, the wrap,
+  the overlay and `setsid` included), the
   isolation sandbox (`sandbox/`: `probe` the cached host facts and the
   doctor line, `view` the pure filesystem view, `bwrap` its argv, `home`
   the sandbox home, `git_guard` the repository's read-only paths and the
@@ -891,7 +893,10 @@ one supervisor policy reader (`candidate/policy.rs`), the pure statistics
   allowlist of `apb mcp --read-only` and the tables every tool is classified
   in; `unadvertised` the 1.0 answers of `prompts/list`, `resources/list`,
   `resources/templates/list` and `completion/complete` that both servers
-  give themselves, since rmcp 3.11 answers them `-32601`) and the tool layer
+  give themselves, since rmcp 3.11 answers them `-32601`), `tool_error`
+  the leaf that holds `ToolError` (re-exported as `tools::ToolError`, so
+  `setup` and `profile_tools` return it without depending on the tool
+  layer), and the tool layer
   in `tools/`
   (one module per domain: `playbook`, `run`, `supervisor`, `trial`, `capture`,
   `actions` the next actions and start actions as tool calls with
@@ -1971,6 +1976,9 @@ merges, delete only paths you created, and stop only processes you started.
 - No em-dashes (U+2014) and no exclamation marks in docs or user-facing strings.
   No CJK anywhere in code or prose. Machine-facing fields are English;
   user-facing chat messages are written in the user's chat language.
+  `apb-core`'s `prose_lint_test` checks every tracked file for an em dash
+  and Markdown prose for an exclamation mark, with a short list of
+  third-party and dated files it leaves out.
 - New `EventPayload` fields are added only with `#[serde(default)]`
   ([decision record 0001](docs/adr/0001-new-events-are-safe-to-skip.md)) and with
   `skip_serializing_if` for its default, so it adds no member to a frozen line.

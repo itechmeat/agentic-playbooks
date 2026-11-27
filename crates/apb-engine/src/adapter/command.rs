@@ -1,11 +1,10 @@
 //! The one spawn of a node agent's process, for the headless and the
-//! streaming transports alike: the command (wrapped in the isolation
-//! sandbox when the attempt has one) behind the agent's run-scoped leading
-//! arguments ([`super::spawn_env::with_scoped_args`]), its environment
-//! ([`super::spawn_env::prepare`], the sandbox overlay last), its own
-//! process group, and the spawn-time callback.
+//! streaming transports alike: the command behind the agent's run-scoped
+//! leading arguments ([`super::spawn_env::with_scoped_args`]), built with
+//! its environment, its own process group and, when the attempt has one,
+//! its isolation sandbox by [`super::spawn_env::command`] (the sandbox
+//! overlay last), and the spawn-time callback.
 
-use std::ffi::OsString;
 use std::process::{Child, Command, Stdio};
 
 use super::failure::ErrorClass;
@@ -32,36 +31,22 @@ pub(super) fn spawn_agent(
     apb_core::process_mode::guard_program_start()
         .map_err(|e| (ErrorClass::ProcessExit, e.to_string()))?;
     let argv = spawn_env::with_scoped_args(argv, target)?;
-    let sandbox = target.env.sandbox.as_deref();
-    let mut cmd = match sandbox {
-        Some(plan) => {
-            let args: Vec<OsString> = argv.iter().map(OsString::from).collect();
-            plan.command(program.as_ref(), &args)
-        }
-        None => {
-            let mut c = Command::new(program);
-            c.args(&argv).current_dir(workdir);
-            c
-        }
-    };
+    // The process env, the connector scrub, the run context, the agent
+    // home, zcode's provider config, the status file, the sandbox and its
+    // overlay and the process group, in one place for every form (start
+    // and resume) of every transport.
+    let mut cmd = spawn_env::command(program, &argv, workdir, target)?;
     cmd.stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // The process env, the connector scrub, the run context, the agent
-    // home, zcode's provider config, the status file and the sandbox
-    // overlay, in one place for every form (start and resume) of every
-    // transport.
-    spawn_env::prepare(&mut cmd, target)?;
-    #[cfg(unix)]
-    crate::proc::own_group(&mut cmd, sandbox.is_some());
     let started = std::time::Instant::now();
     let child = spawn_retrying(&mut cmd).map_err(|e| {
         // In a sandbox the process apb starts is bwrap: name it, so a
         // missing or broken bwrap is not taken for a missing agent.
-        let msg = match sandbox {
-            Some(plan) => format!(
+        let msg = match target.env.sandbox_bwrap() {
+            Some(bwrap) => format!(
                 "spawn `{program}` in the sandbox (`{}`) failed: {e}",
-                plan.bwrap.display()
+                bwrap.display()
             ),
             None => format!("spawn `{program}` failed: {e}"),
         };

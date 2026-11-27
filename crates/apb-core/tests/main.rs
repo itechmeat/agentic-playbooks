@@ -94,6 +94,8 @@ mod process_env_test;
 mod profile_resolve_test;
 #[path = "suite/promotion_test.rs"]
 mod promotion_test;
+#[path = "suite/prose_lint_test.rs"]
+mod prose_lint_test;
 #[path = "suite/provenance_test.rs"]
 mod provenance_test;
 #[path = "suite/quality_test.rs"]

@@ -31,5 +31,6 @@ pub mod profile_tools;
 pub mod promote;
 pub mod server;
 pub mod setup;
+mod tool_error;
 pub mod tools;
 mod unadvertised;

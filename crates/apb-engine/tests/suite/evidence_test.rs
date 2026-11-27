@@ -879,7 +879,7 @@ fn cites_are_capped_and_the_trace_keeps_bounded_ops() {
 }
 
 /// A session never bound to an attempt is refused as soon as a newer
-/// session exists for the same attempt — even one opened in the same
+/// session exists for the same attempt, even one opened in the same
 /// millisecond: `opened_at` alone cannot order them, so any other
 /// unbound-or-not session of the same attempt at the same time supersedes.
 #[test]

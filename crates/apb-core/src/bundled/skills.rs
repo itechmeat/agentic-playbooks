@@ -205,6 +205,18 @@ pub fn skill_state(skill: &BundledSkill) -> InstallState {
     }
 }
 
+/// Whether the installed copy of the shipped skill `name` holds exactly the
+/// shipped files: the check a role profile's approval is carried on
+/// ([`super::role_trust::carry`]).
+pub(super) fn shipped_and_current(name: &str) -> bool {
+    super::skill(name).is_some_and(|s| {
+        matches!(
+            skill_state(&s),
+            InstallState::UpToDate { installed } if installed == s.version
+        )
+    })
+}
+
 /// Whether the copy of `skill` in `skills_dir` is changed by someone and
 /// not newer shipped content: the copy an upgrade reports as an update
 /// available.
@@ -316,7 +328,7 @@ impl SkillUpdates {
             return Vec::new();
         }
         match lock() {
-            Ok(_lock) => super::role_trust::carry(held, &self.updated),
+            Ok(_lock) => super::role_trust::carry(held, &self.updated, shipped_and_current),
             Err(e) => vec![format!(
                 "role profiles were not approved for the updated skills: {e}"
             )],

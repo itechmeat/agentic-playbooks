@@ -109,7 +109,7 @@ describe('floorStep', () => {
     if (step?.kind === 'confirm') {
       const q = floorQuestion(step)
       expect(q).toContain('from deny to allow')
-      expect(q).not.toMatch(/—|!/)
+      expect(q).not.toMatch(/\u2014|!/)
     }
   })
 
